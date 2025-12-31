@@ -1,0 +1,56 @@
+name: Upstream Sync
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "44 21 * * *" # 每日定时执行
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  sync_latest_from_upstream:
+    name: Sync latest commits from upstream repo
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+
+    steps:
+      # Step 1: 检出目标仓库代码
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整的提交历史，确保 rebase 能正常工作
+          token: ${{ secrets.PAT_TOKEN }}
+
+      # Step 2: 添加上游仓库并获取更新
+      - name: Add upstream and fetch
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/hbq0405/emby-toolkit.git
+          fi
+          git fetch upstream main --tags
+
+      # Step 3: 设置 Git 用户信息
+      - name: Set Git user identity
+        run: |
+          git config --global user.name "Waynenet"
+          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
+
+      # Step 4: 检测是否有上游更新（使用提交差异检测）
+      - name: Check for upstream changes
+        run: |
+          git checkout main
+          NEW_COMMITS=$(git log main..upstream/main --oneline | wc -l)
+          echo "NEW_COMMITS=$NEW_COMMITS" >> $GITHUB_ENV
+
+      # Step 5: 使用 rebase 同步上游改动，避免生成多余的 merge commit
+      - name: Rebase upstream changes
+        if: env.NEW_COMMITS != '0'
+        run: |
+          git rebase upstream/main
+
+      # Step 6: 强制推送更新后的代码到目标仓库
+      - name: Push changes to origin
+        if: env.NEW_COMMITS != '0'
+        run: |
+          git push origin main --force
