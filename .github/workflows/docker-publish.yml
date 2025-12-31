@@ -3,10 +3,7 @@ name: Docker Image CI & CD for Emby Toolkit
 on:
   push:
     branches:
-      - main      # 监听 主 分支
-      - dev        # 监听 开发 分支
-    tags:
-      - 'v*'
+      - main
   workflow_dispatch:
 
 jobs:
@@ -39,12 +36,7 @@ jobs:
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/emby-toolkit
           tags: |
-            # 规则1: 如果事件是推送到一个分支，就用分支名作为 Docker 标签。
-            # 这会自动为默认分支(main)打上 'latest' 标签。
-            type=ref,event=branch
-
-            # 规则2: 如果事件是推送一个 Git 标签，就直接使用该标签名作为 Docker 标签。
-            type=ref,event=tag
+            type=raw,value=latest
 
       - name: Build and push AMD64 Docker image
         uses: docker/build-push-action@v5
