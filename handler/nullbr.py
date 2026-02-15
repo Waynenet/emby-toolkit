@@ -114,8 +114,10 @@ def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
             logger.info(f"  [大小检查] 总大小: {size_gb}G, 集数: {episode_count}, 平均: {check_size:.2f}G (限制: {min_size}-{max_size})")
 
         if min_size > 0 and check_size < min_size:
+            logger.info(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为平均大小 {check_size:.2f}G 小于最小限制 {min_size}G")
             return False
         if max_size > 0 and check_size > max_size:
+            logger.info(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为平均大小 {check_size:.2f}G 大于最大限制 {max_size}G")
             return False
 
     # 4. 中字过滤
