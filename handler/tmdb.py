@@ -232,6 +232,25 @@ def get_season_details_tmdb(tv_id: int, season_number: int, api_key: str, append
     
     return _tmdb_request(endpoint, api_key, params)
 
+# --- 获取电视剧某一季的集总数 ---
+def get_season_episode_count(api_key: str, tmdb_id: int, season_number: int) -> int:
+    """
+    通过 TMDb ID 和季度号获取该季的剧集总数。
+    """
+    if not api_key or not tmdb_id:
+        return 0
+    
+    # 构造请求端点：/tv/{series_id}/season/{season_number}
+    endpoint = f"/tv/{tmdb_id}/season/{season_number}"
+    try:
+        data = _tmdb_request(endpoint, api_key, {"language": "zh-CN"})
+        if data and "episodes" in data:
+            return len(data["episodes"])
+    except Exception as e:
+        logger.error(f"TMDb: 获取剧集数量失败 (ID: {tmdb_id}, S{season_number}): {e}")
+    
+    return 0
+
 # --- 获取电视剧某一季的详细信息，简化调用版 ---
 def get_tv_season_details(tv_id: int, season_number: int, api_key: str) -> Optional[Dict[str, Any]]:
     """

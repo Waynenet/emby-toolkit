@@ -677,37 +677,56 @@ def task_auto_subscribe(processor):
                         failed_notifications_to_send[user_id].append(f"《{item['title']}》(原因: 不满足发行日期延迟订阅)")
                 continue
 
-            # 2.2启用NULLBR
+            # 2.2 启用NULLBR + 优先级为NULLBR
             nullbr_handled = False
             
             if enable_nullbr_fallback and nullbr_priority == 'nullbr':
-                logger.info(f"  ➜ [策略] 检测到 NULLBR 优先模式，尝试直接搜索《{item['title']}》...")
                 
-                # 准备参数
-                tmdb_id = item['tmdb_id']
-                media_type = 'tv' if item['item_type'] in ['Series', 'Season'] else 'movie'
-                title = item['title']
-                season_number = item.get('season_number') # 如果是单季订阅，带上季号
-
-                # 执行下载 (auto_download_best_resource 内部会自动处理季号)
-                if nullbr_handler.auto_download_best_resource(tmdb_id, media_type, title, season_number):
-                    logger.info(f"  ✅ 《{title}》NULLBR 直下成功，跳过 MP 订阅。")
+                # --- ★★★ 新增：剧集完结检查逻辑 ★★★ ---
+                proceed_with_nullbr = True
+                
+                if item['item_type'] in ['Series', 'Season']:
+                    # 获取正确的 TMDb ID (如果是季，优先取父剧集 ID)
+                    target_tmdb_id = int(item.get('parent_series_tmdb_id') or item['tmdb_id'])
+                    target_season = item.get('season_number')
                     
-                    # 1. 标记为 IGNORED (原因: NULLBR直下)
-                    request_db.set_media_status_ignored(
-                        tmdb_ids=[tmdb_id],
-                        item_type=item['item_type'],
-                        source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
-                        ignore_reason="NULLBR直下"
+                    # 调用 helper 检查是否完结
+                    is_ended = check_series_completion(
+                        target_tmdb_id, 
+                        tmdb_api_key, 
+                        season_number=target_season, 
+                        series_name=item['title']
                     )
                     
-                    # 2. 记录通知
-                    subscription_details.append({'source': 'NULLBR优先', 'item': f"{title} (直下)"})
+                    if not is_ended:
+                        logger.info(f"  ➜ 剧集《{item['title']}》尚未完结 (连载中)，跳过 NULLBR 搜索，交由 MP 进行追更订阅。")
+                        proceed_with_nullbr = False
+                
+                # 只有 (是电影) 或 (是剧集且已完结) 才执行 NULLBR
+                if proceed_with_nullbr:
+                    logger.info(f"  ➜ [策略] 检测到 NULLBR 优先模式，尝试直接搜索《{item['title']}》...")
                     
-                    # 3. 标记已处理，跳过后续 MP 逻辑
-                    nullbr_handled = True
-                else:
-                    logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
+                    # 准备参数
+                    tmdb_id = item['tmdb_id']
+                    media_type = 'tv' if item['item_type'] in ['Series', 'Season'] else 'movie'
+                    title = item['title']
+                    season_number = item.get('season_number')
+
+                    # 执行下载
+                    if nullbr_handler.auto_download_best_resource(tmdb_id, media_type, title, season_number):
+                        logger.info(f"  ✅ 《{title}》NULLBR 直下成功，跳过 MP 订阅。")
+                        
+                        request_db.set_media_status_ignored(
+                            tmdb_ids=[tmdb_id],
+                            item_type=item['item_type'],
+                            source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
+                            ignore_reason="NULLBR直下"
+                        )
+                        
+                        subscription_details.append({'source': 'NULLBR优先', 'item': f"{title} (直下)"})
+                        nullbr_handled = True
+                    else:
+                        logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
 
             if nullbr_handled:
                 continue

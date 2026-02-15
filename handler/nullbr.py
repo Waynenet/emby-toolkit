@@ -10,6 +10,7 @@ import config_manager
 
 import constants
 import utils
+import handler.tmdb as tmdb
 try:
     from p115client import P115Client
 except ImportError:
@@ -58,7 +59,7 @@ def _parse_size_to_gb(size_str):
     elif unit == 'KB': return num / 1024 / 1024
     return 0.0
 
-def _is_resource_valid(item, filters, media_type='movie'):
+def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
     """根据配置过滤资源 (保持原有逻辑)"""
     if not filters: return True
     
@@ -74,13 +75,30 @@ def _is_resource_valid(item, filters, media_type='movie'):
         q_list = [item_quality] if isinstance(item_quality, str) else item_quality
         if not any(q in q_list for q in filters['qualities']): return False
 
-    # 3. 大小
-    min_s = float(filters.get('tv_min_size' if media_type == 'tv' else 'movie_min_size') or 0)
-    max_s = float(filters.get('tv_max_size' if media_type == 'tv' else 'movie_max_size') or 0)
-    if min_s > 0 or max_s > 0:
+    # 3. 大小过滤 (GB) 
+    if media_type == 'tv':
+        min_size = float(filters.get('tv_min_size') or filters.get('min_size') or 0)
+        max_size = float(filters.get('tv_max_size') or filters.get('max_size') or 0)
+    else:
+        min_size = float(filters.get('movie_min_size') or filters.get('min_size') or 0)
+        max_size = float(filters.get('movie_max_size') or filters.get('max_size') or 0)
+    
+    if min_size > 0 or max_size > 0:
         size_gb = _parse_size_to_gb(item.get('size'))
-        if min_s > 0 and size_gb < min_s: return False
-        if max_s > 0 and size_gb > max_s: return False
+        
+        # 如果是剧集且获取到了集数，计算单集平均大小
+        check_size = size_gb
+        if media_type == 'tv' and episode_count > 0:
+            check_size = size_gb / episode_count
+            # 简单的防误判：如果计算出的单集太小（比如小于0.1G），可能是获取到了单集资源而不是整季包
+            # 但这里我们主要目的是过滤整季包，所以按平均值算没问题。
+            # 如果资源本身就是单集（如S01E01），除以总集数后会变得非常小，自然会被 min_size 过滤掉，
+            # 这正好符合“订阅整季”的需求（不要单集散件）。
+
+        if min_size > 0 and check_size < min_size:
+            return False
+        if max_size > 0 and check_size > max_size:
+            return False
 
     # 4. 中字
     if filters.get('require_zh'):
@@ -327,7 +345,7 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
         sources_to_fetch = config.get('enabled_sources', ['115', 'magnet', 'ed2k'])
 
     if _user_level_cache.get('daily_quota', 0) > 0 and _user_level_cache.get('daily_used', 0) >= _user_level_cache.get('daily_quota', 0):
-        logger.warning(f"  ⚠️ 本地缓存显示配额已用完 ({_user_level_cache['daily_used']}/{_user_level_cache['daily_quota']})，跳过请求")
+        logger.warning(f"  ⚠️ 今日 API 配额已用完 ({_user_level_cache['daily_used']}/{_user_level_cache['daily_quota']})，跳过请求")
         raise Exception("今日 API 配额已用完，请明日再试或升级套餐。")
     
     all_resources = []
@@ -345,7 +363,24 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
     filters = config.get('filters', {})
     if not any(filters.values()): return all_resources
         
-    filtered_list = [res for res in all_resources if _is_resource_valid(res, filters, media_type)]
+    # 如果是剧集，获取该季的总集数，用于后续按单集平均大小过滤
+    episode_count = 0
+    if media_type == 'tv' and season_number:
+        try:
+            tmdb_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+            if tmdb_api_key:
+                season_info = tmdb.get_tv_season_details(tmdb_id, season_number, tmdb_api_key)
+                if season_info and 'episodes' in season_info:
+                    episode_count = len(season_info['episodes'])
+                    logger.info(f"  ➜ [NULLBR] 获取到 第 {season_number} 季 总集数: {episode_count}，将按单集平均大小过滤。")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 获取 TMDb 季集数失败，将按总大小过滤: {e}")
+
+    # 5. 执行过滤 (传入 episode_count)
+    filtered_list = [
+        res for res in all_resources 
+        if _is_resource_valid(res, filters, media_type, episode_count=episode_count)
+    ]
     logger.info(f"  ➜ 资源过滤: 原始 {len(all_resources)} -> 过滤后 {len(filtered_list)}")
     return filtered_list
 
