@@ -701,13 +701,10 @@ def task_auto_subscribe(processor):
                         ignore_reason="NULLBR直下"
                     )
                     
-                    # 2. 扣除配额 (虽然没走MP，但既然你目的是消耗NULLBR配额，这里扣不扣MP配额看你心情，通常还是扣一下表示“处理了一个请求”)
-                    settings_db.decrement_subscription_quota()
-
-                    # 3. 记录通知
+                    # 2. 记录通知
                     subscription_details.append({'source': 'NULLBR优先', 'item': f"{title} (直下)"})
                     
-                    # 4. 标记已处理，跳过后续 MP 逻辑
+                    # 3. 标记已处理，跳过后续 MP 逻辑
                     nullbr_handled = True
                 else:
                     logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
