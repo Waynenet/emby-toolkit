@@ -305,7 +305,7 @@
                   <template #unchecked>未启用</template>
                </n-switch>
                <n-text depth="3" style="font-size: 12px;">
-                 仅适用<b>电影</b> (超过保护期)。
+                 在播剧不调用NULLBR搜索。
                </n-text>
              </n-space>
              
