@@ -93,26 +93,20 @@ const open = async (item) => {
     }
 
     // 4. 智能识别 ID 和 季号
-    // 优先检查是否有 series_tmdb_id (这通常意味着它是季或集)
     if (item.series_tmdb_id) {
+        // 场景 A: 来自库内详情页 (通常带有 series_tmdb_id)
         currentItemId.value = item.series_tmdb_id;
-        
-        // ★★★ 关键修复 2：更严谨的季号判断 (防止 0 被当成 false) ★★★
         if (item.season_number !== undefined && item.season_number !== null) {
             currentSeasonNumber.value = parseInt(item.season_number);
-            console.log(`[Nullbr] 识别到季号: ${currentSeasonNumber.value}`);
-        } else {
-            console.warn('[Nullbr] 有 series_id 但缺少 season_number');
         }
     } else {
-        // 电影或剧集主体
+        // 场景 B: 来自 DiscoverPage (只有 tmdb_id)
         currentItemId.value = item.tmdb_id || item.id;
         
-        // ★★★ 兜底逻辑：如果是季类型，但没 series_id，尝试用 tmdb_id 搜 (虽然可能不准)
-        // 但如果此时有 season_number，还是带上比较好
-        if (type === 'season' && item.season_number !== undefined) {
-             console.warn('[Nullbr] 警告: 季类型缺少 series_tmdb_id，搜索结果可能不准确');
+        // ★★★ 修复点：无论 type 是 'tv' 还是 'season'，只要传了 season_number 就认 ★★★
+        if (item.season_number !== undefined && item.season_number !== null) {
              currentSeasonNumber.value = parseInt(item.season_number);
+             console.log(`[Nullbr] 识别到传入的季号: ${currentSeasonNumber.value}`);
         }
     }
     
