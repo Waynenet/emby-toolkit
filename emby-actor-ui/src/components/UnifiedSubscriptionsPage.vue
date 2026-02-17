@@ -333,7 +333,6 @@
                    </template>
                    <template v-else>
                       <b>逻辑:</b> 先尝试 NULLBR 下载 -> 若成功则<b>跳过</b> MP 订阅 -> 若失败则回退提交 MP 订阅。<br/>
-                      (适用于希望老资源直接离线下载，不占用 MP 搜索队列的场景)
                    </template>
                 </div>
              </n-card>
