@@ -602,35 +602,13 @@ class SmartOrganizer:
             raw_kw_list = kw_container.get('keywords', []) if self.media_type == 'movie' else kw_container.get('results', [])
             data['keyword_ids'] = [k.get('id') for k in raw_kw_list]
 
-            # 3. 分级计算 (这是唯一需要预处理成 Label 的，因为它是抽象概念)
-            rating_code = None
-            rating_country = None
-            if self.media_type == 'tv':
-                results = raw_details.get('content_ratings', {}).get('results', [])
-                for country in self.rating_priority:
-                    if country == 'ORIGIN': continue 
-                    found = next((r['rating'] for r in results if r['iso_3166_1'] == country), None)
-                    if found:
-                        rating_code = found
-                        rating_country = country
-                        break
-            else:
-                results = raw_details.get('release_dates', {}).get('results', [])
-                for country in self.rating_priority:
-                    if country == 'ORIGIN': continue
-                    country_release = next((r for r in results if r['iso_3166_1'] == country), None)
-                    if country_release:
-                        cert = next((x['certification'] for x in country_release.get('release_dates', []) if x.get('certification')), None)
-                        if cert:
-                            rating_code = cert
-                            rating_country = country
-                            break
-            
-            if rating_code and rating_country:
-                country_map_list = self.rating_map.get(rating_country, [])
-                label_match = next((r['label'] for r in country_map_list if r['code'] == rating_code), None)
-                if label_match:
-                    data['rating_label'] = label_match
+            # 3. 分级计算 
+            data['rating_label'] = utils.get_rating_label(
+                raw_details, 
+                self.media_type, 
+                self.rating_map, 
+                self.rating_priority
+            )
 
             # 补充标题日期供重命名
             data['title'] = raw_details.get('title') or raw_details.get('name')
@@ -982,7 +960,7 @@ class SmartOrganizer:
         year = date_str[:4] if date_str else ''
         
         safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
-        std_root_name = f"{safe_title} ({year}) {{tmdb-{self.tmdb_id}}}" if year else f"{safe_title} {{tmdb-{self.tmdb_id}}}"
+        std_root_name = f"{safe_title} ({year}) {{tmdb={self.tmdb_id}}}" if year else f"{safe_title} {{tmdb={self.tmdb_id}}}"
         
         source_root_id = root_item.get('fid') or root_item.get('cid')
         is_source_file = bool(root_item.get('fid'))
@@ -1265,7 +1243,7 @@ def _standardize_115_file(client, file_item, save_cid, raw_title, tmdb_id, media
             if match: final_year = match.group(1)
         
         safe_title = re.sub(r'[\\/:*?"<>|]', '', final_title).strip()
-        std_name = f"{safe_title} ({final_year}) {{tmdb-{tmdb_id}}}" if final_year else f"{safe_title} {{tmdb-{tmdb_id}}}"
+        std_name = f"{safe_title} ({final_year}) {{tmdb={tmdb_id}}}" if final_year else f"{safe_title} {{tmdb={tmdb_id}}}"
 
         # ==================================================
         # 2. 核心修复：区分 文件夹重命名 与 单文件归档

@@ -634,3 +634,88 @@ DEFAULT_AI_PROMPTS = {
   "translation": "..."
 }}"""
 }
+
+# --- 分级计算通用逻辑 (含 Adult 强匹配) ---
+def get_rating_label(details: dict, media_type: str, rating_map: Optional[dict] = None, priority: Optional[list] = None) -> str:
+    """
+    根据 TMDb 详情、媒体类型和配置，计算统一的分级标签 (Label)。
+    
+    逻辑：
+    1. 【Adult 强匹配】如果 TMDb 标记为 adult=True，且配置中有 emby_value=15 的项，直接返回该标签。
+    2. 【优先级遍历】按照 priority 配置的国家顺序查找分级。
+    3. 【映射转换】将找到的国家分级代码转换为统一的中文 Label。
+    """
+    if rating_map is None: rating_map = DEFAULT_RATING_MAPPING
+    if priority is None: priority = DEFAULT_RATING_PRIORITY
+
+    # 1. ★★★ Adult 强匹配 (最高优先级) ★★★
+    # 如果 TMDb 明确标记为成人内容
+    if details.get('adult') is True:
+        # 遍历所有国家的配置，寻找任意一个定义了 emby_value=15 (成人) 的标签
+        # 通常在 US 里配置了 XXX -> 成人 -> 15
+        for country_rules in rating_map.values():
+            for rule in country_rules:
+                if rule.get('emby_value') == 15:
+                    return rule['label']
+
+    # 2. 准备源数据
+    rating_code = None
+    rating_country = None
+    
+    # 获取原产国 (用于处理 'ORIGIN' 优先级)
+    origin_countries = details.get('origin_country', [])
+    if not origin_countries and 'production_countries' in details:
+        origin_countries = [c.get('iso_3166_1') for c in details['production_countries']]
+    
+    # 3. 遍历优先级
+    for country in priority:
+        target_countries = []
+        if country == 'ORIGIN':
+            target_countries = origin_countries
+        else:
+            target_countries = [country]
+        
+        if not target_countries: continue
+
+        for target_c in target_countries:
+            found_code = None
+            
+            if media_type == 'tv':
+                # TV 逻辑: content_ratings.results
+                results = details.get('content_ratings', {}).get('results', [])
+                found = next((r for r in results if r['iso_3166_1'] == target_c), None)
+                if found: found_code = found.get('rating')
+            else:
+                # Movie 逻辑: release_dates.results
+                results = details.get('release_dates', {}).get('results', [])
+                country_data = next((r for r in results if r['iso_3166_1'] == target_c), None)
+                if country_data:
+                    # 电影可能有多个分级 (不同版本)，优先取第一个非空的 certification
+                    for rel in country_data.get('release_dates', []):
+                        if rel.get('certification'):
+                            found_code = rel.get('certification')
+                            break
+            
+            if found_code:
+                rating_code = found_code
+                rating_country = target_c
+                break
+        
+        if rating_code: break
+
+    # 4. 映射到 Label
+    if rating_code and rating_country:
+        # 查找对应的 Label
+        country_rules = rating_map.get(rating_country, [])
+        
+        # 尝试完全匹配
+        for rule in country_rules:
+            if rule['code'] == rating_code:
+                return rule['label']
+        
+        # 如果没找到完全匹配，尝试不区分大小写
+        for rule in country_rules:
+            if rule['code'].lower() == rating_code.lower():
+                return rule['label']
+
+    return '未知'
