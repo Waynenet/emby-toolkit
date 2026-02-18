@@ -1150,9 +1150,9 @@ class SmartOrganizer:
         date_str = self.details.get('date') or ''
         year = date_str[:4] if date_str else ''
         safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
-        std_root_name = f"{safe_title} ({year}) {{tmdb-{self.tmdb_id}}}" if year else f"{safe_title} {{tmdb-{self.tmdb_id}}}"
+        std_root_name = f"{safe_title} ({year}) {{tmdb={self.tmdb_id}}}" if year else f"{safe_title} {{tmdb={self.tmdb_id}}}"
 
-        logger.info(f"  🚀 [MP对接] 开始归类移动: FileID:{file_id} -> CID:{target_cid}/{std_root_name}")
+        logger.info(f"  🚀 [MP上传] 开始归类移动: FileID:{file_id} -> CID:{target_cid}/{std_root_name}")
 
         # 2. 获取或创建目标标准文件夹 (在目标分类CID下)
         final_home_cid = None
@@ -1174,33 +1174,21 @@ class SmartOrganizer:
                 final_home_cid = mk_res.get('cid')
         
         if not final_home_cid:
-            logger.error(f"  ❌ [MP对接] 无法创建目标文件夹，移动终止。")
+            logger.error(f"  ❌ [MP上传] 无法创建目标文件夹，移动终止。")
             return False
 
         # 3. 移动文件
-        # 注意：MP 整理后的结构可能是：
-        #   /影视待整理/极限审判 (2026) {tmdb=...}/极限审判.mkv
-        # 我们需要把 极限审判.mkv 移动到 /分类目录/极限审判 (2026) {tmdb-...}/
-        # 也就是把文件从 MP 的文件夹里 拔出来，放到我们的文件夹里
-        
-        # 移动文件
         move_res = self.client.fs_move(file_id, final_home_cid)
         if move_res.get('state'):
-            logger.info(f"  ✅ [MP对接] 文件移动成功。")
+            logger.info(f"  ✅ [MP上传] 文件移动成功。")
             
             # 4. 尝试删除 MP留下的空文件夹 (current_cid)
             # 只有当 current_cid 不是根目录时才删
             if current_cid and str(current_cid) != '0':
-                # 简单检查一下是否为空（可选，115删除非空目录会失败吗？通常API删除是强制的，小心）
-                # 安全起见，我们只尝试删除，如果里面还有别的文件（比如nfo/图片），可能需要一起移？
-                # MP 的 Webhook 是一次 transfer 一个文件吗？还是一个列表？
-                # 看日志是 file_list，可能有多个。
-                # 简单策略：不删源目录，或者留给 MP 自己清理。
-                # 如果我们把文件移走了，MP 的目录就空了。
-                pass
+                self.client.fs_delete([current_cid])
             return True
         else:
-            logger.error(f"  ❌ [MP对接] 文件移动失败: {move_res}")
+            logger.error(f"  ❌ [MP上传] 文件移动失败: {move_res}")
             return False
 
 # ==============================================================================
