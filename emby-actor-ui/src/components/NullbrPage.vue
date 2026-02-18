@@ -885,7 +885,14 @@ const computedGenreOptions = computed(() => {
     return Array.from(map.values());
   }
 });
-
+const genreOptions = computed(() => {
+  const map = new Map();
+  // 合并电影和剧集的所有类型，利用 Map 去重 (ID相同的视为同一个)
+  [...rawMovieGenres.value, ...rawTvGenres.value].forEach(g => {
+    if (g && g.value) map.set(g.value, g);
+  });
+  return Array.from(map.values());
+});
 // 2. 动态工作室 (Studios) 选项
 const computedStudioOptions = computed(() => {
   const type = currentRule.value.media_type;
