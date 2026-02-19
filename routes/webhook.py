@@ -553,7 +553,8 @@ def emby_webhook():
             
             # ★★★ 直接从 meta 获取季号 (整数) ★★★
             # begin_season 通常是当前文件的季号
-            season_number = media_info.get("seasons")
+            season_info = media_info.get("season_info", [])
+            season_number = season_info[0].get("season_number") if season_info else 1
             logger.info(f"  ➜ MP 通知中季号信息: {season_number}")
             
             # 115 当前父目录 ID (MP 创建的目录)
