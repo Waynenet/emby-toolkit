@@ -565,7 +565,7 @@ def emby_webhook():
                 return jsonify({"status": "ignored_missing_data"}), 200
 
             # 转换媒体类型
-            media_type = 'tv' if media_type_cn == '剧集' else 'movie'
+            media_type = 'tv' if media_type_cn == '电视剧' else 'movie'
             
             # 3. 初始化 115 客户端
             if P115Client is None:
