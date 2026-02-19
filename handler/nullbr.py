@@ -790,9 +790,10 @@ class SmartOrganizer:
 
         # 5. 音频 (Audio)
         audio_info = []
-        # 识别多音轨标识
-        multi_audio_match = re.search(r'\b(\d+Audio|Multi|双语|多音轨)\b', name_upper, re.I)
+        # 匹配 2Audio, 3Audio, Multi, 双语, Dual-Audio 等
+        multi_audio_match = re.search(r'\b(\d+Audio|Multi|双语|多音轨|Dual-Audio)\b', name_upper, re.I)
         if multi_audio_match:
+            # 直接使用原文件名中的大小写/格式，或者统一格式
             audio_info.append(multi_audio_match.group(1))
         if re.search(r'ATMOS', name_upper): audio_info.append('Atmos')
         elif re.search(r'TRUEHD', name_upper): audio_info.append('TrueHD')
