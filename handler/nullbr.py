@@ -1705,7 +1705,7 @@ def task_scan_and_organize_115(processor=None):
 
     try:
         save_cid = int(cid_val)
-        save_name = int(save_val)
+        save_name = str(save_val)
         
         # 1. 准备 '未识别' 目录 (代码保持不变)
         unidentified_folder_name = "未识别"
@@ -1728,7 +1728,6 @@ def task_scan_and_organize_115(processor=None):
 
         # 2. 扫描目录
         logger.info(f"  🔍 正在扫描目录: {save_name} ...")
-        res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         
         if not res.get('data'):
