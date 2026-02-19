@@ -1046,7 +1046,7 @@ class SmartOrganizer:
         
         # 策略 1: 先尝试查找 (防止 mkdir 报错)
         try:
-            search_res = self.client.fs_files({'cid': dest_parent_cid, 'search_value': std_root_name, 'limit': 20})
+            search_res = self.client.fs_files({'cid': dest_parent_cid, 'search_value': std_root_name, 'limit': 50, 'o': 'user_otime', 'asc': 0})
             if search_res.get('data'):
                 for item in search_res['data']:
                     # 必须是文件夹且名字完全匹配
@@ -1707,7 +1707,7 @@ def task_scan_and_organize_115(processor=None):
     - 识别失败 -> 移动到 '未识别' 目录
     ★ 修复：增加子文件探测逻辑，防止剧集文件夹因命名不规范被误判为电影
     """
-    logger.info("=== 开始执行 115 待整理目录扫描 (增强版+智能纠错) ===")
+    logger.info("=== 开始执行 115 待整理目录扫描 ===")
     
     if P115Client is None:
         logger.error("未安装 p115client，无法执行。")

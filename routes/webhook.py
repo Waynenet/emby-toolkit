@@ -804,7 +804,7 @@ def emby_webhook():
             logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
-    trigger_events = ["item.add", "library.new", "library.deleted", "metadata.update", "image.update", "collection.items.removed"]
+    trigger_events = ["item.add", "library.new", "library.deleted", "metadata.update", "image.update", "collection.items.removed", "None"]
     if event_type not in trigger_events:
         logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
