@@ -550,11 +550,8 @@ def emby_webhook():
             # 115 文件 ID 和 文件名
             target_item = transfer_info.get("target_item", {})
             file_id = target_item.get("fileid")
-            file_name = target_item.get("name")
-            # 0: 文件夹, 1: 文件
-            item_type = target_item.get("type", 1) 
             
-            # 115 当前父目录 ID (MP 创建的目录)
+            # 115 当前父目录 ID (MP 创建的临时目录)
             target_dir = transfer_info.get("target_diritem", {})
             current_parent_cid = target_dir.get("fileid")
             
@@ -589,30 +586,47 @@ def emby_webhook():
             target_cid = organizer.get_target_cid()
             
             if target_cid:
-                # ★★★ 核心修改：构造 root_item 并调用 execute ★★★
-                # 我们把 MP 传过来的文件/文件夹伪装成 115 API 返回的 item 格式
-                # 这样 execute 就会把它当做扫描到的文件来处理：递归、重命名、移动、建季目录
+                # 获取真实文件对象 
+                real_root_item = None
+                try:
+                    # MP 的临时目录里通常只有这一个文件，limit 设小点就行
+                    res = client.fs_files({'cid': current_parent_cid, 'limit': 50})
+                    if res.get('data'):
+                        for item in res['data']:
+                            # 匹配文件ID (fid) 或 文件夹ID (cid)
+                            if str(item.get('fid')) == str(file_id) or str(item.get('cid')) == str(file_id):
+                                real_root_item = item
+                                break
+                except Exception as e:
+                    logger.warning(f"  ⚠️ 获取真实文件信息失败: {e}")
+
+                # 如果万一没取到（极低概率），才用伪装数据兜底
+                if not real_root_item:
+                    logger.warning("  ⚠️ 未能获取文件详情，使用基础信息兜底...")
+                    real_root_item = {
+                        'n': target_item.get("name"),
+                        'cid': current_parent_cid
+                    }
+                    if target_item.get("type", 1) == 1: # 文件
+                        real_root_item['fid'] = file_id
+                    else: # 文件夹
+                        real_root_item['cid'] = file_id
+
+                logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理: {real_root_item.get('n')}")
                 
-                root_item = {
-                    'n': file_name,
-                    'cid': current_parent_cid # 父目录ID
-                }
-                
-                if item_type == 0:
-                    # 如果是文件夹 (MP上传的是打包目录)
-                    root_item['cid'] = file_id # 这里的 cid 是文件夹自己的 ID
-                    # 没有 fid 表示是文件夹
-                else:
-                    # 如果是单文件
-                    root_item['fid'] = file_id
-                    # cid 保持为父目录 ID
-                
-                logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理: {file_name}")
-                
-                # 直接复用最稳的 execute 逻辑！
-                success = organizer.execute(root_item, target_cid)
+                # 复用最稳的 execute 逻辑
+                success = organizer.execute(real_root_item, target_cid)
                 
                 if success:
+                    # ★★★ 核心修复 2: 强制删除 MP 临时目录 (解决源目录未删除) ★★★
+                    # execute 在单文件模式下不会删父目录，所以这里我们要手动补一刀
+                    if current_parent_cid and str(current_parent_cid) != '0':
+                        try:
+                            logger.info(f"  🧹 [MP上传] 清理临时目录: {current_parent_cid}")
+                            client.fs_delete([current_parent_cid])
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 清理临时目录失败: {e}")
+
                     logger.info("  📣 [MP上传] 整理完成，通知 CMS 执行增量同步...")
                     notify_cms_scan()
                     return jsonify({"status": "success_organized"}), 200
