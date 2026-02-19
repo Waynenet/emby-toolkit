@@ -555,6 +555,7 @@ def emby_webhook():
             # 115 当前父目录 ID (MP 创建的临时目录)
             target_dir = transfer_info.get("target_diritem", {})
             current_parent_cid = target_dir.get("fileid")
+            current_parent_name = target_dir.get("name")
             
             # 元数据
             tmdb_id = media_info.get("tmdb_id")
@@ -587,6 +588,7 @@ def emby_webhook():
                     'n': target_item.get("name"),
                     's': target_item.get("size"), # 直接用 MP 给的大小
                     'cid': current_parent_cid,    # 父目录 ID
+                    'name': current_parent_name,  # 父目录名称,
                     'fid': file_id                # ★★★ 关键：必须有 fid，execute 才会认为是单文件模式 ★★★
                 }
                 
