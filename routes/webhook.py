@@ -546,8 +546,6 @@ def emby_webhook():
         try:
             transfer_info = data.get("data", {}).get("transferinfo", {})
             media_info = data.get("data", {}).get("mediainfo", {})
-            meta_info = data.get("data", {}).get("meta", {}) # ★★★ 获取 meta 信息 ★★★
-            season_info = data.get("data", {}).get("season_info", {}) # ★★★ 获取 season 信息 ★★★
             
             # 115 文件 ID
             target_item = transfer_info.get("target_item", {})
@@ -555,7 +553,7 @@ def emby_webhook():
             
             # ★★★ 直接从 meta 获取季号 (整数) ★★★
             # begin_season 通常是当前文件的季号
-            season_number = season_info.get("season_number")
+            season_number = media_info.get("seasons")
             
             # 115 当前父目录 ID (MP 创建的目录)
             target_dir = transfer_info.get("target_diritem", {})
