@@ -1690,20 +1690,22 @@ def task_scan_and_organize_115(processor=None):
     config = get_config()
     cookies = config.get('p115_cookies')
     cid_val = config.get('p115_save_path_cid')
+    save_val = config.get('p115_save_path_name', '待整理')
     enable_organize = config.get('enable_smart_organize', False)
 
     if not cookies:
-        logger.error("未配置 115 Cookies，跳过。")
+        logger.error("  ⚠️ 未配置 115 Cookies，跳过。")
         return
     if not cid_val or str(cid_val) == '0':
-        logger.error("未配置待整理目录 (CID)，跳过。")
+        logger.error("  ⚠️ 未配置待整理目录 (CID)，跳过。")
         return
     if not enable_organize:
-        logger.warning("未开启智能整理开关，仅扫描不处理。")
+        logger.warning("  ⚠️ 未开启智能整理开关，仅扫描不处理。")
         return
 
     try:
         save_cid = int(cid_val)
+        save_name = int(save_val)
         
         # 1. 准备 '未识别' 目录 (代码保持不变)
         unidentified_folder_name = "未识别"
@@ -1725,12 +1727,12 @@ def task_scan_and_organize_115(processor=None):
             except: pass
 
         # 2. 扫描目录
-        logger.info(f"正在扫描目录 CID: {save_cid} ...")
+        logger.info(f"  🔍 正在扫描目录: {save_name} ...")
         res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         
         if not res.get('data'):
-            logger.info("待整理目录为空。")
+            logger.info("  📂 待整理目录为空。")
             return
 
         processed_count = 0
@@ -1759,7 +1761,7 @@ def task_scan_and_organize_115(processor=None):
                             # 如果子文件名包含 S01E01, EP01, Season 等特征，强制修正为 TV
                             if re.search(r'(?:S\d{1,2}E\d{1,2}|EP?\d{1,3}|第\d+季|Season)', sub_name, re.IGNORECASE):
                                 media_type = 'tv'
-                                logger.info(f"  🕵️‍♂️ [纠错] 检测到子文件包含剧集特征 ({sub_name})，类型修正为: TV")
+                                logger.info(f"  🕵️‍♂️ 检测到子文件包含剧集特征 ({sub_name})，类型修正为: 电视剧")
                                 break
                 except Exception as e:
                     logger.warning(f"  ⚠️ 子目录探测失败: {e}")
@@ -1791,4 +1793,4 @@ def task_scan_and_organize_115(processor=None):
             notify_cms_scan()
 
     except Exception as e:
-        logger.error(f"115 扫描任务异常: {e}", exc_info=True)
+        logger.error(f"  ⚠️ 115 扫描任务异常: {e}", exc_info=True)
