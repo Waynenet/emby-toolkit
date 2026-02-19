@@ -35,6 +35,7 @@ def handle_config():
         
         if 'p115_cookies' not in config: config['p115_cookies'] = ''
         if 'p115_save_path_cid' not in config: config['p115_save_path_cid'] = 0
+        if 'p115_save_path_name' not in config: config['p115_save_path_name'] = '根目录'
         if 'enable_smart_organize' not in config: config['enable_smart_organize'] = False
         return jsonify(config)
     
@@ -46,6 +47,7 @@ def handle_config():
             "cms_token": data.get('cms_token', '').strip(),
             "p115_cookies": data.get('p115_cookies', '').strip(),
             "p115_save_path_cid": data.get('p115_save_path_cid', 0),
+            "p115_save_path_name": data.get('p115_save_path_name', '根目录').strip(),
             "filters": data.get('filters', {}),
             "enable_smart_organize": data.get('enable_smart_organize', False),
             "enabled_sources": data.get('enabled_sources', ['115', 'magnet', 'ed2k']),

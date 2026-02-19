@@ -1229,6 +1229,33 @@ const getRuleSummary = (rule) => {
       parts.push(`语言:${names.join(',')}`);
   }
   
+  // 年份范围
+  if (rule.year_min || rule.year_max) {
+      if (rule.year_min && rule.year_max) {
+          parts.push(`年份:${rule.year_min}-${rule.year_max}`);
+      } else if (rule.year_min) {
+          parts.push(`年份:≥${rule.year_min}`);
+      } else if (rule.year_max) {
+          parts.push(`年份:≤${rule.year_max}`);
+      }
+  }
+
+  // 时长范围 
+  if (rule.runtime_min || rule.runtime_max) {
+      if (rule.runtime_min && rule.runtime_max) {
+          parts.push(`时长:${rule.runtime_min}-${rule.runtime_max}分`);
+      } else if (rule.runtime_min) {
+          parts.push(`时长:≥${rule.runtime_min}分`);
+      } else if (rule.runtime_max) {
+          parts.push(`时长:≤${rule.runtime_max}分`);
+      }
+  }
+
+  // 最低评分
+  if (rule.min_rating > 0) {
+      parts.push(`评分:≥${rule.min_rating}`);
+  }
+
   return parts.join(' + ') || '无条件';
 };
 
