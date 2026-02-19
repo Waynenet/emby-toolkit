@@ -593,20 +593,11 @@ def emby_webhook():
                 # ★★★ 核心修改：优先尝试整目录移动 ★★★
                 success = False
                 
-                # 只有当 MP 传的是文件夹 (没有 fid) 时，才尝试整目录移动
-                if 'fid' not in real_root_item:
-                    logger.info("  ⚡ 尝试整目录移动 (乾坤大挪移)...")
-                    if organizer.execute_folder_move(real_root_item, target_cid):
-                        success = True
-                        # 整目录移动成功后，不需要删除父目录了，因为父目录就是我们要移走的那个目录
-                        # 或者如果 real_root_item 是父目录下的子目录，那父目录还是要删
-                        # 逻辑：MP 创建了 TempDir -> 里面有 MovieDir
-                        # 我们把 MovieDir 移走了，TempDir 变成了空壳，还是得删
-                    else:
-                        logger.info("  🔄 整目录移动不适用 (目标已存在)，转为单文件合并模式...")
-                        success = organizer.execute(real_root_item, target_cid)
+                logger.info("  ⚡ 尝试整目录移动...")
+                if organizer.execute_folder_move(real_root_item, target_cid):
+                    success = True
                 else:
-                    # 如果是单文件，直接走合并模式
+                    logger.info("  🔄 目标已存在，转为合并模式...")
                     success = organizer.execute(real_root_item, target_cid)
                 
                 if success:
