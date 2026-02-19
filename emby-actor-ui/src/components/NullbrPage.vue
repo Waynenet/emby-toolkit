@@ -156,7 +156,7 @@
                     </n-button>
                   </n-input-group>
                 </n-form-item>
-                <n-form-item label="保存目录 CID">
+                <n-form-item label="待整理目录 CID">
                   <n-input v-model:value="config.p115_save_path_cid" placeholder="0 为根目录" />
                 </n-form-item>
               </div>
