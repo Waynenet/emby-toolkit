@@ -590,22 +590,33 @@ def emby_webhook():
                     'fid': file_id                # ★★★ 关键：必须有 fid，execute 才会认为是单文件模式 ★★★
                 }
                 
-                # 双重保险：如果 MP 传的是文件夹 (type=0)，则移除 fid
-                # 但通常 MP 转存的都是视频文件，这里为了防止万一
-                if str(target_item.get("type")) == "0":
-                    logger.warning("  ⚠️ 检测到 MP 上传的是文件夹，这可能会导致递归扫描，请谨慎！")
-                    del real_root_item['fid']
-                    real_root_item['cid'] = file_id # 文件夹自己的 ID
-
-                # logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理...")
-                # 复用 execute 逻辑
-                success = organizer.execute(real_root_item, target_cid)
+                # ★★★ 核心修改：优先尝试整目录移动 ★★★
+                success = False
+                
+                # 只有当 MP 传的是文件夹 (没有 fid) 时，才尝试整目录移动
+                if 'fid' not in real_root_item:
+                    logger.info("  ⚡ 尝试整目录移动 (乾坤大挪移)...")
+                    if organizer.execute_folder_move(real_root_item, target_cid):
+                        success = True
+                        # 整目录移动成功后，不需要删除父目录了，因为父目录就是我们要移走的那个目录
+                        # 或者如果 real_root_item 是父目录下的子目录，那父目录还是要删
+                        # 逻辑：MP 创建了 TempDir -> 里面有 MovieDir
+                        # 我们把 MovieDir 移走了，TempDir 变成了空壳，还是得删
+                    else:
+                        logger.info("  🔄 整目录移动不适用 (目标已存在)，转为单文件合并模式...")
+                        success = organizer.execute(real_root_item, target_cid)
+                else:
+                    # 如果是单文件，直接走合并模式
+                    success = organizer.execute(real_root_item, target_cid)
                 
                 if success:
-                    # 强制删除 MP 临时目录
+                    # 强制删除 MP 临时目录 (空壳)
                     if current_parent_cid and str(current_parent_cid) != '0':
                         try:
-                            logger.debug(f"  🧹 [MP上传] 删除临时目录")
+                            # 只有当移走的不是 current_parent_cid 本身时才删
+                            # MP 的结构通常是: 临时目录(current_parent_cid) -> 视频文件 或 视频文件夹(real_root_item)
+                            # 所以删 current_parent_cid 是安全的
+                            logger.info(f"  🧹 [MP上传] 清理临时目录: {current_parent_cid}")
                             client.fs_delete([current_parent_cid])
                         except Exception as e:
                             logger.warning(f"  ⚠️ 清理临时目录失败: {e}")

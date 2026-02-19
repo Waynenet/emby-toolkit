@@ -1030,18 +1030,14 @@ class SmartOrganizer:
         # ==================================================
         final_home_cid = None
         
-        # 策略 1: 先尝试查找 (防止 mkdir 报错)
         try:
             search_res = self.client.fs_files({
                 'cid': dest_parent_cid, 
                 'search_value': std_root_name, 
-                'limit': 50, 
-                'o': 'user_utime', 
-                'asc': 0
+                'limit': 1150, # 直接拉满
             })
             if search_res.get('data'):
                 for item in search_res['data']:
-                    # 必须是文件夹且名字完全匹配
                     if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
                         final_home_cid = item.get('cid')
                         logger.info(f"  📂 发现已存在的目录: {std_root_name}")
@@ -1049,37 +1045,15 @@ class SmartOrganizer:
         except Exception as e:
             logger.warning(f"  ⚠️ 查找目录异常: {e}")
 
-        # 策略 2: 如果没找到，尝试创建
+        # 如果没找到，创建新目录
         if not final_home_cid:
             mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
             if mk_res.get('state'):
                 final_home_cid = mk_res.get('cid')
                 logger.info(f"  🆕 创建新目录: {std_root_name}")
             else:
-                # 策略 3: 创建失败 (可能已存在且沉底)，再次尝试查找
-                logger.warning(f"  ⚠️ 目录创建失败(可能已存在且沉底)，尝试深度查找: {std_root_name}")
-                
-                time.sleep(0.5) # 稍微缓一下，防止并发过快
-                
-                try:
-                    deep_search_res = self.client.fs_files({
-                        'cid': dest_parent_cid, 
-                        'search_value': std_root_name, 
-                        'limit': 1000, 
-                    })
-                    
-                    if deep_search_res.get('data'):
-                        for item in deep_search_res['data']:
-                            if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
-                                final_home_cid = item.get('cid')
-                                logger.info(f"  📂 [深度查找] 找回沉底目录: {std_root_name}")
-                                break
-                except Exception as e:
-                    logger.warning(f"  ⚠️ 深度查找异常: {e}")
-        
-        if not final_home_cid:
-            logger.error(f"  ❌ 无法创建或找到目标标准文件夹 [{std_root_name}]，整理终止。")
-            return False
+                logger.error(f"  ❌ 创建目录失败: {std_root_name}")
+                return False
 
         # ==================================================
         # 步骤 B: 扫描源文件
@@ -1199,6 +1173,55 @@ class SmartOrganizer:
         logger.info(f"  ✅ [整理] 完成。共迁移 {moved_count} 个文件。")
         return True
     
+    def execute_folder_move(self, root_item, target_cid):
+        """
+        乾坤大挪移：直接移动整个文件夹
+        返回: 
+          True: 移动成功 (无需后续操作)
+          False: 目标已存在 (需要回退到 execute 进行合并)
+        """
+        # 1. 准备标准名称
+        title = self.details.get('title') or self.original_title
+        date_str = self.details.get('date') or ''
+        year = date_str[:4] if date_str else ''
+        safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
+        std_root_name = f"{safe_title} ({year}) {{tmdb={self.tmdb_id}}}" if year else f"{safe_title} {{tmdb={self.tmdb_id}}}"
+        
+        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else root_item.get('cid')
+        source_cid = root_item.get('cid') # MP 上传的文件夹 ID
+
+        # 2. 检查目标目录是否存在 (深度查找)
+        try:
+            search_res = self.client.fs_files({
+                'cid': dest_parent_cid, 
+                'search_value': std_root_name, 
+                'limit': 1150 
+            })
+            if search_res.get('data'):
+                for item in search_res['data']:
+                    if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                        logger.info(f"  ⚠️ 目标目录已存在 ({std_root_name})，转入合并模式...")
+                        return False # 目标存在，不能直接移，返回 False
+        except: pass
+
+        # 3. 目标不存在 -> 执行乾坤大挪移
+        logger.info(f"  🚀 [115] 目标不存在，执行整目录移动: {root_item.get('n')} -> {std_root_name}")
+        
+        # 3.1 先重命名 MP 的文件夹为标准名称
+        # if root_item.get('n') != std_root_name:
+        #     rename_res = self.client.fs_rename((source_cid, std_root_name))
+        #     if not rename_res.get('state'):
+        #         logger.error(f"  ❌ 重命名失败，转入合并模式")
+        #         return False
+        
+        # 3.2 移动整个文件夹到分类目录
+        move_res = self.client.fs_move(source_cid, dest_parent_cid)
+        if move_res.get('state'):
+            logger.info(f"  ✅ [整理] 整目录移动成功！")
+            return True
+        else:
+            logger.error(f"  ❌ 移动失败，转入合并模式")
+            return False
 # ==============================================================================
 # ★★★ 115 推送逻辑  ★★★
 # ==============================================================================
