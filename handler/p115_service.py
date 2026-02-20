@@ -574,7 +574,7 @@ class SmartOrganizer:
             search_res = self.client.fs_files({
                 'cid': dest_parent_cid,
                 'search_value': std_root_name,
-                'limit': 1,
+                'limit': 1150,
             })
             if search_res.get('data'):
                 for item in search_res['data']:
