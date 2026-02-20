@@ -31,6 +31,7 @@
             <n-radio-group v-model:value="filter" size="small">
               <n-radio-button value="all">全部</n-radio-button>
               <n-radio-button value="needed">需处理</n-radio-button>
+              <n-radio-button value="subscribed">处理中</n-radio-button>
               <n-radio-button value="ignored">已忽略</n-radio-button>
             </n-radio-group>
             <n-button @click="showSettingsModal = true">规则设定</n-button>
