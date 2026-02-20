@@ -10,7 +10,6 @@ import constants
 from database import settings_db
 import handler.tmdb as tmdb
 import utils
-from handler.nullbr import _cms_lock, _cms_timer, get_config, logger
 try:
     from p115client import P115Client
 except ImportError:
@@ -21,6 +20,9 @@ logger = logging.getLogger(__name__)
 # --- CMS通知防抖定时器 ---
 _cms_timer = None
 _cms_lock = threading.Lock()
+
+def get_config():
+    return settings_db.get_setting('nullbr_config') or {}
 
 class P115Service:
     _instance = None
