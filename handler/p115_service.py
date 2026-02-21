@@ -76,7 +76,8 @@ class P115Service:
     def get_cookies(cls):
         config = settings_db.get_setting('nullbr_config') or {}
         return config.get('p115_cookies')
-_directory_cid_cache = {}
+    
+_directory_cid_cache = {} # 全局目录 CID 缓存，key 格式: f"{parent_cid}_{dir_name}"
 class SmartOrganizer:
     def __init__(self, client, tmdb_id, media_type, original_title):
         self.client = client
@@ -593,7 +594,7 @@ class SmartOrganizer:
         # 2. 先查缓存
         if cache_key in _directory_cid_cache:
             final_home_cid = _directory_cid_cache[cache_key]
-            logger.debug(f"  ⚡ [缓存命中] 目录 CID: {final_home_cid}")
+            logger.info(f"  ⚡ [缓存命中] 目录 CID: {final_home_cid}")
         
         # 3. 缓存未命中，走 API (乐观锁策略)
         if not final_home_cid:
@@ -606,6 +607,7 @@ class SmartOrganizer:
                 logger.info(f"  🆕 创建新目录成功: {std_root_name}")
                 # ★★★ 写入缓存 ★★★
                 _directory_cid_cache[cache_key] = final_home_cid
+                logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
             else:
                 # 创建失败，回退搜索
                 try:
@@ -621,6 +623,7 @@ class SmartOrganizer:
                                 logger.info(f"  📂 发现已存在的目录: {std_root_name}")
                                 # ★★★ 写入缓存 ★★★
                                 _directory_cid_cache[cache_key] = final_home_cid
+                                logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
                                 break
                 except Exception as e:
                     logger.warning(f"  ⚠️ 查找目录异常: {e}")
