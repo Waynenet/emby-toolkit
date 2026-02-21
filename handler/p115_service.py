@@ -208,7 +208,14 @@ class SmartOrganizer:
         # 3. 国家 (Countries) - Code 匹配
         if rule.get('countries'):
             # rule['countries'] 存的是 Code (如 ['US', 'CN'])
-            if not any(c in self.raw_metadata['country_codes'] for c in rule['countries']): return False
+            # 只匹配第一个主要国家，避免合拍片误判 
+            current_countries = self.raw_metadata.get('country_codes', [])
+            # 获取列表中的第一个国家作为主要国家
+            primary_country = current_countries[0] if current_countries else None
+            
+            # 如果没有国家信息，或者主要国家不在规则允许的列表中，则不匹配
+            if not primary_country or primary_country not in rule['countries']:
+                return False
 
         # 4. 语言 (Languages) - Code 匹配
         if rule.get('languages'):
