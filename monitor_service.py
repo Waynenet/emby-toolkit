@@ -101,7 +101,7 @@ class MediaFileHandler(FileSystemEventHandler):
         global DEBOUNCE_TIMER
         with QUEUE_LOCK:
             if file_path not in FILE_EVENT_QUEUE:
-                logger.info(f"  🔍 [实时监控] 文件加入队列: {os.path.basename(file_path)}")
+                logger.info(f"  🔍 [实时监控] 文件加入队列: {file_path}")
             
             FILE_EVENT_QUEUE.add(file_path)
             
@@ -113,7 +113,7 @@ class MediaFileHandler(FileSystemEventHandler):
         global DELETE_DEBOUNCE_TIMER
         with DELETE_QUEUE_LOCK:
             if file_path not in DELETE_EVENT_QUEUE:
-                logger.info(f"  🗑️ [实时监控] 删除事件入队: {os.path.basename(file_path)}")
+                logger.info(f"  🗑️ [实时监控] 删除事件入队: {file_path}")
             
             DELETE_EVENT_QUEUE.add(file_path)
             
