@@ -76,7 +76,7 @@ class P115Service:
     def get_cookies(cls):
         config = settings_db.get_setting('nullbr_config') or {}
         return config.get('p115_cookies')
-
+_directory_cid_cache = {}
 class SmartOrganizer:
     def __init__(self, client, tmdb_id, media_type, original_title):
         self.client = client
@@ -583,39 +583,47 @@ class SmartOrganizer:
         logger.info(f"  🚀 [115] 开始整理: {root_item.get('n')} -> {std_root_name}")
 
         # ==================================================
-        # 步骤 A: 获取或创建目标标准文件夹 (优化版：先创建，失败再查找)
+        # 步骤 A: 获取或创建目标标准文件夹 (带缓存优化)
         # ==================================================
         final_home_cid = None
         
-        # 1. 尝试直接创建目录 (乐观策略)
-        mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
+        # 1. 构建缓存 Key (父目录CID + 目标目录名)
+        cache_key = f"{dest_parent_cid}-{std_root_name}"
         
-        if mk_res.get('state'):
-            # 创建成功
-            final_home_cid = mk_res.get('cid')
-            logger.info(f"  🆕 创建新目录成功: {std_root_name}")
-        else:
-            # 创建失败，通常是因为目录已存在
-            # 此时回退到搜索逻辑
-            try:
-                # ★★★ 优化：设置 30 足够了 ★★★
-                # 1. search_value 是服务端搜索，不用担心早期目录搜不到。
-                # 2. 设置 > 1 是为了防止同名文件排在文件夹前面，导致 limit 1 此时返回了文件而被过滤掉。
-                # 3. 30 个冗余位足够容纳同名文件干扰，且对 API 压力极小。
-                search_res = self.client.fs_files({
-                    'cid': dest_parent_cid, 
-                    'search_value': std_root_name, 
-                    'limit': 30, 
-                })
-                if search_res.get('data'):
-                    for item in search_res['data']:
-                        # 必须精确匹配名称，且是文件夹
-                        if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
-                            final_home_cid = item.get('cid')
-                            logger.info(f"  📂 发现已存在的目录: {std_root_name}")
-                            break
-            except Exception as e:
-                logger.warning(f"  ⚠️ 查找目录异常: {e}")
+        # 2. 先查缓存
+        if cache_key in _directory_cid_cache:
+            final_home_cid = _directory_cid_cache[cache_key]
+            logger.debug(f"  ⚡ [缓存命中] 目录 CID: {final_home_cid}")
+        
+        # 3. 缓存未命中，走 API (乐观锁策略)
+        if not final_home_cid:
+            # 尝试直接创建
+            mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
+            
+            if mk_res.get('state'):
+                # 创建成功
+                final_home_cid = mk_res.get('cid')
+                logger.info(f"  🆕 创建新目录成功: {std_root_name}")
+                # ★★★ 写入缓存 ★★★
+                _directory_cid_cache[cache_key] = final_home_cid
+            else:
+                # 创建失败，回退搜索
+                try:
+                    search_res = self.client.fs_files({
+                        'cid': dest_parent_cid, 
+                        'search_value': std_root_name, 
+                        'limit': 30, 
+                    })
+                    if search_res.get('data'):
+                        for item in search_res['data']:
+                            if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                                final_home_cid = item.get('cid')
+                                logger.info(f"  📂 发现已存在的目录: {std_root_name}")
+                                # ★★★ 写入缓存 ★★★
+                                _directory_cid_cache[cache_key] = final_home_cid
+                                break
+                except Exception as e:
+                    logger.warning(f"  ⚠️ 查找目录异常: {e}")
 
         # 如果经过创建和查找都拿不到 CID，说明真的出问题了
         if not final_home_cid:
