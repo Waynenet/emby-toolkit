@@ -239,6 +239,170 @@
               </n-grid>
             </n-tab-pane>
 
+            <!-- ★★★ 115 网盘设置 ★★★ -->
+            <n-tab-pane name="115_drive" tab="115 网盘">
+              <n-grid cols="1 l:3" :x-gap="24" :y-gap="24" responsive="screen">
+                
+                <!-- 左侧：账户与连接 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header>
+                      <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="card-title">账户与连接</span>
+                        <n-tag v-if="p115Info" type="success" size="small" round>
+                          {{ p115Info.msg || '连接正常' }}
+                        </n-tag>
+                        <n-tag v-else-if="configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
+                        <n-tag v-else type="error" size="small" round>未配置</n-tag>
+                      </div>
+                    </template>
+                    <template #header-extra>
+                      <n-button size="tiny" secondary type="success" @click="check115Status" :loading="loading115Info">
+                        检查连通性
+                      </n-button>
+                    </template>
+
+                    <!-- ★★★ 修改：隐藏 Cookies 原始内容，使用 Modal 编辑 ★★★ -->
+                    <n-form-item label="Cookies" path="p115_cookies">
+                      <n-input-group>
+                        <n-input 
+                          readonly 
+                          :value="configModel.p115_cookies ? '已配置 (点击右侧按钮修改)' : ''" 
+                          :placeholder="configModel.p115_cookies ? '' : '未配置'"
+                          style="pointer-events: none;"
+                        >
+                          <template #prefix>
+                            <n-icon :color="configModel.p115_cookies ? '#18a058' : '#ccc'">
+                              <component :is="configModel.p115_cookies ? CheckIcon : CloseIcon" />
+                            </n-icon>
+                          </template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openCookieModal">
+                          设置 Cookies
+                        </n-button>
+                      </n-input-group>
+                    </n-form-item>
+
+                    <n-form-item label="API 请求间隔 (秒)" path="p115_request_interval">
+                      <n-input-number v-model:value="configModel.p115_request_interval" :min="1" :step="0.5" placeholder="5.0" />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          115 官方对 API 调用频率有严格限制，建议保持 5 秒以上。
+                        </n-text>
+                      </template>
+                    </n-form-item>
+                    <n-form-item label="CMS 通知地址" path="cms_url">
+                        <n-input v-model:value="configModel.cms_url" placeholder="http://ip:port" />
+                    </n-form-item>
+                    <n-form-item label="CMS Token" path="cms_token">
+                        <n-input v-model:value="configModel.cms_token" type="password" show-password-on="click" placeholder="Token" />
+                        <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">整理完成后通知 CMS 执行扫库。</n-text>
+                        </template>
+                    </n-form-item>
+                  </n-card>
+                </n-gi>
+
+                <!-- 中间：路径配置 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">路径配置</span></template>
+                    
+                    <n-form-item label="默认上传/待整理目录" path="p115_save_path_cid">
+                      <n-input-group>
+                        <n-input 
+                          :value="configModel.p115_save_path_name || configModel.p115_save_path_cid" 
+                          placeholder="选择目录" 
+                          readonly 
+                          @click="openFolderSelector('save_path', configModel.p115_save_path_cid)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openFolderSelector('save_path', configModel.p115_save_path_cid)">
+                          选择
+                        </n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">NULLBR 转存和整理的目标目录。</n-text>
+                      </template>
+                    </n-form-item>
+
+                    <n-form-item label="网盘媒体库根目录" path="p115_media_root_cid">
+                      <n-input-group>
+                        <n-input 
+                          :value="configModel.p115_media_root_name || configModel.p115_media_root_cid" 
+                          placeholder="选择目录" 
+                          readonly 
+                          @click="openFolderSelector('media_root', configModel.p115_media_root_cid)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openFolderSelector('media_root', configModel.p115_media_root_cid)">
+                          选择
+                        </n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">对应 Emby 的媒体库根目录，扫描时将基于此目录。</n-text>
+                      </template>
+                    </n-form-item>
+                    <n-form-item label="整理开关" path="p115_enable_organize">
+                        <n-switch v-model:value="configModel.p115_enable_organize">
+                            <template #checked>开启整理</template>
+                            <template #unchecked>仅转存</template>
+                        </n-switch>
+                        <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">开启后，MP 上传或 NULLBR 转存的资源会自动按分类规则整理到目标目录。</n-text>
+                        </template>
+                    </n-form-item>
+
+                    <n-form-item label="需要整理的扩展名" path="p115_extensions">
+                      <n-select
+                        v-model:value="configModel.p115_extensions"
+                        multiple
+                        filterable
+                        tag
+                        placeholder="输入扩展名并回车 (如 mkv)"
+                        :options="[]" 
+                      />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          只有包含在列表中的文件类型才会被整理。
+                        </n-text>
+                      </template>
+                    </n-form-item>
+                    
+                    <n-form-item label="联动删除网盘文件（待开发）" path="p115_sync_delete">
+                        <n-switch v-model:value="configModel.p115_sync_delete" />
+                        <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">
+                            <span style="color: #d03050;">高危操作：</span>当本地/Emby 删除媒体时，同步删除 115 网盘中的源文件。
+                          </n-text>
+                        </template>
+                    </n-form-item>
+                  </n-card>
+                </n-gi>
+
+                <!-- 右侧：分类规则配置 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card">
+                    <template #header>
+                      <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <span class="card-title">智能分类规则</span>
+                        <n-button secondary type="primary" @click="showRuleManagerModal = true">
+                          <template #icon><n-icon :component="ListIcon" /></template>
+                          管理规则 ({{ sortingRules.length }})
+                        </n-button>
+                      </div>
+                    </template>
+                    <n-alert type="info" :show-icon="true">
+                      当开启“整理”时，系统将按顺序匹配以下规则。命中规则后，资源将被移动到指定的 115 目录中。
+                      <br>未命中的资源将移动到“未识别”目录。
+                    </n-alert>
+                  </n-card>
+                </n-gi>
+              </n-grid>
+            </n-tab-pane>
+
             <!-- ================== 标签页 2: Emby (紧凑双列版) ================== -->
             <n-tab-pane name="emby" tab="Emby & 虚拟库">
               <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
@@ -769,6 +933,279 @@
       </div>
 
     </n-space>
+    <!-- ★★★ 新增：115 Cookie 编辑弹窗 ★★★ -->
+    <n-modal v-model:show="showCookieModal" preset="card" title="配置 115 Cookies" style="width: 600px;">
+      <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
+        建议用不大助手获取。
+        <br>格式通常为: UID=...; CID=...; SEID=...
+      </n-alert>
+      <n-form-item label="Cookies 内容" :show-feedback="false">
+        <n-input 
+          v-model:value="tempCookies" 
+          type="textarea" 
+          placeholder="UID=...; CID=...; SEID=..." 
+          :rows="8" 
+          :autosize="{ minRows: 5, maxRows: 10 }"
+        />
+      </n-form-item>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showCookieModal = false">取消</n-button>
+          <n-button type="primary" @click="confirmCookies">确定</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+    <!-- ★★★ 移植：115 目录选择器 Modal ★★★ -->
+    <n-modal v-model:show="showFolderPopover" preset="card" title="选择 115 目录" style="width: 450px;" :bordered="false">
+      <div class="folder-browser">
+        <!-- 顶部导航 -->
+        <div class="browser-header">
+          <div class="nav-left">
+            <n-button text size="small" @click="load115Folders('0')">
+              <template #icon><n-icon size="18"><HomeIcon /></n-icon></template>
+            </n-button>
+            <n-divider vertical />
+            <div class="breadcrumbs">
+              <span v-if="currentBrowserCid === '0'">根目录</span>
+              <template v-else>
+                <span class="crumb-item" @click="load115Folders('0')">...</span>
+                <span class="separator">/</span>
+                <span class="crumb-item current">{{ currentBrowserFolderName }}</span>
+              </template>
+            </div>
+          </div>
+          <!-- 新建文件夹 -->
+          <n-popover trigger="click" placement="bottom-end" :show="showCreateFolderInput" @update:show="v => showCreateFolderInput = v">
+            <template #trigger>
+              <n-button size="tiny" secondary type="primary">
+                <template #icon><n-icon><AddIcon /></n-icon></template>
+                新建
+              </n-button>
+            </template>
+            <div style="padding: 8px; width: 200px;">
+              <n-input v-model:value="newFolderName" placeholder="文件夹名称" size="small" @keyup.enter="handleCreateFolder" />
+              <n-button block type="primary" size="small" style="margin-top: 8px;" @click="handleCreateFolder">确定</n-button>
+            </div>
+          </n-popover>
+        </div>
+
+        <!-- 文件夹列表 -->
+        <div class="folder-list-container">
+          <n-spin :show="loadingFolders">
+            <div class="folder-list">
+              <n-empty v-if="folderList.length === 0 && !loadingFolders" description="空文件夹" size="small" style="padding: 40px 0;" />
+              <div 
+                v-for="folder in folderList" 
+                :key="folder.id" 
+                class="folder-item"
+                @click="load115Folders(folder.id, folder.name)"
+              >
+                <div class="folder-icon-wrapper">
+                  <n-icon size="22" color="#ffca28"><FolderIcon /></n-icon>
+                </div>
+                <span class="folder-name">{{ folder.name }}</span>
+                <n-icon size="16" color="#ccc"><ChevronRightIcon /></n-icon>
+              </div>
+            </div>
+          </n-spin>
+        </div>
+
+        <!-- 底部确认 -->
+        <div class="browser-footer">
+          <div class="current-info">
+            <span style="color: #666; font-size: 12px;">已选: {{ currentBrowserFolderName }}</span>
+          </div>
+          <n-space>
+            <n-button size="small" @click="showFolderPopover = false">取消</n-button>
+            <n-button type="primary" size="small" @click="confirmFolderSelection">
+              确定选择
+            </n-button>
+          </n-space>
+        </div>
+      </div>
+    </n-modal>
+    <!-- ★★★ 移植：规则管理模态框 ★★★ -->
+    <n-modal 
+      v-model:show="showRuleManagerModal" 
+      preset="card" 
+      title="115 分类规则管理" 
+      style="width: 800px; max-width: 95%; height: 80vh;"
+      content-style="display: flex; flex-direction: column; overflow: hidden;" 
+    >
+      <template #header-extra>
+        <n-space align="center">
+          <n-radio-group v-model:value="ruleFilterType" size="small">
+            <n-radio-button value="all">全部</n-radio-button>
+            <n-radio-button value="movie">电影</n-radio-button>
+            <n-radio-button value="tv">剧集</n-radio-button>
+            <n-radio-button value="mixed">混合</n-radio-button>
+          </n-radio-group>
+          <n-divider vertical />
+          <n-tag v-if="ruleFilterType === 'all'" type="warning" size="small" :bordered="false">拖拽可调整优先级</n-tag>
+        </n-space>
+      </template>
+      
+      <div style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
+        <div style="flex: 1; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
+          <div class="rules-container">
+            <!-- 拖拽列表 (仅全部模式) -->
+            <draggable 
+              v-if="ruleFilterType === 'all'"
+              v-model="sortingRules" 
+              item-key="id" 
+              handle=".drag-handle" 
+              @end="saveSortingRules"
+              :animation="200"
+            >
+              <template #item="{ element: rule }">
+                <div class="rule-item">
+                  <n-icon class="drag-handle" :component="DragHandleIcon" size="20" />
+                  <div class="rule-info">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <div class="rule-name">{{ rule.name }}</div>
+                      <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
+                      <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
+                      <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                      <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
+                    </div>
+                    <div class="rule-desc">
+                        <n-tag size="tiny" :bordered="false" type="warning" style="opacity: 0.8;">目录: {{ rule.dir_name }}</n-tag>
+                        <span style="margin-left: 8px; font-size: 12px; opacity: 0.7;">{{ getRuleSummary(rule) }}</span>
+                    </div>
+                  </div>
+                  <div class="rule-actions">
+                    <n-switch v-model:value="rule.enabled" size="small" @update:value="saveSortingRules" />
+                    <n-divider vertical />
+                    <n-button text size="medium" @click="editRule(rule)"><n-icon :component="EditIcon" color="#18a058" /></n-button>
+                    <n-button text size="medium" @click="deleteRule(rule)"><n-icon :component="DeleteIcon" color="#d03050" /></n-button>
+                  </div>
+                </div>
+              </template>
+            </draggable>
+
+            <!-- 普通列表 (筛选模式) -->
+            <div v-else>
+              <div v-for="rule in filteredSortingRules" :key="rule.id" class="rule-item">
+                <div style="width: 24px; margin-right: 12px;"></div> 
+                <div class="rule-info">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <div class="rule-name">{{ rule.name }}</div>
+                    <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
+                    <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
+                    <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                    <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
+                  </div>
+                  <div class="rule-desc">
+                      <n-tag size="tiny" :bordered="false" type="warning" style="opacity: 0.8;">目录: {{ rule.dir_name }}</n-tag>
+                      <span style="margin-left: 8px; font-size: 12px; opacity: 0.7;">{{ getRuleSummary(rule) }}</span>
+                  </div>
+                </div>
+                <div class="rule-actions">
+                  <n-switch v-model:value="rule.enabled" size="small" @update:value="saveSortingRules" />
+                  <n-divider vertical />
+                  <n-button text size="medium" @click="editRule(rule)"><n-icon :component="EditIcon" color="#18a058" /></n-button>
+                  <n-button text size="medium" @click="deleteRule(rule)"><n-icon :component="DeleteIcon" color="#d03050" /></n-button>
+                </div>
+              </div>
+            </div>
+            <n-empty v-if="filteredSortingRules.length === 0" description="暂无规则" style="margin: 40px 0;" />
+          </div>
+        </div>
+        <div style="border-top: 1px solid var(--n-divider-color); padding-top: 16px; flex-shrink: 0;">
+          <n-button type="primary" dashed block @click="addRule">
+            <template #icon><n-icon :component="AddIcon" /></template>
+            添加新规则
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
+
+    <!-- ★★★ 移植：规则编辑模态框 ★★★ -->
+    <n-modal v-model:show="showRuleModal" preset="card" title="编辑分类规则" style="width: 650px;">
+      <n-form label-placement="left" label-width="100">
+        <n-form-item label="规则名称">
+          <n-input v-model:value="currentRule.name" placeholder="例如：漫威电影宇宙" />
+        </n-form-item>
+        <n-form-item label="目标目录">
+          <n-input-group>
+            <n-input 
+              :value="currentRule.dir_name || currentRule.cid" 
+              readonly 
+              placeholder="点击选择目录" 
+              @click="openFolderSelector('rule', currentRule.cid)"
+            >
+              <template #prefix><n-icon :component="FolderIcon" color="#f0a020" /></template>
+            </n-input>
+            <n-button type="primary" ghost @click="openFolderSelector('rule', currentRule.cid)">
+              选择
+            </n-button>
+          </n-input-group>
+        </n-form-item>
+        
+        <n-divider title-placement="left" style="font-size: 12px; color: #999;">匹配条件 (满足所有勾选条件时命中)</n-divider>
+        
+        <n-form-item label="媒体类型">
+          <n-radio-group v-model:value="currentRule.media_type">
+            <n-radio-button value="all">不限</n-radio-button>
+            <n-radio-button value="movie">仅电影</n-radio-button>
+            <n-radio-button value="tv">仅剧集</n-radio-button>
+          </n-radio-group>
+        </n-form-item>
+
+        <n-form-item label="类型/风格">
+          <n-select v-model:value="currentRule.genres" multiple filterable :options="computedGenreOptions" placeholder="包含任一类型即可" />
+        </n-form-item>
+        
+        <n-form-item label="国家/地区">
+          <n-select v-model:value="currentRule.countries" multiple filterable :options="countryOptions" placeholder="包含任一国家即可" />
+        </n-form-item>
+
+        <n-form-item label="原始语言">
+          <n-select v-model:value="currentRule.languages" multiple filterable :options="languageOptions" placeholder="包含任一语言即可" />
+        </n-form-item>
+
+        <n-form-item label="工作室">
+          <n-select v-model:value="currentRule.studios" multiple filterable :options="computedStudioOptions" placeholder="包含任一工作室即可" />
+        </n-form-item>
+
+        <n-form-item label="关键词">
+           <n-select v-model:value="currentRule.keywords" multiple filterable tag :options="keywordOptions" placeholder="包含任一关键词即可" />
+        </n-form-item>
+
+        <n-form-item label="分级">
+           <n-select v-model:value="currentRule.ratings" multiple filterable :options="ratingOptions" placeholder="包含任一分级即可" />
+        </n-form-item>
+
+        <n-form-item label="年份范围">
+          <n-input-group>
+            <n-input-number v-model:value="currentRule.year_min" :min="1900" :max="2099" placeholder="起始" :show-button="false" style="width: 50%" />
+            <n-input-group-label style="border-left: 0; border-right: 0;">至</n-input-group-label>
+            <n-input-number v-model:value="currentRule.year_max" :min="1900" :max="2099" placeholder="结束" :show-button="false" style="width: 50%" />
+          </n-input-group>
+        </n-form-item>
+
+        <n-form-item label="时长 (分钟)">
+          <n-input-group>
+            <n-input-number v-model:value="currentRule.runtime_min" :min="0" placeholder="0" :show-button="false" style="width: 50%" />
+            <n-input-group-label style="border-left: 0; border-right: 0;">至</n-input-group-label>
+            <n-input-number v-model:value="currentRule.runtime_max" :min="0" placeholder="∞" :show-button="false" style="width: 50%" />
+          </n-input-group>
+        </n-form-item>
+
+        <n-form-item label="最低评分">
+          <n-input-number v-model:value="currentRule.min_rating" :min="0" :max="10" :step="0.1" placeholder="0" style="width: 100%">
+            <template #suffix>分</template>
+          </n-input-number>
+        </n-form-item>
+
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showRuleModal = false">取消</n-button>
+          <n-button type="primary" @click="confirmSaveRule">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
   
   <!-- 导出选项模态框 -->
@@ -968,7 +1405,6 @@ import {
   NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip
 } from 'naive-ui';
 import { 
-  MoveOutline as DragHandleIcon,
   DownloadOutline as ExportIcon, 
   CloudUploadOutline as ImportIcon,
   TrashOutline as ClearIcon,
@@ -976,7 +1412,17 @@ import {
   AlertCircleOutline as AlertIcon,
   SyncOutline as SyncIcon,
   CloudOfflineOutline as OfflineIcon,
-  FlashOutline as FlashIcon
+  FlashOutline as FlashIcon,
+  Folder as FolderIcon,
+  HomeOutline as HomeIcon, 
+  ChevronForward as ChevronRightIcon, 
+  Add as AddIcon,
+  CheckmarkCircleOutline as CheckIcon,
+  CloseCircleOutline as CloseIcon,
+  ListOutline as ListIcon, 
+  CreateOutline as EditIcon,
+  TrashOutline as DeleteIcon, 
+  Menu as DragHandleIcon
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
@@ -1305,6 +1751,246 @@ const triggerRestart = async () => {
     }
   }
 };
+
+// ★★★ 115 相关逻辑 ★★★
+const p115Info = ref(null);
+const loading115Info = ref(false);
+const showFolderPopover = ref(false);
+const loadingFolders = ref(false);
+const folderList = ref([]);
+const currentBrowserCid = ref('0');
+const currentBrowserFolderName = ref('根目录');
+const newFolderName = ref('');
+const showCreateFolderInput = ref(false);
+const selectorContext = ref(''); 
+// ★★★ 规则管理相关状态 ★★★
+const sortingRules = ref([]);
+const showRuleModal = ref(false);
+const showRuleManagerModal = ref(false);
+const currentRule = ref({});
+const ruleFilterType = ref('all');
+
+// 选项数据 (从 NullbrPage 移植)
+const rawMovieGenres = ref([]); 
+const rawTvGenres = ref([]);    
+const rawStudios = ref([]);     
+const countryOptions = ref([]); 
+const languageOptions = ref([]);
+const keywordOptions = ref([]);
+const ratingOptions = ref([]);
+
+// ★★★ Cookie Modal 逻辑 ★★★
+const showCookieModal = ref(false);
+const tempCookies = ref('');
+
+const openCookieModal = () => {
+  tempCookies.value = configModel.value.p115_cookies || '';
+  showCookieModal.value = true;
+};
+
+const confirmCookies = () => {
+  configModel.value.p115_cookies = tempCookies.value;
+  showCookieModal.value = false;
+  // 自动检查连通性
+  if (tempCookies.value) {
+    check115Status();
+  }
+};
+
+// 检查 115 状态
+const check115Status = async () => {
+    // 注意：这里我们使用 configModel 中的值，因为可能还没保存
+    if (!configModel.value.p115_cookies) {
+        message.warning('请先设置 Cookies');
+        return;
+    }
+    loading115Info.value = true;
+    try {
+        await handleSaveConfig(JSON.parse(JSON.stringify(configModel.value)));
+        
+        const res = await axios.get('/api/p115/status');
+        if (res.data && res.data.data) p115Info.value = res.data.data;
+    } catch (e) { 
+        p115Info.value = null; 
+        message.error('连接失败: ' + (e.response?.data?.message || e.message));
+    } finally { 
+        loading115Info.value = false; 
+    }
+};
+
+const openFolderSelector = (context, initialCid = '0') => {
+  selectorContext.value = context;
+  showFolderPopover.value = true;
+  const targetCid = (initialCid && initialCid !== '0') ? initialCid : '0';
+  load115Folders(targetCid);
+};
+
+const load115Folders = async (cid, folderName = null) => {
+  loadingFolders.value = true;
+  try {
+    const res = await axios.get('/api/p115/dirs', { params: { cid } });
+    if (res.data && res.data.success) {
+      folderList.value = res.data.data;
+      currentBrowserCid.value = cid;
+      if (folderName) currentBrowserFolderName.value = folderName;
+      if (cid === '0') currentBrowserFolderName.value = '根目录';
+    }
+  } catch (e) {
+    message.error("加载目录失败: " + (e.response?.data?.message || e.message));
+  } finally {
+    loadingFolders.value = false;
+  }
+};
+
+const handleCreateFolder = async () => {
+  if (!newFolderName.value) return;
+  try {
+    const res = await axios.post('/api/p115/mkdir', {
+      pid: currentBrowserCid.value,
+      name: newFolderName.value
+    });
+    if (res.data && res.data.status === 'success') {
+      message.success('创建成功');
+      newFolderName.value = '';
+      showCreateFolderInput.value = false;
+      load115Folders(currentBrowserCid.value, currentBrowserFolderName.value);
+    } else {
+      message.error(res.data.message || '创建失败');
+    }
+  } catch (e) {
+    message.error("请求失败: " + e.message);
+  }
+};
+
+const confirmFolderSelection = () => {
+  const cid = currentBrowserCid.value;
+  const name = cid === '0' ? '/' : currentBrowserFolderName.value;
+  
+  if (selectorContext.value === 'save_path') {
+    configModel.value.p115_save_path_cid = cid;
+    configModel.value.p115_save_path_name = name;
+  } else if (selectorContext.value === 'media_root') {
+    configModel.value.p115_media_root_cid = cid;
+    configModel.value.p115_media_root_name = name;
+  } else if (selectorContext.value === 'rule') {
+    // 规则编辑模式
+    currentRule.value.cid = cid;
+    currentRule.value.dir_name = name;
+  }
+  
+  message.success(`已选择: ${name}`);
+  showFolderPopover.value = false;
+};
+
+const filteredSortingRules = computed(() => {
+  if (ruleFilterType.value === 'all') return sortingRules.value;
+  return sortingRules.value.filter(rule => {
+    if (ruleFilterType.value === 'movie') return rule.media_type === 'movie';
+    if (ruleFilterType.value === 'tv') return rule.media_type === 'tv';
+    if (ruleFilterType.value === 'mixed') return rule.media_type === 'all';
+    return true;
+  });
+});
+
+const computedGenreOptions = computed(() => {
+  const type = currentRule.value.media_type;
+  if (type === 'movie') return rawMovieGenres.value;
+  else if (type === 'tv') return rawTvGenres.value;
+  else {
+    const map = new Map();
+    [...rawMovieGenres.value, ...rawTvGenres.value].forEach(g => map.set(g.value, g));
+    return Array.from(map.values());
+  }
+});
+
+const computedStudioOptions = computed(() => {
+  const type = currentRule.value.media_type;
+  return rawStudios.value.filter(item => {
+    if (type === 'all') return true;
+    if (type === 'movie') return item.is_movie;
+    if (type === 'tv') return item.is_tv;
+    return true;
+  });
+});
+
+// 辅助函数：获取规则摘要
+const genreOptions = computed(() => {
+  const map = new Map();
+  [...rawMovieGenres.value, ...rawTvGenres.value].forEach(g => { if (g && g.value) map.set(g.value, g); });
+  return Array.from(map.values());
+});
+
+const getRuleSummary = (rule) => {
+  const parts = [];
+  if (rule.media_type !== 'all') parts.push(rule.media_type === 'tv' ? '剧集' : '电影');
+  if (rule.studios?.length) parts.push(`工作室:${rule.studios.join(',')}`);
+  if (rule.keywords?.length) parts.push(`关键词:${rule.keywords.join(',')}`);
+  if (rule.ratings?.length) parts.push(`分级:${rule.ratings.join(',')}`);
+  if (rule.genres?.length) {
+      const names = rule.genres.map(id => {
+          const opt = genreOptions.value.find(o => o.value == id);
+          return opt ? opt.label : id;
+      });
+      parts.push(`类型:${names.join(',')}`);
+  }
+  if (rule.countries?.length) parts.push(`国家:${rule.countries.join(',')}`);
+  if (rule.year_min || rule.year_max) parts.push(`年份限制`);
+  if (rule.min_rating > 0) parts.push(`评分:≥${rule.min_rating}`);
+  return parts.join(' + ') || '无条件';
+};
+
+// ★★★ 规则 CRUD 操作 ★★★
+const loadSortingRules = async () => {
+  try {
+    const res = await axios.get('/api/p115/sorting_rules');
+    let data = res.data;
+    if (typeof data === 'string') try { data = JSON.parse(data); } catch(e) {}
+    sortingRules.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+      console.error("加载规则失败", e);
+      sortingRules.value = [];
+  }
+};
+
+const saveSortingRules = async () => {
+  try {
+    await axios.post('/api/p115/sorting_rules', sortingRules.value);
+  } catch (e) { message.error('保存规则失败'); }
+};
+
+const addRule = () => {
+  currentRule.value = { 
+    id: Date.now(), name: '', cid: '', enabled: true, 
+    media_type: 'all', genres: [], countries: [], languages: [], 
+    studios: [], keywords: [], ratings: [],
+    year_min: null, year_max: null, runtime_min: null, runtime_max: null, min_rating: 0
+  };
+  showRuleModal.value = true;
+};
+
+const editRule = (rule) => {
+  currentRule.value = JSON.parse(JSON.stringify(rule));
+  showRuleModal.value = true;
+};
+
+const deleteRule = (rule) => {
+  sortingRules.value = sortingRules.value.filter(r => r.id !== rule.id);
+  saveSortingRules();
+};
+
+const confirmSaveRule = () => {
+  if (!currentRule.value.name || !currentRule.value.cid) {
+    message.error('名称和 CID 必填');
+    return;
+  }
+  const idx = sortingRules.value.findIndex(r => r.id === currentRule.value.id);
+  if (idx > -1) sortingRules.value[idx] = currentRule.value;
+  else sortingRules.value.push(currentRule.value);
+  
+  saveSortingRules();
+  showRuleModal.value = false;
+};
+
 const save = async () => {
   try {
     await formRef.value?.validate();
@@ -1570,10 +2256,14 @@ const handleCorrectSequences = async () => {
     isCorrecting.value = false;
   }
 };
-onMounted(() => {
+
+onMounted(async () => {
   componentIsMounted.value = true;
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
+      if (configModel.value.p115_cookies) {
+                check115Status();
+            }
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }
@@ -1594,6 +2284,40 @@ onMounted(() => {
       }
     }
   });
+  loadSortingRules(); // 加载规则
+
+    try {
+        // 加载 TMDb 选项数据 (用于规则编辑)
+        const [mGenres, tGenres] = await Promise.all([
+             axios.get('/api/custom_collections/config/tmdb_movie_genres'),
+             axios.get('/api/custom_collections/config/tmdb_tv_genres')
+        ]);
+        rawMovieGenres.value = (mGenres.data || []).map(g => ({ label: g.name, value: g.id }));
+        rawTvGenres.value = (tGenres.data || []).map(g => ({ label: g.name, value: g.id }));
+
+        const sRes = await axios.get('/api/custom_collections/config/studios');
+        rawStudios.value = (sRes.data || []).map(s => {
+            const types = s.types || []; 
+            return {
+                label: s.label, value: s.value, 
+                is_movie: types.includes('movie'), is_tv: types.includes('tv')
+            };
+        });
+
+        const cRes = await axios.get('/api/custom_collections/config/tmdb_countries');
+        countryOptions.value = cRes.data;
+        
+        const lRes = await axios.get('/api/custom_collections/config/languages');
+        languageOptions.value = lRes.data;
+        
+        const kRes = await axios.get('/api/custom_collections/config/keywords');
+        keywordOptions.value = kRes.data;
+        
+        const rRes = await axios.get('/api/custom_collections/config/unified_ratings_options');
+        ratingOptions.value = (rRes.data || []).map(r => ({ label: r, value: r }));
+    } catch (e) {
+        console.error("加载选项失败", e);
+    }
 });
 onUnmounted(() => {
   componentIsMounted.value = false;
@@ -1657,4 +2381,60 @@ onUnmounted(() => {
   font-size: 16px;
   vertical-align: middle;
 }
+/* ★★★ 新增：文件夹浏览器样式 ★★★ */
+.folder-browser {
+  display: flex;
+  flex-direction: column;
+  height: 500px;
+  background-color: var(--n-color-modal); 
+  color: var(--n-text-color);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--n-divider-color);
+}
+.browser-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--n-divider-color);
+  background-color: var(--n-action-color); 
+  flex-shrink: 0;
+}
+.nav-left { display: flex; align-items: center; flex: 1; overflow: hidden; }
+.breadcrumbs {
+  flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-left: 8px; display: flex; align-items: center; color: var(--n-text-color-3);
+}
+.crumb-item { cursor: pointer; transition: color 0.2s; }
+.crumb-item:hover { color: var(--n-primary-color); }
+.crumb-item.current { color: var(--n-text-color-1); font-weight: 600; cursor: default; }
+.separator { margin: 0 6px; color: var(--n-text-color-disabled); }
+.folder-list-container { flex: 1; overflow-y: auto; position: relative; }
+.folder-list { padding: 4px 0; }
+.folder-item {
+  display: flex; align-items: center; padding: 10px 16px; cursor: pointer;
+  transition: background-color 0.2s; border-bottom: 1px solid var(--n-divider-color);
+  color: var(--n-text-color-2);
+}
+.folder-item:hover { background-color: var(--n-hover-color); }
+.folder-icon-wrapper { display: flex; align-items: center; margin-right: 12px; }
+.folder-name { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--n-text-color-1); }
+.browser-footer {
+  padding: 12px 16px; border-top: 1px solid var(--n-divider-color);
+  display: flex; justify-content: space-between; align-items: center;
+  background-color: var(--n-color-modal); flex-shrink: 0;
+}
+.rules-container { background: transparent; border: none; padding: 0; }
+.rule-item {
+  display: flex; align-items: center; background-color: var(--n-action-color); 
+  border: 1px solid var(--n-divider-color); padding: 12px; margin-bottom: 8px; border-radius: 6px; transition: all 0.2s;
+}
+.rule-item:hover { border-color: var(--n-primary-color); background-color: var(--n-hover-color); }
+.drag-handle { cursor: grab; color: #999; margin-right: 12px; padding: 4px; }
+.drag-handle:active { cursor: grabbing; }
+.rule-info { flex: 1; }
+.rule-name { font-weight: bold; font-size: 13px; color: var(--n-text-color-1); }
+.rule-desc span { color: var(--n-text-color-3); }
+.rule-actions { display: flex; align-items: center; gap: 4px; }
 </style>

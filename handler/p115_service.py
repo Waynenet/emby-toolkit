@@ -3,6 +3,7 @@ import logging
 import requests
 import random
 import os
+import json
 import re
 import threading
 import time
@@ -23,7 +24,7 @@ _cms_timer = None
 _cms_lock = threading.Lock()
 
 def get_config():
-    return settings_db.get_setting('nullbr_config') or {}
+    return config_manager.APP_CONFIG
 
 class P115Service:
     _instance = None
@@ -39,8 +40,8 @@ class P115Service:
             raise ImportError("未安装 p115client")
 
         # 获取配置
-        config = settings_db.get_setting('nullbr_config') or {}
-        cookies = config.get('p115_cookies')
+        config = get_config()
+        cookies = config.get(constants.CONFIG_OPTION_115_COOKIES)
         
         if not cookies:
             return None
@@ -57,7 +58,10 @@ class P115Service:
                     return None
             
             # ★★★ 全局限流逻辑 ★★★
-            interval = int(config.get('request_interval', 5))
+            try:
+                interval = float(config.get(constants.CONFIG_OPTION_115_INTERVAL, 5.0))
+            except (ValueError, TypeError):
+                interval = 5.0
             current_time = time.time()
             elapsed = current_time - cls._last_request_time
             
@@ -74,8 +78,8 @@ class P115Service:
 
     @classmethod
     def get_cookies(cls):
-        config = settings_db.get_setting('nullbr_config') or {}
-        return config.get('p115_cookies')
+        config = get_config()
+        return config.get(constants.CONFIG_OPTION_115_COOKIES)
     
 _directory_cid_cache = {} # 全局目录 CID 缓存，key 格式: f"{parent_cid}_{dir_name}"
 class SmartOrganizer:
@@ -93,7 +97,18 @@ class SmartOrganizer:
 
         self.raw_metadata = self._fetch_raw_metadata()
         self.details = self.raw_metadata
-        self.rules = settings_db.get_setting('nullbr_sorting_rules') or []
+        raw_rules = settings_db.get_setting(constants.DB_KEY_115_SORTING_RULES)
+        self.rules = []
+        
+        if raw_rules:
+            if isinstance(raw_rules, list):
+                self.rules = raw_rules
+            elif isinstance(raw_rules, str):
+                try:
+                    self.rules = json.loads(raw_rules)
+                except Exception as e:
+                    logger.error(f"  ❌ 解析 115 分类规则失败: {e}")
+                    self.rules = []
 
     def _fetch_raw_metadata(self):
         """
@@ -574,10 +589,18 @@ class SmartOrganizer:
 
         dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else root_item.get('cid')
 
-        MIN_VIDEO_SIZE = 10 * 1024 * 1024
+        # ★★★ 修改：从全局配置读取扩展名 ★★★
+        config = get_config()
+        configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
+        
+        # 转换为小写集合，提高查找效率
+        allowed_exts = set(e.lower() for e in configured_exts)
+        
+        # 定义已知的视频格式（仅用于判断是否需要检查文件大小，不用于筛选文件）
+        # 筛选文件完全依赖 allowed_exts
+        known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
 
-        video_exts = ['mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts']
-        sub_exts = ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
+        MIN_VIDEO_SIZE = 10 * 1024 * 1024
 
         logger.info(f"  🚀 [115] 开始整理: {root_item.get('n')} -> {std_root_name}")
 
@@ -652,56 +675,53 @@ class SmartOrganizer:
         moved_count = 0
 
         for file_item in candidates:
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(0.1, 0.3))
             fid = file_item.get('fid')
             file_name = file_item.get('n', '')
             ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
 
-            # 优先进行垃圾词过滤
+            # 1. 优先进行垃圾词过滤
             if self._is_junk_file(file_name):
                 logger.info(f"  🗑️ [过滤] 命中屏蔽词，跳过垃圾文件: {file_name}")
                 continue
 
-            # 大小解析
+            # 2. 扩展名白名单检查 
+            if ext not in allowed_exts:
+                # logger.debug(f"  🙈 [忽略] 扩展名不在白名单: {ext}")
+                continue
+
+            # 3. 大小解析
             raw_size = file_item.get('s')
             if raw_size is None: raw_size = file_item.get('size')
             file_size = _parse_115_size(raw_size)
 
-            is_video = ext in video_exts
-            is_sub = ext in sub_exts
+            # 判断是否为视频（用于大小检查逻辑）
+            is_video_type = ext in known_video_exts
 
-            if not (is_video or is_sub): continue
-
-            # 过滤小样 (大小兜底)
-            # 如果正则没拦住，但文件很小，依然会被这里拦住
-            if is_video:
+            # 4. 过滤小样 (仅针对视频文件)
+            if is_video_type:
                 if 0 < file_size < MIN_VIDEO_SIZE:
                     logger.info(f"  🗑️ [过滤] 跳过小视频 (Size): {file_name}")
                     continue
                 elif file_size == 0:
-                    # 如果解析出来是0，可能是API问题，打印日志但保留文件
-                    logger.debug(f"  ⚠️ [注意] 文件大小解析为0 (Raw: {raw_size})，强制保留: {file_name}")
-                else:
-                    logger.debug(f"  📄 文件: {file_name}, 大小: {file_size/1024/1024:.2f} MB")
+                    logger.debug(f"  ⚠️ [注意] 文件大小解析为0，强制保留: {file_name}")
 
-            # 2. 计算新文件名
+            # 5. 计算新文件名
             new_filename = file_name
             season_num = None
 
-            # 视频和字幕都参与重命名计算
-            if is_video or is_sub:
-                try:
-                    new_filename, season_num = self._rename_file_node(
-                        file_item,
-                        safe_title,       # 基础标题 (不含年份)
-                        year=year,        # 传入年份
-                        is_tv=(self.media_type=='tv')
-                    )
-                except Exception as e:
-                    logger.error(f"  ❌ 重命名计算出错: {e}")
-                    new_filename = file_name
+            try:
+                new_filename, season_num = self._rename_file_node(
+                    file_item,
+                    safe_title,       
+                    year=year,        
+                    is_tv=(self.media_type=='tv')
+                )
+            except Exception as e:
+                logger.error(f"  ❌ 重命名计算出错: {e}")
+                new_filename = file_name
 
-            # 3. 执行重命名 (在源位置)
+            # 6. 执行重命名 (在源位置)
             if new_filename != file_name:
                 rename_res = self.client.fs_rename((fid, new_filename))
                 if rename_res.get('state'):
@@ -710,7 +730,7 @@ class SmartOrganizer:
                     logger.warning(f"  ⚠️ 重命名失败: {file_name}")
                     new_filename = file_name
 
-            # 4. 确定移动的目标文件夹
+            # 7. 确定移动的目标文件夹
             target_folder_cid = final_home_cid
 
             # 只有剧集且成功解析出季号时，才放入 Season 文件夹
@@ -731,7 +751,7 @@ class SmartOrganizer:
                 if season_folders_cache.get(season_num):
                     target_folder_cid = season_folders_cache[season_num]
 
-            # 5. 执行移动
+            # 8. 执行移动
             move_res = self.client.fs_move(fid, target_folder_cid)
             if move_res.get('state'):
                 moved_count += 1
@@ -790,14 +810,14 @@ def _perform_cms_notify():
     真正执行 CMS 通知的函数 (被定时器调用)
     """
     config = get_config()
-    cms_url = config.get('cms_url')
-    cms_token = config.get('cms_token')
+    cms_url = config.get(constants.CONFIG_OPTION_CMS_URL)
+    cms_token = config.get(constants.CONFIG_OPTION_CMS_TOKEN)
 
     if not cms_url or not cms_token:
         return
 
     cms_url = cms_url.rstrip('/')
-    enable_smart_organize = config.get('enable_smart_organize', False)
+    enable_smart_organize = config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
 
     # 根据模式选择参数
     if enable_smart_organize:
@@ -851,7 +871,7 @@ def get_115_account_info():
     if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
-    cookies = config.get('p115_cookies')
+    cookies = config.get(constants.CONFIG_OPTION_115_COOKIES)
 
     if not cookies:
         raise Exception("未配置 Cookies")
@@ -962,10 +982,10 @@ def task_scan_and_organize_115(processor=None):
     if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
-    cookies = config.get('p115_cookies')
-    cid_val = config.get('p115_save_path_cid')
-    save_val = config.get('p115_save_path_name', '待整理')
-    enable_organize = config.get('enable_smart_organize', False)
+    cookies = config.get(constants.CONFIG_OPTION_115_COOKIES)
+    cid_val = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID)
+    save_val = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_NAME, '待整理')
+    enable_organize = config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
 
     if not cookies:
         logger.error("  ⚠️ 未配置 115 Cookies，跳过。")

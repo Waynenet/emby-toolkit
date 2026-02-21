@@ -103,6 +103,22 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS: (constants.CONFIG_SECTION_MONITOR, 'list', constants.DEFAULT_MONITOR_EXCLUDE_DIRS),
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY: (constants.CONFIG_SECTION_MONITOR, 'int', constants.DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY),
 
+    # [115] 
+    constants.CONFIG_OPTION_115_COOKIES: (constants.CONFIG_SECTION_115, 'string', ""),
+    constants.CONFIG_OPTION_115_SAVE_PATH_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_SAVE_PATH_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
+    constants.CONFIG_OPTION_115_SYNC_DELETE: (constants.CONFIG_SECTION_115, 'boolean', False),
+    constants.CONFIG_OPTION_115_INTERVAL: (constants.CONFIG_SECTION_115, 'float', 5.0),
+    constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: (constants.CONFIG_SECTION_115, 'boolean', False),
+    constants.CONFIG_OPTION_115_EXTENSIONS: (constants.CONFIG_SECTION_115, 'list', [
+        'mp4', 'mkv', 'avi', 'ts', 'iso', 'mov', 'm2ts', 
+        'srt', 'ass', 'ssa'
+    ]),
+    constants.CONFIG_OPTION_CMS_URL: (constants.CONFIG_SECTION_115, 'string', ""),
+    constants.CONFIG_OPTION_CMS_TOKEN: (constants.CONFIG_SECTION_115, 'string', ""),
+
     # [LocalDataSource]
     constants.CONFIG_OPTION_LOCAL_DATA_PATH: (constants.CONFIG_SECTION_LOCAL_DATA, 'string', ""),
 

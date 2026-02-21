@@ -156,6 +156,7 @@ def init_db():
                         emby_item_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                         date_added TIMESTAMP WITH TIME ZONE,
                         asset_details_json JSONB,
+                        cloud_fid_json JSONB, 
 
                         -- 订阅与状态管理
                         subscription_status TEXT NOT NULL DEFAULT 'NONE', -- 'NONE', 'WANTED', 'SUBSCRIBED', 'IGNORED', 'PENDING_RELEASE', 'REQUESTED', 'PAUSED'
@@ -431,7 +432,8 @@ def init_db():
                             "backdrop_path": "TEXT",  
                             "homepage": "TEXT", 
                             "production_companies_json": "JSONB",
-                            "networks_json": "JSONB"
+                            "networks_json": "JSONB",
+                            "cloud_fid_json": "JSONB"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
