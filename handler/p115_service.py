@@ -572,7 +572,7 @@ class SmartOrganizer:
                 return True
         return False
 
-    def execute(self, root_item, target_cid):
+    def execute(self, root_item, target_cid, webhook=False):
         """
         执行整理：先尝试创建，失败后再查找（高效率模式），且一步到位移动
         """
@@ -693,9 +693,11 @@ class SmartOrganizer:
                         real_target_cid = s_cid
 
             # 3. 先改名
-            if new_filename != file_name:
+            if new_filename != file_name and webhook == False:
                 if self.client.fs_rename((fid, new_filename)).get('state'):
                     logger.info(f"  ✏️ [重命名] {file_name} -> {new_filename}")
+            else:
+                logger.info(f"  ✏️ [MP上传] 跳过重命名 (已是标准名): {file_name}")
 
             # 4. 一步到位移动到目的地
             if self.client.fs_move(fid, real_target_cid).get('state'):
