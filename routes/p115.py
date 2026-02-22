@@ -168,7 +168,7 @@ def play_115_video(pick_code):
         if not real_url:
             return "Cannot get video stream from 115", 404
             
-        logger.info(f"  🚀 [原端口秒播] 命中 115 直链，302 光速重定向中...")
+        logger.debug(f"  🚀 115 直链已获取: {pick_code}")
         
         # 直接 302 跳转
         return redirect(real_url, code=302)
