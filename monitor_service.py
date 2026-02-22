@@ -87,7 +87,9 @@ class MediaFileHandler(FileSystemEventHandler):
             self._enqueue_file(event.dest_path)
 
     def on_deleted(self, event):
+        # 不再忽略文件夹删除，因为 115 联动删除需要捕获整季/整部电影文件夹的删除
         if event.is_directory:
+            self._enqueue_delete(event.src_path, is_directory=True)
             return
         
         _, ext = os.path.splitext(event.src_path)
@@ -95,7 +97,7 @@ class MediaFileHandler(FileSystemEventHandler):
         if ext.lower() not in self.extensions:
             return
 
-        self._enqueue_delete(event.src_path)
+        self._enqueue_delete(event.src_path, is_directory=False)
 
     def _enqueue_file(self, file_path: str):
         """新增/移动文件入队"""
@@ -109,14 +111,15 @@ class MediaFileHandler(FileSystemEventHandler):
             if DEBOUNCE_TIMER: DEBOUNCE_TIMER.kill()
             DEBOUNCE_TIMER = spawn_later(DEBOUNCE_DELAY, process_batch_queue)
 
-    def _enqueue_delete(self, file_path: str):
-        """删除文件入队"""
+    def _enqueue_delete(self, file_path: str, is_directory: bool = False):
+        """删除文件/文件夹入队"""
         global DELETE_DEBOUNCE_TIMER
         with DELETE_QUEUE_LOCK:
-            if file_path not in DELETE_EVENT_QUEUE:
-                logger.debug(f"  🗑️ [实时监控] 删除事件入队: {file_path}")
+            item = (file_path, is_directory)
+            if item not in DELETE_EVENT_QUEUE:
+                logger.debug(f"  🗑️ [实时监控] 删除事件入队: {file_path} (目录: {is_directory})")
             
-            DELETE_EVENT_QUEUE.add(file_path)
+            DELETE_EVENT_QUEUE.add(item)
             
             if DELETE_DEBOUNCE_TIMER: DELETE_DEBOUNCE_TIMER.kill()
             DELETE_DEBOUNCE_TIMER = spawn_later(DEBOUNCE_DELAY, process_delete_batch_queue)
@@ -204,7 +207,7 @@ def process_batch_queue():
 
 def process_delete_batch_queue():
     """
-    处理删除队列 (批量版 + 排除路径分流版 + 存活性二次确认)
+    处理删除队列 (批量版 + 排除路径分流版 + 存活性二次确认 + 115联动删除)
     """
     if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_ENABLED, False):
         with DELETE_QUEUE_LOCK:
@@ -213,25 +216,27 @@ def process_delete_batch_queue():
     
     global DELETE_DEBOUNCE_TIMER
     with DELETE_QUEUE_LOCK:
-        raw_files = list(DELETE_EVENT_QUEUE)
+        raw_items = list(DELETE_EVENT_QUEUE)
         DELETE_EVENT_QUEUE.clear()
         DELETE_DEBOUNCE_TIMER = None
     
-    if not raw_files: return
+    if not raw_items: return
     
     processor = MonitorService.processor_instance
     if not processor: return
 
-    # 存活性检查
-    files_to_really_delete = []
-    for f in raw_files:
-        if os.path.exists(f):
+    # ==========================================
+    # 1. 存活性检查 (防抖过滤假删除)
+    # ==========================================
+    items_to_really_delete = []
+    for f_path, is_dir in raw_items:
+        if os.path.exists(f_path):
             # 如果防抖延迟后文件依然存在，说明不是真正的删除（可能是覆盖、移动中的临时状态）
-            logger.debug(f"  [实时监控] 忽略虚假删除事件（文件仍存在）: {os.path.basename(f)}")
+            logger.debug(f"  [实时监控] 忽略虚假删除事件（文件/目录仍存在）: {os.path.basename(f_path)}")
             continue
-        files_to_really_delete.append(f)
+        items_to_really_delete.append((f_path, is_dir))
     
-    if not files_to_really_delete:
+    if not items_to_really_delete:
         return
 
     exclude_paths = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, [])
@@ -239,20 +244,42 @@ def process_delete_batch_queue():
     files_to_delete_logic = []
     files_to_refresh_only = []
 
-    for file_path in files_to_really_delete:
-        if _is_path_excluded(file_path, exclude_paths):
-            files_to_refresh_only.append(file_path)
-        else:
-            files_to_delete_logic.append(file_path)
+    # ==========================================
+    # 2. 触发 115 联动删除 & 本地逻辑分流
+    # ==========================================
+    for f_path, is_dir in items_to_really_delete:
+        
+        # 在此处（确认真删除后）触发 115 网盘联动删除
+        # 使用独立线程执行，防止网络请求阻塞本地监控队列
+        threading.Thread(
+            target=sync_delete_from_local_path, 
+            args=(f_path, is_dir), 
+            name=f"P115-Delete-{os.path.basename(f_path)}"
+        ).start()
 
-    # 1. 正常逻辑：走处理器删除流程 (清理DB等)
+        # --- 以下为本地清理逻辑分流 ---
+        if is_dir:
+            # 如果是目录被删，本地数据库清理逻辑通常不处理目录，
+            # 我们将其放入 refresh_only，让 Emby 刷新它的父级目录即可感知变化
+            files_to_refresh_only.append(f_path)
+            continue
+
+        if _is_path_excluded(f_path, exclude_paths):
+            files_to_refresh_only.append(f_path)
+        else:
+            files_to_delete_logic.append(f_path)
+
+    # ==========================================
+    # 3. 执行本地清理与 Emby 刷新
+    # ==========================================
+    # 正常逻辑：走处理器删除流程 (清理DB等)
     if files_to_delete_logic:
         logger.info(f"  🗑️ [实时监控] 确认删除并聚合处理: {len(files_to_delete_logic)} 个常规文件")
         threading.Thread(target=processor.process_file_deletion_batch, args=(files_to_delete_logic,)).start()
 
-    # 2. 排除路径逻辑：仅刷新 Emby (移除条目)
+    # 排除路径逻辑：仅刷新 Emby (移除条目)
     if files_to_refresh_only:
-        logger.info(f"  🗑️ [实时监控] 确认删除并聚合处理: {len(files_to_refresh_only)} 个排除路径文件 (仅刷新)")
+        logger.info(f"  🗑️ [实时监控] 确认删除并聚合处理: {len(files_to_refresh_only)} 个排除路径/目录 (仅刷新)")
         threading.Thread(target=_handle_batch_delete_refresh_only, args=(files_to_refresh_only,)).start()
 
 def _handle_batch_file_task(processor, file_paths: List[str]):
