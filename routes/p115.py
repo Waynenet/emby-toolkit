@@ -1,6 +1,8 @@
 # routes/p115.py
 import logging
 from flask import redirect
+import threading
+from datetime import datetime, timedelta
 import json
 import os
 import re
@@ -10,9 +12,31 @@ from extensions import admin_required
 from database import settings_db
 from handler.p115_service import P115Service, get_config
 import constants
-from functools import lru_cache
+from functools import lru_cache, wraps
 p115_bp = Blueprint('p115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
+
+# --- 简单的令牌桶/计数器限流器 ---
+class RateLimiter:
+    def __init__(self, max_requests=3, period=2):
+        self.max_requests = max_requests  # 周期内最大请求数
+        self.period = period              # 周期（秒）
+        self.tokens = max_requests
+        self.last_sync = datetime.now()
+        self.lock = threading.Lock()
+
+    def consume(self):
+        with self.lock:
+            now = datetime.now()
+            # 补充令牌
+            elapsed = (now - self.last_sync).total_seconds()
+            self.tokens = min(self.max_requests, self.tokens + elapsed * (self.max_requests / self.period))
+            self.last_sync = now
+
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
 
 @p115_bp.route('/status', methods=['GET'])
 @admin_required
@@ -140,6 +164,11 @@ def handle_sorting_rules():
         settings_db.save_setting(constants.DB_KEY_115_SORTING_RULES, rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
+
+# 实例化限流器：建议 2 秒内最多允许 3 次解析请求（针对 115 比较稳妥）
+api_limiter = RateLimiter(max_requests=3, period=2)
+# 全局解析锁：确保同一时间只有一个线程在请求 115 API，防止并发冲突
+fetch_lock = threading.Lock()    
 @lru_cache(maxsize=2048)
 def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     """
@@ -147,32 +176,41 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     """
     client = P115Service.get_client()
     if not client: return None
-    try:
-        # 这里的 user_agent 必须是播放器的真实 UA
-        url_obj = client.download_url(pick_code, user_agent=user_agent)
-        return str(url_obj) if url_obj else None
-    except Exception as e:
-        logger.error(f"  ❌ 获取 115 直链 API 报错: {e}")
-        return None
+    # 使用锁：即使缓存失效，多个请求同时进来，也只有一个能去查 115 API
+    with fetch_lock:
+        # 这里的限流逻辑：如果令牌不足，直接等待或返回
+        if not api_limiter.consume():
+            logger.warning(f"  ⚠️ [流控] 请求过快，已拦截 pick_code: {pick_code}")
+            time.sleep(0.5) # 稍微强制延迟，缓解压力
+            
+        try:
+            # 增加一个小随机延迟，模拟人为行为
+            time.sleep(0.1) 
+            url_obj = client.download_url(pick_code, user_agent=user_agent)
+            return str(url_obj) if url_obj else None
+        except Exception as e:
+            logger.error(f"  ❌ 获取 115 直链 API 报错: {e}")
+            return None
 
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) # 允许 HEAD 请求，加速客户端嗅探
 def play_115_video(pick_code):
     """
     终极极速 302 直链解析服务 (带内存缓存版)
     """
+    if request.method == 'HEAD':
+        # HEAD 请求通常是播放器嗅探，直接返回 200 或简单处理，不触发解析
+        return '', 200
+
     try:
-        # 获取客户端真实 UA
         player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
         
-        # ★ 从内存缓存中光速获取直链 (或者去 115 获取并存入缓存)
+        # 尝试从缓存获取
         real_url = _get_cached_115_url(pick_code, player_ua)
         
         if not real_url:
-            return "Cannot get video stream from 115", 404
+            # 如果解析太快被拦截了，给播放器返回 429 告知稍后再试
+            return "Too Many Requests - 115 API Protection", 429
             
-        logger.debug(f"  🚀 115 直链已获取: {pick_code}")
-        
-        # 直接 302 跳转
         return redirect(real_url, code=302)
         
     except Exception as e:
