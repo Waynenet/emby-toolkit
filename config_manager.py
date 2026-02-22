@@ -114,6 +114,10 @@ DYNAMIC_CONFIG_DEF = {
         'mp4', 'mkv', 'avi', 'ts', 'iso', 'mov', 'm2ts', 
         'srt', 'ass', 'ssa'
     ]),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "媒体库"),
+    constants.CONFIG_OPTION_LOCAL_STRM_ROOT: (constants.CONFIG_SECTION_115, 'string', "/mnt/media"),
+    constants.CONFIG_OPTION_ETK_SERVER_URL: (constants.CONFIG_SECTION_115, 'string', "http://192.168.1.X:5257"),
     constants.CONFIG_OPTION_CMS_URL: (constants.CONFIG_SECTION_115, 'string', ""),
     constants.CONFIG_OPTION_CMS_TOKEN: (constants.CONFIG_SECTION_115, 'string', ""),
 

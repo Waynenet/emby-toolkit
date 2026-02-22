@@ -32,7 +32,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "SELECT id FROM p115_filesystem_cache WHERE parent_id = %s AND name = %s AND is_directory = TRUE", 
+                        "SELECT id FROM p115_filesystem_cache WHERE parent_id = %s AND name = %s", 
                         (str(parent_cid), str(name))
                     )
                     row = cursor.fetchone()
@@ -49,9 +49,9 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO p115_filesystem_cache (id, parent_id, name, is_directory)
-                        VALUES (%s, %s, %s, TRUE)
-                        ON CONFLICT (parent_id, name, is_directory)
+                        INSERT INTO p115_filesystem_cache (id, parent_id, name)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (parent_id, name)
                         DO UPDATE SET id = EXCLUDED.id, updated_at = NOW()
                     """, (str(cid), str(parent_cid), str(name)))
                     conn.commit()
@@ -775,6 +775,50 @@ class SmartOrganizer:
                 logger.info(f"  📁 [移动] {file_name} -> {std_root_name}")
                 moved_count += 1
 
+                # ==================================================
+                # ★★★ 终极形态：同步生成本地 .strm 直链文件 ★★★
+                # ==================================================
+                pick_code = file_item.get('pc')  # 115 文件的提取码
+                local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+                etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "http://127.0.0.1:5257").rstrip('/')
+                
+                if pick_code and local_root and os.path.exists(local_root):
+                    try:
+                        # 1. 获取当前匹配到的分类目录名 (如 "欧美电影")
+                        category_name = None
+                        for rule in self.rules:
+                            if rule.get('cid') == str(target_cid):
+                                category_name = rule.get('dir_name', '未识别')
+                                break
+                        if not category_name: category_name = "未识别"
+
+                        # 2. 拼接本地绝对路径
+                        if self.media_type == 'tv' and season_num is not None:
+                            local_dir = os.path.join(local_root, category_name, std_root_name, s_name)
+                        else:
+                            local_dir = os.path.join(local_root, category_name, std_root_name)
+                        
+                        os.makedirs(local_dir, exist_ok=True) # 自动创建本地文件夹结构
+
+                        # 3. 构造 strm 文件名和直链内容
+                        # 如果新文件名带有 .mkv 等后缀，将其替换为 .strm
+                        strm_filename = os.path.splitext(new_filename)[0] + ".strm"
+                        strm_filepath = os.path.join(local_dir, strm_filename)
+                        
+                        strm_content = f"{etk_url}/api/p115/play/{pick_code}"
+                        
+                        # 4. 写入硬盘
+                        with open(strm_filepath, 'w', encoding='utf-8') as f:
+                            f.write(strm_content)
+                            
+                        logger.info(f"  📝 [STRM生成] 已生成本地直链文件: {strm_filepath}")
+                        
+                        # ★ 进阶福利：如果是字幕文件 (.ass / .srt)，我们其实也可以直接把它下到本地！
+                        # （Emby 挂载本地字幕体验最好，这部分以后你要加的话，老六再给你写代码）
+                        
+                    except Exception as e:
+                        logger.error(f"  ❌ 生成 STRM 文件失败: {e}", exc_info=True)
+
         # 步骤 D: 清理空目录
         if not is_source_file and moved_count > 0:
             self.client.fs_delete([source_root_id])
@@ -1176,9 +1220,9 @@ def task_sync_115_directory_tree(processor=None):
                                 sub_name = item.get('n')
                                 if sub_cid and sub_name:
                                     cursor.execute("""
-                                        INSERT INTO p115_filesystem_cache (id, parent_id, name, is_directory)
-                                        VALUES (%s, %s, %s, TRUE)
-                                        ON CONFLICT (parent_id, name, is_directory)
+                                        INSERT INTO p115_filesystem_cache (id, parent_id, name)
+                                        VALUES (%s, %s, %s)
+                                        ON CONFLICT (parent_id, name)
                                         DO UPDATE SET id = EXCLUDED.id, updated_at = NOW()
                                     """, (str(sub_cid), str(cid), str(sub_name)))
                                     total_cached += 1

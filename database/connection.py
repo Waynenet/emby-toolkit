@@ -406,9 +406,6 @@ def init_db():
                         id TEXT PRIMARY KEY,           -- 115 的 cid (文件夹) 或 fid (文件)
                         parent_id TEXT NOT NULL,       -- 父目录 ID (根目录为 '0')
                         name TEXT NOT NULL,            -- 文件/文件夹名称
-                        is_directory BOOLEAN DEFAULT FALSE, -- 是否为文件夹
-                        pick_code TEXT,                -- 提取码 (用于下载/播放)
-                        size BIGINT DEFAULT 0,         -- 文件大小
                         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), -- 最后同步时间
                         
                         -- 复合唯一约束：同一个父目录下不能有同名文件 (用于快速查找)
@@ -553,8 +550,6 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_parent_id ON p115_filesystem_cache (parent_id);")
                     # 加速 "全局搜索某个文件"
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_name ON p115_filesystem_cache (name);")
-                    # 加速 "只看文件夹" (用于构建目录树)
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_is_directory ON p115_filesystem_cache (is_directory);")
 
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)

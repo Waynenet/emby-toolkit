@@ -53,6 +53,9 @@ CONFIG_OPTION_115_INTERVAL = "p115_request_interval"           # API请求间隔
 CONFIG_OPTION_115_ENABLE_ORGANIZE = "p115_enable_organize"     # 智能整理总开关
 CONFIG_OPTION_115_EXTENSIONS = "p115_extensions"               # 115转存/上传的文件扩展名列表
 DB_KEY_115_SORTING_RULES = "p115_sorting_rules"                # 存储 115 分类规则的数据库键名
+CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"       # 115网盘媒体库根目录CID
+CONFIG_OPTION_LOCAL_STRM_ROOT = "local_strm_root"              # 本地生成.strm的根目录
+CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                # ETK服务器地址 (用于strm文件内)
 CONFIG_OPTION_CMS_URL = "cms_url"                              # CMS 地址
 CONFIG_OPTION_CMS_TOKEN = "cms_token"                          # CMS Token
 

@@ -306,51 +306,59 @@
                 <!-- 中间：路径配置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">整理配置</span></template>
+                    <template #header><span class="card-title">整理与直链配置</span></template>
                     
-                    <n-form-item label="待整理目录" path="p115_save_path_cid">
+                    <n-form-item label="待整理目录 (入库区)" path="p115_save_path_cid">
                       <n-input-group>
                         <n-input 
                           :value="configModel.p115_save_path_name || configModel.p115_save_path_cid" 
-                          placeholder="选择目录" 
-                          readonly 
+                          placeholder="选择待整理目录" readonly 
                           @click="openFolderSelector('save_path', configModel.p115_save_path_cid)"
                         >
                           <template #prefix><n-icon :component="FolderIcon" /></template>
                         </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('save_path', configModel.p115_save_path_cid)">
-                          选择
-                        </n-button>
+                        <n-button type="primary" ghost @click="openFolderSelector('save_path', configModel.p115_save_path_cid)">选择</n-button>
                       </n-input-group>
                       <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">MP 上传和 NULLBR 转存的目录。</n-text>
+                        <n-text depth="3" style="font-size:0.8em;">MP下载或NULLBR转存的初始目录</n-text>
                       </template>
                     </n-form-item>
 
-                    <n-form-item label="整理开关" path="p115_enable_organize">
-                        <n-switch v-model:value="configModel.p115_enable_organize">
-                            <template #checked>开启整理</template>
-                            <template #unchecked>仅转存</template>
-                        </n-switch>
+                    <n-form-item label="网盘媒体库根目录 (目标区)" path="p115_media_root_cid">
+                      <n-input-group>
+                        <n-input 
+                          :value="configModel.p115_media_root_name || configModel.p115_media_root_cid" 
+                          placeholder="选择网盘媒体库主目录" readonly 
+                          @click="openFolderSelector('media_root', configModel.p115_media_root_cid)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openFolderSelector('media_root', configModel.p115_media_root_cid)">选择</n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">整理目标主目录，分类规则的目录都在它下面</n-text>
+                      </template>
+                    </n-form-item>
+
+                    <n-form-item label="本地 STRM 根目录" path="local_strm_root">
+                        <n-input v-model:value="configModel.local_strm_root" placeholder="例如: /mnt/media" />
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">开启后，MP 上传或 NULLBR 转存的资源会自动按分类规则整理到目标目录。<br>MP需要安装webhook插件，POST方式通知ETK。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件，供 Emby 扫描</n-text>
                         </template>
                     </n-form-item>
 
-                    <n-form-item label="需要整理的扩展名" path="p115_extensions">
-                      <n-select
-                        v-model:value="configModel.p115_extensions"
-                        multiple
-                        filterable
-                        tag
-                        placeholder="输入扩展名并回车 (如 mkv)"
-                        :options="[]" 
-                      />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          只有包含在列表中的文件类型才会被整理。
-                        </n-text>
-                      </template>
+                    <n-form-item label="ETK 内部访问地址" path="etk_server_url">
+                        <n-input v-model:value="configModel.etk_server_url" placeholder="http://192.168.X.X:5257" />
+                        <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">将写入 .strm 文件中，Emby 必须能访问此地址来请求直链</n-text>
+                        </template>
+                    </n-form-item>
+
+                    <n-form-item label="智能整理开关" path="p115_enable_organize">
+                        <n-switch v-model:value="configModel.p115_enable_organize">
+                            <template #checked>整理并生成STRM</template>
+                            <template #unchecked>仅转存</template>
+                        </n-switch>
                     </n-form-item>
                   </n-card>
                 </n-gi>

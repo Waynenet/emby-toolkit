@@ -1,5 +1,6 @@
 # routes/p115.py
 import logging
+from flask import redirect
 import json
 import time
 from flask import Blueprint, jsonify, request
@@ -136,3 +137,36 @@ def handle_sorting_rules():
             rules = []
         settings_db.save_setting(constants.DB_KEY_115_SORTING_RULES, rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
+    
+@p115_bp.route('/play/<pick_code>', methods=['GET'])
+def play_115_video(pick_code):
+    """
+    终极黑魔法：115 极速 302 直链解析服务
+    Emby 读取 strm 访问此接口，ETK 换取直链并 302 跳转。0 流量消耗！
+    """
+    client = P115Service.get_client()
+    if not client:
+        return "115 Client Not Initialized", 500
+        
+    try:
+        # 获取用户 User-Agent (其实 115 官方 API 通常自带了内部的 header 处理)
+        headers = {'User-Agent': request.headers.get('User-Agent', '')}
+        
+        # 调用 115 官方接口，拿 pick_code 换取临时带签名的直链
+        # p115client 支持 fs_download_url，直接返回详情字典
+        download_info = client.fs_download_url(pick_code)
+        
+        real_url = download_info.get('url')
+        if not real_url:
+            # 如果没拿到，说明该文件可能被限制或被删除了
+            logger.error(f"  ❌ 无法获取直链，pick_code: {pick_code}")
+            return "Cannot get video stream from 115", 404
+            
+        logger.info(f"  🎬 [直链解析成功] 正在 302 跳转至 115 CDN...")
+        
+        # HTTP 302 临时重定向，让 Emby/播放器 拿着直链自己去拉流
+        return redirect(real_url, code=302)
+        
+    except Exception as e:
+        logger.error(f"  ❌ 直链解析发生异常: {e}")
+        return str(e), 500

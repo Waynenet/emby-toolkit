@@ -113,7 +113,7 @@ class MediaFileHandler(FileSystemEventHandler):
         global DELETE_DEBOUNCE_TIMER
         with DELETE_QUEUE_LOCK:
             if file_path not in DELETE_EVENT_QUEUE:
-                logger.info(f"  🗑️ [实时监控] 删除事件入队: {file_path}")
+                logger.debug(f"  🗑️ [实时监控] 删除事件入队: {file_path}")
             
             DELETE_EVENT_QUEUE.add(file_path)
             
