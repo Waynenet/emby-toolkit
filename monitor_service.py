@@ -247,10 +247,29 @@ def process_delete_batch_queue():
     # ==========================================
     # 2. 触发 115 联动删除 & 本地逻辑分流
     # ==========================================
+    # 提取所有被删除的目录路径
+    deleted_dirs = [p for p, is_dir in items_to_really_delete if is_dir]
+    
+    final_items_to_delete = []
     for f_path, is_dir in items_to_really_delete:
+        # 如果这个文件/目录的父级（或祖父级）也在删除列表中，说明它是被“连锅端”的
+        is_child_of_deleted_dir = False
+        for d_dir in deleted_dirs:
+            # 确保不是自己，且路径以被删目录开头
+            if f_path != d_dir and f_path.startswith(d_dir + os.sep):
+                is_child_of_deleted_dir = True
+                break
         
-        # 在此处（确认真删除后）触发 115 网盘联动删除
-        # 使用独立线程执行，防止网络请求阻塞本地监控队列
+        # 只有最顶层的删除事件才会被保留
+        if not is_child_of_deleted_dir:
+            final_items_to_delete.append((f_path, is_dir))
+        else:
+            logger.debug(f"  [实时监控] 忽略子项删除 (已被父目录连锅端): {os.path.basename(f_path)}")
+
+    # 使用过滤后的 final_items_to_delete 进行后续处理
+    for f_path, is_dir in final_items_to_delete:
+        
+        # 触发 115 网盘联动删除 (异步执行防阻塞)
         threading.Thread(
             target=sync_delete_from_local_path, 
             args=(f_path, is_dir), 
@@ -259,8 +278,6 @@ def process_delete_batch_queue():
 
         # --- 以下为本地清理逻辑分流 ---
         if is_dir:
-            # 如果是目录被删，本地数据库清理逻辑通常不处理目录，
-            # 我们将其放入 refresh_only，让 Emby 刷新它的父级目录即可感知变化
             files_to_refresh_only.append(f_path)
             continue
 

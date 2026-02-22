@@ -380,7 +380,7 @@
                             <template #unchecked>仅移除本地缓存</template>
                         </n-switch>
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">开启后，通过反代端口在 Emby 中删除媒体时，将同时触发 115 网盘上的物理删除。<strong style="color:#d03050; margin-left:4px;">高危操作，手抖党慎开！</strong></n-text>
+                            <n-text depth="3" style="font-size:0.8em;">开启后，在 Emby 中删除媒体时，将同时触发 115 网盘上的物理删除。<strong style="color:#d03050; margin-left:4px;">高危操作，手抖党慎开！</strong></n-text>
                         </template>
                     </n-form-item>
                   </n-card>
@@ -1458,7 +1458,8 @@ const tableInfo = {
   'user_media_data': { cn: 'Emby用户数据', isSharable: false },
   'user_templates': { cn: '用户权限模板', isSharable: false },
   'invitations': { cn: '邀请链接', isSharable: false },
-  'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false }
+  'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
+  'p115_filesystem_cache': { cn: '115目录缓存', isSharable: true }
 };
 const tableDependencies = {
   'emby_users': ['user_media_data', 'emby_users_extended'],
