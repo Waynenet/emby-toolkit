@@ -819,7 +819,7 @@ def proxy_all(path):
                                 client_ip = request.headers.get('X-Real-IP', request.remote_addr)
                                 
                                 # 调用内存缓存版的直链获取器
-                                real_url = _get_cached_115_url(pick_code, client_ip)
+                                real_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                                 
                                 if real_url:
                                     logger.info(f"  🎬 [反代劫持] 成功拦截 Emby 流请求，下发 115 CDN 直链！")
