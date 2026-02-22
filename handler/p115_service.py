@@ -664,6 +664,7 @@ class SmartOrganizer:
                             if item.get('n') == std_root_name and not item.get('fid'):
                                 final_home_cid = item.get('cid')
                                 P115CacheManager.save_cid(final_home_cid, dest_parent_cid, std_root_name) # ★ 只在这里存
+                                logger.info(f"  📂 成功查找到已存在主目录并永久缓存: {std_root_name}")
                                 break
                 except Exception as e:
                     logger.warning(f"  ⚠️ 115模糊查找异常: {e}")
@@ -769,7 +770,8 @@ class SmartOrganizer:
             if self.client.fs_move(fid, real_target_cid).get('state'):
                 if self.media_type == 'tv' and season_num is not None:
                     logger.info(f"  📁 [移动] {file_name} -> {std_root_name} - {s_name}")
-                logger.info(f"  📁 [移动] {file_name} -> {std_root_name}")
+                else:
+                    logger.info(f"  📁 [移动] {file_name} -> {std_root_name}")
                 moved_count += 1
 
                 # ==================================================
