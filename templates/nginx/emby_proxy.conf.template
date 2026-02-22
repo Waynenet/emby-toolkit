@@ -31,6 +31,7 @@ server {
     proxy_set_header If-Range $http_if_range;
     # 核心：透传所有客户端 Header
     proxy_pass_request_headers on;
+    proxy_read_timeout 60s;
 
     # ====================================================================
     #  核心路由规则 (V4)

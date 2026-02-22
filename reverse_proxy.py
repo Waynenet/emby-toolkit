@@ -836,18 +836,23 @@ def proxy_all(path):
                                                 "SupportsDirectPlay": True,
                                                 "SupportsDirectStream": True,
                                                 "SupportsTranscoding": False,
-                                                "Container": "mp4", # 显式告知容器格式
+                                                "Container": "mp4",
                                                 "ReadAtNativeFramerate": False,
-                                                "Type": "Default"
+                                                "Type": "Default",
+                                                "IsRemote": True,  # 新增：明确告知客户端这是远程流
                                             }],
                                             "PlaySessionId": f"etk_proxy_{int(time.time())}"
                                         }
-                                        # 强制指定内容长度和编码，防止某些客户端解析 500
                                         json_data = json.dumps(fake_info)
+                                        # 使用 Response 显式返回，并清理掉可能导致 500 的异常 Header
                                         return Response(
-                                            json_data, 
+                                            json_data,
+                                            status=200,
                                             mimetype='application/json',
-                                            headers={'Content-Length': str(len(json_data))}
+                                            headers={
+                                                'Access-Control-Allow-Origin': '*', # 解决部分客户端跨域
+                                                'Content-Length': str(len(json_data.encode('utf-8'))) # 确保按字节长度计算
+                                            }
                                         )
                                     
                                     # 真正的视频流请求，直接 302 甩出去
