@@ -13,6 +13,7 @@ from gevent import spawn_later
 import constants
 import config_manager
 import handler.emby as emby
+from handler.p115_service import sync_delete_from_local_path
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
