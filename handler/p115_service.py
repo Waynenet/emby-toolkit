@@ -1410,32 +1410,45 @@ def task_full_sync_strm_and_subs(processor=None):
         items_yielded = 0
         files_generated = 0
         
-        # A. 优先尝试极速遍历
+        # A. 优先尝试极速遍历 (完美适配 iter_files_with_path_skim)
         try:
             from p115client.tool.iterdir import iter_files_with_path_skim
-            for info in iter_files_with_path_skim(client, int(base_cid), with_ancestors=True):
+            
+            # ★ 修复 1：增加 max_workers=2 (或 3)，限制并发，防止瞬间请求过多导致 115 接口报错中断
+            iterator = iter_files_with_path_skim(
+                client, 
+                int(base_cid), 
+                with_ancestors=True, 
+                max_workers=2 
+            )
+            
+            for info in iterator:
                 if processor and getattr(processor, 'is_stop_requested', lambda: False)():
                     update_progress(100, "任务已被用户手动终止。")
                     return
                 
                 items_yielded += 1
                 
-                # 解析 info 中的路径列表，提取出分类目录之后的所有子文件夹名
-                path_nodes = info.get('path', [])
+                # ★ 修复 2：极速模式下，节点字典列表存在 'ancestors' 里，而不是 'path' 里
+                ancestors = info.get('ancestors', [])
                 rel_path_parts = []
-                if isinstance(path_nodes, list) and len(path_nodes) > 0:
-                    # 我们只需要 base_cid 之后的层级
+                
+                if isinstance(ancestors, list) and len(ancestors) > 0:
                     found_base = False
-                    for node in path_nodes:
-                        if str(node.get('cid')) == str(base_cid):
+                    for node in ancestors:
+                        # p115client 的 ancestors 节点通常用 'id' 而不是 'cid'
+                        node_id = str(node.get('id') or node.get('cid', ''))
+                        if node_id == str(base_cid):
                             found_base = True
                             continue
                         if found_base:
                             rel_path_parts.append(str(node.get('name', '')))
                 
                 process_file_info(info, rel_path_parts, base_cid)
+                
         except Exception as e:
-            logger.warning(f"极速遍历异常 CID:{base_cid}: {e}")
+            # ★ 修复 3：打印出具体的报错详情 (repr)，以后如果再降级，看日志一眼就能知道是网络断了还是啥原因
+            logger.warning(f"  ⚠️ 极速遍历异常 CID:{base_cid} - 错误详情: {repr(e)}")
 
         # B. 自动降级：如果极速模式没出货，启动标准递归
         if items_yielded == 0:
