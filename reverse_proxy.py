@@ -786,68 +786,98 @@ def proxy_all(path):
         # ★★★ 终极拦截 A+：全盘接管视频流 302 直链解析 (复刻 CMS 核心逻辑) ★★★
         # 当客户端请求视频流时，反代层主动查询文件路径并剥离 115 直链！
         # ====================================================================
-        if '/videos/' in full_path and ('/stream' in full_path or '/original' in full_path or 'PlaybackInfo' in full_path):
+        # 扩展匹配条件：包含 videos 且有 stream/playback/original/hls 等关键词
+        is_stream_request = (
+            '/videos/' in full_path or 
+            '/playback/' in full_path or 
+            full_path.endswith('.m3u8') or
+            'PlaybackInfo' in full_path
+        ) and (
+            '/stream' in full_path or 
+            '/original' in full_path or 
+            '/playback/' in full_path or 
+            full_path.endswith('.m3u8') or
+            'PlaybackInfo' in full_path or
+            '/manifest' in full_path
+        )
+        
+        if is_stream_request:
             try:
+                logger.info(f"  🔍 [反代拦截] 检测到视频流请求: {full_path}")
+                
                 # 1. 抓取请求流的项目 ID
                 item_id_match = re.search(r'/Items/([^/]+)/', full_path) or re.search(r'/videos/([^/]+)/', full_path)
-                if item_id_match:
+                if not item_id_match:
+                    logger.warning(f"  ⚠️ [反代拦截] 无法从路径提取 ItemId: {full_path}")
+                else:
                     item_id = item_id_match.group(1)
                     base_url, api_key = _get_real_emby_url_and_key()
                     user_id = request.args.get('UserId') or request.args.get('api_key') or "admin"
                     
-                    # 2. 向局域网内的 Emby 打听这个视频的实际物理路径
+                    # 2. 向 Emby 查询视频的实际物理路径
                     details_url = f"{base_url}/emby/Items/{item_id}"
-                    resp = requests.get(details_url, params={'api_key': api_key, 'UserId': user_id}, timeout=3)
+                    resp = requests.get(details_url, params={'api_key': api_key, 'UserId': user_id}, timeout=5)
                     
                     if resp.status_code == 200:
                         item_data = resp.json()
                         file_path = item_data.get('Path', '')
+                        logger.info(f"  📁 [反代拦截] Item {item_id} 路径: {file_path}")
                         
                         # 3. 核心判断：是 .strm 文件吗？本地能读到吗？
-                        if file_path and file_path.endswith('.strm') and os.path.exists(file_path):
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                strm_content = f.read().strip()
-                                
-                            # 4. 从局域网链接中提取提取码 (pick_code)
-                            # strm 格式: http://192.168.X.X:5257/api/p115/play/abc1234
-                            if '/api/p115/play/' in strm_content:
-                                pick_code = strm_content.split('/play/')[-1].split('?')[0].strip()
-                                
-                                # 5. ★ 决战 115：获取直链并直接返回 302！
-                                # 注意：必须使用当前发起请求的客户端的 User-Agent，否则 115 CDN 报 403
-                                player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                                client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                                
-                                # 调用内存缓存版的直链获取器
-                                real_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                                
-                                if real_url:
-                                    logger.info(f"  🎬 [反代劫持] 成功拦截 Emby 流请求，下发 115 CDN 直链！")
-                                    from flask import redirect
+                        if file_path and file_path.endswith('.strm'):
+                            if os.path.exists(file_path):
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    strm_content = f.read().strip()
+                                logger.info(f"  📄 [反代拦截] STRM 内容: {strm_content[:100]}...")
                                     
-                                    # 如果是 PlaybackInfo 请求 (客户端起播前的嗅探)，需要特殊伪装
-                                    if 'PlaybackInfo' in full_path:
-                                         # 骗过 Emby 客户端，告诉它这是一个外部直接播放流
-                                         fake_info = {
-                                             "MediaSources": [{
-                                                 "Id": item_id,
-                                                 "Path": real_url,
-                                                 "Protocol": "Http",
-                                                 "IsInfiniteStream": False,
-                                                 "RequiresOpening": False,
-                                                 "RequiresClosing": False,
-                                                 "SupportsDirectPlay": True,
-                                                 "SupportsDirectStream": True,
-                                                 "SupportsTranscoding": False
-                                             }],
-                                             "PlaySessionId": "etk_direct_play_session"
-                                         }
-                                         return Response(json.dumps(fake_info), mimetype='application/json')
+                                # 4. 提取 pick_code
+                                # strm 格式: http://192.168.X.X:5257/api/p115/play/abc1234
+                                if '/api/p115/play/' in strm_content:
+                                    pick_code = strm_content.split('/play/')[-1].split('?')[0].strip()
+                                    logger.info(f"  🔑 [反代拦截] 提取到 PickCode: {pick_code}")
                                     
-                                    # 真正的视频流请求，直接 302 甩出去
-                                    return redirect(real_url, code=302)
+                                    # 5. 获取 115 直链
+                                    player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+                                    client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+                                    
+                                    real_url = _get_cached_115_url(pick_code, player_ua, client_ip)
+                                    
+                                    if real_url:
+                                        logger.info(f"  🎬 [反代拦截] 成功获取 115 直链，准备 302 重定向!")
+                                        from flask import redirect
+                                        
+                                        # 如果是 PlaybackInfo 请求 (客户端起播前的嗅探)
+                                        if 'PlaybackInfo' in full_path:
+                                            fake_info = {
+                                                "MediaSources": [{
+                                                    "Id": item_id,
+                                                    "Path": real_url,
+                                                    "Protocol": "Http",
+                                                    "IsInfiniteStream": False,
+                                                    "RequiresOpening": False,
+                                                    "RequiresClosing": False,
+                                                    "SupportsDirectPlay": True,
+                                                    "SupportsDirectStream": True,
+                                                    "SupportsTranscoding": False
+                                                }],
+                                                "PlaySessionId": "etk_direct_play_session"
+                                            }
+                                            return Response(json.dumps(fake_info), mimetype='application/json')
+                                        
+                                        # 真正的视频流请求，直接 302 甩出去
+                                        return redirect(real_url, code=302)
+                                    else:
+                                        logger.error(f"  ❌ [反代拦截] 获取 115 直链失败!")
+                                else:
+                                    logger.warning(f"  ⚠️ [反代拦截] STRM 内容不包含 115 播放链接")
+                            else:
+                                logger.warning(f"  ⚠️ [反代拦截] STRM 文件不存在: {file_path}")
+                        else:
+                            logger.info(f"  ℹ️ [反代拦截] 非 STRM 文件，跳过拦截")
+                    else:
+                        logger.warning(f"  ⚠️ [反代拦截] 获取 Item 详情失败: {resp.status_code}")
             except Exception as e:
-                logger.error(f"  ❌ 反代拦截解析直链出错，回退原生处理: {e}")
+                logger.error(f"  ❌ [反代拦截] 反代拦截解析直链出错: {e}", exc_info=True)
 
         # --- 拦截 A: 虚拟项目海报图片 ---
         if path.startswith('emby/Items/') and '/Images/Primary' in path:
