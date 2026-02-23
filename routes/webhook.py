@@ -565,7 +565,7 @@ def emby_webhook():
                         pickcodes.append(pc_match.group(1))
 
             if pickcodes and item_path:
-                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行物理销毁。")
+                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行联动删除。")
                 # 异步执行网盘删除，不阻塞 Webhook
                 from handler.p115_service import delete_115_files_by_webhook
                 spawn(delete_115_files_by_webhook, item_path, pickcodes)
