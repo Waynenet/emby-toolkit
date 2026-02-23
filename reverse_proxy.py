@@ -869,9 +869,6 @@ def proxy_all(path):
                                 real_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                                 
                                 if real_url:
-                                    # 同样强制升级为 HTTPS
-                                    if real_url.startswith('http://'):
-                                        real_url = real_url.replace('http://', 'https://', 1)
                                         
                                     logger.info(f"  🎬 [视频流拦截] 成功拦截客户端请求，下发 115 直链！")
                                     from flask import redirect
