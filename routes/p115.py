@@ -186,12 +186,23 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
         try:
             # 增加一个小随机延迟，模拟人为行为
             time.sleep(0.1) 
-            url_obj = client.download_url(pick_code, user_agent=user_agent)
-            logger.info(f"  🎬 获取[115]直链成功: {url_obj.name}")
+            
+            # ★★★ 修复：优先使用 GET 方法的 web 接口 ★★★
+            # 原来的 download_url (app="chrome") 使用 POST 方法，但 115 现在返回 405 错误
+            # 改用 download_url_web 使用 GET 方法，更稳定
+            url_obj = client.download_url_web(pick_code, user_agent=user_agent)
+            logger.info(f"  🎬 获取[115]直链成功(GET): {url_obj.name}")
             return str(url_obj) if url_obj else None
         except Exception as e:
-            logger.error(f"  ❌ 获取 115 直链 API 报错: {e}")
-            return None
+            # 如果 GET 方法也失败，尝试原来的 POST 方法作为回退
+            logger.warning(f"  ⚠️ GET 方法获取直链失败，尝试 POST 方法: {e}")
+            try:
+                url_obj = client.download_url(pick_code, user_agent=user_agent)
+                logger.info(f"  🎬 获取[115]直链成功(POST回退): {url_obj.name}")
+                return str(url_obj) if url_obj else None
+            except Exception as e2:
+                logger.error(f"  ❌ 获取 115 直链 API 报错: {e2}")
+                return None
 
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) # 允许 HEAD 请求，加速客户端嗅探
 def play_115_video(pick_code):
