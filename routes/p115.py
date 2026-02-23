@@ -205,22 +205,18 @@ def play_115_video(pick_code):
         return resp
 
     try:
-        # 此时抓到的 User-Agent 才是底层播放器(ExoPlayer/AVPlayer)的真实 UA！
         player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
         client_ip = request.headers.get('X-Real-IP', request.remote_addr)
         
-        # 用真实的播放器 UA 去换取 115 直链
         real_url = _get_cached_115_url(pick_code, player_ua, client_ip)
         
         if not real_url:
             return "Too Many Requests - 115 API Protection", 429
             
-        # 解决外网 HTTPS 混合内容拦截
-        client_scheme = request.headers.get('X-Forwarded-Proto', request.scheme)
-        if client_scheme == 'https' and real_url.startswith('http://'):
+        # ★★★ 核心修复：强制升级为 HTTPS，防止 TV/手机端因安全策略拦截 HTTP 导致 500 错误 ★★★
+        if real_url.startswith('http://'):
             real_url = real_url.replace('http://', 'https://', 1)
             
-        # 302 重定向到真实的 115 CDN
         resp = redirect(real_url, code=302)
         resp.headers['Access-Control-Allow-Origin'] = '*'
         return resp

@@ -789,11 +789,6 @@ def proxy_all(path):
                 base_url, api_key = _get_real_emby_url_and_key()
                 target_url = f"{base_url}/{path.lstrip('/')}"
                 
-                # 识别客户端类型
-                client_name = request.headers.get('X-Emby-Client', '').lower()
-                auth_header = request.headers.get('X-Emby-Authorization', '').lower()
-                user_agent = request.headers.get('User-Agent', '').lower()
-                
 
                 forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
                 forward_headers['Host'] = urlparse(base_url).netloc
@@ -809,36 +804,17 @@ def proxy_all(path):
                     for source in data.get('MediaSources', []):
                         strm_url = source.get('Path', '')
                         if isinstance(strm_url, str) and '/api/p115/play/' in strm_url:
-                            # 1. 提取 pick_code
-                            pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
-                            
-                            # 2. 动态获取客户端当前的访问地址 (完美解决内外网问题)
-                            # 如果客户端用公网域名访问，这里拿到的就是公网域名；如果是内网IP，就是内网IP
-                            client_scheme = request.headers.get('X-Forwarded-Proto', request.scheme)
-                            client_host = request.headers.get('Host') 
-                            
-                            # 3. 采纳你的建议：加上伪装的文件名参数，让客户端彻底相信这是一个视频文件
-                            # 使用 ?file=video.mp4 的方式，既能骗过客户端，又不会破坏路由
-                            proxy_play_url = f"{client_scheme}://{client_host}/api/p115/play/{pick_code}?file=video.mp4"
-                            
-                            # 4. 暴力覆盖，防止 Emby 瞎拼接 URL
-                            source['Path'] = proxy_play_url
-                            source['DirectStreamUrl'] = proxy_play_url
-                            source['IsRemote'] = True
+                            source['DirectStreamUrl'] = strm_url
+                            source['Path'] = strm_url
+                            source.pop('TranscodingUrl', None) # 逼迫客户端直连
                             source['Protocol'] = 'Http'
                             source['SupportsDirectPlay'] = True
                             source['SupportsDirectStream'] = True
                             source['SupportsTranscoding'] = False
-                            
-                            # 极其关键：删掉 Emby 内部的转码和备用地址，逼它只能走我们的 proxy_play_url
-                            source.pop('TranscodingUrl', None) 
-                            source.pop('Bitrate', None)
-                            
                             modified = True
-                            logger.info(f"  🎬 [PlaybackInfo] 已下发动态 302 引导链接 (Host: {client_host})，等待播放器握手！")
                             
                     if modified:
-                        logger.info(f"  🎬 [PlaybackInfo] 识别为客户端，已将 115 真实 CDN 直链喂到嘴里！")
+                        logger.info(f"  🎬 [PlaybackInfo] 识别为客户端，强制下发 115 直连！")
                         return Response(json.dumps(data), status=200, mimetype='application/json')
                         
                 excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
