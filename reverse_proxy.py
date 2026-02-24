@@ -871,12 +871,20 @@ def proxy_all(path):
                             if real_115_cdn_url:
                                 logger.info(f"  🎬 获取到 115 直链: {real_115_cdn_url[:80]}...")
                                 
-                                # 直接替换 Path，不做任何复杂处理
-                                source['Path'] = real_115_cdn_url
-                                source['IsRemote'] = True
+                                # 检测是否为浏览器客户端
+                                is_browser = 'emby web' in client_name or 'jellyfin web' in client_name
                                 
-                                # 添加 DirectStreamUrl 让客户端可以直接使用
-                                source['DirectStreamUrl'] = real_115_cdn_url
+                                if is_browser:
+                                    # 浏览器需要使用 RemoteUrl 字段
+                                    source['RemoteUrl'] = real_115_cdn_url
+                                    source['IsRemote'] = True
+                                    # 浏览器不需要 Path，但保留以防万一
+                                    source['Path'] = real_115_cdn_url
+                                else:
+                                    # 客户端使用 Path 和 DirectStreamUrl
+                                    source['Path'] = real_115_cdn_url
+                                    source['IsRemote'] = True
+                                    source['DirectStreamUrl'] = real_115_cdn_url
                                 
                                 # 清理其他可能干扰的字段
                                 source.pop('TranscodingUrl', None) 
