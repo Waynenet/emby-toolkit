@@ -882,6 +882,11 @@ def proxy_all(path):
                                 modified = True
                             
                     if modified:
+                        # 打印返回给客户端的完整数据（用于调试）
+                        for source in data.get('MediaSources', []):
+                            logger.info(f"  📤 返回给客户端的 Path: {source.get('Path', 'N/A')}")
+                            logger.info(f"  📤 返回给客户端的 Protocol: {source.get('Protocol', 'N/A')}")
+                            logger.info(f"  📤 返回给客户端的 IsRemote: {source.get('IsRemote', 'N/A')}")
                         logger.info(f"  🎬 [PlaybackInfo] 识别为客户端，已将 115 真实 CDN 直链喂到嘴里！")
                         return Response(json.dumps(data), status=200, mimetype='application/json')
                         
