@@ -1031,7 +1031,8 @@ def proxy_all(path):
                                     # 内网 IP：直接返回 115 直链
                                     # 公网 IP：如果配置了公网 URL，则返回公网 URL
                                     
-                                    etk_public_url = config_manager.APP_CONFIG.get('etk_public_url', '').rstrip('/')
+                                    etk_public_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ETK_PUBLIC_URL, '').rstrip('/')
+                                    etk_server_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ETK_SERVER_URL, '').rstrip('/')
                                     
                                     if is_internal_ip or not etk_public_url:
                                         # 内网或没有配置公网 URL：直接返回 115 直链
@@ -1047,9 +1048,9 @@ def proxy_all(path):
                                     else:
                                         # 公网：用公网 URL 替换内网 IP
                                         # 替换 URL 中的内网 IP 为公网 URL
-                                        public_stream_url = real_115_cdn_url.replace('http://192.168.31.175:8096', etk_public_url)
-                                        public_stream_url = public_stream_url.replace('http://192.168.31.175', etk_public_url)
-                                        public_stream_url = public_stream_url.replace('https://192.168.31.175', etk_public_url)
+                                        public_stream_url = real_115_cdn_url.replace(etk_server_url, etk_public_url)
+                                        public_stream_url = public_stream_url.replace(etk_server_url.replace('https://', 'http://'), etk_public_url)
+                                        public_stream_url = public_stream_url.replace(etk_server_url.replace('http://', 'https://'), etk_public_url)
                                         
                                         source['Path'] = public_stream_url
                                         source['IsRemote'] = True
