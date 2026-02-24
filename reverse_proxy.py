@@ -869,13 +869,15 @@ def proxy_all(path):
                                 source['Path'] = real_115_cdn_url
                                 source['IsRemote'] = True
                                 
+                                # 添加 DirectStreamUrl 让客户端可以直接使用
+                                source['DirectStreamUrl'] = real_115_cdn_url
+                                
                                 # 清理其他可能干扰的字段
-                                source.pop('DirectStreamUrl', None) 
                                 source.pop('TranscodingUrl', None) 
                                 
                                 source['Protocol'] = 'Http'
                                 source['SupportsDirectPlay'] = True
-                                source['SupportsDirectStream'] = False 
+                                source['SupportsDirectStream'] = True
                                 source['SupportsTranscoding'] = False
                                 
                                 logger.info(f"  ✅ PlaybackInfo 劫持完成")
