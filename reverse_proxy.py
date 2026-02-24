@@ -790,6 +790,29 @@ def proxy_all(path):
         if '/videos/' in path and ('/stream.' in path or '/original.' in path):
             logger.info(f"[STREAM] 进入视频流拦截，path={path}")
             
+            # 检测浏览器客户端
+            user_agent = request.headers.get('User-Agent', '').lower()
+            client_name = request.headers.get('X-Emby-Client', '').lower()
+            is_browser = 'mozilla' in user_agent or 'chrome' in user_agent or 'safari' in user_agent
+            native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer']
+            if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent:
+                is_browser = False
+            
+            # 浏览器直接转发给 Emby 服务端，不做 302 重定向（115 直链存在跨域问题）
+            if is_browser:
+                logger.info(f"[STREAM] 识别为浏览器，直接转发给 Emby 服务端，不做 302 重定向")
+                base_url, api_key = _get_real_emby_url_and_key()
+                target_url = f"{base_url}/{path.lstrip('/')}"
+                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+                forward_headers['Host'] = urlparse(base_url).netloc
+                forward_params = request.args.copy()
+                forward_params['api_key'] = api_key
+                resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=30.0, stream=True)
+                excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+                response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+                return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+            
+            # 本地客户端才做 302 重定向
             parts = path.split('/')
             item_id = parts[2] if len(parts) > 2 else ''
             play_session_id = request.args.get('PlaySessionId', '')
@@ -823,10 +846,10 @@ def proxy_all(path):
             except Exception as e:
                 logger.error(f"[STREAM] 获取 115 直链失败: {e}")
             
-            # 【修复核心】如果获取到 115 直链，直接 302 重定向！不要用 Python 中转流！
+            # 如果获取到 115 直链，直接 302 重定向！不要用 Python 中转流！
             # 这样 Infuse 等播放器会自己去连 115，完美支持拖动进度条，且不消耗服务器带宽。
             if real_115_url:
-                logger.info(f"[STREAM] 拦截到客户端视频流请求，直接 302 重定向到 115 直链")
+                logger.info(f"[STREAM] 拦截到本地客户端视频流请求，直接 302 重定向到 115 直链")
                 return redirect(real_115_url, code=302)
             
             # 如果获取失败，回退到原来的转发方式
@@ -897,7 +920,11 @@ def proxy_all(path):
                                 logger.info(f"  🔍 客户端名称: {client_name}, User-Agent: {user_agent[:50]}, 是否浏览器: {is_browser}")
                                 
                                 if is_browser:
-                                    # 只有浏览器需要劫持 PlaybackInfo (解决跨域 CORS 问题)
+                                    # 浏览器直接转发给 Emby 服务端处理，不做劫持（115 直链存在跨域问题）
+                                    logger.info(f"  ⏭️ [PlaybackInfo] 识别为浏览器，直接转发给 Emby 服务端，不做劫持")
+                                else:
+                                    # 对于 Android TV, Infuse 等本地客户端进行劫持
+                                    # 保持 Emby 原生的 .strm 逻辑，让客户端自己去请求流，然后我们在上面的拦截 H 处给它 302 重定向。
                                     source['RemoteUrl'] = real_115_cdn_url
                                     source['Path'] = real_115_cdn_url
                                     source['IsRemote'] = True
@@ -906,13 +933,8 @@ def proxy_all(path):
                                     source['SupportsDirectPlay'] = True
                                     source['SupportsDirectStream'] = True
                                     source['SupportsTranscoding'] = False
-                                    logger.info(f"  ✅ [PlaybackInfo] 识别为浏览器，已注入 115 直链")
+                                    logger.info(f"  ✅ [PlaybackInfo] 识别为本地客户端，已注入 115 直链")
                                     modified = True
-                                else:
-                                    # 对于 Android TV, Infuse 等本地客户端，千万不要劫持！
-                                    # 保持 Emby 原生的 .strm 逻辑，让客户端自己去请求流，然后我们在上面的拦截 H 处给它 302 重定向。
-                                    logger.info(f"  ⏭️ [PlaybackInfo] 识别为本地客户端，跳过劫持，保留原生 .strm 逻辑")
-                                    pass
                             
                     if modified:
                         return Response(json.dumps(data), status=200, mimetype='application/json')
