@@ -876,12 +876,11 @@ def proxy_all(path):
                                 logger.info(f"  🔍 客户端名称: {client_name}, User-Agent: {user_agent[:50]}, 是否浏览器: {is_browser}")
                                 
                                 if is_browser:
-                                    # 浏览器需要使用 RemoteUrl 字段
+                                    # 浏览器需要同时使用 Path 和 RemoteUrl
                                     source['RemoteUrl'] = real_115_cdn_url
+                                    source['Path'] = real_115_cdn_url
                                     source['IsRemote'] = True
-                                    # 清空 Path，避免浏览器使用它
-                                    source['Path'] = ''
-                                    logger.info(f"  📤 返回给浏览器的 RemoteUrl: {real_115_cdn_url[:60]}...")
+                                    logger.info(f"  📤 返回给浏览器的 Path+RemoteUrl: {real_115_cdn_url[:60]}...")
                                 else:
                                     # 客户端使用 Path 和 DirectStreamUrl
                                     source['Path'] = real_115_cdn_url
