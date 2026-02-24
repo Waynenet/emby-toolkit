@@ -791,34 +791,35 @@ def proxy_all(path):
             user_agent = request.headers.get('User-Agent', '').lower()
             client_name = request.headers.get('X-Emby-Client', '').lower()
             
+            # 1. 识别浏览器
             is_browser = 'mozilla' in user_agent or 'chrome' in user_agent or 'safari' in user_agent
             native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer']
             if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent:
                 is_browser = False
 
+            # 【修复点】在判断之前先获取基础配置，确保 base_url 可用
+            base_url, api_key = _get_real_emby_url_and_key()
+
             if is_browser:
-                # 【核心修改】浏览器请求不再转发，直接 302 重定向给 Emby 原生地址
-                # 拼接 Emby 原生视频地址
+                # 浏览器请求：直接 302 到 Emby 后端，让 Emby 处理转码或直连，Python 不参与转发
+                from urllib.parse import urlencode
                 target_url = f"{base_url}/{path.lstrip('/')}"
-                # 携带原始参数（包含 api_key 等）
                 forward_params = request.args.copy()
                 forward_params['api_key'] = api_key
-                
-                # 构造带参数的重定向 URL
-                from urllib.parse import urlencode
                 redirect_target = f"{target_url}?{urlencode(forward_params)}"
                 
-                logger.info(f"[STREAM] 浏览器请求，直接 302 重定向至 Emby 后端: {redirect_target[:60]}...")
+                logger.info(f"[STREAM] 浏览器请求，直接重定向至 Emby: {redirect_target[:60]}...")
                 return redirect(redirect_target, code=302)
+            
             else:
-                # 只有本地客户端（非浏览器）才走这个逻辑
+                # 非浏览器（如 Infuse）：走 115 劫持逻辑
                 parts = path.split('/')
                 item_id = parts[2] if len(parts) > 2 else ''
                 play_session_id = request.args.get('PlaySessionId', '')
                 
                 real_115_url = None
                 try:
-                    base_url, api_key = _get_real_emby_url_and_key()
+                    # 使用 PlaybackInfo 尝试获取直链
                     playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
                     params = {
                         'api_key': api_key,
@@ -826,12 +827,10 @@ def proxy_all(path):
                         'MaxStreamingBitrate': 140000000,
                         'PlaySessionId': play_session_id,
                     }
-                    
                     forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
                     forward_headers['Host'] = urlparse(base_url).netloc
                     
                     resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
-                    
                     if resp.status_code == 200:
                         data = resp.json()
                         for source in data.get('MediaSources', []):
@@ -843,39 +842,16 @@ def proxy_all(path):
                                 real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                                 break
                 except Exception as e:
-                    logger.error(f"[STREAM] 获取 115 直链失败: {e}")
-                
+                    logger.error(f"[STREAM] 获取 115 直链异常: {e}")
+
                 if real_115_url:
-                    logger.info(f"[STREAM] 拦截到客户端视频流请求，直接 302 重定向到 115 直链")
+                    logger.info(f"[STREAM] 客户端 302 重定向至 115 直链")
                     return redirect(real_115_url, code=302)
-            
-                # 兜底转发逻辑 (浏览器或直链获取失败时走这里)
-                logger.info(f"[STREAM] 回退到转发模式")
-                base_url, api_key = _get_real_emby_url_and_key()
-                target_url = f"{base_url}/{path.lstrip('/')}"
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                forward_params = request.args.copy()
-                forward_params['api_key'] = api_key
                 
-                # 使用流式转发，避免大文件内存溢出
-                resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=10, allow_redirects=False)
-                
-                # 如果后端 Emby 返回了 302 (可能是 strm 原生跳转)，再次检查直链
-                if resp.status_code in [301, 302]:
-                    redirect_url = resp.headers.get('Location', '')
-                    if '/api/p115/play/' in redirect_url:
-                        pick_code = redirect_url.split('/play/')[-1].split('?')[0].strip()
-                        player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                        client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                        real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                        if real_115_url and not is_browser: # 同样非浏览器才重定向
-                            logger.info(f"[STREAM] 拦截到后端 302 跳转，直接重定向到 115 直链")
-                            return redirect(real_115_url, code=302)
-                
-                excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-                response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_resp_headers]
-                return Response(resp.content, resp.status_code, response_headers)
+                # 如果 115 获取失败，同样重定向回 Emby，彻底不做 Python 转发
+                target_url = f"{base_url}/{path.lstrip('/')}?api_key={api_key}"
+                logger.info(f"[STREAM] 115 失败，客户端重定向至 Emby 备用地址")
+                return redirect(target_url, code=302)
         
         # ====================================================================
         # ★★★ 终极拦截 G: PlaybackInfo 智能劫持 (完美兼容版) ★★★
