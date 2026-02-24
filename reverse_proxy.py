@@ -786,24 +786,78 @@ def proxy_all(path):
         
         # ====================================================================
         # ★★★ 拦截 H: 视频流请求 (stream.mkv, stream.mp4, original.mp4 等) ★★★
+        # 
+        # 新方案：让浏览器直接请求 115 直链
+        # 1. 拦截视频请求
+        # 2. 调用 PlaybackInfo 获取 MediaSource
+        # 3. 提取 115 pick_code，获取真实直链
+        # 4. 返回 302 重定向到 115 直链
         # ====================================================================
         if '/videos/' in path and ('/stream.' in path or '/original.' in path):
             logger.info(f"[STREAM] 进入视频流拦截，path={path}")
             
-            # 尝试从请求参数中获取 MediaSourceId
+            # 从路径提取 item_id
+            # /emby/videos/554781/original.mp4 -> item_id = 554781
+            parts = path.split('/')
+            item_id = parts[2] if len(parts) > 2 else ''
+            logger.info(f"[STREAM] 提取到 item_id: {item_id}")
+            
+            # 需要获取 MediaSourceId 来获取正确的 MediaSource
             media_source_id = request.args.get('MediaSourceId', '')
-            item_id = path.split('/')[2] if '/videos/' in path else ''
+            play_session_id = request.args.get('PlaySessionId', '')
             
-            # 如果有 MediaSourceId，尝试从中提取 115 pick_code
-            if media_source_id and 'mediasource_' in media_source_id:
-                # 尝试从缓存或数据库获取对应的 pick_code
-                # 这里我们可以直接从路径中提取 item_id 然后查询 115 直链
-                logger.info(f"[STREAM] 尝试获取 item {item_id} 的 115 直链...")
+            # 如果有 MediaSourceId，优先使用它来获取 115 直链
+            if media_source_id:
+                # 方法1：如果有 MediaSourceId，直接调用 PlaybackInfo 获取
+                logger.info(f"[STREAM] 使用 MediaSourceId: {media_source_id}")
             
-            # 转发到真实 Emby 获取响应
-            base_url, api_key = _get_real_emby_url_and_key()
+            # 尝试调用 PlaybackInfo 获取 MediaSource
+            try:
+                base_url, api_key = _get_real_emby_url_and_key()
+                
+                # 构建 PlaybackInfo 请求
+                playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
+                params = {
+                    'api_key': api_key,
+                    'UserId': request.args.get('UserId', ''),
+                    'MaxStreamingBitrate': 140000000,
+                    'PlaySessionId': play_session_id,
+                }
+                
+                # 添加原始请求头
+                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+                forward_headers['Host'] = urlparse(base_url).netloc
+                
+                logger.info(f"[STREAM] 调用 PlaybackInfo: {playback_info_url}")
+                resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for source in data.get('MediaSources', []):
+                        strm_url = source.get('Path', '')
+                        logger.info(f"[STREAM] MediaSource Path: {strm_url[:100] if strm_url else 'N/A'}")
+                        
+                        # 找到 115 直链
+                        if isinstance(strm_url, str) and '/api/p115/play/' in strm_url:
+                            pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
+                            player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+                            client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+                            real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
+                            
+                            if real_115_url:
+                                logger.info(f"[STREAM] 获取到 115 直链: {real_115_url[:60]}...")
+                                # 返回 302 重定向到 115 直链
+                                return Response('', status=302, headers={'Location': real_115_url})
+                
+                logger.warning(f"[STREAM] PlaybackInfo 调用失败: {resp.status_code}")
+                
+            except Exception as e:
+                logger.error(f"[STREAM] 获取 115 直链失败: {e}")
+            
+            # 如果获取失败，回退到原来的方式
+            logger.info(f"[STREAM] 回退到转发模式")
+            
             target_url = f"{base_url}/{path.lstrip('/')}"
-            
             forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
             forward_headers['Host'] = urlparse(base_url).netloc
             forward_params = request.args.copy()
@@ -816,9 +870,7 @@ def proxy_all(path):
             # 如果返回 302 重定向，检查是否是 115 直链
             if resp.status_code in [301, 302]:
                 redirect_url = resp.headers.get('Location', '')
-                logger.info(f"[STREAM] 原始重定向: {redirect_url}")
                 
-                # 如果重定向到 /api/p115/play/，我们需要拦截并替换
                 if '/api/p115/play/' in redirect_url:
                     pick_code = redirect_url.split('/play/')[-1].split('?')[0].strip()
                     player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
@@ -827,15 +879,11 @@ def proxy_all(path):
                     
                     if real_115_url:
                         logger.info(f"[STREAM] 拦截 115 重定向: {real_115_url[:60]}...")
-                        # 返回 302 重定向到真实的 115 直链
                         return Response('', status=302, headers={'Location': real_115_url})
             
-            # 如果 Emby 返回的是内部路径（不是 302），可能需要从 Emby 获取 MediaSources
-            # 但这比较复杂，暂时透传错误
             if resp.status_code >= 400:
                 logger.error(f"[STREAM] Emby 返回错误: {resp.status_code}, {resp.text[:200]}")
             
-            # 透传其他响应
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_resp_headers]
             return Response(resp.content, resp.status_code, response_headers)
