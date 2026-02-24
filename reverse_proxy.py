@@ -846,10 +846,16 @@ def proxy_all(path):
                 
                 resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=10)
                 
+                # 调试：打印原始响应中的 MediaSources
                 if resp.status_code == 200 and 'application/json' in resp.headers.get('Content-Type', ''):
                     data = resp.json()
                     modified = False
                     
+                    # 调试日志：打印所有 MediaSource 的 Path
+                    for idx, source in enumerate(data.get('MediaSources', [])):
+                        strm_url = source.get('Path', '')
+                        logger.info(f"  🔍 [调试] MediaSource[{idx}] Path: {strm_url[:100] if strm_url else 'N/A'}...")
+                        
                     for source in data.get('MediaSources', []):
                         strm_url = source.get('Path', '')
                         if isinstance(strm_url, str) and '/api/p115/play/' in strm_url:
