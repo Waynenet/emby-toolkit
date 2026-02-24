@@ -69,7 +69,7 @@ def list_115_directories():
     
     try:
         # nf=1: 只返回文件夹
-        resp = client.fs_files_app({
+        resp = client.fs_files({
             'cid': cid, 
             'limit': 1000, 
             'asc': 1, 
