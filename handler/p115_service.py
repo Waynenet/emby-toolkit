@@ -599,7 +599,7 @@ class SmartOrganizer:
             time.sleep(1.5) 
             
             # limit 调大一点，防止文件过多漏掉
-            res = self.client.fs_files({'cid': cid, 'limit': 2000})
+            res = self.client.fs_files({'cid': cid, 'limit': 50})
             if res.get('data'):
                 for item in res['data']:
                     # 如果是文件 (有 fid)
@@ -1090,10 +1090,11 @@ def task_scan_and_organize_115(processor=None):
         save_cid = int(cid_val)
         save_name = str(save_val)
 
-        # 1. 准备 '未识别' 目录 
+        # 1. 准备 '未识别' 目录
         unidentified_folder_name = "未识别"
         unidentified_cid = None
         try:
+            time.sleep(1.5) # ★ 防风控：查未识别目录前先睡一下
             search_res = client.fs_files({'cid': save_cid, 'search_value': unidentified_folder_name, 'limit': 1})
             if search_res.get('data'):
                 for item in search_res['data']:
@@ -1105,16 +1106,29 @@ def task_scan_and_organize_115(processor=None):
         if not unidentified_cid:
             try:
                 mk_res = client.fs_mkdir(unidentified_folder_name, save_cid)
-                if mk_res.get('state'):
-                    unidentified_cid = mk_res.get('cid')
+                if mk_res.get('state'): unidentified_cid = mk_res.get('cid')
             except: pass
 
-        # 2. 扫描目录
         logger.info(f"  🔍 正在扫描目录: {save_name} ...")
-        res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+        
+        # =================================================================
+        # ★★★ 终极防风控：带退避重试的主目录扫描 ★★★
+        # =================================================================
+        res = {}
+        for retry in range(3):
+            try:
+                time.sleep(2) # 每次请求前强制休眠 2 秒
+                res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+                break # 成功则跳出重试循环
+            except Exception as e:
+                if '405' in str(e) or 'Method Not Allowed' in str(e):
+                    logger.warning(f"  ⚠️ 扫描主目录触发 115 风控拦截 (405)，休眠 5 秒后重试 ({retry+1}/3)...")
+                    time.sleep(5) # 被拦截了就多睡一会儿，让 WAF 冷静一下
+                else:
+                    raise # 其他严重错误直接抛出
 
         if not res.get('data'):
-            logger.info(f"  📂 [{save_name}] 目录为空。")
+            logger.info(f"  📂 [{save_name}] 目录为空或获取失败。")
             return
 
         processed_count = 0
@@ -1123,51 +1137,55 @@ def task_scan_and_organize_115(processor=None):
         for item in res['data']:
             name = item.get('n')
             item_id = item.get('fid') or item.get('cid')
-            is_folder = not item.get('fid') # 判断是否为文件夹
+            is_folder = not item.get('fid')
 
             if str(item_id) == str(unidentified_cid) or name == unidentified_folder_name:
                 continue
 
             forced_type = None
-            peek_failed = False  # ★ 新增：透视失败标志位
+            peek_failed = False
 
             if is_folder:
-                try:
-                    # ★ 修复1：透视前强制休眠 1.5 秒，防止连续透视触发 405 风控
-                    time.sleep(1.5)
-                    
-                    # 偷看一眼文件夹里面的内容 (取前20个足矣)
-                    sub_res = client.fs_files({'cid': item.get('cid'), 'limit': 20})
-                    if sub_res.get('data'):
-                        for sub_item in sub_res['data']:
-                            sub_name = sub_item.get('n', '')
-                            # 只要包含 Season XX, S01, EP01, 第X季，就是电视剧
-                            if re.search(r'(Season\s?\d+|S\d+|Ep?\d+|第\d+季)', sub_name, re.IGNORECASE):
-                                forced_type = 'tv'
-                                logger.info(f"  🕵️‍♂️ [结构探测] 目录 '{name}' 包含子项 '{sub_name}' -> 判定为 TV")
-                                break
-                except Exception as e:
-                    logger.warning(f"  ⚠️ 目录透视失败 (可能触发115风控): {e}")
-                    peek_failed = True # ★ 标记透视失败
+                # =================================================================
+                # ★★★ 终极防风控：带退避重试的子目录透视 ★★★
+                # =================================================================
+                for retry in range(2):
+                    try:
+                        time.sleep(2) # 透视前强制休眠 2 秒
+                        sub_res = client.fs_files({'cid': item.get('cid'), 'limit': 20})
+                        if sub_res.get('data'):
+                            for sub_item in sub_res['data']:
+                                sub_name = sub_item.get('n', '')
+                                if re.search(r'(Season\s?\d+|S\d+|Ep?\d+|第\d+季)', sub_name, re.IGNORECASE):
+                                    forced_type = 'tv'
+                                    break
+                        peek_failed = False
+                        break # 成功跳出
+                    except Exception as e:
+                        if '405' in str(e) or 'Method Not Allowed' in str(e):
+                            logger.warning(f"  ⚠️ 透视目录 '{name}' 触发风控，休眠 3 秒后重试 ({retry+1}/2)...")
+                            time.sleep(3)
+                            peek_failed = True # 如果最后一次还是失败，保持 True
+                        else:
+                            peek_failed = True
+                            break
 
-            # ★ 修复2：如果透视失败，直接放弃识别，保留在原目录等待下次重试
             if peek_failed:
-                logger.warning(f"  ⏭️ 跳过对 '{name}' 的识别，等待下次重试。")
+                logger.warning(f"  ⏭️ 透视 '{name}' 连续失败，为防误判跳过本次识别。")
                 continue
 
-            # 3. 识别 (传入 forced_type)
             tmdb_id, media_type, title = _identify_media_enhanced(name, forced_media_type=forced_type)
             
             if tmdb_id:
                 logger.info(f"  ➜ 识别成功: {name} -> ID:{tmdb_id} ({media_type})")
                 try:
-                    # 4. 归类
                     organizer = SmartOrganizer(client, tmdb_id, media_type, title)
                     target_cid = organizer.get_target_cid()
+                    
+                    # ★ 兜底逻辑：禁止 execute 内部删除，由外部判断时间
                     if organizer.execute(item, target_cid, delete_source=False):
                         processed_count += 1
-
-                        # 5. 延迟清理逻辑 (仅针对文件夹)
+                        
                         if is_folder:
                             update_time_str = item.get('te') or item.get('tp') or '0'
                             try:
@@ -1183,9 +1201,7 @@ def task_scan_and_organize_115(processor=None):
                 except Exception as e:
                     logger.error(f"  ❌ 整理出错: {e}")
             else:
-                # 5. 识别失败 -> 移动到 '未识别'
                 if unidentified_cid:
-                    logger.info(f"  ⚠️ 无法识别: {name} -> 移动到 '未识别'")
                     try:
                         client.fs_move(item_id, unidentified_cid)
                         moved_to_unidentified += 1
