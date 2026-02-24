@@ -796,10 +796,20 @@ def proxy_all(path):
             if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent:
                 is_browser = False
 
-            # --- 修改点：如果是浏览器，直接彻底跳过拦截 H 的所有逻辑 ---
             if is_browser:
-                logger.info(f"[STREAM] 识别为浏览器，彻底跳过拦截H，交给脚本末尾的全局流式转发处理")
-                # 这里什么都不做，不要 return，让它滑出这个 if 块
+                # 【核心修改】浏览器请求不再转发，直接 302 重定向给 Emby 原生地址
+                # 拼接 Emby 原生视频地址
+                target_url = f"{base_url}/{path.lstrip('/')}"
+                # 携带原始参数（包含 api_key 等）
+                forward_params = request.args.copy()
+                forward_params['api_key'] = api_key
+                
+                # 构造带参数的重定向 URL
+                from urllib.parse import urlencode
+                redirect_target = f"{target_url}?{urlencode(forward_params)}"
+                
+                logger.info(f"[STREAM] 浏览器请求，直接 302 重定向至 Emby 后端: {redirect_target[:60]}...")
+                return redirect(redirect_target, code=302)
             else:
                 # 只有本地客户端（非浏览器）才走这个逻辑
                 parts = path.split('/')
