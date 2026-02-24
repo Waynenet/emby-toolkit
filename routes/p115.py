@@ -170,7 +170,7 @@ api_limiter = RateLimiter(max_requests=3, period=2)
 # 全局解析锁：确保同一时间只有一个线程在请求 115 API，防止并发冲突
 fetch_lock = threading.Lock()
 
-# 用于存储已解析的 URL，配合 lru_cache 使用
+# 用于存储已解析的 URL，缓存键只用 pick_code（115 直链与 UA 无关）
 _url_cache = {}
 
 def _get_cached_115_url(pick_code, user_agent, client_ip=None):
@@ -178,8 +178,8 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     带缓存的 115 直链获取器
     支持区分缓存命中和首次获取
     """
-    # 构建缓存键
-    cache_key = (pick_code, user_agent, client_ip)
+    # ★ 修复：缓存键只用 pick_code，115 直链 URL 与 UA 无关
+    cache_key = pick_code
     
     # 先检查缓存（不打印日志）
     if cache_key in _url_cache:
@@ -199,7 +199,7 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     with fetch_lock:
         # 二次检查缓存（可能在锁等待期间被其他线程填充）
         if cache_key in _url_cache and _url_cache[cache_key]:
-            logger.debug(f"  📥 [115直链] 命中缓存: {pick_code[:8]}...")
+            logger.info(f"  🎬 [115直链] 缓存命中: {cache_key}")
             return _url_cache[cache_key]
         
         # 这里的限流逻辑：如果令牌不足，直接等待或返回
