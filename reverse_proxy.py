@@ -1,4 +1,4 @@
-# reverse_proxy.py (最终完美版 V5 - 实时架构适配)
+# reverse_proxy.py (最终完美版 V5 - 实时架构适配 + CORS修复)
 
 import logging
 import requests
@@ -732,6 +732,24 @@ def handle_get_latest_items(user_id, params):
         return Response(json.dumps([]), mimetype='application/json')
 
 proxy_app = Flask(__name__)
+
+# ====================================================================
+# ★★★ CORS 中间件 - 修复浏览器播放跨域报错 ★★★
+# ====================================================================
+# 添加CORS支持，允许浏览器在播放115直链时不会因跨域而被阻止
+@proxy_app.after_request
+def add_cors_headers(response):
+    """
+    为所有响应添加CORS头，解决浏览器播放115直链时的跨域报错问题。
+    特别是当PlaybackInfo被修改注入了115直链(RemoteUrl)后，浏览器需要能够访问这个外部URL。
+    """
+    # 允许所有来源访问（这是合理的，因为Emby本身就需要对外暴露）
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, HEAD'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Emby-Authorization, X-Real-IP, Client'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Length, Content-Range, Content-Type'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    return response
 
 @proxy_app.route('/', defaults={'path': ''})
 @proxy_app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'])
