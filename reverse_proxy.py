@@ -785,10 +785,20 @@ def proxy_all(path):
         logger.info(f"[PROXY] 请求路径: {full_path}")
         
         # ====================================================================
-        # ★★★ 拦截 H: 视频流请求 (stream.mkv, stream.mp4 等) ★★★
+        # ★★★ 拦截 H: 视频流请求 (stream.mkv, stream.mp4, original.mp4 等) ★★★
         # ====================================================================
-        if '/videos/' in path and '/stream.' in path:
+        if '/videos/' in path and ('/stream.' in path or '/original.' in path):
             logger.info(f"[STREAM] 进入视频流拦截，path={path}")
+            
+            # 尝试从请求参数中获取 MediaSourceId
+            media_source_id = request.args.get('MediaSourceId', '')
+            item_id = path.split('/')[2] if '/videos/' in path else ''
+            
+            # 如果有 MediaSourceId，尝试从中提取 115 pick_code
+            if media_source_id and 'mediasource_' in media_source_id:
+                # 尝试从缓存或数据库获取对应的 pick_code
+                # 这里我们可以直接从路径中提取 item_id 然后查询 115 直链
+                logger.info(f"[STREAM] 尝试获取 item {item_id} 的 115 直链...")
             
             # 转发到真实 Emby 获取响应
             base_url, api_key = _get_real_emby_url_and_key()
@@ -819,6 +829,11 @@ def proxy_all(path):
                         logger.info(f"[STREAM] 拦截 115 重定向: {real_115_url[:60]}...")
                         # 返回 302 重定向到真实的 115 直链
                         return Response('', status=302, headers={'Location': real_115_url})
+            
+            # 如果 Emby 返回的是内部路径（不是 302），可能需要从 Emby 获取 MediaSources
+            # 但这比较复杂，暂时透传错误
+            if resp.status_code >= 400:
+                logger.error(f"[STREAM] Emby 返回错误: {resp.status_code}, {resp.text[:200]}")
             
             # 透传其他响应
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
