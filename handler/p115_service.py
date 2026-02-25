@@ -256,13 +256,6 @@ class P115Service:
                 self._openapi = openapi_client
                 self._cookie = cookie_client
 
-            # 暴露底层的原生客户端，供极速遍历工具使用
-            @property
-            def raw_client(self):
-                if self._cookie and hasattr(self._cookie, 'webapi'):
-                    return self._cookie.webapi
-                return None
-
             def _check_openapi(self):
                 if not self._openapi:
                     raise Exception("未配置 115 Token (OpenAPI)，无法执行管理操作")
@@ -1074,8 +1067,12 @@ class SmartOrganizer:
                                                 break
                                     
                                     if found_root and start_idx < len(path_nodes):
-                                        rel_segments = [str(n.get('file_name') or n.get('fn')).strip() for n in path_nodes[start_idx:]]
-                                        relative_category_path = "/".join(rel_segments)
+                                        rel_segments = []
+                                        for n in path_nodes[start_idx:]:
+                                            node_name = n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')
+                                            if node_name:
+                                                rel_segments.append(str(node_name).strip())
+                                        relative_category_path = "/".join(rel_segments) if rel_segments else category_rule.get('dir_name', '未识别')
                                     else:
                                         relative_category_path = category_rule.get('dir_name', '未识别')
                                         
@@ -1630,8 +1627,12 @@ def task_full_sync_strm_and_subs(processor=None):
                                 break
                     
                     if found_root and start_idx < len(path_nodes):
-                        rel_segments = [str(n.get('file_name') or n.get('fn')).strip() for n in path_nodes[start_idx:]]
-                        calculated_path = "/".join(rel_segments)
+                        rel_segments = []
+                        for n in path_nodes[start_idx:]:
+                            node_name = n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')
+                            if node_name:
+                                rel_segments.append(str(node_name).strip())
+                        calculated_path = "/".join(rel_segments) if rel_segments else r.get('dir_name', '未识别')
                     else:
                         calculated_path = r.get('dir_name', '未识别')
                         
@@ -1712,101 +1713,49 @@ def task_full_sync_strm_and_subs(processor=None):
                         logger.error(f"下载字幕失败 [{name}]: {e}")
 
     # ==========================================
-    # 2. 遍历执行
+    # 2. 遍历执行 (纯净稳定递归版)
     # ==========================================
     total_cids = len(target_cids)
     for idx, base_cid in enumerate(target_cids):
         base_prog = int((idx / total_cids) * 100)
-        # 修复日志打印 None 的小问题
         category_rel_path = cid_to_rel_path.get(base_cid) or "未识别"
         update_progress(base_prog, f"  ➜ 正在同步层级: {category_rel_path} (CID: {base_cid}) ...")
         
-        items_yielded = 0
         files_generated = 0
         
-        # A. 优先尝试极速遍历
+        def reliable_recursive_scan(cid, current_parts):
+            offset = 0
+            limit = 1000
+            while True:
+                if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
+                
+                # 底层 StrictSplitClient 已经自带 0.5 秒匀速锁，这里直接调就行，绝对不会 405
+                res = client.fs_files({'cid': cid, 'limit': limit, 'offset': offset, 'record_open_time': 0, 'count_folders': 0})
+                data = res.get('data', [])
+                if not data: break
+                
+                for item in data:
+                    fc_val = item.get('fc') if item.get('fc') is not None else item.get('type')
+                    if str(fc_val) == '1':
+                        process_file_info(item, current_parts, base_cid)
+                    elif str(fc_val) == '0':
+                        sub_name = item.get('fn') or item.get('n') or item.get('file_name') or item.get('name', '')
+                        sub_cid = item.get('fid') or item.get('file_id') or item.get('cid')
+                        if sub_cid and sub_name:
+                            reliable_recursive_scan(sub_cid, current_parts + [sub_name])
+                            
+                if len(data) < limit: break
+                offset += limit
+        
         try:
-            from p115client.tool.iterdir import iter_files_with_path_skim
-            
-            # ★★★ 核心修复：提取原生客户端喂给极速工具 ★★★
-            raw_p115_client = getattr(client, 'raw_client', None)
-            if not raw_p115_client:
-                raise Exception("无法获取底层 P115Client (可能未配置 Cookie)，极速模式不可用")
-            
-            iterator = iter_files_with_path_skim(
-                raw_p115_client, # 使用原生客户端，绕过我们自己加的 0.5 秒限速锁
-                int(base_cid), 
-                with_ancestors=True, 
-                max_workers=1 
-            )
-            
-            for info in iterator:
-                if processor and getattr(processor, 'is_stop_requested', lambda: False)():
-                    update_progress(100, "任务已被用户手动终止。")
-                    return
-                
-                # 只有带 fid 的才是文件，文件夹不参与 process_file_info
-                fid = info.get('fid') or info.get('id')
-                if not fid or info.get('ico') == 'folder':
-                    continue
-
-                items_yielded += 1
-                
-                ancestors = info.get('ancestors', [])
-                rel_path_parts = []
-                
-                if isinstance(ancestors, list) and len(ancestors) > 0:
-                    found_base = False
-                    for node in ancestors:
-                        node_id = str(node.get('id') or node.get('cid', ''))
-                        
-                        # 找到规则配置的根 CID
-                        if node_id == str(base_cid):
-                            found_base = True
-                            continue
-                        
-                        if found_base:
-                            node_name = str(node.get('name', '')).strip()
-                            if node_id != str(fid) and node_name:
-                                rel_path_parts.append(node_name)
-                
-                file_real_name = info.get('n') or info.get('name', '')
-                if rel_path_parts and rel_path_parts[-1] == file_real_name:
-                    rel_path_parts.pop()
-
-                process_file_info(info, rel_path_parts, base_cid)
-                
+            reliable_recursive_scan(base_cid, [])
         except Exception as e:
-            logger.warning(f"  ⚠️ 极速遍历异常 CID:{base_cid} - 错误详情: {repr(e)}")
-
-        # B. 自动降级：如果极速模式没出货，启动标准递归
-        if items_yielded == 0:
-            logger.warning(f"  ⚠️ 极速遍历未发现文件，正在使用标准递归扫描...")
-            def reliable_recursive_scan(cid, current_parts):
-                offset = 0
-                limit = 1000
-                while True:
-                    if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
-                    res = client.fs_files({'cid': cid, 'limit': limit, 'offset': offset, 'record_open_time': 0, 'count_folders': 0})
-                    data = res.get('data', [])
-                    if not data: break
-                    for item in data:
-                        if str(item.get('fc')) == '1':
-                            process_file_info(item, current_parts, base_cid)
-                        elif str(item.get('fc')) == '0':
-                            reliable_recursive_scan(item.get('fid'), current_parts + [item.get('fn')])
-                    if len(data) < limit: break
-                    offset += limit
+            logger.error(f"  ❌ 标准扫描异常 CID:{base_cid}: {e}")
             
-            try:
-                reliable_recursive_scan(base_cid, [])
-            except Exception as e:
-                logger.error(f"标准扫描异常 CID:{base_cid}: {e}")
-                
         logger.info(f"  ✅ [{category_rel_path}] 同步完成，处理文件: {files_generated}")
         if files_generated > 0:
             successful_cids.add(base_cid)
-        # ==========================================
+    # ==========================================
     # ★ 新增：安全的本地清理逻辑 (放在 for 循环外面，函数的末尾)
     # ==========================================
     if enable_cleanup:

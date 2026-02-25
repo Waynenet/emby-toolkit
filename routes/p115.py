@@ -437,12 +437,17 @@ def handle_sorting_rules():
                                     break
                         
                         if found_root and start_idx < len(path_nodes):
-                            # 官方文档：paths 数组里返回的是 file_name
-                            rel_segments = [str(n.get('file_name') or n.get('fn')).strip() for n in path_nodes[start_idx:]]
-                            rule['category_path'] = "/".join(rel_segments)
+                            # ★ 修复：兼容所有可能的键名，并防止 str(None) 变成 "None"
+                            rel_segments = []
+                            for n in path_nodes[start_idx:]:
+                                node_name = n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')
+                                if node_name:
+                                    rel_segments.append(str(node_name).strip())
+                            
+                            rule['category_path'] = "/".join(rel_segments) if rel_segments else rule.get('dir_name', '未识别')
                         else:
                             # 兜底：如果层级异常或没找到根目录，用规则里配的名称
-                            rule['category_path'] = rule.get('dir_name', '')
+                            rule['category_path'] = rule.get('dir_name', '未识别')
                             
                         logger.info(f"  📂 已为规则 '{rule.get('name')}' 自动计算并保存路径: {rule.get('category_path')}")
                         
