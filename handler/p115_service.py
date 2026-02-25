@@ -1368,19 +1368,20 @@ def task_scan_and_organize_115(processor=None):
 
             if is_folder:
                 # =================================================================
-                # ★★★ 子目录透视：开启 nf=1 (仅看文件夹) 极大降低负载 ★★★
+                # ★★★ 子目录透视：扫描前20个项目(包含文件和文件夹)来判断是否为剧集 ★★★
                 # =================================================================
                 for retry in range(2):
                     try:
                         time.sleep(2)
                         sub_res = client.fs_files({
-                            'cid': item.get('cid'), 'limit': 20, 
-                            'nf': 1, # ★ 核心优化：只返回文件夹，不返回文件
+                            'cid': item_id, 'limit': 20, # ★ 修复1: 使用 item_id 作为目标目录
                             'record_open_time': 0, 'count_folders': 0
+                            # ★ 修复2: 移除 'nf': 1，允许读取视频文件，兼容没有季文件夹的扁平剧集
                         })
                         if sub_res.get('data'):
                             for sub_item in sub_res['data']:
-                                sub_name = sub_item.get('fn', '')
+                                # ★ 修复3: 兼容 OpenAPI 键名
+                                sub_name = sub_item.get('fn') or sub_item.get('n') or sub_item.get('file_name', '')
                                 if re.search(r'(Season\s?\d+|S\d+|Ep?\d+|第\d+季)', sub_name, re.IGNORECASE):
                                     forced_type = 'tv'
                                     break
