@@ -63,8 +63,6 @@ def _generate_qrcode():
         resp = requests.post(url, data=payload, headers=headers, timeout=10)
         result = resp.json()
         
-        logger.info(f"115扫码二维码响应: {result}")
-        
         if result.get('state'):
             qr_data = result.get('data', {})
             _qrcode_data['qrcode'] = qr_data.get('qrcode')
@@ -99,8 +97,6 @@ def _check_qrcode_status():
         resp = requests.get(url, params=params, timeout=30)
         result = resp.json()
         
-        logger.info(f"115二维码状态响应: {result}")
-        
         state = result.get('state')
         
         # state=0 表示二维码无效/过期
@@ -128,8 +124,6 @@ def _check_qrcode_status():
                 token_resp = requests.post(token_url, data=token_payload, headers=token_headers, timeout=10)
                 token_result = token_resp.json()
                 
-                logger.info(f"115 Token响应: {token_result}")
-                
                 if token_result.get('state'):
                     token_data = token_result.get('data', {})
                     access_token = token_data.get('access_token')
@@ -144,8 +138,6 @@ def _check_qrcode_status():
                         user_headers = {"Authorization": f"Bearer {access_token}"}
                         user_resp = requests.get(user_info_url, headers=user_headers, timeout=10)
                         user_result = user_resp.json()
-                        
-                        logger.info(f"115用户信息响应: {user_result}")
                         
                         # 构造 cookies 格式 (UID=...; CID=...; SEID=...)
                         # 从 access_token 解析或直接使用
@@ -528,7 +520,7 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
                 # download_url 现在返回直链字符串
                 direct_url = str(url_obj)
                 # 首次获取日志
-                logger.info(f"  🎬 [115直链] 获取成功: {pick_code[:8]}...")
+                logger.info(f"  🎬 [115直链] 获取成功: {url_obj.name}")
                 # 存入缓存，115 直链通常几小时失效，这里设置缓存 2 小时 (7200秒)
                 _url_cache[cache_key] = {"url": direct_url, "expire_at": now + 7200}
                 return direct_url

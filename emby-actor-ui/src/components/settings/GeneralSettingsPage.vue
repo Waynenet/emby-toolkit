@@ -1007,8 +1007,8 @@
       <n-alert type="success" :show-icon="true" style="margin-bottom: 16px;">
         <b>Cookie 说明：</b><br>
         1. 用于播放：获取直链<br>
-        2. 可解决部分 403 封禁问题<br>
-        3. 强烈推荐配置
+        2. 可解决官方接口 403 封禁问题<br>
+        3. 302必须配置，建议用不大助手扫码获取
       </n-alert>
       
       <n-form-item label="Cookie (网页端身份)">

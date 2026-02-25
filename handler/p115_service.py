@@ -172,7 +172,7 @@ class P115Service:
                 try:
                     cls._openapi_client = P115OpenAPIClient(token)
                     cls._token_cache = token
-                    logger.info("  🚀 [115] OpenAPI 客户端已初始化 (Token 模式)")
+                    logger.info("  🚀 [115] OpenAPI 客户端已初始化 (整理用)")
                 except Exception as e:
                     logger.error(f"  ❌ 115 OpenAPI 客户端初始化失败: {e}")
                     cls._openapi_client = None
@@ -193,7 +193,7 @@ class P115Service:
                 try:
                     cls._cookie_client = P115CookieClient(cookie)
                     cls._cookie_cache = cookie
-                    logger.info("  🚀 [115] Cookie 客户端已初始化 (播放模式)")
+                    logger.info("  🚀 [115] Cookie 客户端已初始化 (播放用)")
                 except Exception as e:
                     logger.error(f"  ❌ 115 Cookie 客户端初始化失败: {e}")
                     cls._cookie_client = None
@@ -985,6 +985,9 @@ class SmartOrganizer:
                                 break
                         if not category_name: category_name = "未识别"
 
+                        # ==================================================
+                        # ★ 动态计算并缓存分类路径 (category_path)
+                        # ==================================================
                         category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
                         relative_category_path = "未识别"
                         
@@ -993,7 +996,7 @@ class SmartOrganizer:
                                 relative_category_path = category_rule['category_path']
                                 logger.debug(f"  ⚡ [规则缓存] 命中分类路径: '{relative_category_path}'")
                             else:
-                                # 缓存未命中，动态计算
+                                # 缓存未命中，动态计算 (完全对齐 routes/p115.py 的逻辑)
                                 logger.info(f"  🔍 [规则缓存] 未命中路径缓存，正在向 115 请求计算层级...")
                                 media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
                                 try:
@@ -1555,7 +1558,7 @@ def task_full_sync_strm_and_subs(processor=None):
             if 'category_path' in r and r['category_path']:
                 cid_to_rel_path[cid] = r['category_path']
             else:
-                # 缓存未命中，动态计算
+                # 缓存未命中，动态计算 (完全对齐 routes/p115.py 的逻辑)
                 logger.info(f"  🔍 [规则缓存] CID:{cid} 未命中路径缓存，正在计算...")
                 try:
                     dir_info = client.fs_files({'cid': cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
