@@ -941,6 +941,7 @@
       <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
         建议用不大助手获取。
         <br>格式通常为: UID=...; CID=...; SEID=...
+        <br>或者点击右侧按钮使用扫码登录
       </n-alert>
       <n-form-item label="Cookies 内容" :show-feedback="false">
         <n-input 
@@ -952,10 +953,63 @@
         />
       </n-form-item>
       <template #footer>
-        <n-space justify="end">
-          <n-button @click="showCookieModal = false">取消</n-button>
-          <n-button type="primary" @click="confirmCookies">确定</n-button>
+        <n-space justify="space-between" style="width: 100%;">
+          <n-button type="primary" secondary @click="openQrcodeModal">
+            <template #icon><n-icon><QrCodeOutline /></n-icon></template>
+            扫码登录
+          </n-button>
+          <n-space>
+            <n-button @click="showCookieModal = false">取消</n-button>
+            <n-button type="primary" @click="confirmCookies">确定</n-button>
+          </n-space>
         </n-space>
+      </template>
+    </n-modal>
+
+    <!-- ★★★ 新增：115 扫码登录弹窗 ★★★ -->
+    <n-modal v-model:show="showQrcodeModal" preset="card" title="115 扫码登录" style="width: 350px;" :mask-closable="false">
+      <div style="text-align: center; padding: 20px 0;">
+        <!-- 加载中状态 -->
+        <n-spin v-if="qrcodeStatus === 'loading'" size="large">
+          <template #description>正在获取二维码...</template>
+        </n-spin>
+        
+        <!-- 二维码显示 -->
+        <div v-else-if="qrcodeStatus === 'waiting' || qrcodeStatus === 'success'">
+          <n-qr-code 
+            v-if="qrcodeUrl" 
+            :value="qrcodeUrl" 
+            :size="200"
+            style="margin: 0 auto 20px;"
+          />
+          <n-alert v-if="qrcodeStatus === 'waiting'" type="info" :show-icon="true">
+            请使用 115 APP 扫描二维码登录
+          </n-alert>
+          <n-alert v-if="qrcodeStatus === 'success'" type="success" :show-icon="true">
+            登录成功！ Cookies 已自动保存
+          </n-alert>
+        </div>
+        
+        <!-- 过期状态 -->
+        <div v-else-if="qrcodeStatus === 'expired'">
+          <n-result status="warning" title="二维码已过期">
+            <template #footer>
+              <n-button type="primary" @click="openQrcodeModal">重新获取二维码</n-button>
+            </template>
+          </n-result>
+        </div>
+        
+        <!-- 错误状态 -->
+        <div v-else-if="qrcodeStatus === 'error'">
+          <n-result status="error" title="获取二维码失败">
+            <template #footer>
+              <n-button type="primary" @click="openQrcodeModal">重试</n-button>
+            </template>
+          </n-result>
+        </div>
+      </div>
+      <template #footer>
+        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'">关闭</n-button>
       </template>
     </n-modal>
     <!-- ★★★ 移植：115 目录选择器 Modal ★★★ -->
@@ -1405,7 +1459,8 @@ import {
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
   NFormItemGridItem, NCheckboxGroup, NCheckbox, NText, NRadioGroup, NRadio,
-  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip
+  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip,
+  NQrCode, NResult
 } from 'naive-ui';
 import { 
   DownloadOutline as ExportIcon, 
@@ -1425,7 +1480,8 @@ import {
   ListOutline as ListIcon, 
   CreateOutline as EditIcon,
   TrashOutline as DeleteIcon, 
-  Menu as DragHandleIcon
+  Menu as DragHandleIcon,
+  QrCodeOutline
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
@@ -1817,6 +1873,79 @@ const confirmCookies = () => {
   if (tempCookies.value) {
     check115Status();
   }
+};
+
+// ★★★ 115 扫码登录 Modal 逻辑 ★★★
+const showQrcodeModal = ref(false);
+const qrcodeUrl = ref('');
+const qrcodeStatus = ref('idle'); // idle, waiting, success, expired, error
+const qrcodeLoading = ref(false);
+const qrcodePolling = ref(null);
+
+const openQrcodeModal = async () => {
+  showQrcodeModal.value = true;
+  qrcodeStatus.value = 'loading';
+  qrcodeLoading.value = true;
+  
+  try {
+    const res = await axios.post('/api/p115/qrcode');
+    if (res.data && res.data.success) {
+      qrcodeUrl.value = res.data.data.qrcode;
+      qrcodeStatus.value = 'waiting';
+      startPolling();
+    } else {
+      qrcodeStatus.value = 'error';
+      message.error(res.data?.message || '获取二维码失败');
+    }
+  } catch (e) {
+    qrcodeStatus.value = 'error';
+    message.error('获取二维码失败: ' + (e.response?.data?.message || e.message));
+  } finally {
+    qrcodeLoading.value = false;
+  }
+};
+
+const startPolling = () => {
+  // 每2秒检查一次二维码状态
+  qrcodePolling.value = setInterval(async () => {
+    try {
+      const res = await axios.get('/api/p115/qrcode/status');
+      const data = res.data;
+      
+      if (data.status === 'success') {
+        // 登录成功
+        qrcodeStatus.value = 'success';
+        configModel.value.p115_cookies = data.cookies;
+        message.success('登录成功！');
+        stopPolling();
+        setTimeout(() => {
+          showQrcodeModal.value = false;
+          check115Status();
+        }, 1500);
+      } else if (data.status === 'expired') {
+        qrcodeStatus.value = 'expired';
+        message.warning('二维码已过期');
+        stopPolling();
+      }
+      // waiting 状态继续轮询
+    } catch (e) {
+      console.error('检查二维码状态失败', e);
+    }
+  }, 2000);
+};
+
+const stopPolling = () => {
+  if (qrcodePolling.value) {
+    clearInterval(qrcodePolling.value);
+    qrcodePolling.value = null;
+  }
+};
+
+const closeQrcodeModal = () => {
+  stopPolling();
+  showQrcodeModal.value = false;
+  qrcodeUrl.value = '';
+  qrcodeStatus.value = 'idle';
 };
 
 // 检查 115 状态

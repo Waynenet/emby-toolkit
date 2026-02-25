@@ -33,15 +33,49 @@ class P115OpenAPIClient:
         }
 
     def fs_files(self, payload):
-        """获取文件列表"""
+        """获取文件列表 - 官方API使用GET方法"""
         url = f"{self.base_url}/open/ufile/files"
-        # 官方接口默认参数
+        # 官方接口默认参数 - 使用Query参数
         params = {"show_dir": 1, "limit": 50, "offset": 0}
         if isinstance(payload, dict):
             params.update(payload)
         
-        resp = requests.get(url, params=params, headers=self.headers).json()
-        return resp
+        try:
+            resp = requests.get(url, params=params, headers=self.headers, timeout=30)
+            logger.debug(f"  📡 [115 OpenAPI] fs_files 请求: {url}, params: {params}")
+            logger.debug(f"  📡 [115 OpenAPI] fs_files 响应状态: {resp.status_code}")
+            if resp.status_code != 200:
+                logger.warning(f"  📡 [115 OpenAPI] fs_files 响应内容: {resp.text[:500]}")
+            json_resp = resp.json()
+            logger.debug(f"  📡 [115 OpenAPI] fs_files 响应: {json_resp}")
+            
+            # 官方API返回的字段与老库不同，需要转换
+            # fn->n, fc->file_category (0=folder, 1=file), pc->pickcode, fid->fid (文件夹也有fid!)
+            if json_resp.get("state") and json_resp.get("data"):
+                for item in json_resp["data"]:
+                    # 1. 文件名: fn -> n
+                    if 'fn' in item:
+                        item['n'] = item.get('fn')
+                    # 2. 文件ID: fid (保持不变，文件夹也有fid!)
+                    # 3. 文件分类: fc (0=文件夹, 1=文件)
+                    fc = item.get('fc')
+                    # ★★★ 关键修复：文件夹也有 fid！用 fc 来判断类型，而不是 fid 是否存在 ★★★
+                    if fc == '0' or fc == 0:
+                        # 文件夹：确保有 cid 字段（使用 fid 作为 cid）
+                        if 'cid' not in item:
+                            item['cid'] = item.get('fid')
+                    # 4. 文件大小: fs -> s
+                    if 'fs' in item and 's' not in item:
+                        item['s'] = item.get('fs')
+                    # 5. 提取码: pc (保持不变)
+                    # 6. 父目录ID: pid (保持不变)
+                    # 7. 添加调试日志
+                    logger.debug(f"  📂 [115] 转换后字段: n={item.get('n')}, fid={item.get('fid')}, cid={item.get('cid')}, fc={fc}")
+                    
+            return json_resp
+        except Exception as e:
+            logger.error(f"  ❌ [115 OpenAPI] fs_files 请求失败: {e}")
+            return {"state": False, "error_msg": str(e)}
 
     def fs_files_app(self, payload):
         """兼容旧代码的调用，直接转给 fs_files"""
@@ -83,14 +117,29 @@ class P115OpenAPIClient:
         """获取下载直链"""
         url = f"{self.base_url}/open/ufile/downurl"
         data = {"pick_code": str(pick_code)}
-        resp = requests.post(url, data=data, headers=self.headers).json()
         
-        if resp.get("state") and resp.get("data"):
-            # 官方返回的数据结构是 {"data": {"文件ID": {"url": "真实直链"}}}
-            for k, v in resp["data"].items():
-                if isinstance(v, dict) and "url" in v:
-                    return v["url"]
-        return None
+        # 添加 Content-Type
+        headers = dict(self.headers)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        
+        try:
+            resp = requests.post(url, data=data, headers=headers, timeout=30)
+            logger.debug(f"  🎬 [115 OpenAPI] download_url 请求: {url}, pick_code: {pick_code}")
+            logger.debug(f"  🎬 [115 OpenAPI] download_url 响应状态: {resp.status_code}")
+            if resp.status_code != 200:
+                logger.warning(f"  🎬 [115 OpenAPI] download_url 响应内容: {resp.text[:500]}")
+            json_resp = resp.json()
+            logger.debug(f"  🎬 [115 OpenAPI] download_url 响应: {json_resp}")
+            
+            if json_resp.get("state") and json_resp.get("data"):
+                # 官方返回的数据结构是 {"data": {"文件ID": {"url": "真实直链"}}}
+                for k, v in json_resp["data"].items():
+                    if isinstance(v, dict) and "url" in v:
+                        return v["url"]
+            return None
+        except Exception as e:
+            logger.error(f"  ❌ [115 OpenAPI] download_url 请求失败: {e}")
+            return None
 
 
 # ======================================================================

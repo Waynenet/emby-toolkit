@@ -7,14 +7,215 @@ import json
 import os
 import re
 import time
+import requests
 from flask import Blueprint, jsonify, request, redirect
 from extensions import admin_required
 from database import settings_db
 from handler.p115_service import P115Service, get_config
 import constants
 from functools import lru_cache, wraps
-p115_bp = Blueprint('p115_bp', __name__, url_prefix='/api/p115')
+
+# 115扫码登录相关变量 (OAuth 2.0 + PKCE 模式)
+_qrcode_data = {
+    "qrcode": None,        # 二维码内容
+    "uid": None,           # 设备码
+    "time": None,         # 时间戳
+    "sign": None,         # 签名
+    "code_verifier": None,# PKCE verifier
+    "access_token": None,  # 最终获取的 access_token
+    "refresh_token": None  # 刷新token
+}
+p115_bp = Blueprint('115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
+
+# --- 115扫码登录相关API (OAuth 2.0 + PKCE 模式) ---
+
+def _generate_pkce_pair():
+    """生成 PKCE 的 verifier 和 challenge"""
+    import base64
+    import os
+    import hashlib
+    
+    # 1. 生成 43~128 位的随机字符串 (code_verifier)
+    verifier = base64.urlsafe_b64encode(os.urandom(40)).decode('utf-8').rstrip('=')
+    
+    # 2. 计算 SHA256 并进行 Base64Url 编码 (code_challenge)
+    digest = hashlib.sha256(verifier.encode('ascii')).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode('utf-8').rstrip('=')
+    
+    return verifier, challenge
+
+def _generate_qrcode():
+    """生成115扫码登录二维码 (OAuth 2.0 + PKCE 新版API)"""
+    try:
+        # 1. 生成 PKCE 密钥对
+        verifier, challenge = _generate_pkce_pair()
+        
+        # 2. 调用获取二维码接口
+        url = "https://passportapi.115.com/open/authDeviceCode"
+        payload = {
+            "client_id": "100196261",  # 115开发者后台的AppID
+            "code_challenge": challenge,
+            "code_challenge_method": "sha256"
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        
+        resp = requests.post(url, data=payload, headers=headers, timeout=10)
+        result = resp.json()
+        
+        logger.info(f"115扫码二维码响应: {result}")
+        
+        if result.get('state'):
+            qr_data = result.get('data', {})
+            _qrcode_data['qrcode'] = qr_data.get('qrcode')
+            _qrcode_data['uid'] = qr_data.get('uid')
+            _qrcode_data['time'] = qr_data.get('time')
+            _qrcode_data['sign'] = qr_data.get('sign')
+            _qrcode_data['code_verifier'] = verifier
+            _qrcode_data['access_token'] = None
+            _qrcode_data['refresh_token'] = None
+            return qr_data
+        else:
+            logger.error(f"获取二维码失败: {result.get('message')}")
+            return None
+    except Exception as e:
+        logger.error(f"生成二维码失败: {e}")
+        return None
+
+def _check_qrcode_status():
+    """检查二维码扫码状态 (OAuth 2.0 + PKCE 新版API)"""
+    if not _qrcode_data.get('uid') or not _qrcode_data.get('time'):
+        return {"status": "waiting", "message": "请先获取二维码"}
+    
+    try:
+        # 1. 先轮询二维码状态
+        url = "https://qrcodeapi.115.com/get/status/"
+        params = {
+            "uid": _qrcode_data.get('uid'),
+            "time": _qrcode_data.get('time'),
+            "sign": _qrcode_data.get('sign')
+        }
+        
+        resp = requests.get(url, params=params, timeout=30)
+        result = resp.json()
+        
+        logger.info(f"115二维码状态响应: {result}")
+        
+        state = result.get('state')
+        
+        # state=0 表示二维码无效/过期
+        if state == 0:
+            return {"status": "expired", "message": "二维码已过期，请重新获取"}
+        
+        # state=1 需要看 status 字段
+        if state == 1:
+            data = result.get('data', {})
+            status = data.get('status')
+            
+            if status == 1:
+                # 已扫码，等待确认
+                return {"status": "waiting", "message": "已扫码，等待手机端确认..."}
+            elif status == 2:
+                # 已确认，现在需要换取 token
+                # 2. 用 device code 换取 access_token
+                token_url = "https://passportapi.115.com/open/deviceCodeToToken"
+                token_payload = {
+                    "uid": _qrcode_data.get('uid'),
+                    "code_verifier": _qrcode_data.get('code_verifier')
+                }
+                token_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                
+                token_resp = requests.post(token_url, data=token_payload, headers=token_headers, timeout=10)
+                token_result = token_resp.json()
+                
+                logger.info(f"115 Token响应: {token_result}")
+                
+                if token_result.get('state'):
+                    token_data = token_result.get('data', {})
+                    access_token = token_data.get('access_token')
+                    refresh_token = token_data.get('refresh_token')
+                    
+                    if access_token:
+                        _qrcode_data['access_token'] = access_token
+                        _qrcode_data['refresh_token'] = refresh_token
+                        
+                        # 3. 用 access_token 获取用户信息来验证
+                        user_info_url = "https://proapi.115.com/open/user/info"
+                        user_headers = {"Authorization": f"Bearer {access_token}"}
+                        user_resp = requests.get(user_info_url, headers=user_headers, timeout=10)
+                        user_result = user_resp.json()
+                        
+                        logger.info(f"115用户信息响应: {user_result}")
+                        
+                        # 构造 cookies 格式 (UID=...; CID=...; SEID=...)
+                        # 从 access_token 解析或直接使用
+                        cookies = f"UID={_qrcode_data.get('uid')}; CID={_qrcode_data.get('uid')}; SEID={access_token}"
+                        
+                        return {
+                            "status": "success", 
+                            "message": "登录成功",
+                            "cookies": cookies,
+                            "user_info": user_result.get('data', {})
+                        }
+                else:
+                    return {"status": "error", "message": "获取Token失败: " + token_result.get('message', '未知错误')}
+            else:
+                return {"status": "waiting", "message": data.get('msg', '等待扫码...')}
+        
+        return {"status": "waiting", "message": "等待扫码..."}
+            
+    except requests.exceptions.Timeout:
+        return {"status": "waiting", "message": "轮询超时，继续等待..."}
+    except Exception as e:
+        logger.error(f"检查二维码状态失败: {e}")
+        return {"status": "error", "message": str(e)}
+
+@p115_bp.route('/qrcode', methods=['POST'])
+@admin_required
+def get_qrcode():
+    """获取115登录二维码"""
+    data = _generate_qrcode()
+    if data:
+        return jsonify({
+            "success": True, 
+            "data": {
+                "qrcode": data.get('qrcode'),
+                "uid": data.get('uid')
+            }
+        })
+    return jsonify({"success": False, "message": "获取二维码失败"}), 500
+
+@p115_bp.route('/qrcode/status', methods=['GET'])
+@admin_required
+def check_qrcode_status():
+    """检查扫码登录状态"""
+    status = _check_qrcode_status()
+    
+    if status.get('status') == 'success':
+        return jsonify({
+            "success": True,
+            "status": "success",
+            "message": "登录成功",
+            "cookies": status.get('cookies')
+        })
+    elif status.get('status') == 'expired':
+        return jsonify({
+            "success": False,
+            "status": "expired",
+            "message": "二维码已过期，请重新获取"
+        })
+    elif status.get('status') == 'waiting':
+        return jsonify({
+            "success": True,
+            "status": "waiting",
+            "message": "等待扫码..."
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "message": status.get('message', '检查状态失败')
+        }), 500
 
 # --- 简单的令牌桶/计数器限流器 ---
 class RateLimiter:
@@ -68,14 +269,17 @@ def list_115_directories():
         cid = 0
     
     try:
-        # nf=1: 只返回文件夹
+        # nf=1: 只返回文件夹, file_type=0: 文件夹类型
         resp = client.fs_files({
             'cid': cid, 
             'limit': 1000, 
             'asc': 1, 
             'o': 'file_name',
-            'nf': 1 
+            'nf': 1,
+            'file_type': 0
         })
+        
+        logger.info(f"  📂 [115目录] 请求 cid={cid}, 响应: {resp.get('state')}, 数据条数: {len(resp.get('data', []))}")
         
         if not resp.get('state'):
             return jsonify({"success": False, "message": resp.get('error_msg', '获取失败')}), 500
@@ -84,13 +288,21 @@ def list_115_directories():
         dirs = []
         
         for item in data:
-            # 双重保险：虽然加了 nf=1，还是判断一下是否有 fid
-            if not item.get('fid'): 
+            # ★★★ 关键修复：115 OpenAPI 中，文件夹也有 fid！
+            # 用 fc 字段判断：fc='0' 表示文件夹，fc='1' 表示文件
+            fc = item.get('fc')
+            is_folder = (fc == '0' or fc == 0)
+            
+            if is_folder:
+                # 文件夹：cid 就是 fid
+                cid_val = item.get('cid') or item.get('fid')
                 dirs.append({
-                    "id": item.get('cid'),
+                    "id": str(cid_val) if cid_val else None,
                     "name": item.get('n'),
                     "parent_id": item.get('pid')
                 })
+        
+        logger.info(f"  📂 [115目录] 找到 {len(dirs)} 个子目录")
         
         current_name = '根目录'
         if cid != 0 and resp.get('path'):
@@ -173,7 +385,7 @@ def handle_sorting_rules():
                 cid = rule.get('cid')
                 if cid and str(cid) != '0':
                     try:
-                        time.sleep(1.5) # 防风控限流
+                        time.sleep(0.5) # 防风控限流
                         
                         payload = {'cid': cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0}
                         if hasattr(client, 'fs_files_app'):
@@ -275,9 +487,10 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
             # 使用 POST 方法获取直链
             url_obj = client.download_url(pick_code, user_agent=user_agent)
             if url_obj:
+                # download_url 现在返回直链字符串
                 direct_url = str(url_obj)
                 # 首次获取日志
-                logger.info(f"  🎬 [115直链] 获取成功: {url_obj.name}")
+                logger.info(f"  🎬 [115直链] 获取成功: {pick_code[:8]}...")
                 # 存入缓存，115 直链通常几小时失效，这里设置缓存 2 小时 (7200秒)
                 _url_cache[cache_key] = {"url": direct_url, "expire_at": now + 7200}
                 return direct_url
