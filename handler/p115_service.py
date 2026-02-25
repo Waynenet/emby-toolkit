@@ -157,35 +157,6 @@ class P115Service:
     _cookie_cache = None
     
     _last_request_time = 0
-    _last_alert_time = 0  # 新增：记录上次发送报警的时间
-
-    @classmethod
-    def _send_admin_alert(cls, error_type, error_msg):
-        """发送 Telegram 报警通知 (带 1 小时防抖)"""
-        now = time.time()
-        # 防抖：1小时内只发送一次报警，防止刷屏
-        if now - cls._last_alert_time < 3600:
-            return
-        cls._last_alert_time = now
-        
-        def _async_send():
-            try:
-                from handler.telegram import send_telegram_message, escape_markdown
-                from database import user_db
-                admin_ids = user_db.get_admin_telegram_chat_ids()
-                if not admin_ids:
-                    return
-                    
-                safe_error = escape_markdown(str(error_msg))
-                text = f"⚠️ *115 客户端初始化失败*\n\n*类型*: {error_type}\n*错误*: `{safe_error}`\n\n请前往系统设置检查凭证是否过期。"
-                
-                for chat_id in admin_ids:
-                    send_telegram_message(chat_id, text)
-            except Exception as e:
-                logger.error(f"  ❌ 发送 115 异常通知失败: {e}")
-        
-        # 异步发送，不阻塞主线程
-        threading.Thread(target=_async_send, daemon=True).start()
 
     @classmethod
     def get_openapi_client(cls):
@@ -199,19 +170,11 @@ class P115Service:
         with cls._lock:
             if cls._openapi_client is None or token != cls._token_cache:
                 try:
-                    client = P115OpenAPIClient(token)
-                    
-                    # ★ 新增：主动调用接口验证 Token 是否有效
-                    user_info = client.get_user_info()
-                    if not user_info.get('state'):
-                        raise Exception(f"Token 无效或已过期 ({user_info.get('message', '未知错误')})")
-                        
-                    cls._openapi_client = client
+                    cls._openapi_client = P115OpenAPIClient(token)
                     cls._token_cache = token
-                    logger.info("  🚀 [115] OpenAPI 客户端已初始化 (Token 模式)")
+                    logger.info("  🚀 [115] OpenAPI 客户端已初始化 (整理用)")
                 except Exception as e:
                     logger.error(f"  ❌ 115 OpenAPI 客户端初始化失败: {e}")
-                    cls._send_admin_alert("OpenAPI (Token)", e)
                     cls._openapi_client = None
             
             return cls._openapi_client
@@ -230,10 +193,9 @@ class P115Service:
                 try:
                     cls._cookie_client = P115CookieClient(cookie)
                     cls._cookie_cache = cookie
-                    logger.info("  🚀 [115] Cookie 客户端已初始化 (播放模式)")
+                    logger.info("  🚀 [115] Cookie 客户端已初始化 (播放用)")
                 except Exception as e:
                     logger.error(f"  ❌ 115 Cookie 客户端初始化失败: {e}")
-                    cls._send_admin_alert("Cookie", e)
                     cls._cookie_client = None
             
             return cls._cookie_client
