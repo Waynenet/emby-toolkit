@@ -462,7 +462,7 @@ def main_app_start():
         from handler.p115_service import P115Service
         openapi_client = P115Service.get_openapi_client()
         if openapi_client:
-            logger.info("  🚀 [115] OpenAPI 客户端启动时已初始化 (整理用)")
+            logger.debug("  🚀 [115] OpenAPI 客户端启动时已初始化 (整理用)")
         else:
             logger.debug("  ℹ️ [115] 未配置 Token，跳过 OpenAPI 初始化")
     except Exception as e:
