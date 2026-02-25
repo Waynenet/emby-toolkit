@@ -42,25 +42,25 @@ CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY = "monitor_exclude_refresh_delay"
 DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY = 0 # 默认不延迟
 
 # ==============================================================================
-# ✨ 115 网盘配置 (115 Cloud Drive) - ★★★ 重构分离 ★★★
+# ✨ 115 网盘配置 (115 Cloud Drive) 
 # ==============================================================================
 CONFIG_SECTION_115 = "115"
-CONFIG_OPTION_115_TOKEN = "p115_token"                         # 115 Access Token (用于OpenAPI管理操作: 扫描/创建目录/移动文件)
-CONFIG_OPTION_115_REFRESH_TOKEN = "p115_refresh_token"         # 115 Refresh Token (用于自动续期Access Token)
-CONFIG_OPTION_115_COOKIES = "p115_cookies"                     # 115 Cookie (用于播放: 获取直链)
-CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"         # 115转存/上传的目标目录CID
-CONFIG_OPTION_115_SAVE_PATH_NAME = "p115_save_path_name"       # 115转存/上传的目标目录名称
-CONFIG_OPTION_115_MEDIA_ROOT_NAME = "p115_media_root_name"     # 网盘媒体库根目录名称
-CONFIG_OPTION_115_INTERVAL = "p115_request_interval"           # API请求间隔
-CONFIG_OPTION_115_ENABLE_ORGANIZE = "p115_enable_organize"     # 智能整理总开关
-CONFIG_OPTION_115_EXTENSIONS = "p115_extensions"               # 115转存/上传的文件扩展名列表
-DB_KEY_115_SORTING_RULES = "p115_sorting_rules"                # 存储 115 分类规则的数据库键名
-CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"       # 115网盘媒体库根目录CID
-CONFIG_OPTION_LOCAL_STRM_ROOT = "local_strm_root"              # 本地生成.strm的根目录
-CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                # ETK服务器地址 (用于strm文件内)
+CONFIG_OPTION_115_TOKEN = "p115_token"                           # 115 Access Token (用于OpenAPI管理操作: 扫描/创建目录/移动文件)
+CONFIG_OPTION_115_REFRESH_TOKEN = "p115_refresh_token"           # 115 Refresh Token (用于自动续期Access Token)
+CONFIG_OPTION_115_COOKIES = "p115_cookies"                       # 115 Cookie (用于播放: 获取直链)
+CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"           # 115转存/上传的目标目录CID
+CONFIG_OPTION_115_SAVE_PATH_NAME = "p115_save_path_name"         # 115转存/上传的目标目录名称
+CONFIG_OPTION_115_MEDIA_ROOT_NAME = "p115_media_root_name"       # 网盘媒体库根目录名称
+CONFIG_OPTION_115_INTERVAL = "p115_request_interval"             # API请求间隔
+CONFIG_OPTION_115_ENABLE_ORGANIZE = "p115_enable_organize"       # 智能整理总开关
+CONFIG_OPTION_115_EXTENSIONS = "p115_extensions"                 # 115转存/上传的文件扩展名列表
+DB_KEY_115_SORTING_RULES = "p115_sorting_rules"                  # 存储 115 分类规则的数据库键名
+CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"         # 115网盘媒体库根目录CID
+CONFIG_OPTION_LOCAL_STRM_ROOT = "local_strm_root"                # 本地生成.strm的根目录
+CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                  # ETK服务器地址 (用于strm文件内)
 CONFIG_OPTION_115_ENABLE_SYNC_DELETE = "p115_enable_sync_delete" # 是否联动删除网盘文件
-CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"         # 是否下载字幕文件
-CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"         # 是否启用本地清理功能
+CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"           # 是否下载字幕文件
+CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"           # 是否启用本地清理功能
 
 # ==============================================================================
 # ✨ 通知服务 (Notification Services)
