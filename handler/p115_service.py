@@ -936,7 +936,7 @@ def get_115_account_info():
 
     try:
         # 尝试列出 1 个文件，这是验证 Cookie 最快最准的方法
-        resp = client.fs_files({'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+        resp = client.fs_files_app({'limit': 1, 'record_open_time': 0, 'count_folders': 0})
 
         if not resp.get('state'):
             raise Exception("Cookie 已失效")
