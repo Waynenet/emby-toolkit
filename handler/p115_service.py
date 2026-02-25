@@ -20,6 +20,49 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+def refresh_115_token():
+    """使用 refresh_token 换取新的 access_token"""
+    config = get_config()
+    refresh_token = config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN, "")
+    if not refresh_token:
+        return False
+        
+    try:
+        url = "https://passportapi.115.com/open/refreshToken"
+        payload = {"refresh_token": refresh_token}
+        resp = requests.post(url, data=payload, timeout=10).json()
+        
+        if resp.get('state'):
+            new_access_token = resp['data']['access_token']
+            new_refresh_token = resp['data']['refresh_token']
+            
+            # 重新构造 Cookie
+            old_cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "")
+            uid = ""
+            if "UID=" in old_cookie:
+                uid = old_cookie.split("UID=")[1].split(";")[0]
+            new_cookie = f"UID={uid}; CID={uid}; SEID={new_access_token}"
+            
+            # 保存新凭证
+            from config_manager import save_config
+            config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
+            config[constants.CONFIG_OPTION_115_COOKIES] = new_cookie
+            config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
+            save_config(config)
+            
+            # 清理内存中的旧客户端，强制下次重新初始化
+            P115Service._openapi_client = None
+            P115Service.reset_cookie_client()
+            
+            logger.info("  🔄 [115] Token 续期成功！")
+            return True
+        else:
+            logger.error(f"  ❌ Token 续期失败: {resp.get('message')}")
+            return False
+    except Exception as e:
+        logger.error(f"  ❌ Token 续期请求异常: {e}")
+        return False
+
 # ======================================================================
 # ★★★ 115 OpenAPI 客户端 (仅管理操作：扫描/创建目录/移动文件) ★★★
 # ======================================================================

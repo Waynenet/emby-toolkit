@@ -147,7 +147,8 @@ def _check_qrcode_status():
                             "status": "success", 
                             "message": "登录成功",
                             "cookies": cookies,
-                            "user_info": user_result.get('data', {})
+                            "user_info": user_result.get('data', {}),
+                            "refresh_token": refresh_token
                         }
                 else:
                     return {"status": "error", "message": "获取Token失败: " + token_result.get('message', '未知错误')}
@@ -180,28 +181,33 @@ def get_qrcode():
 @p115_bp.route('/qrcode/status', methods=['GET'])
 @admin_required
 def check_qrcode_status():
-    """检查扫码登录状态"""
     status = _check_qrcode_status()
     
     if status.get('status') == 'success':
-        # ★★★ 扫码成功后将 Token 保存到配置 ★★★
         access_token = _qrcode_data.get('access_token')
+        cookies = status.get('cookies')
+        refresh_token = status.get('refresh_token') # <--- 获取 refresh_token
+        
         if access_token:
             try:
                 from config_manager import save_config
                 config = get_config()
+                
                 config[constants.CONFIG_OPTION_115_TOKEN] = access_token
+                config[constants.CONFIG_OPTION_115_COOKIES] = cookies 
+                config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token 
+                
                 save_config(config)
-                logger.info("  ✅ [115] 扫码获取的 Token 已自动保存到配置")
+                logger.info("  ✅ [115] 凭证已自动保存到配置")
             except Exception as e:
-                logger.error(f"  ❌ 保存 Token 到配置失败: {e}")
+                logger.error(f"  ❌ 保存凭证到配置失败: {e}")
         
         return jsonify({
             "success": True,
             "status": "success",
             "message": "登录成功",
-            "cookies": status.get('cookies'),
-            "token": access_token  # 同时返回 Token 供前端确认
+            "cookies": cookies,
+            "token": access_token
         })
     elif status.get('status') == 'expired':
         return jsonify({
