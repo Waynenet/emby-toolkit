@@ -140,13 +140,11 @@ def _check_qrcode_status():
                         user_result = user_resp.json()
                         
                         # 构造 cookies 格式 (UID=...; CID=...; SEID=...)
-                        # 从 access_token 解析或直接使用
                         cookies = f"UID={_qrcode_data.get('uid')}; CID={_qrcode_data.get('uid')}; SEID={access_token}"
                         
                         return {
                             "status": "success", 
                             "message": "登录成功",
-                            "cookies": cookies,
                             "user_info": user_result.get('data', {}),
                             "refresh_token": refresh_token
                         }
@@ -194,19 +192,17 @@ def check_qrcode_status():
                 config = get_config()
                 
                 config[constants.CONFIG_OPTION_115_TOKEN] = access_token
-                config[constants.CONFIG_OPTION_115_COOKIES] = cookies 
                 config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token 
                 
                 save_config(config)
-                logger.info("  ✅ [115] 凭证已自动保存到配置")
+                logger.info("  ✅ [115] 扫码获取的 Token 已自动保存到配置")
             except Exception as e:
-                logger.error(f"  ❌ 保存凭证到配置失败: {e}")
+                logger.error(f"  ❌ 保存 Token 到配置失败: {e}")
         
         return jsonify({
             "success": True,
             "status": "success",
             "message": "登录成功",
-            "cookies": cookies,
             "token": access_token
         })
     elif status.get('status') == 'expired':

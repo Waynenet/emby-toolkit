@@ -258,15 +258,10 @@
                     </template>
                     <template #header-extra>
                       <n-space align="center" :size="12">
-                        <n-tooltip trigger="hover">
-                          <template #trigger>
-                            <n-button type="primary" size="small" @click="openQrcodeModal">
-                              <template #icon><n-icon :component="QrCodeOutline" /></template>
-                              扫码登录 (推荐)
-                            </n-button>
-                          </template>
-                          强烈推荐！扫码一次即可同时获取 Token 和 Cookie，且支持自动续期永不掉线。
-                        </n-tooltip>
+                        <n-button type="primary" size="small" @click="openQrcodeModal">
+                          <template #icon><n-icon :component="QrCodeOutline" /></template>
+                          扫码登录
+                        </n-button>
                         <n-button size="small" secondary type="success" @click="check115Status" :loading="loading115Info">
                           检查连通性
                         </n-button>
@@ -287,7 +282,7 @@
                       </div>
                     </div>
 
-                    <!-- ★★★ 分离配置: Access Token (管理用) ★★★ -->
+                    <!-- ★★★ 分离配置: Access Token (管理用) - 优化为直接显示状态 ★★★ -->
                     <n-form-item label="Access Token" path="p115_token">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
@@ -297,17 +292,17 @@
                             </template>
                             {{ configModel.p115_token ? '已配置' : '未配置' }}
                           </n-tag>
-                          <n-button size="small" dashed type="primary" @click="openTokenModal">
-                            {{ configModel.p115_token ? '手动修改' : '手动输入' }}
+                          <n-button size="small" type="primary" @click="openTokenModal">
+                            {{ configModel.p115_token ? '修改' : '粘贴Token' }}
                           </n-button>
                         </n-space>
                         <n-text depth="3" style="font-size:0.8em;">
-                          用于网盘整理。<span style="color: var(--n-primary-color);">建议直接使用上方【一键扫码登录】自动获取。</span>
+                          用于网盘整理。
                         </n-text>
                       </n-space>
                     </n-form-item>
 
-                    <!-- ★★★ 分离配置: Cookie (播放用) ★★★ -->
+                    <!-- ★★★ 分离配置: Cookie (播放用) - 优化为直接显示状态 ★★★ -->
                     <n-form-item label="Cookie" path="p115_cookies">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
@@ -317,12 +312,12 @@
                             </template>
                             {{ configModel.p115_cookies ? '已配置' : '未配置' }}
                           </n-tag>
-                          <n-button size="small" dashed type="primary" @click="openCookieModal">
-                            {{ configModel.p115_cookies ? '手动修改' : '手动输入' }}
+                          <n-button size="small" type="primary" @click="openCookieModal">
+                            {{ configModel.p115_cookies ? '修改' : '粘贴Cookie' }}
                           </n-button>
                         </n-space>
                         <n-text depth="3" style="font-size:0.8em;">
-                          用于反代302播放。<span style="color: var(--n-primary-color);">扫码登录会自动生成，无需使用第三方工具抓取。</span>
+                          用于反代302播放。
                         </n-text>
                       </n-space>
                     </n-form-item>
@@ -1008,13 +1003,12 @@
     </n-modal>
 
     <!-- ★★★ Cookie 独立设置弹窗 ★★★ -->
-    <n-modal v-model:show="showCookieModal" preset="card" title="手动设置 115 Cookie (备用方案)" style="width: 500px;">
-      <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px;">
-        <b>💡 强烈建议：</b><br>
-        请优先使用面板上的<b>【一键扫码登录】</b>按钮，它会自动为您生成 Cookie 并支持自动续期。<br><br>
-        <b>仅在以下情况使用此手动输入：</b><br>
-        1. 扫码生成的 Cookie 触发了 115 的特殊风控无法播放。<br>
-        2. 您希望使用浏览器或“不大助手”抓取的完整原生 Cookie。
+    <n-modal v-model:show="showCookieModal" preset="card" title="设置 115 Cookie" style="width: 500px;">
+      <n-alert type="success" :show-icon="true" style="margin-bottom: 16px;">
+        <b>Cookie 说明：</b><br>
+        1. 用于播放：获取直链<br>
+        2. 可解决官方接口 403 封禁问题<br>
+        3. 302必须配置，建议用不大助手扫码获取
       </n-alert>
       
       <n-form-item label="Cookie (网页端身份)">
@@ -2003,10 +1997,10 @@ const startPolling = () => {
         // 登录成功
         qrcodeStatus.value = 'success';
         configModel.value.p115_cookies = data.cookies;
+        // ★★★ 同时保存 Token ★★★
         if (data.token) {
           configModel.value.p115_token = data.token;
-          // ★ 明确告诉用户两者都拿到了
-          message.success('🎉 扫码成功！Token 和 Cookie 已自动生成并保存，无需其他操作。', { duration: 5000 });
+          message.success('登录成功！Token + Cookie 已自动保存');
         } else {
           message.success('登录成功！Cookies 已自动保存');
         }
@@ -2014,7 +2008,7 @@ const startPolling = () => {
         setTimeout(() => {
           showQrcodeModal.value = false;
           check115Status();
-        }, 2000);
+        }, 1500);
       } else if (data.status === 'expired') {
         qrcodeStatus.value = 'expired';
         message.warning('二维码已过期');

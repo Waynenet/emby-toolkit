@@ -36,28 +36,22 @@ def refresh_115_token():
             new_access_token = resp['data']['access_token']
             new_refresh_token = resp['data']['refresh_token']
             
-            # 重新构造 Cookie
-            old_cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "")
-            uid = ""
-            if "UID=" in old_cookie:
-                uid = old_cookie.split("UID=")[1].split(";")[0]
-            new_cookie = f"UID={uid}; CID={uid}; SEID={new_access_token}"
-            
-            # 保存新凭证
+            # ★ 修复：绝对不要去动用户的 Cookie！只更新 Token
             from config_manager import save_config
             config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
-            config[constants.CONFIG_OPTION_115_COOKIES] = new_cookie
             config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
             save_config(config)
             
-            # 清理内存中的旧客户端，强制下次重新初始化
-            P115Service._openapi_client = None
-            P115Service.reset_cookie_client()
+            # ★ 动态更新内存中的 Token，不需要重启客户端
+            if P115Service._openapi_client:
+                P115Service._openapi_client.access_token = new_access_token
+                P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
+            P115Service._token_cache = new_access_token
             
-            logger.info("  🔄 [115] Token 续期成功！")
+            logger.info("  🔄 [115] Token 自动续期成功！满血复活！")
             return True
         else:
-            logger.error(f"  ❌ Token 续期失败: {resp.get('message')}")
+            logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
             return False
     except Exception as e:
         logger.error(f"  ❌ Token 续期请求异常: {e}")
@@ -78,41 +72,58 @@ class P115OpenAPIClient:
             "User-Agent": "Emby-toolkit/1.0 (OpenAPI)"
         }
 
-    def get_user_info(self):
-        url = f"{self.base_url}/open/user/info"
+    def _do_request(self, method, url, **kwargs):
         try:
-            return requests.get(url, headers=self.headers, timeout=10).json()
-        except Exception as e:
-            return {"state": False, "message": str(e)}
-
-    def fs_files(self, payload):
-        """获取文件列表 - 纯净 OpenAPI 版 (严格返回官方原始字段)"""
-        url = f"{self.base_url}/open/ufile/files"
-        params = {"show_dir": 1, "limit": 1000, "offset": 0}
-        if isinstance(payload, dict): params.update(payload)
-        
-        try:
-            return requests.get(url, params=params, headers=self.headers, timeout=30).json()
+            resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+            
+            # 115 OpenAPI Token 失效通常会返回 state: False 且 code 为 990001/990002
+            if not resp.get("state") and resp.get("code") in [990001, 990002, 990007]:
+                logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
+                
+                # 调用续期函数
+                if refresh_115_token():
+                    # 续期成功，headers 已经被 refresh_115_token 更新了，直接重试请求！
+                    logger.info("  🚀 [115] 续期完成，重新发送刚才失败的请求...")
+                    return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+                else:
+                    logger.error("  💀 [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
+            
+            return resp
         except Exception as e:
             return {"state": False, "error_msg": str(e)}
 
-    def fs_files_app(self, payload): return self.fs_files(payload)
+    def get_user_info(self):
+        url = f"{self.base_url}/open/user/info"
+        return self._do_request("GET", url)
+
+    def fs_files(self, payload):
+        url = f"{self.base_url}/open/ufile/files"
+        params = {"show_dir": 1, "limit": 1000, "offset": 0}
+        if isinstance(payload, dict): params.update(payload)
+        return self._do_request("GET", url, params=params)
+
+    def fs_files_app(self, payload): 
+        return self.fs_files(payload)
 
     def fs_mkdir(self, name, pid):
         url = f"{self.base_url}/open/folder/add"
-        resp = requests.post(url, data={"pid": str(pid), "file_name": str(name)}, headers=self.headers).json()
-        if resp.get("state") and "data" in resp: resp["cid"] = resp["data"].get("file_id")
+        resp = self._do_request("POST", url, data={"pid": str(pid), "file_name": str(name)})
+        if resp.get("state") and "data" in resp: 
+            resp["cid"] = resp["data"].get("file_id")
         return resp
 
     def fs_move(self, fid, to_cid):
-        return requests.post(f"{self.base_url}/open/ufile/move", data={"file_ids": str(fid), "to_cid": str(to_cid)}, headers=self.headers).json()
+        url = f"{self.base_url}/open/ufile/move"
+        return self._do_request("POST", url, data={"file_ids": str(fid), "to_cid": str(to_cid)})
 
     def fs_rename(self, fid_name_tuple):
-        return requests.post(f"{self.base_url}/open/ufile/update", data={"file_id": str(fid_name_tuple[0]), "file_name": str(fid_name_tuple[1])}, headers=self.headers).json()
+        url = f"{self.base_url}/open/ufile/update"
+        return self._do_request("POST", url, data={"file_id": str(fid_name_tuple[0]), "file_name": str(fid_name_tuple[1])})
 
     def fs_delete(self, fids):
+        url = f"{self.base_url}/open/ufile/delete"
         fids_str = ",".join([str(f) for f in fids]) if isinstance(fids, list) else str(fids)
-        return requests.post(f"{self.base_url}/open/ufile/delete", data={"file_ids": fids_str}, headers=self.headers).json()
+        return self._do_request("POST", url, data={"file_ids": fids_str})
 
 
 # ======================================================================
