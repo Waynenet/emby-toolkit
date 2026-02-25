@@ -653,21 +653,29 @@ def emby_webhook():
             if target_cid:
                 logger.info(f"  🚀 [MP上传] 新文件: {target_item.get('name')} (文件大小: {int(target_item.get('size', 0))/1024/1024/1024:.2f} GB)")
                 
-                # 构造真实的文件对象 (模拟 115 API 返回的结构)
+                # 构造真实的文件对象 (兼容 WebAPI 和 OpenAPI 双重结构)
+                is_folder = str(target_item.get("type")) == "0"
+                
                 real_root_item = {
                     'n': target_item.get("name"),
-                    's': target_item.get("size"), # 直接用 MP 给的大小
-                    'cid': current_parent_cid,    # 父目录 ID
-                    'fid': file_id,                # ★★★ 关键：必须有 fid，execute 才会认为是单文件模式 ★★★
-                    'pc': pc
+                    'file_name': target_item.get("name"),
+                    's': target_item.get("size"),
+                    'size': target_item.get("size"),
+                    'cid': current_parent_cid,
+                    'parent_id': current_parent_cid,
+                    'fid': file_id if not is_folder else None,
+                    'file_id': file_id if not is_folder else None,
+                    'pc': pc,
+                    'pick_code': pc,
+                    'fc': '0' if is_folder else '1',  # ★ 关键修复：明确告知是文件还是文件夹
+                    'type': '0' if is_folder else '1'
                 }
                 
-                # 双重保险：如果 MP 传的是文件夹 (type=0)，则移除 fid
-                # 但通常 MP 转存的都是视频文件，这里为了防止万一
-                if str(target_item.get("type")) == "0":
+                # 双重保险：如果 MP 传的是文件夹 (type=0)，则将 cid 指向自身
+                if is_folder:
                     logger.warning("  ⚠️ 检测到 MP 上传的是文件夹，这可能会导致递归扫描，请谨慎！")
-                    del real_root_item['fid']
-                    real_root_item['cid'] = file_id # 文件夹自己的 ID
+                    real_root_item['cid'] = file_id
+                    real_root_item['parent_id'] = file_id
 
                 # logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理...")
                 # 复用 execute 逻辑

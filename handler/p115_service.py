@@ -108,6 +108,43 @@ class P115CookieClient:
             except:
                 pass
         return None
+    
+    def request(self, url, method='GET', **kwargs):
+        if self.webapi and hasattr(self.webapi, 'request'):
+            return self.webapi.request(url, method=method, **kwargs)
+        
+        # 兜底：使用 requests 手动发请求
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Cookie": self.cookie_str
+        }
+        if 'headers' in kwargs:
+            headers.update(kwargs['headers'])
+            del kwargs['headers']
+        
+        return requests.request(method, url, headers=headers, **kwargs)
+
+    def offline_add_urls(self, payload):
+        if self.webapi and hasattr(self.webapi, 'offline_add_urls'):
+            return self.webapi.offline_add_urls(payload)
+        
+        # 兜底：手动调用离线接口
+        url = "https://115.com/web/lixian/?ct=lixian&ac=add_task_urls"
+        r = self.request(url, method='POST', data=payload)
+        return r.json() if hasattr(r, 'json') else r
+
+    def share_import(self, share_code, receive_code, cid):
+        if self.webapi:
+            if hasattr(self.webapi, 'share_receive'):
+                return self.webapi.share_receive(share_code, receive_code, cid)
+            if hasattr(self.webapi, 'fs_share_import'):
+                return self.webapi.fs_share_import(share_code, receive_code, cid)
+        
+        # 兜底：手动调用转存接口
+        url = "https://webapi.115.com/share/receive"
+        payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': cid}
+        r = self.request(url, method='POST', data=payload)
+        return r.json() if hasattr(r, 'json') else r
 
 
 # ======================================================================
@@ -223,6 +260,21 @@ class P115Service:
                 if not self._cookie:
                     raise Exception("未配置 115 Cookie，无法获取播放直链")
                 return self._cookie.download_url(pick_code, user_agent)
+            
+            def request(self, *args, **kwargs):
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法执行网络请求")
+                return self._cookie.request(*args, **kwargs)
+
+            def offline_add_urls(self, payload):
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法执行离线下载")
+                return self._cookie.offline_add_urls(payload)
+
+            def share_import(self, share_code, receive_code, cid):
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法执行转存")
+                return self._cookie.share_import(share_code, receive_code, cid)
 
         # 全局限流逻辑
         with cls._lock:
