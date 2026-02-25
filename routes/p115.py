@@ -655,12 +655,15 @@ def fix_strm_files():
                         if '/api/p115/play/' in content:
                             pick_code = content.split('/api/p115/play/')[-1].split('?')[0].strip()
                             
-                        # 模式 2: ETK 之前测试用的假协议格式
-                        # 例: etk_direct_play://abc1234/文件名.mkv
-                        elif content.startswith('etk_direct_play://'):
-                            pick_code = content.split('//')[1].split('/')[0].strip()
+                        # 模式 2: MoviePilot P115StrmHelper 插件格式 
+                        # 例: http://10.0.0.10:3000/api/v1/plugin/P115StrmHelper/redirect_url?pickcode=dhkyszbgf16gzxi6e&file_name=...
+                        elif 'pickcode=' in content.lower() or 'pick_code=' in content.lower():
+                            # 正则提取 pickcode= 或 pick_code= 后面的字母数字组合
+                            match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
+                            if match:
+                                pick_code = match.group(1)
                             
-                        # 模式 3: CMS 生成的经典格式 (增强版兼容)
+                        # 模式 3: CMS 生成的格式
                         # 解析逻辑：提取 /d/ 后面，直到出现 . 或 ? 或 / 之前的字符
                         elif '/d/' in content:
                             # 这里的正则改成了匹配 /d/ 后面非特殊符号的部分
