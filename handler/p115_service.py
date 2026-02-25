@@ -134,13 +134,8 @@ class P115CookieClient:
         return r.json() if hasattr(r, 'json') else r
 
     def share_import(self, share_code, receive_code, cid):
-        if self.webapi:
-            if hasattr(self.webapi, 'share_receive'):
-                return self.webapi.share_receive(share_code, receive_code, cid)
-            if hasattr(self.webapi, 'fs_share_import'):
-                return self.webapi.fs_share_import(share_code, receive_code, cid)
-        
-        # 兜底：手动调用转存接口
+        # 放弃调用第三方库的 share_receive，直接使用最稳妥的官方原生 API
+        # 官方接口完美支持直接传入 cid 保存到指定目录
         url = "https://webapi.115.com/share/receive"
         payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': cid}
         r = self.request(url, method='POST', data=payload)
@@ -991,12 +986,47 @@ class SmartOrganizer:
                         if not category_name: category_name = "未识别"
 
                         category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
+                        relative_category_path = "未识别"
                         
-                        if category_rule and 'category_path' in category_rule:
-                            relative_category_path = category_rule['category_path']
-                            logger.debug(f"  ⚡ [规则缓存] 分类路径: '{relative_category_path}'")
-                        else:
-                            relative_category_path = category_rule.get('dir_name', '未识别') if category_rule else "未识别"
+                        if category_rule:
+                            if 'category_path' in category_rule and category_rule['category_path']:
+                                relative_category_path = category_rule['category_path']
+                                logger.debug(f"  ⚡ [规则缓存] 命中分类路径: '{relative_category_path}'")
+                            else:
+                                # 缓存未命中，动态计算
+                                logger.info(f"  🔍 [规则缓存] 未命中路径缓存，正在向 115 请求计算层级...")
+                                media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
+                                try:
+                                    dir_info = self.client.fs_files({'cid': target_cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                                    path_nodes = dir_info.get('path', [])
+                                    start_idx = 0
+                                    found_root = False
+                                    
+                                    if media_root_cid == '0':
+                                        start_idx = 1
+                                        found_root = True
+                                    else:
+                                        for i, node in enumerate(path_nodes):
+                                            node_cid = str(node.get('cid') or node.get('file_id'))
+                                            if node_cid == media_root_cid:
+                                                start_idx = i + 1
+                                                found_root = True
+                                                break
+                                    
+                                    if found_root and start_idx < len(path_nodes):
+                                        rel_segments = [str(n.get('file_name') or n.get('fn')).strip() for n in path_nodes[start_idx:]]
+                                        relative_category_path = "/".join(rel_segments)
+                                    else:
+                                        relative_category_path = category_rule.get('dir_name', '未识别')
+                                        
+                                    # 更新内存规则并持久化到数据库
+                                    category_rule['category_path'] = relative_category_path
+                                    settings_db.save_setting(constants.DB_KEY_115_SORTING_RULES, self.rules)
+                                    logger.info(f"  💾 [规则缓存] 已动态计算并永久保存路径: '{relative_category_path}'")
+                                    
+                                except Exception as e:
+                                    logger.warning(f"  ⚠️ 动态计算分类路径失败: {e}")
+                                    relative_category_path = category_rule.get('dir_name', '未识别')
 
                         if self.media_type == 'tv' and season_num is not None:
                             local_dir = os.path.join(local_root, relative_category_path, std_root_name, s_name)
@@ -1512,20 +1542,57 @@ def task_full_sync_strm_and_subs(processor=None):
     if not raw_rules: return
     rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
     
-    # 1. 预处理：获取每个目标分类目录对应的完整相对路径 (参考 execute 逻辑)
+    # 1. 预处理：获取每个目标分类目录对应的完整相对路径
     cid_to_rel_path = {}
     target_cids = []
+    rules_updated = False
     
     for r in rules:
         if r.get('enabled', True) and r.get('cid') and str(r['cid']) != '0':
             cid = str(r['cid'])
             target_cids.append(cid)
-            # ★ 核心修改：直接从规则中读取 category_path
-            if 'category_path' in r:
+            
+            if 'category_path' in r and r['category_path']:
                 cid_to_rel_path[cid] = r['category_path']
             else:
-                # 兜底：使用规则中配置的名称
-                cid_to_rel_path[cid] = r.get('dir_name', '未识别')
+                # 缓存未命中，动态计算
+                logger.info(f"  🔍 [规则缓存] CID:{cid} 未命中路径缓存，正在计算...")
+                try:
+                    dir_info = client.fs_files({'cid': cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                    path_nodes = dir_info.get('path', [])
+                    start_idx = 0
+                    found_root = False
+                    
+                    if media_root_cid == '0':
+                        start_idx = 1
+                        found_root = True
+                    else:
+                        for i, node in enumerate(path_nodes):
+                            node_cid = str(node.get('cid') or node.get('file_id'))
+                            if node_cid == media_root_cid:
+                                start_idx = i + 1
+                                found_root = True
+                                break
+                    
+                    if found_root and start_idx < len(path_nodes):
+                        rel_segments = [str(n.get('file_name') or n.get('fn')).strip() for n in path_nodes[start_idx:]]
+                        calculated_path = "/".join(rel_segments)
+                    else:
+                        calculated_path = r.get('dir_name', '未识别')
+                        
+                    # 更新规则字典
+                    r['category_path'] = calculated_path
+                    cid_to_rel_path[cid] = calculated_path
+                    rules_updated = True
+                    logger.info(f"  💾 [规则缓存] 已动态计算路径: '{calculated_path}'")
+                except Exception as e:
+                    logger.warning(f"  ⚠️ 动态计算分类路径失败: {e}")
+                    cid_to_rel_path[cid] = r.get('dir_name', '未识别')
+
+    # 如果有任何规则被更新，持久化保存到数据库
+    if rules_updated:
+        settings_db.save_setting(constants.DB_KEY_115_SORTING_RULES, rules)
+        logger.info("  💾 [规则缓存] 所有缺失的路径已计算完毕并永久保存到数据库。")
 
     valid_local_files = set() # 本地已存在的 STRM 和字幕文件绝对路径集合（仅当 enable_cleanup=True 时使用）
     successful_cids = set() # 记录成功处理过的 CID，最后用于清理本地多余文件
