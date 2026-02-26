@@ -119,11 +119,6 @@ class P115OpenAPIClient:
         if isinstance(payload, dict): params.update(payload)
         return self._do_request("GET", url, params=params)
 
-    def fs_downurl(self, pick_code):
-        url = f"{self.base_url}/open/ufile/downurl"
-        # 官方文档要求 Body(form-data)
-        return self._do_request("POST", url, data={"pick_code": str(pick_code)})
-
     def fs_mkdir(self, name, pid):
         url = f"{self.base_url}/open/folder/add"
         resp = self._do_request("POST", url, data={"pid": str(pid), "file_name": str(name)})
@@ -348,11 +343,6 @@ class P115Service:
                 self._check_openapi()
                 self._rate_limit()
                 return self._openapi.fs_search(payload)
-            
-            def fs_downurl(self, pick_code):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_downurl(pick_code)
 
             def fs_mkdir(self, name, pid):
                 self._check_openapi()
@@ -1193,25 +1183,20 @@ class SmartOrganizer:
                                 if not os.path.exists(sub_filepath):
                                     try:
                                         logger.info(f"  ⬇️ [字幕下载] 正在向 115 拉取外挂字幕: {new_filename} ...")
-                                        down_resp = self.client.fs_downurl(pick_code)
-                                        dl_url = None
-                                        if down_resp and down_resp.get('state'):
-                                            data_dict = down_resp.get('data', {})
-                                            for fid, info in data_dict.items():
-                                                dl_url = info.get('url', {}).get('url')
-                                                if dl_url: break
-                                                
+                                        url_obj = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                                        dl_url = str(url_obj)
                                         if dl_url:
                                             import requests
-                                            headers = {"User-Agent": "Mozilla/5.0"}
+                                            headers = {
+                                                "User-Agent": "Mozilla/5.0",
+                                                "Cookie": self.get_cookies()
+                                            }
                                             resp = requests.get(dl_url, stream=True, timeout=30, headers=headers)
                                             resp.raise_for_status()
                                             with open(sub_filepath, 'wb') as f:
                                                 for chunk in resp.iter_content(chunk_size=8192):
                                                     f.write(chunk)
                                             logger.info(f"  ✅ [字幕下载] 下载完成！")
-                                        else:
-                                            logger.warning(f"  ⚠️ 无法获取字幕下载直链: {new_filename}")
                                     except Exception as e:
                                         logger.error(f"  ❌ 下载字幕失败: {e}")
                         
@@ -1890,27 +1875,15 @@ def task_full_sync_strm_and_subs(processor=None):
                             if not os.path.exists(sub_path):
                                 try:
                                     import requests
-                                    # ★ 终极绝杀：直接调用 OpenAPI 获取下载地址，无视 Cookie 风控！
-                                    down_resp = client.fs_downurl(pc)
-                                    dl_url = None
-                                    if down_resp and down_resp.get('state'):
-                                        data_dict = down_resp.get('data', {})
-                                        # 官方返回的是以 file_id 为 key 的字典
-                                        for fid, info in data_dict.items():
-                                            dl_url = info.get('url', {}).get('url')
-                                            if dl_url: break
-                                            
-                                    if dl_url:
-                                        # OpenAPI 给的直链非常纯净，连 Cookie 都不需要带！
-                                        headers = {"User-Agent": "Mozilla/5.0"}
-                                        resp = requests.get(dl_url, stream=True, timeout=15, headers=headers)
+                                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
+                                    if url_obj:
+                                        headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                                        resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
                                         resp.raise_for_status()
                                         with open(sub_path, 'wb') as f:
                                             for chunk in resp.iter_content(8192): f.write(chunk)
                                         logger.info(f"  ⬇️ [增量] 下载字幕: {name}")
                                         subs_downloaded += 1
-                                    else:
-                                        logger.warning(f"  ⚠️ 无法获取字幕下载直链: {name}")
                                 except Exception as e:
                                     logger.error(f"  ❌ 下载字幕失败 [{name}]: {e}")
                                     
