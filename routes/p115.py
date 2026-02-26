@@ -237,10 +237,10 @@ class RateLimiter:
 def get_115_status():
     """检查 115 凭证状态 (分别检查 Token 和 Cookie)"""
     try:
-        from handler.p115_service import P115Service, get_config
+        from handler.p115_service import P115Service, get_config, get_115_tokens
         config = get_config()
         
-        token = config.get(constants.CONFIG_OPTION_115_TOKEN, "").strip()
+        token = get_115_tokens().get('access_token') 
         cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "").strip()
         
         result = {
