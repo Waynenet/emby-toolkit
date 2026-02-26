@@ -406,6 +406,7 @@ def init_db():
                         id TEXT PRIMARY KEY,           -- 115 的 cid (文件夹) 或 fid (文件)
                         parent_id TEXT NOT NULL,       -- 父目录 ID (根目录为 '0')
                         name TEXT NOT NULL,            -- 文件/文件夹名称
+                        local_path TEXT,               -- 本地映射路径 (如果已同步到本地)
                         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), -- 最后同步时间
                         
                         -- 复合唯一约束：同一个父目录下不能有同名文件 (用于快速查找)
@@ -433,6 +434,9 @@ def init_db():
                         all_existing_columns[table].add(row['column_name'])
 
                     schema_upgrades = {
+                        'p115_filesystem_cache': {
+                            "local_path": "TEXT"
+                        },
                         'emby_users': {
                             "policy_json": "JSONB"  
                         },

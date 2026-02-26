@@ -448,6 +448,35 @@ class P115Service:
 # ======================================================================
 class P115CacheManager:
     @staticmethod
+    def get_local_path(cid):
+        """从本地数据库获取已缓存的完整相对路径"""
+        if not cid: return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT local_path FROM p115_filesystem_cache WHERE id = %s", (str(cid),))
+                    row = cursor.fetchone()
+                    return row['local_path'] if row else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def update_local_path(cid, local_path):
+        """更新数据库中的 local_path"""
+        if not cid or not local_path: return
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE p115_filesystem_cache 
+                        SET local_path = %s, updated_at = NOW() 
+                        WHERE id = %s
+                    """, (str(local_path), str(cid)))
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"  ❌ 更新 local_path 失败: {e}")
+
+    @staticmethod
     def get_cid(parent_cid, name):
         """从本地数据库获取 CID (毫秒级)"""
         if not parent_cid or not name: return None
@@ -1149,7 +1178,12 @@ class SmartOrganizer:
                                     found_root = False
                                     
                                     if media_root_cid == '0':
-                                        start_idx = 1
+                                        # ★ 修复 0 层级 Bug：115 的根目录永远在 index 0，所以从 1 开始切片是绝对正确的。
+                                        # 但如果分类目录本身就是根目录，这里需要特殊处理
+                                        if str(target_cid) == '0':
+                                            start_idx = 0
+                                        else:
+                                            start_idx = 1 
                                         found_root = True
                                     else:
                                         for i, node in enumerate(path_nodes):
@@ -1731,38 +1765,65 @@ def task_full_sync_strm_and_subs(processor=None):
             target_cids.add(cid)
             cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
 
-    # 加载 DB 中的目录树
-    dir_cache = {} 
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT id, parent_id, name FROM p115_filesystem_cache")
-                for row in cursor.fetchall():
-                    dir_cache[str(row['id'])] = {
-                        'pid': str(row['parent_id']), 
-                        'name': str(row['name'])
-                    }
-    except Exception as e:
-        update_progress(100, f"读取本地目录缓存失败: {e}")
-        return
+    # =================================================================
+    # ★ 核心升级：动态智能路径推导器 (带内存与 DB 双重缓存)
+    # =================================================================
+    pid_path_cache = {} # 内存缓存，防止同一个文件夹重复请求 115
 
-    # 内存路径推导函数 (核心魔法)
-    def resolve_local_dir(pid):
-        """根据文件的 pid，向上追溯直到命中 target_cids，返回拼接好的本地相对路径"""
+    def get_local_path_for_pid(pid, target_cid, base_category_path):
         pid = str(pid)
-        if pid in cid_to_rel_path:
-            return cid_to_rel_path[pid]
+        target_cid = str(target_cid)
+        
+        # 1. 如果文件直接在分类主目录下，直接返回分类路径
+        if pid == target_cid:
+            return base_category_path
             
-        parts = []
-        curr = pid
-        while curr and curr in dir_cache:
-            parts.append(dir_cache[curr]['name'])
-            curr = dir_cache[curr]['pid']
+        # 2. 查内存缓存 (极速)
+        if pid in pid_path_cache:
+            return pid_path_cache[pid]
             
-            if curr in cid_to_rel_path:
-                parts.append(cid_to_rel_path[curr])
-                parts.reverse()
-                return os.path.join(*parts)
+        # 3. 查本地数据库缓存
+        db_path = P115CacheManager.get_local_path(pid)
+        if db_path:
+            pid_path_cache[pid] = db_path
+            return db_path
+            
+        # 4. 终极兜底：向 115 问路！(100% 准确，且每个文件夹只会问一次)
+        try:
+            dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0})
+            path_nodes = dir_info.get('path', [])
+            
+            start_idx = -1
+            # 在路径链路中寻找 target_cid (分类目录)
+            for i, node in enumerate(path_nodes):
+                if str(node.get('cid') or node.get('file_id')) == target_cid:
+                    start_idx = i + 1
+                    break
+            
+            if start_idx != -1:
+                sub_folders = []
+                for n in path_nodes[start_idx:]:
+                    node_name = n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')
+                    if node_name: 
+                        sub_folders.append(str(node_name).strip())
+                
+                # 拼接出最终的本地相对路径
+                final_path = os.path.join(base_category_path, *sub_folders) if sub_folders else base_category_path
+                
+                # 存入内存和数据库，下次秒出！
+                pid_path_cache[pid] = final_path
+                
+                # 顺手把这个目录的结构存入数据库，防止外键报错
+                P115CacheManager.save_cid(pid, path_nodes[-2].get('cid') if len(path_nodes)>1 else '0', path_nodes[-1].get('file_name'))
+                P115CacheManager.update_local_path(pid, final_path)
+                
+                logger.debug(f"  🔍 [动态推导] 成功解析并缓存新路径: {final_path}")
+                return final_path
+            else:
+                logger.warning(f"  ⚠️ 路径异常: 文件夹 {pid} 不在分类 {target_cid} 之下！")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 向 115 动态查询路径失败 (pid={pid}): {e}")
+            
         return None
 
     # =================================================================
@@ -1833,24 +1894,8 @@ def task_full_sync_strm_and_subs(processor=None):
                         pid = item.get('pid') or item.get('cid') or item.get('parent_id')
                         if not pc or not pid: continue
                         
-                        # ★ 瞬间推导本地路径 (增强版：优先使用 API 返回的 path 数组，彻底摆脱对本地缓存的强依赖)
-                        rel_dir = None
-                        item_paths = item.get('path') or item.get('paths')
-                        if item_paths and isinstance(item_paths, list):
-                            start_idx = -1
-                            for i, p_node in enumerate(item_paths):
-                                if str(p_node.get('cid') or p_node.get('file_id')) == target_cid:
-                                    start_idx = i + 1
-                                    break
-                            if start_idx != -1:
-                                sub_folders = [str(p.get('name') or p.get('file_name')).strip() for p in item_paths[start_idx:]]
-                                base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
-                                rel_dir = os.path.join(base_cat_path, *sub_folders) if sub_folders else base_cat_path
-
-                        # 如果 API 没有返回 path，兜底使用本地 DB 缓存推导
-                        if not rel_dir:
-                            rel_dir = resolve_local_dir(pid)
-                            
+                        # ★ 智能推导本地路径 (传入 pid, 当前分类 cid, 当前分类的基准路径)
+                        rel_dir = get_local_path_for_pid(pid, target_cid, category_name)
                         if not rel_dir: 
                             logger.debug(f"  ⚠️ 无法推导路径，跳过文件: {name} (pid: {pid})")
                             continue 

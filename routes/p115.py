@@ -442,7 +442,12 @@ def handle_sorting_rules():
                         
                         # 在链路中寻找“媒体库根目录”
                         if media_root_cid == '0':
-                            start_idx = 1 # 如果没配根目录，默认跳过 115 物理“根目录”
+                            # ★ 修复 0 层级 Bug：115 的根目录永远在 index 0，所以从 1 开始切片是绝对正确的。
+                            # 但如果分类目录本身就是根目录，这里需要特殊处理
+                            if str(cid) == '0':
+                                start_idx = 0
+                            else:
+                                start_idx = 1 
                             found_root = True
                         else:
                             for i, node in enumerate(path_nodes):
