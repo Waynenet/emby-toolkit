@@ -240,7 +240,8 @@ def get_115_status():
         from handler.p115_service import P115Service, get_config, get_115_tokens
         config = get_config()
         
-        token = get_115_tokens().get('access_token') 
+        token, _ = get_115_tokens()
+        token = (token or "").strip() 
         cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "").strip()
         
         result = {

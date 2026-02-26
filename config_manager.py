@@ -269,6 +269,12 @@ def load_config():
 
         # 将加载好的动态配置也更新到全局配置中
         APP_CONFIG.update(final_dynamic_config)
+        
+        auth_data = settings_db.get_setting('p115_auth_tokens')
+        if auth_data:
+            APP_CONFIG[constants.CONFIG_OPTION_115_TOKEN] = auth_data.get('access_token', '')
+            APP_CONFIG[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = auth_data.get('refresh_token', '')
+
         logger.trace("  ➜ 动态应用配置已从数据库加载。")
 
     except Exception as e:
@@ -297,15 +303,18 @@ def save_config(new_config: Dict[str, Any]):
         in_refresh = new_config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN)
         
         if in_token is not None:
-            # 存入小金库
             settings_db.save_setting('p115_auth_tokens', {
                 'access_token': in_token,
                 'refresh_token': in_refresh or ""
             })
+            
+            # 同步更新内存，让前端刷新页面时能立刻看到新 Token
+            APP_CONFIG[constants.CONFIG_OPTION_115_TOKEN] = in_token
+            APP_CONFIG[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = in_refresh or ""
+
             # 从全局配置字典中剔除，永远不再存入 dynamic_app_config
             new_config.pop(constants.CONFIG_OPTION_115_TOKEN, None)
             new_config.pop(constants.CONFIG_OPTION_115_REFRESH_TOKEN, None)
-            logger.info("  ➜ 检测到 115 Token 更新，已安全转移至独立金库。")
         # =================================================================
 
         # 步骤 1: 从数据库加载当前完整的动态配置
