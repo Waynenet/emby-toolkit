@@ -46,7 +46,6 @@
       # --- 1. Emby-Toolkit 主程序 ---
       emby-toolkit:
         image: hbq0405/emby-toolkit:latest 
-        #image: hbq0405/emby-toolkit:arm              # ARM用这个镜像
         container_name: emby-toolkit
         network_mode: bridge                          # 网络模式
         ports:
