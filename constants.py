@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "7.1.3"  # 更新版本号
+APP_VERSION = "7.1.2"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -45,7 +45,6 @@ DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY = 0 # 默认不延迟
 # ✨ 115 网盘配置 (115 Cloud Drive) 
 # ==============================================================================
 CONFIG_SECTION_115 = "115"
-CONFIG_OPTION_115_REFRESH_TOKEN = "p115_refresh_token"           # 115 Refresh Token (用于自动续期Access Token)
 CONFIG_OPTION_115_COOKIES = "p115_cookies"                       # 115 Cookie (用于播放: 获取直链)
 CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"           # 115转存/上传的目标目录CID
 CONFIG_OPTION_115_SAVE_PATH_NAME = "p115_save_path_name"         # 115转存/上传的目标目录名称

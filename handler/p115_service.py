@@ -21,13 +21,14 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 def get_115_tokens():
-    """从独立存储获取 Token，防止被 WebUI 保存配置时误覆盖"""
+    """唯一真理：只从独立数据库获取 Token"""
     auth_data = settings_db.get_setting('p115_auth_tokens')
-    if auth_data and auth_data.get('access_token'):
+    if auth_data:
         return auth_data.get('access_token'), auth_data.get('refresh_token')
-    
+    return None, None
+
 def save_115_tokens(access_token, refresh_token):
-    """将 Token 存入独立存储"""
+    """唯一真理：只写入独立数据库"""
     settings_db.save_setting('p115_auth_tokens', {
         'access_token': access_token,
         'refresh_token': refresh_token
@@ -36,38 +37,37 @@ def save_115_tokens(access_token, refresh_token):
 _refresh_lock = threading.Lock()
 
 def refresh_115_token(failed_token=None):
-    """使用 refresh_token 换取新的 access_token (纯小金库读写)"""
+    """使用 refresh_token 换取新的 access_token (纯数据库读写)"""
     with _refresh_lock:
         try:
-            # ★ 防御并发：如果内存中的 token 已经和失败的 token 不一样了，说明别的线程刚续期完，直接放行！
-            if failed_token and P115Service._token_cache and P115Service._token_cache != failed_token:
+            current_access, current_refresh = get_115_tokens()
+            if not current_refresh:
+                return False
+                
+            # ★ 并发防御：如果数据库里的 token 已经和刚才报错的 token 不一样了，说明别的线程刚续期完，直接放行！
+            if failed_token and current_access and current_access != failed_token:
                 logger.info("  ⚡ [115] 检测到 Token 已被其他线程续期，直接放行。")
                 if P115Service._openapi_client:
-                    P115Service._openapi_client.access_token = P115Service._token_cache
-                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {P115Service._token_cache}"
+                    P115Service._openapi_client.access_token = current_access
+                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {current_access}"
                 return True
 
-            access_token, refresh_token = get_115_tokens()
-            if not refresh_token:
-                return False
-
             url = "https://passportapi.115.com/open/refreshToken"
-            payload = {"refresh_token": refresh_token}
+            payload = {"refresh_token": current_refresh}
             resp = requests.post(url, data=payload, timeout=10).json()
             
             if resp.get('state'):
                 new_access_token = resp['data']['access_token']
                 new_refresh_token = resp['data']['refresh_token']
                 
-                # ★ 专款专用：只写独立 DB Key，绝对不受全局配置干扰
+                # 写入数据库
                 save_115_tokens(new_access_token, new_refresh_token)
                 
                 if P115Service._openapi_client:
                     P115Service._openapi_client.access_token = new_access_token
                     P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
-                P115Service._token_cache = new_access_token
                 
-                logger.info("  🔄 [115] Token 自动续期成功！已成功保存。")
+                logger.info("  🔄 [115] Token 自动续期成功！已存入独立金库。")
                 return True
             else:
                 logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
@@ -95,14 +95,12 @@ class P115OpenAPIClient:
         try:
             current_token = self.access_token # 记录当前请求使用的 token
             resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
-            # logger.info(f"🔮 [115] 请求响应: {resp}")
-            # 115 OpenAPI Token 失效通常会返回 state: False 且 code 为 990001/990002 或 4014012x
+            
             if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
-                logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在自动续期...")
+                logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
                 
-                # 调用续期函数，传入失败的 token
+                # ★ 传入 current_token 进行比对
                 if refresh_115_token(current_token):
-                    # 续期成功，headers 已经被 refresh_115_token 更新了，直接重试请求！
                     logger.info("  🚀 [115] 续期完成，重新发送刚才失败的请求...")
                     return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
                 else:
@@ -241,16 +239,15 @@ class P115Service:
     def get_openapi_client(cls):
         """获取管理客户端 (OpenAPI) - 启动时初始化"""
         token, _ = get_115_tokens()
-        
         if not token:
             return None
 
         with cls._lock:
-            if cls._openapi_client is None or token != cls._token_cache:
+            # 如果 client 不存在，或者 token 变了，重新初始化
+            if cls._openapi_client is None or getattr(cls._openapi_client, 'access_token', None) != token:
                 try:
                     cls._openapi_client = P115OpenAPIClient(token)
-                    cls._token_cache = token
-                    logger.info("  🚀 [115] OpenAPI 客户端已初始化 (整理用)")
+                    logger.info("  🚀 [115] OpenAPI 客户端已初始化/更新 (整理用)")
                 except Exception as e:
                     logger.error(f"  ❌ 115 OpenAPI 客户端初始化失败: {e}")
                     cls._openapi_client = None

@@ -199,7 +199,7 @@ def check_qrcode_status():
         return jsonify({
             "success": True,
             "status": "success",
-            "message": "Token 获取成功！",
+            "message": "授权成功！",
         })
         
     elif status.get('status') == 'expired':

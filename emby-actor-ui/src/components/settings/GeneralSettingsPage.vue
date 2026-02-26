@@ -252,7 +252,7 @@
                         <n-tag v-if="p115Info" type="success" size="small" round>
                           {{ p115Info.msg || '连接正常' }}
                         </n-tag>
-                        <n-tag v-else-if="configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
+                        <n-tag v-else-if="configModel.p115_token || configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
                         <n-tag v-else type="error" size="small" round>未配置</n-tag>
                       </div>
                     </template>
@@ -281,6 +281,23 @@
                         </div>
                       </div>
                     </div>
+
+                    <!-- ★★★ 分离配置: Access Token (管理用) - 纯展示 ★★★ -->
+                    <n-form-item label="OpenAPI 授权">
+                      <n-space vertical :size="8" style="width: 100%;">
+                        <n-space align="center" justify="space-between">
+                          <n-tag :type="p115Info?.has_token ? 'success' : 'default'" size="small">
+                            <template #icon>
+                              <n-icon :component="p115Info?.has_token ? CheckIcon : CloseIcon" />
+                            </template>
+                            {{ p115Info?.has_token ? '已授权 (自动续期中)' : '未授权 (请扫码)' }}
+                          </n-tag>
+                        </n-space>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          用于网盘整理。请点击右上角“扫码登录”获取授权。
+                        </n-text>
+                      </n-space>
+                    </n-form-item>
 
                     <!-- ★★★ 分离配置: Cookie (播放用) - 优化为直接显示状态 ★★★ -->
                     <n-form-item label="Cookie" path="p115_cookies">
@@ -1928,15 +1945,15 @@ const startPolling = () => {
       const data = res.data;
       
       if (data.status === 'success') {
-        // 登录成功
         qrcodeStatus.value = 'success';
-        configModel.value.p115_cookies = data.cookies;
-        // Token 已由后端保存到数据库，前端只需保存 Cookie
-        message.success('登录成功！Cookie 已自动保存');
+        if (data.cookies) {
+           configModel.value.p115_cookies = data.cookies; // Cookie 还是保留在前端配置里
+        }
+        message.success('登录成功！授权已自动保存');
         stopPolling();
         setTimeout(() => {
           showQrcodeModal.value = false;
-          check115Status();
+          check115Status(); // 刷新状态显示
         }, 1500);
       } else if (data.status === 'expired') {
         qrcodeStatus.value = 'expired';
@@ -1966,26 +1983,19 @@ const closeQrcodeModal = () => {
 
 // 检查 115 状态
 const check115Status = async () => {
-    // 支持 Token 或 Cookie 任意一个
-    if (!configModel.value.p115_cookies) {
-        message.warning('请先扫码登录或设置 Cookie');
-        return;
-    }
     loading115Info.value = true;
     try {
-        // 先保存配置（如果有修改）
-        await handleSaveConfig(JSON.parse(JSON.stringify(configModel.value)));
-        
+        // 纯粹查状态，不再触发 handleSaveConfig，彻底切断前端对后端的污染
         const res = await axios.get('/api/p115/status');
         if (res.data && res.data.data) {
             p115Info.value = res.data.data;
-            message.success('115 连接成功！');
+            message.success('115 状态刷新成功！');
         } else {
             p115Info.value = null;
         }
     } catch (e) { 
         p115Info.value = null; 
-        message.error('连接失败: ' + (e.response?.data?.message || e.message));
+        message.error('状态获取失败: ' + (e.response?.data?.message || e.message));
     } finally { 
         loading115Info.value = false; 
     }
@@ -2484,9 +2494,9 @@ onMounted(async () => {
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       // 支持 Token 或 Cookie 任意一个检查状态
-      if (configModel.value.p115_cookies) {
-        check115Status();
-      }
+      if (configModel.value.p115_token || configModel.value.p115_cookies) {
+                check115Status();
+            }
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }
