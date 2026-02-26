@@ -39,10 +39,15 @@ def refresh_115_token():
             expires_in = resp['data'].get('expires_in', 0)
             hours = round(expires_in / 3600, 1)
             
-            from config_manager import save_config
+            # ★ 修复 1：绕过前端防御机制，直接底层写库更新 Token
+            current_db_config = settings_db.get_setting('dynamic_app_config') or {}
+            current_db_config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
+            current_db_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
+            settings_db.save_setting('dynamic_app_config', current_db_config)
+            
+            # 更新内存
             config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
             config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
-            save_config(config)
             
             # ★ 动态更新内存中的 Token，不需要重启客户端
             if P115Service._openapi_client:
@@ -1739,6 +1744,9 @@ def task_full_sync_strm_and_subs(processor=None):
     if download_subs: fetch_types.append(1) # 1=文档(含字幕)
 
     total_targets = len(target_cids)
+
+    # 熔断标记
+    api_fatal_error = False
     
     for idx, target_cid in enumerate(target_cids):
         category_name = cid_to_rel_path.get(target_cid, "未知分类")
@@ -1757,6 +1765,11 @@ def task_full_sync_strm_and_subs(processor=None):
                 try:
                     # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
                     res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
+                    # 绝对熔断！如果接口明确返回失败（如 Token 失效），立刻终止！
+                    if not res.get('state'):
+                        logger.error(f"  🛑 [致命错误] 115 API 返回失败: {res.get('error_msg', res)}，触发熔断保护！")
+                        api_fatal_error = True
+                        break
                     data = res.get('data', [])
                     if not data: break
                     
@@ -1849,7 +1862,12 @@ def task_full_sync_strm_and_subs(processor=None):
                     
                 except Exception as e:
                     logger.error(f"  ❌ 全局拉取异常 (cid={target_cid}, type={f_type}): {e}")
+                    api_fatal_error = True # ★ 触发熔断
                     break
+            
+            # 如果内层循环触发了熔断，外层循环也直接跳出
+            if api_fatal_error: break
+        if api_fatal_error: break
 
     logger.info(f"  ✅ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
 
@@ -1857,7 +1875,11 @@ def task_full_sync_strm_and_subs(processor=None):
     # 阶段 3: 本地失效文件清理 (耗时: 秒级)
     # =================================================================
     if enable_cleanup:
-        update_progress(90, "  🧹 正在比对并清理本地失效文件...")
+        if api_fatal_error:
+            update_progress(90, "  🛑 [熔断保护] 由于拉取过程中发生 API 错误，为防止误删，已强制跳过本地清理阶段！")
+            logger.warning("  🛑 [熔断保护] 拒绝执行本地清理！")
+        else:
+            update_progress(90, "  🧹 正在比对并清理本地失效文件...")
         cleaned_files = 0
         cleaned_dirs = 0
         
