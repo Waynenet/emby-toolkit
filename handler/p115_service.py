@@ -112,6 +112,12 @@ class P115OpenAPIClient:
 
     def fs_files_app(self, payload): 
         return self.fs_files(payload)
+    
+    def fs_search(self, payload):
+        url = f"{self.base_url}/open/ufile/search"
+        params = {"limit": 100, "offset": 0}
+        if isinstance(payload, dict): params.update(payload)
+        return self._do_request("GET", url, params=params)
 
     def fs_mkdir(self, name, pid):
         url = f"{self.base_url}/open/folder/add"
@@ -332,6 +338,11 @@ class P115Service:
                 self._check_openapi()
                 self._rate_limit()
                 return self._openapi.fs_files_app(payload)
+            
+            def fs_search(self, payload):
+                self._check_openapi()
+                self._rate_limit()
+                return self._openapi.fs_search(payload)
 
             def fs_mkdir(self, name, pid):
                 self._check_openapi()
@@ -1740,26 +1751,26 @@ def task_full_sync_strm_and_subs(processor=None):
     files_generated = 0
     subs_downloaded = 0
     
-    fetch_types = [4] # 4=视频
-    if download_subs: 
-        # 1=文档(可能包含极少数被误认的字幕), 99=其他(115通常把srt/ass归类为其他)
-        fetch_types.extend([1, 99])
-
     total_targets = len(target_cids)
-
-    # 熔断标记
-    api_fatal_error = False
+    api_fatal_error = False 
     
     for idx, target_cid in enumerate(target_cids):
         category_name = cid_to_rel_path.get(target_cid, "未知分类")
         base_prog = 10 + int((idx / total_targets) * 80)
         update_progress(base_prog, f"  🌐 正在全局拉取分类 [{category_name}] 下的所有文件...")
         
-        for f_type in fetch_types:
-            if f_type == 4: type_name = "视频"
-            elif f_type == 1: type_name = "文档"
-            elif f_type == 99: type_name = "其他(字幕)"
-            else: type_name = "未知"
+        # ★ 核心修改：将拉取任务拆分为“按类型拉取视频”和“按关键词搜索字幕”
+        pull_tasks = [{"name": "视频", "is_search": False, "params": {'type': 4}}]
+        
+        if download_subs:
+            # 使用官方搜索接口精准打击！
+            for ext in ['srt', 'ass', 'ssa', 'sub', 'vtt']:
+                pull_tasks.append({"name": f"字幕(.{ext})", "is_search": True, "params": {'search_value': f'.{ext}'}})
+        
+        for task in pull_tasks:
+            task_name = task["name"]
+            is_search = task["is_search"]
+            base_params = task["params"]
             
             offset = 0
             limit = 1000
@@ -1769,17 +1780,26 @@ def task_full_sync_strm_and_subs(processor=None):
                 if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
                 
                 try:
-                    # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
-                    res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
-                    # 绝对熔断！如果接口明确返回失败（如 Token 失效），立刻终止！
+                    req_payload = {'cid': target_cid, 'limit': limit, 'offset': offset}
+                    req_payload.update(base_params)
+                    
+                    # ★ 区分调用：搜索走官方 fs_search，拉取走 fs_files
+                    if is_search and hasattr(client, 'fs_search'):
+                        res = client.fs_search(req_payload)
+                    else:
+                        req_payload['record_open_time'] = 0
+                        res = client.fs_files(req_payload)
+                    
+                    # 绝对熔断保护
                     if not res.get('state'):
                         logger.error(f"  🛑 [致命错误] 115 API 返回失败: {res.get('error_msg', res)}，触发熔断保护！")
                         api_fatal_error = True
                         break
+
                     data = res.get('data', [])
                     if not data: break
                     
-                    logger.info(f"  ➜ [{category_name}] - [{type_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
+                    logger.info(f"  ➜ [{category_name}] - [{task_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
                     
                     for item in data:
                         # 兼容 OpenAPI 键名
@@ -1874,7 +1894,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     page += 1
                     
                 except Exception as e:
-                    logger.error(f"  ❌ 全局拉取异常 (cid={target_cid}, type={f_type}): {e}")
+                    logger.error(f"  ❌ 全局拉取异常 (cid={target_cid}, type={task_name}): {e}")
                     api_fatal_error = True # ★ 触发熔断
                     break
             
