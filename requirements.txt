@@ -33,7 +33,7 @@ google-genai     # 用于Gemini
 docker
 
 # --- 封面生成 ---
-numpy
+numpy==2.3.5
 PyYAML
 Pillow
 
