@@ -20,50 +20,72 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def refresh_115_token():
-    """使用 refresh_token 换取新的 access_token"""
+def get_115_tokens():
+    """从独立存储获取 Token，防止被 WebUI 保存配置时误覆盖"""
+    auth_data = settings_db.get_setting('p115_auth_tokens')
+    if auth_data and auth_data.get('access_token'):
+        return auth_data.get('access_token'), auth_data.get('refresh_token')
+    
+    # 兼容老版本：如果小金库是空的，尝试从老配置里捞出来并迁移到小金库
     config = get_config()
+    access_token = config.get(constants.CONFIG_OPTION_115_TOKEN, "")
     refresh_token = config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN, "")
-    if not refresh_token:
-        return False
-        
-    try:
-        url = "https://passportapi.115.com/open/refreshToken"
-        payload = {"refresh_token": refresh_token}
-        resp = requests.post(url, data=payload, timeout=10).json()
-        
-        if resp.get('state'):
-            new_access_token = resp['data']['access_token']
-            new_refresh_token = resp['data']['refresh_token']
+    if access_token:
+        save_115_tokens(access_token, refresh_token)
+    return access_token, refresh_token
 
-            expires_in = resp['data'].get('expires_in', 0)
-            hours = round(expires_in / 3600, 1)
+def save_115_tokens(access_token, refresh_token):
+    """将 Token 存入独立存储"""
+    settings_db.save_setting('p115_auth_tokens', {
+        'access_token': access_token,
+        'refresh_token': refresh_token
+    })
+    # 同步更新内存，防止其他老代码报错
+    config = get_config()
+    config[constants.CONFIG_OPTION_115_TOKEN] = access_token
+    config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token
+
+_refresh_lock = threading.Lock()
+
+def refresh_115_token():
+    """使用 refresh_token 换取新的 access_token (纯小金库读写)"""
+    with _refresh_lock:
+        try:
+            access_token, refresh_token = get_115_tokens()
+            if not refresh_token:
+                return False
+                
+            # 检查内存是否已更新 (防御并发)
+            if P115Service._token_cache and P115Service._token_cache != access_token:
+                if P115Service._openapi_client:
+                    P115Service._openapi_client.access_token = access_token
+                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {access_token}"
+                return True
+
+            url = "https://passportapi.115.com/open/refreshToken"
+            payload = {"refresh_token": refresh_token}
+            resp = requests.post(url, data=payload, timeout=10).json()
             
-            # ★ 修复 1：绕过前端防御机制，直接底层写库更新 Token
-            current_db_config = settings_db.get_setting('dynamic_app_config') or {}
-            current_db_config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
-            current_db_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
-            settings_db.save_setting('dynamic_app_config', current_db_config)
-            
-            # 更新内存
-            config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
-            config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
-            
-            # ★ 动态更新内存中的 Token，不需要重启客户端
-            if P115Service._openapi_client:
-                P115Service._openapi_client.access_token = new_access_token
-                P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
-            P115Service._token_cache = new_access_token
-            
-            logger.info("  🔄 [115] Token 自动续期成功！")
-            logger.info(f"  ⏳ [115] 新 Token 寿命: {expires_in} 秒 (约 {hours} 小时)")
-            return True
-        else:
-            logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
+            if resp.get('state'):
+                new_access_token = resp['data']['access_token']
+                new_refresh_token = resp['data']['refresh_token']
+                
+                # ★ 专款专用：只写独立 DB Key，绝对不受全局配置干扰
+                save_115_tokens(new_access_token, new_refresh_token)
+                
+                if P115Service._openapi_client:
+                    P115Service._openapi_client.access_token = new_access_token
+                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
+                P115Service._token_cache = new_access_token
+                
+                logger.info("  🔄 [115] Token 自动续期成功！已存入独立金库。")
+                return True
+            else:
+                logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
+                return False
+        except Exception as e:
+            logger.error(f"  ❌ Token 续期请求异常: {e}")
             return False
-    except Exception as e:
-        logger.error(f"  ❌ Token 续期请求异常: {e}")
-        return False
 
 # ======================================================================
 # ★★★ 115 OpenAPI 客户端 (仅管理操作：扫描/创建目录/移动文件) ★★★
@@ -228,8 +250,7 @@ class P115Service:
     @classmethod
     def get_openapi_client(cls):
         """获取管理客户端 (OpenAPI) - 启动时初始化"""
-        config = get_config()
-        token = config.get(constants.CONFIG_OPTION_115_TOKEN, "").strip()
+        token, _ = get_115_tokens()
         
         if not token:
             return None
@@ -418,8 +439,8 @@ class P115Service:
     @classmethod
     def get_token(cls):
         """获取 Token (用于 API 调用)"""
-        config = get_config()
-        return config.get(constants.CONFIG_OPTION_115_TOKEN)
+        token, _ = get_115_tokens()
+        return token
 
 
 # ======================================================================

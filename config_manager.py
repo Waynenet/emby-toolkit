@@ -290,23 +290,26 @@ def save_config(new_config: Dict[str, Any]):
     global APP_CONFIG
     
     try:
+        # =================================================================
+        # ★★★ 拦截器：如果前端传来了 115 Token，直接劫持到“小金库”，不混入全局配置
+        # =================================================================
+        in_token = new_config.get(constants.CONFIG_OPTION_115_TOKEN)
+        in_refresh = new_config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN)
+        
+        if in_token is not None:
+            # 存入小金库
+            settings_db.save_setting('p115_auth_tokens', {
+                'access_token': in_token,
+                'refresh_token': in_refresh or ""
+            })
+            # 从全局配置字典中剔除，永远不再存入 dynamic_app_config
+            new_config.pop(constants.CONFIG_OPTION_115_TOKEN, None)
+            new_config.pop(constants.CONFIG_OPTION_115_REFRESH_TOKEN, None)
+            logger.info("  ➜ 检测到 115 Token 更新，已安全转移至独立金库。")
+        # =================================================================
+
         # 步骤 1: 从数据库加载当前完整的动态配置
         full_dynamic_config = settings_db.get_setting('dynamic_app_config') or {}
-        
-        # =================================================================
-        # ★★★ 核心防御：防止前端页面滞后导致后台续期的新 Token 被旧数据覆盖 ★★★
-        # =================================================================
-        db_refresh = full_dynamic_config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN)
-        in_token = new_config.get(constants.CONFIG_OPTION_115_TOKEN)
-        
-        if db_refresh:
-            # 如果前端传来的 token 是空的，说明用户在 UI 上手动清空了，允许清空
-            if not in_token:
-                new_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = ""
-            else:
-                # 否则，强制保留数据库里最新的 refresh_token，无视前端传来的旧值！
-                new_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = db_refresh
-        # =================================================================
         
         # 步骤 2: 将前端传入的新配置更新（合并）到这个完整的配置对象中
         full_dynamic_config.update(new_config)

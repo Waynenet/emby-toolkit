@@ -188,23 +188,19 @@ def check_qrcode_status():
         
         if access_token and refresh_token:
             try:
-                from config_manager import save_config
-                config = get_config()
-                
-                config[constants.CONFIG_OPTION_115_TOKEN] = access_token
-                config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token
-                save_config(config)
+                # ★ 直接调用小金库存钱函数
+                from handler.p115_service import save_115_tokens
+                save_115_tokens(access_token, refresh_token)
                 logger.info(f"  ✅ [115] 扫码成功！Token 已保存。")
                     
             except Exception as e:
-                logger.error(f"  ❌ 保存 Token 到配置失败: {e}")
+                logger.error(f"  ❌ 保存 Token 失败: {e}")
         
         return jsonify({
             "success": True,
             "status": "success",
             "message": "Token 获取成功！",
             "token": access_token,
-            "refresh_token": refresh_token,
         })
         
     elif status.get('status') == 'expired':

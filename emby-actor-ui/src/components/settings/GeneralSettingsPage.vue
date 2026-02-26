@@ -1999,20 +1999,14 @@ const startPolling = () => {
         // ★★★ 同时保存 Token ★★★
         if (data.token) {
           configModel.value.p115_token = data.token;
-          
-          // ★★★ 新增：同步 refresh_token 到前端模型，防止被 check115Status 覆盖 ★★★
-          if (data.refresh_token) {
-            configModel.value.p115_refresh_token = data.refresh_token;
-          }
-          
-          message.success('登录成功！Token 已自动保存');
+          message.success('登录成功！Token + Cookie 已自动保存');
         } else {
           message.success('登录成功！Cookies 已自动保存');
         }
         stopPolling();
         setTimeout(() => {
           showQrcodeModal.value = false;
-          check115Status(); // 这里会触发保存，现在前端模型里有 refresh_token 了，就不会覆盖为空了
+          check115Status();
         }, 1500);
       } else if (data.status === 'expired') {
         qrcodeStatus.value = 'expired';
