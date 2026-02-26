@@ -294,19 +294,17 @@ def save_config(new_config: Dict[str, Any]):
         full_dynamic_config = settings_db.get_setting('dynamic_app_config') or {}
         
         # =================================================================
-        # ★★★ 核心防御：防止前端状态滞后导致 RefreshToken 被覆盖 ★★★
+        # ★★★ 核心防御：防止前端页面滞后导致后台续期的新 Token 被旧数据覆盖 ★★★
         # =================================================================
         db_refresh = full_dynamic_config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN)
         in_token = new_config.get(constants.CONFIG_OPTION_115_TOKEN)
         
         if db_refresh:
-            # 如果前端传来的 access_token 是空的，说明用户在 UI 上手动清空了 Token
-            # 此时我们允许同步清空 refresh_token
+            # 如果前端传来的 token 是空的，说明用户在 UI 上手动清空了，允许清空
             if not in_token:
                 new_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = ""
             else:
-                # 否则，无论前端传来什么 refresh_token（空的还是旧的），
-                # 都强制使用数据库里最新的！彻底杜绝前端滞后覆盖的问题。
+                # 否则，强制保留数据库里最新的 refresh_token，无视前端传来的旧值！
                 new_config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = db_refresh
         # =================================================================
         
