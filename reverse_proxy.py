@@ -785,11 +785,11 @@ def proxy_all(path):
         # logger.info(f"[PROXY] 请求路径: {full_path}")
         
         # ====================================================================
-        # ★★★ 拦截 H: 视频流请求 (stream.mkv, stream.mp4, original.mp4 等) ★★★
+        # ★★★ 拦截 H: 视频流请求 (全员 302 直链版) ★★★
         # ====================================================================
         if '/videos/' in path and ('/stream.' in path or '/original.' in path):
             
-            # 1. ★★★ 核心修复：处理浏览器的预检请求 (OPTIONS)，直接放行并赋予跨域权限 ★★★
+            # 1. 拦截 OPTIONS 预检请求 (给浏览器吃定心丸)
             if request.method == 'OPTIONS':
                 resp = Response()
                 resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -830,42 +830,26 @@ def proxy_all(path):
             except Exception as e:
                 logger.error(f"[STREAM] 获取 115 直链失败: {e}")
             
+            # 2. 只要拿到了 115 直链，管你是浏览器还是 TV，统统 302 滚去 115 下载！
             if real_115_url:
-                # 2. ★★★ 核心修复：所有客户端（包括浏览器）统一走 302，并在 302 响应中强行注入跨域头 ★★★
+                logger.info(f"  🚀 [STREAM] 成功获取直链，全员 302 重定向至 115 CDN")
                 resp = redirect(real_115_url, code=302)
                 resp.headers['Access-Control-Allow-Origin'] = '*'
-                resp.headers['Access-Control-Allow-Headers'] = '*'
-                resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
                 return resp
             
-            # 如果获取失败，回退到原来的转发方式
-            logger.info(f"[STREAM] 回退到转发模式")
+            # 3. 兜底：如果 115 抽风没拿到直链，再走服务器中转
+            logger.info(f"  ⚠️ [STREAM] 未获取到直链，回退到服务器中转")
             target_url = f"{base_url}/{path.lstrip('/')}"
             forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
             forward_headers['Host'] = urlparse(base_url).netloc
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
             
-            resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=10, allow_redirects=False)
-            
-            if resp.status_code in [301, 302]:
-                redirect_url = resp.headers.get('Location', '')
-                if '/api/p115/play/' in redirect_url:
-                    pick_code = redirect_url.split('/play/')[-1].split('?')[0].strip()
-                    player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                    client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                    real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                    if real_115_url:
-                        # 兜底的 302 也要加上跨域头
-                        resp = redirect(real_115_url, code=302)
-                        resp.headers['Access-Control-Allow-Origin'] = '*'
-                        resp.headers['Access-Control-Allow-Headers'] = '*'
-                        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-                        return resp
+            resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=30.0, stream=True, allow_redirects=True)
             
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-            response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_resp_headers]
-            return Response(resp.content, resp.status_code, response_headers)
+            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         
         # ====================================================================
         # ★★★ 终极拦截 G: PlaybackInfo 智能劫持 (完美兼容版) ★★★

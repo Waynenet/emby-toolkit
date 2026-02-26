@@ -93,6 +93,28 @@ server {
         proxy_pass http://emby_server;
     }
 
+    # ====================================================================
+    # ★★★ 终极黑魔法：动态抹除 Emby 网页端的 crossorigin 属性 ★★★
+    # ====================================================================
+    location ^~ /web/ {
+        proxy_pass http://emby_server;
+        
+        # 【关键】必须清空 Accept-Encoding，强制 Emby 返回明文而不是 gzip 压缩包
+        # 否则 Nginx 无法在压缩包里查找和替换字符串
+        proxy_set_header Accept-Encoding "";
+        
+        # 指定需要替换的文件类型 (HTML 和 JS)
+        sub_filter_types text/html application/javascript text/javascript application/x-javascript;
+        
+        # 暴力抹除所有可能的 crossorigin 写法
+        sub_filter 'crossorigin="anonymous"' '';
+        sub_filter 'crossOrigin="anonymous"' '';
+        sub_filter 'crossOrigin = "anonymous"' '';
+        
+        # 替换全文所有的匹配项
+        sub_filter_once off;
+    }
+
     # 兜底规则：转发所有其他请求到真实 Emby
     location / {
         proxy_pass http://emby_server;
