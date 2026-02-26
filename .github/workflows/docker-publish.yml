@@ -67,6 +67,8 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            BUILDPLATFORM=${{ matrix.platform }}
           labels: ${{ needs.prepare.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |

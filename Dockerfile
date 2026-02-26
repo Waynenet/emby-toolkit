@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG BUILDPLATFORM
+ARG BUILDPLATFORM=linux/amd64
 # --- 阶段 1: 构建前端 ---
 FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-build
 WORKDIR /app/emby-actor-ui
