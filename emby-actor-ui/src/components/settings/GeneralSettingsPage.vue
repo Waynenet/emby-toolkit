@@ -466,7 +466,7 @@
             </n-tab-pane>
 
             <!-- ================== 标签页 2: Emby (紧凑双列版) ================== -->
-            <n-tab-pane name="emby" tab="Emby & 虚拟库">
+            <n-tab-pane name="emby" tab="Emby & 302反代">
               <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
 
                 <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
@@ -559,7 +559,7 @@
                 <!-- ########## 右侧卡片: 虚拟库 (反向代理) ########## -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">虚拟库反代</span></template>
+                    <template #header><span class="card-title">302反代</span></template>
                     
                     <!-- 同样使用紧凑双列 -->
                     <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
@@ -567,7 +567,6 @@
                       <!-- 1. 启用开关 -->
                       <n-form-item-grid-item label="启用" path="proxy_enabled" label-width="100">
                         <n-switch v-model:value="configModel.proxy_enabled" />
-                        <n-text depth="3" style="font-size: 0.8em;">访问自建合集虚拟的媒体库</n-text>
                       </n-form-item-grid-item>
 
                       <!-- 2. 端口 -->

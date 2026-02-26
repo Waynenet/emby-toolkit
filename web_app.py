@@ -480,7 +480,7 @@ def main_app_start():
             try:
                 internal_proxy_port = 7758
                 external_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)
-                logger.info(f"  🚀 [虚拟库] 服务器已启动 (容器监听端口: {external_port})")
+                logger.info(f"  🚀 [302反代] 服务器已启动 (容器监听端口: {external_port})")
                 proxy_server = WSGIServer(('0.0.0.0', internal_proxy_port), proxy_app, handler_class=WebSocketHandler)
                 proxy_server.serve_forever()
             except Exception as e:
