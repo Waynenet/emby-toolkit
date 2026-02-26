@@ -149,11 +149,8 @@ class P115CookieClient:
     def download_url(self, pick_code, user_agent=None):
         """获取直链 (仅 Cookie 可用)"""
         if self.webapi:
-            try:
-                url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
-                if url_obj: return str(url_obj)
-            except Exception as e:
-                logger.warning(f"  ⚠️ Cookie 直链获取失败: {e}")
+            url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
+            if url_obj: return str(url_obj)
         return None
 
     def get_user_info(self):
@@ -206,6 +203,7 @@ class P115Service:
     """统一管理 OpenAPI 和 Cookie 客户端"""
     _instance = None
     _lock = threading.Lock()
+    _downurl_lock = threading.Lock() # 直链专用锁
     
     # 客户端缓存
     _openapi_client = None
@@ -214,6 +212,7 @@ class P115Service:
     _cookie_cache = None
     
     _last_request_time = 0
+    _last_downurl_time = 0 # 直链专用时间戳
 
     @classmethod
     def get_openapi_client(cls):
@@ -350,10 +349,29 @@ class P115Service:
                 return self._openapi.fs_delete(fids)
 
             def download_url(self, pick_code, user_agent=None):
-                self._rate_limit()
                 if not self._cookie:
                     raise Exception("未配置 115 Cookie，无法获取播放直链")
-                return self._cookie.download_url(pick_code, user_agent)
+                
+                with P115Service._downurl_lock:
+                    # ★ 专门针对 downurl 的严格流控 (最少 1.5 秒)
+                    current_time = time.time()
+                    elapsed = current_time - P115Service._last_downurl_time
+                    if elapsed < 1.5:
+                        time.sleep(1.5 - elapsed)
+                    
+                    try:
+                        res = self._cookie.download_url(pick_code, user_agent)
+                        P115Service._last_downurl_time = time.time()
+                        return res
+                    except Exception as e:
+                        err_str = str(e)
+                        # ★ 如果触发 405 风控，强制熔断 10 秒
+                        if '405' in err_str or 'Method Not Allowed' in err_str:
+                            logger.error("  🛑 [熔断] 获取直链触发 115 WAF 风控 (405)，强制休眠 10 秒...")
+                            P115Service._last_downurl_time = time.time() + 10
+                        else:
+                            P115Service._last_downurl_time = time.time()
+                        raise e
 
             def request(self, *args, **kwargs):
                 self._rate_limit()
@@ -1619,14 +1637,14 @@ def task_sync_115_directory_tree(processor=None):
 
 def task_full_sync_strm_and_subs(processor=None):
     """
-    【V3 终极极速版】全量生成 STRM 与 同步字幕
-    利用本地 DB 目录树缓存，将递归扫描降维打击为“扁平化并发扫描”，速度提升百倍！
+    【V4 终极上帝视角版】全量生成 STRM 与 同步字幕
+    利用 115 分类目录级全局拉取 (type=4/1) + 本地 DB 目录树缓存，实现秒级增量同步！
     """
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
     
-    start_msg = "=== 🚀 开始全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始全量同步 STRM (跳过字幕) ==="
+    start_msg = "=== 🚀 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始极速全量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
     logger.info(start_msg)
     
@@ -1641,7 +1659,6 @@ def task_full_sync_strm_and_subs(processor=None):
 
     local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
     etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
-    media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
     
     known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
     known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
@@ -1692,9 +1709,9 @@ def task_full_sync_strm_and_subs(processor=None):
         update_progress(100, f"读取本地目录缓存失败: {e}")
         return
 
-    # 内存路径推导函数
+    # 内存路径推导函数 (核心魔法)
     def resolve_local_dir(pid):
-        """根据目录的 pid，向上追溯直到命中 target_cids，返回拼接好的本地相对路径"""
+        """根据文件的 pid，向上追溯直到命中 target_cids，返回拼接好的本地相对路径"""
         pid = str(pid)
         if pid in cid_to_rel_path:
             return cid_to_rel_path[pid]
@@ -1712,103 +1729,109 @@ def task_full_sync_strm_and_subs(processor=None):
         return None
 
     # =================================================================
-    # 阶段 2: 扁平化极速扫描 (彻底消灭递归)
+    # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
     # =================================================================
     valid_local_files = set()
     files_generated = 0
     subs_downloaded = 0
     
-    update_progress(10, "  🔄 正在计算有效扫描路径...")
+    fetch_types = [4] # 4=视频
+    if download_subs: fetch_types.append(1) # 1=文档(含字幕)
+
+    total_targets = len(target_cids)
     
-    # 1. 筛选出所有属于媒体库的有效目录
-    valid_cids = {}
-    for cid in dir_cache.keys():
-        rel_dir = resolve_local_dir(cid)
-        if rel_dir:
-            valid_cids[cid] = rel_dir
-
-    # 2. 把规则里的根目录也加进去
-    for cid in target_cids:
-        if cid not in valid_cids:
-            valid_cids[cid] = cid_to_rel_path.get(cid, "未识别")
-
-    total_dirs = len(valid_cids)
-    logger.info(f"  🎯 共筛选出 {total_dirs} 个有效媒体目录，开始生成STRM...")
-
-    def process_file_info(info, rel_dir):
-        nonlocal files_generated, subs_downloaded
-        name = info.get('fn') or info.get('n') or info.get('file_name', '')
-        ext = name.split('.')[-1].lower() if '.' in name else ''
-        if ext not in allowed_exts: return
-        pc = info.get('pc') or info.get('pick_code')
-        if not pc: return
-
-        current_local_path = os.path.join(local_root, rel_dir)
-        os.makedirs(current_local_path, exist_ok=True)
-
-        if ext in known_video_exts:
-            strm_name = os.path.splitext(name)[0] + ".strm"
-            strm_path = os.path.join(current_local_path, strm_name)
-            content = f"{etk_url}/api/p115/play/{pc}"
-
-            need_write = True
-            if os.path.exists(strm_path):
+    for idx, target_cid in enumerate(target_cids):
+        category_name = cid_to_rel_path.get(target_cid, "未知分类")
+        base_prog = 10 + int((idx / total_targets) * 80)
+        update_progress(base_prog, f"  🌐 正在全局拉取分类 [{category_name}] 下的所有文件...")
+        
+        for f_type in fetch_types:
+            type_name = "视频" if f_type == 4 else "文档/字幕"
+            offset = 0
+            limit = 1000
+            page = 1
+            
+            while True:
+                if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
+                
                 try:
-                    with open(strm_path, 'r', encoding='utf-8') as f:
-                        if f.read().strip() == content: need_write = False
-                except: pass
-
-            if need_write:
-                with open(strm_path, 'w', encoding='utf-8') as f: f.write(content)
-                logger.info(f"  📝 已生成 STRM: {strm_name}")
-                files_generated += 1
-
-            valid_local_files.add(os.path.abspath(strm_path))
-
-        elif ext in known_sub_exts and download_subs:
-            sub_path = os.path.join(current_local_path, name)
-            if not os.path.exists(sub_path):
-                try:
-                    import requests
-                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
-                    if url_obj:
-                        headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
-                        resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
-                        resp.raise_for_status()
-                        with open(sub_path, 'wb') as f:
-                            for chunk in resp.iter_content(8192): f.write(chunk)
-                        logger.info(f"  ⬇️ [增量] 下载字幕: {name}")
-                        subs_downloaded += 1
-                except Exception as e:
-                    logger.error(f"  ❌ 下载字幕失败 [{name}]: {e}")
-
-            valid_local_files.add(os.path.abspath(sub_path))
-
-    # 3. 开始遍历有效目录
-    for idx, (cid, rel_dir) in enumerate(valid_cids.items()):
-        if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
-
-        if idx % 50 == 0 or idx == total_dirs - 1:
-            base_prog = 10 + int((idx / total_dirs) * 80)
-            update_progress(base_prog, f"  ➜ 扫描进度: {idx+1}/{total_dirs} 个目录...")
-
-        offset = 0
-        limit = 1000
-        while True:
-            try:
-                # show_dir=0 表示只拉取文件，不拉取文件夹，极大减少数据量
-                res = client.fs_files({'cid': cid, 'show_dir': 0, 'limit': limit, 'offset': offset, 'record_open_time': 0})
-                data = res.get('data', [])
-                if not data: break
-
-                for item in data:
-                    process_file_info(item, rel_dir)
+                    # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
+                    res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
+                    data = res.get('data', [])
+                    if not data: break
                     
-                if len(data) < limit: break
-                offset += limit
-            except Exception as e:
-                logger.error(f"  ❌ 扫描目录 CID:{cid} 异常: {e}")
-                break
+                    logger.info(f"  ➜ [{category_name}] - [{type_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
+                    
+                    for item in data:
+                        # 兼容 OpenAPI 键名
+                        name = item.get('fn') or item.get('n') or item.get('file_name', '')
+                        ext = name.split('.')[-1].lower() if '.' in name else ''
+                        if ext not in allowed_exts: continue
+                        
+                        pc = item.get('pc') or item.get('pick_code')
+                        # 115 返回的文件数据中，pid/cid 代表它所在的父目录 ID
+                        pid = item.get('pid') or item.get('cid') or item.get('parent_id')
+                        if not pc or not pid: continue
+                        
+                        # ★ 瞬间推导本地路径
+                        rel_dir = resolve_local_dir(pid)
+                        if not rel_dir: continue 
+                            
+                        current_local_path = os.path.join(local_root, rel_dir)
+                        os.makedirs(current_local_path, exist_ok=True)
+                        
+                        # 处理视频 STRM
+                        if ext in known_video_exts:
+                            strm_name = os.path.splitext(name)[0] + ".strm"
+                            strm_path = os.path.join(current_local_path, strm_name)
+                            content = f"{etk_url}/api/p115/play/{pc}"
+                            
+                            need_write = True
+                            if os.path.exists(strm_path):
+                                try:
+                                    with open(strm_path, 'r', encoding='utf-8') as f:
+                                        old_content = f.read().strip()
+                                        if old_content == content: 
+                                            need_write = False
+                                        else:
+                                            logger.debug(f"  🔄 [更新] 内容不一致触发覆盖 -> 旧: [{old_content}] | 新: [{content}]")
+                                except Exception as e: pass
+                                        
+                            if need_write:
+                                with open(strm_path, 'w', encoding='utf-8') as f: f.write(content)
+                                if not os.path.exists(strm_path):
+                                    logger.debug(f"  📝 [新增] 生成 STRM: {strm_name}")
+                                files_generated += 1
+                                
+                            valid_local_files.add(os.path.abspath(strm_path))
+                                
+                        # 处理字幕下载
+                        elif ext in known_sub_exts and download_subs:
+                            sub_path = os.path.join(current_local_path, name)
+                            if not os.path.exists(sub_path):
+                                try:
+                                    import requests
+                                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
+                                    if url_obj:
+                                        headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                                        resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
+                                        resp.raise_for_status()
+                                        with open(sub_path, 'wb') as f:
+                                            for chunk in resp.iter_content(8192): f.write(chunk)
+                                        logger.info(f"  ⬇️ [增量] 下载字幕: {name}")
+                                        subs_downloaded += 1
+                                except Exception as e:
+                                    logger.error(f"  ❌ 下载字幕失败 [{name}]: {e}")
+                                    
+                            valid_local_files.add(os.path.abspath(sub_path))
+
+                    if len(data) < limit: break
+                    offset += limit
+                    page += 1
+                    
+                except Exception as e:
+                    logger.error(f"  ❌ 全局拉取异常 (cid={target_cid}, type={f_type}): {e}")
+                    break
 
     logger.info(f"  ✅ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
 
@@ -1824,7 +1847,6 @@ def task_full_sync_strm_and_subs(processor=None):
             target_local_dir = os.path.join(local_root, rel_path)
             if not os.path.exists(target_local_dir): continue
             
-            # 1. 清理多余的文件 (只碰 strm 和 字幕)
             for root_dir, dirs, files in os.walk(target_local_dir):
                 for file in files:
                     ext = file.split('.')[-1].lower()
@@ -1838,7 +1860,6 @@ def task_full_sync_strm_and_subs(processor=None):
                             except Exception as e:
                                 logger.warning(f"  ⚠️ 删除文件失败 {file}: {e}")
             
-            # 2. 清理空文件夹 (自底向上)
             for root_dir, dirs, files in os.walk(target_local_dir, topdown=False):
                 for d in dirs:
                     dir_path = os.path.join(root_dir, d)
@@ -1850,7 +1871,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     
         logger.info(f"  🧹 清理完成: 删除了 {cleaned_files} 个失效文件, {cleaned_dirs} 个空目录。")
 
-    update_progress(100, "=== 全量生成STRM任务结束 ===")
+    update_progress(100, "=== 极速全量同步任务圆满结束 ===")
 
 def delete_115_files_by_webhook(item_path, pickcodes):
     """

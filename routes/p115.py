@@ -477,8 +477,8 @@ def handle_sorting_rules():
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
 
-# 实例化限流器：建议 2 秒内最多允许 3 次解析请求（针对 115 比较稳妥）
-api_limiter = RateLimiter(max_requests=3, period=2)
+# ★ 修改 1：收紧限流器，2秒内只允许 1 次解析请求，专门对付 Emby 的并发探测
+api_limiter = RateLimiter(max_requests=1, period=2)
 # 全局解析锁：确保同一时间只有一个线程在请求 115 API，防止并发冲突
 fetch_lock = threading.Lock()
 
@@ -517,20 +517,17 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     # 使用锁：即使缓存失效，多个请求同时进来，也只有一个能去查 115 API
     with fetch_lock:
         now = time.time()
-        # 二次检查缓存（可能在锁等待期间被其他线程填充）
         if cache_key in _url_cache and now < _url_cache[cache_key]["expire_at"]:
             cached_url = _url_cache[cache_key]["url"]
             if cached_url:
-                # 从缓存中取出之前解析好的文件名
                 display_name = _url_cache[cache_key].get("name", pick_code[:8] + "...")
                 logger.info(f"  📥 [115直链] 命中缓存: {display_name}")
                 return cached_url
         
-        # 这里的限流逻辑：如果令牌不足，直接等待或返回
+        # ★ 修改 2：触发流控时，不要 sleep，直接返回 None 让 Emby 滚蛋
         if not api_limiter.consume():
             logger.warning(f"  ⚠️ [流控] 请求过快，已拦截 pick_code: {pick_code}")
-            time.sleep(0.5) # 稍微强制延迟，缓解压力
-            return None # 触发流控不写入缓存，让客户端稍后重试即可
+            return None 
             
         try:
             # 增加一个小随机延迟，模拟人为行为
