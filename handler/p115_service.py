@@ -59,6 +59,8 @@ def refresh_115_token(failed_token=None):
             if resp.get('state'):
                 new_access_token = resp['data']['access_token']
                 new_refresh_token = resp['data']['refresh_token']
+                expires_in = resp['data'].get('expires_in', 0)
+                hours = expires_in / 3600 if expires_in else '未知'
                 
                 # 写入数据库
                 save_115_tokens(new_access_token, new_refresh_token)
@@ -67,7 +69,7 @@ def refresh_115_token(failed_token=None):
                     P115Service._openapi_client.access_token = new_access_token
                     P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
                 
-                logger.info("  🔄 [115] Token 自动续期成功！已存入独立金库。")
+                logger.info(f"  🔄 [115] Token 自动续期成功！有效时长 {hours} 小时。")
                 return True
             else:
                 logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
