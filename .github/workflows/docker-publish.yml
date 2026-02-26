@@ -3,62 +3,124 @@ name: Docker Image CI & CD for Emby Toolkit
 on:
   push:
     branches:
-      - main      # 监听 主 分支
-      - dev        # 监听 开发 分支
+      - main
+      - dev
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/emby-toolkit
+
 jobs:
-  build-and-push:
+  prepare:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      labels: ${{ steps.meta.outputs.labels }}
+      json: ${{ steps.meta.outputs.json }}
+    steps:
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
 
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_id: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_id: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Set up Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@v3
-        
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/emby-toolkit
-          tags: |
-            # 规则1: 如果事件是推送到一个分支，就用分支名作为 Docker 标签。
-            type=ref,event=branch
-            # 规则1.1: 默认分支(main)额外打上 latest 标签。
-            type=raw,value=latest,enable={{is_default_branch}}
-
-            # 规则2: 如果事件是推送一个 Git 标签，就直接使用该标签名作为 Docker 标签。
-            type=ref,event=tag
-
-      - name: Build and push multi-arch Docker image
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |
-            type=gha,scope=emby-toolkit-main
-            type=gha,scope=emby-toolkit-${{ github.ref_name }}
-          cache-to: type=gha,mode=max,scope=emby-toolkit-${{ github.ref_name }}
+            type=gha,scope=emby-toolkit-main-${{ matrix.platform_id }}
+            type=gha,scope=emby-toolkit-${{ github.ref_name }}-${{ matrix.platform_id }}
+          cache-to: type=gha,mode=max,scope=emby-toolkit-${{ github.ref_name }}-${{ matrix.platform_id }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform_id }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ needs.prepare.outputs.json }}
+        run: |
+          set -euo pipefail
+          cd /tmp/digests
+          tags="$(jq -cr '.tags | map("-t " + .) | join(" ")' <<<"$DOCKER_METADATA_OUTPUT_JSON")"
+          refs="$(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)"
+          docker buildx imagetools create $tags $refs
+          first_tag="$(jq -r '.tags[0]' <<<"$DOCKER_METADATA_OUTPUT_JSON")"
+          docker buildx imagetools inspect "$first_tag"
