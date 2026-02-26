@@ -477,6 +477,18 @@ class P115CacheManager:
             logger.error(f"  ❌ 更新 local_path 失败: {e}")
 
     @staticmethod
+    def get_node_info(cid):
+        """获取节点的 parent_id 和 name (查户口)"""
+        if not cid: return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT parent_id, name FROM p115_filesystem_cache WHERE id = %s", (str(cid),))
+                    return cursor.fetchone()
+        except Exception:
+            return None
+
+    @staticmethod
     def get_cid(parent_cid, name):
         """从本地数据库获取 CID (毫秒级)"""
         if not parent_cid or not name: return None
@@ -1787,12 +1799,33 @@ def task_full_sync_strm_and_subs(processor=None):
         if pid in pid_path_cache:
             return pid_path_cache[pid]
             
-        # 3. 查本地数据库缓存
+        # 3. 查本地数据库缓存 (直接命中)
         db_path = P115CacheManager.get_local_path(pid)
         if db_path:
             pid_path_cache[pid] = db_path
             return db_path
             
+        # =================================================================
+        # ★ 3.5 找他爹要路径 (神级优化：如果自己没路径，但数据库里有爹的记录)
+        # =================================================================
+        node_info = P115CacheManager.get_node_info(pid)
+        if node_info:
+            parent_id = node_info['parent_id']
+            node_name = node_info['name']
+            
+            # 递归找爹的路径 (利用内存和DB缓存，瞬间返回)
+            parent_path = get_local_path_for_pid(parent_id, target_cid, base_category_path)
+            if parent_path:
+                # 爹有路径，直接拼上自己的名字！
+                final_path = os.path.join(parent_path, node_name)
+                
+                # 存入内存，并顺手更新自己的数据库记录，下次连爹都不用找了！
+                pid_path_cache[pid] = final_path
+                P115CacheManager.update_local_path(pid, final_path)
+                
+                logger.debug(f"  👨‍👦 [找爹推导] 成功通过父目录推导路径: {final_path}")
+                return final_path
+
         # 4. 终极兜底：向 115 问路！(100% 准确，且每个文件夹只会问一次)
         try:
             dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0})
@@ -1822,7 +1855,7 @@ def task_full_sync_strm_and_subs(processor=None):
                 P115CacheManager.save_cid(pid, path_nodes[-2].get('cid') if len(path_nodes)>1 else '0', path_nodes[-1].get('file_name'))
                 P115CacheManager.update_local_path(pid, final_path)
                 
-                logger.debug(f"  🔍 [动态推导] 成功解析并缓存新路径: {final_path}")
+                logger.debug(f"  🔍 [动态推导] 成功向115问路并缓存新路径: {final_path}")
                 return final_path
             else:
                 logger.warning(f"  ⚠️ 路径异常: 文件夹 {pid} 不在分类 {target_cid} 之下！")
