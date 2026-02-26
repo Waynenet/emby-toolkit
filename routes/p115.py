@@ -525,15 +525,8 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
         try:
             time.sleep(0.1) 
             
-            # 调用 OpenAPI 官方接口获取直链
-            down_resp = client.fs_downurl(pick_code)
-            direct_url = None
-            
-            if down_resp and down_resp.get('state'):
-                data_dict = down_resp.get('data', {})
-                for fid, info in data_dict.items():
-                    direct_url = info.get('url', {}).get('url')
-                    if direct_url: break
+            url_obj = client.download_url(pick_code, user_agent=user_agent)
+            direct_url = str(url_obj) if url_obj else None
             
             if direct_url:
                 display_name = pick_code[:8] + "..."
@@ -548,9 +541,7 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
                         if path_name: display_name = path_name
                 except: pass
 
-                # =================================================================
-                # ★ 定制化日志输出：一眼看出是谁在请求
-                # =================================================================
+                # 定制化日志输出
                 if is_scanner:
                     logger.info(f"  🤖 [神医插件] 提取媒体信息 -> {display_name}")
                 else:
