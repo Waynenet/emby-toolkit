@@ -788,31 +788,15 @@ def proxy_all(path):
         # ★★★ 拦截 H: 视频流请求 (stream.mkv, stream.mp4, original.mp4 等) ★★★
         # ====================================================================
         if '/videos/' in path and ('/stream.' in path or '/original.' in path):
-            # logger.info(f"[STREAM] 进入视频流拦截，path={path}")
             
-            # 检测浏览器客户端
-            user_agent = request.headers.get('User-Agent', '').lower()
-            client_name = request.headers.get('X-Emby-Client', '').lower()
-            is_browser = 'mozilla' in user_agent or 'chrome' in user_agent or 'safari' in user_agent
-            native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer']
-            if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent:
-                is_browser = False
-            
-            # 浏览器直接转发给 Emby 服务端，不做 302 重定向（115 直链存在跨域问题）
-            if is_browser:
-                # logger.info(f"[STREAM] 识别为浏览器，直接转发给 Emby 服务端，不做 302 重定向")
-                base_url, api_key = _get_real_emby_url_and_key()
-                target_url = f"{base_url}/{path.lstrip('/')}"
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                forward_params = request.args.copy()
-                forward_params['api_key'] = api_key
-                resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=30.0, stream=True)
-                excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-                response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-                return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
-            
-            # 客户端才做 302 重定向
+            # 1. ★★★ 核心修复：处理浏览器的预检请求 (OPTIONS)，直接放行并赋予跨域权限 ★★★
+            if request.method == 'OPTIONS':
+                resp = Response()
+                resp.headers['Access-Control-Allow-Origin'] = '*'
+                resp.headers['Access-Control-Allow-Headers'] = '*'
+                resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                return resp
+
             parts = path.split('/')
             item_id = parts[2] if len(parts) > 2 else ''
             play_session_id = request.args.get('PlaySessionId', '')
@@ -846,11 +830,13 @@ def proxy_all(path):
             except Exception as e:
                 logger.error(f"[STREAM] 获取 115 直链失败: {e}")
             
-            # 如果获取到 115 直链，直接 302 重定向！不要用 Python 中转流！
-            # 这样 Infuse 等播放器会自己去连 115，完美支持拖动进度条，且不消耗服务器带宽。
             if real_115_url:
-                # logger.info(f"  ✅ 已 302 跳转重定向到 115 直链")
-                return redirect(real_115_url, code=302)
+                # 2. ★★★ 核心修复：所有客户端（包括浏览器）统一走 302，并在 302 响应中强行注入跨域头 ★★★
+                resp = redirect(real_115_url, code=302)
+                resp.headers['Access-Control-Allow-Origin'] = '*'
+                resp.headers['Access-Control-Allow-Headers'] = '*'
+                resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                return resp
             
             # 如果获取失败，回退到原来的转发方式
             logger.info(f"[STREAM] 回退到转发模式")
@@ -870,8 +856,12 @@ def proxy_all(path):
                     client_ip = request.headers.get('X-Real-IP', request.remote_addr)
                     real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                     if real_115_url:
-                        # logger.info(f"  ✅ 已 302 跳转重定向到 115 直链")
-                        return redirect(real_115_url, code=302)
+                        # 兜底的 302 也要加上跨域头
+                        resp = redirect(real_115_url, code=302)
+                        resp.headers['Access-Control-Allow-Origin'] = '*'
+                        resp.headers['Access-Control-Allow-Headers'] = '*'
+                        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                        return resp
             
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_resp_headers]
