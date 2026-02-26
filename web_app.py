@@ -457,17 +457,6 @@ def main_app_start():
     except Exception as e:
         logger.error(f"启动实时监控服务失败: {e}", exc_info=True)
 
-    # 初始化115 OpenAPI客户端 (管理操作：扫描/整理)
-    try:
-        from handler.p115_service import P115Service
-        openapi_client = P115Service.get_openapi_client()
-        if openapi_client:
-            logger.debug("  🚀 [115] OpenAPI 客户端启动时已初始化 (整理用)")
-        else:
-            logger.debug("  ℹ️ [115] 未配置 Token，跳过 OpenAPI 初始化")
-    except Exception as e:
-        logger.warning(f"  ⚠️ [115] OpenAPI 启动初始化失败: {e}")
-
     def warmup_vector_cache():
         try:
             logger.debug("  🔥 正在后台预加载向量数据...")
