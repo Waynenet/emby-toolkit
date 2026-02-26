@@ -11,7 +11,8 @@ RUN --mount=type=cache,id=emby-toolkit-npm-cache,target=/root/.npm \
       npm install --prefer-offline --no-audit --no-fund --legacy-peer-deps; \
     fi
 COPY emby-actor-ui/ ./
-RUN npm run build
+RUN --mount=type=cache,id=emby-toolkit-vite-cache,target=/app/emby-actor-ui/node_modules/.vite \
+    npm run build
 
 # --- 阶段 2: 构建最终的生产镜像 (★ 优化后 ★) ---
 FROM python:3.12-slim
