@@ -1231,6 +1231,20 @@ class SmartOrganizer:
                         
                         os.makedirs(local_dir, exist_ok=True) 
 
+                        # 实时将计算好的路径写入数据库缓存，以便后续快速访问
+                        try:
+                            # 1. 实时更新主目录的 local_path
+                            main_folder_path = os.path.join(relative_category_path, std_root_name)
+                            P115CacheManager.update_local_path(final_home_cid, main_folder_path)
+                            
+                            # 2. 如果是剧集，实时更新季目录的 local_path
+                            if self.media_type == 'tv' and season_num is not None:
+                                season_folder_path = os.path.join(main_folder_path, s_name)
+                                # 此时 real_target_cid 就是季目录的 CID
+                                P115CacheManager.update_local_path(real_target_cid, season_folder_path)
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 实时更新目录路径缓存失败: {e}") 
+
                         ext = new_filename.split('.')[-1].lower() if '.' in new_filename else ''
                         is_video = ext in known_video_exts
                         is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
@@ -1823,7 +1837,7 @@ def task_full_sync_strm_and_subs(processor=None):
                 pid_path_cache[pid] = final_path
                 P115CacheManager.update_local_path(pid, final_path)
                 
-                logger.debug(f"  👨‍👦 [找爹推导] 成功通过父目录推导路径: {final_path}")
+                logger.debug(f"  👨‍👦 成功通过父目录推导路径: {final_path}")
                 return final_path
 
         # 4. 终极兜底：向 115 问路！(100% 准确，且每个文件夹只会问一次)
