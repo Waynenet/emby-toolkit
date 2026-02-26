@@ -1657,12 +1657,17 @@ def task_sync_115_directory_tree(processor=None):
                                     # 记录有效的子目录 ID
                                     current_valid_sub_cids.add(str(sub_cid))
                                     
+                                    current_local_path = os.path.join(dir_name, str(sub_name))
+                                    
                                     cursor.execute("""
-                                        INSERT INTO p115_filesystem_cache (id, parent_id, name)
-                                        VALUES (%s, %s, %s)
+                                        INSERT INTO p115_filesystem_cache (id, parent_id, name, local_path)
+                                        VALUES (%s, %s, %s, %s)
                                         ON CONFLICT (parent_id, name)
-                                        DO UPDATE SET id = EXCLUDED.id, updated_at = NOW()
-                                    """, (str(sub_cid), str(cid), str(sub_name)))
+                                        DO UPDATE SET 
+                                            id = EXCLUDED.id, 
+                                            local_path = EXCLUDED.local_path,
+                                            updated_at = NOW()
+                                    """, (str(sub_cid), str(cid), str(sub_name), current_local_path))
                                     total_cached += 1
                                     dir_count_in_page += 1
                         conn.commit()
