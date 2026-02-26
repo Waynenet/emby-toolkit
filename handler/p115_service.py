@@ -47,20 +47,21 @@ def save_115_tokens(access_token, refresh_token):
 
 _refresh_lock = threading.Lock()
 
-def refresh_115_token():
+def refresh_115_token(failed_token=None):
     """使用 refresh_token 换取新的 access_token (纯小金库读写)"""
     with _refresh_lock:
         try:
+            # ★ 防御并发：如果内存中的 token 已经和失败的 token 不一样了，说明别的线程刚续期完，直接放行！
+            if failed_token and P115Service._token_cache and P115Service._token_cache != failed_token:
+                logger.info("  ⚡ [115] 检测到 Token 已被其他线程续期，直接放行。")
+                if P115Service._openapi_client:
+                    P115Service._openapi_client.access_token = P115Service._token_cache
+                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {P115Service._token_cache}"
+                return True
+
             access_token, refresh_token = get_115_tokens()
             if not refresh_token:
                 return False
-                
-            # 检查内存是否已更新 (防御并发)
-            if P115Service._token_cache and P115Service._token_cache != access_token:
-                if P115Service._openapi_client:
-                    P115Service._openapi_client.access_token = access_token
-                    P115Service._openapi_client.headers["Authorization"] = f"Bearer {access_token}"
-                return True
 
             url = "https://passportapi.115.com/open/refreshToken"
             payload = {"refresh_token": refresh_token}
@@ -104,13 +105,15 @@ class P115OpenAPIClient:
 
     def _do_request(self, method, url, **kwargs):
         try:
+            current_token = self.access_token # 记录当前请求使用的 token
             resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
             # logger.info(f"🔮 [115] 请求响应: {resp}")
+            # 115 OpenAPI Token 失效通常会返回 state: False 且 code 为 990001/990002 或 4014012x
             if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
-                logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
+                logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在自动续期...")
                 
-                # 调用续期函数
-                if refresh_115_token():
+                # 调用续期函数，传入失败的 token
+                if refresh_115_token(current_token):
                     # 续期成功，headers 已经被 refresh_115_token 更新了，直接重试请求！
                     logger.info("  🚀 [115] 续期完成，重新发送刚才失败的请求...")
                     return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
