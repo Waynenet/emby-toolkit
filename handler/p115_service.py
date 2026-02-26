@@ -26,24 +26,12 @@ def get_115_tokens():
     if auth_data and auth_data.get('access_token'):
         return auth_data.get('access_token'), auth_data.get('refresh_token')
     
-    # 兼容老版本：如果小金库是空的，尝试从老配置里捞出来并迁移到小金库
-    config = get_config()
-    access_token = config.get(constants.CONFIG_OPTION_115_TOKEN, "")
-    refresh_token = config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN, "")
-    if access_token:
-        save_115_tokens(access_token, refresh_token)
-    return access_token, refresh_token
-
 def save_115_tokens(access_token, refresh_token):
     """将 Token 存入独立存储"""
     settings_db.save_setting('p115_auth_tokens', {
         'access_token': access_token,
         'refresh_token': refresh_token
     })
-    # 同步更新内存，防止其他老代码报错
-    config = get_config()
-    config[constants.CONFIG_OPTION_115_TOKEN] = access_token
-    config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token
 
 _refresh_lock = threading.Lock()
 

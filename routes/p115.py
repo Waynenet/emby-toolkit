@@ -200,8 +200,6 @@ def check_qrcode_status():
             "success": True,
             "status": "success",
             "message": "Token 获取成功！",
-            "token": access_token,
-            "refresh_token": refresh_token
         })
         
     elif status.get('status') == 'expired':

@@ -45,7 +45,6 @@ DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY = 0 # 默认不延迟
 # ✨ 115 网盘配置 (115 Cloud Drive) 
 # ==============================================================================
 CONFIG_SECTION_115 = "115"
-CONFIG_OPTION_115_TOKEN = "p115_token"                           # 115 Access Token (用于OpenAPI管理操作: 扫描/创建目录/移动文件)
 CONFIG_OPTION_115_REFRESH_TOKEN = "p115_refresh_token"           # 115 Refresh Token (用于自动续期Access Token)
 CONFIG_OPTION_115_COOKIES = "p115_cookies"                       # 115 Cookie (用于播放: 获取直链)
 CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"           # 115转存/上传的目标目录CID

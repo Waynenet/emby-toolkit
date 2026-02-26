@@ -252,7 +252,7 @@
                         <n-tag v-if="p115Info" type="success" size="small" round>
                           {{ p115Info.msg || '连接正常' }}
                         </n-tag>
-                        <n-tag v-else-if="configModel.p115_token || configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
+                        <n-tag v-else-if="configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
                         <n-tag v-else type="error" size="small" round>未配置</n-tag>
                       </div>
                     </template>
@@ -281,26 +281,6 @@
                         </div>
                       </div>
                     </div>
-
-                    <!-- ★★★ 分离配置: Access Token (管理用) - 优化为直接显示状态 ★★★ -->
-                    <n-form-item label="Access Token" path="p115_token">
-                      <n-space vertical :size="8" style="width: 100%;">
-                        <n-space align="center" justify="space-between">
-                          <n-tag :type="configModel.p115_token ? 'success' : 'default'" size="small">
-                            <template #icon>
-                              <n-icon :component="configModel.p115_token ? CheckIcon : CloseIcon" />
-                            </template>
-                            {{ configModel.p115_token ? '已配置' : '未配置' }}
-                          </n-tag>
-                          <n-button size="small" type="primary" @click="openTokenModal">
-                            {{ configModel.p115_token ? '修改' : '粘贴Token' }}
-                          </n-button>
-                        </n-space>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          用于网盘整理。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
 
                     <!-- ★★★ 分离配置: Cookie (播放用) - 优化为直接显示状态 ★★★ -->
                     <n-form-item label="Cookie" path="p115_cookies">
@@ -975,32 +955,6 @@
 
     </n-space>
     
-    <!-- ★★★ Token 独立设置弹窗 ★★★ -->
-    <n-modal v-model:show="showTokenModal" preset="card" title="设置 115 Access Token" style="width: 500px;">
-      <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
-        <b>Access Token 说明：</b><br>
-        1. 用于管理操作：扫描目录、创建文件夹、移动文件<br>
-        2. 可通过 115 APP 扫码获取<br>
-        3. 强烈推荐配置，可显著降低 405 封禁风险
-      </n-alert>
-      
-      <n-form-item label="Access Token">
-        <n-input 
-          v-model:value="tempTokenInput" 
-          type="textarea" 
-          placeholder="g3cts. 开头的长字符串..." 
-          :rows="3" 
-        />
-      </n-form-item>
-
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showTokenModal = false">取消</n-button>
-          <n-button type="primary" @click="confirmToken">确定保存</n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
     <!-- ★★★ Cookie 独立设置弹窗 ★★★ -->
     <n-modal v-model:show="showCookieModal" preset="card" title="设置 115 Cookie" style="width: 500px;">
       <n-alert type="success" :show-icon="true" style="margin-bottom: 16px;">
@@ -1918,25 +1872,6 @@ const languageOptions = ref([]);
 const keywordOptions = ref([]);
 const ratingOptions = ref([]);
 
-// ★★★ Token Modal 逻辑 (独立设置 Access Token) ★★★
-const showTokenModal = ref(false);
-const tempTokenInput = ref('');
-
-const openTokenModal = () => {
-  // 从混合字符串中提取 Token
-  const raw = configModel.value.p115_token || '';
-  tempTokenInput.value = raw;
-  showTokenModal.value = true;
-};
-
-const confirmToken = () => {
-  configModel.value.p115_token = tempTokenInput.value.trim();
-  showTokenModal.value = false;
-  if (configModel.value.p115_token) {
-    check115Status();
-  }
-};
-
 // ★★★ Cookie Modal 逻辑 (独立设置 Cookie) ★★★
 const showCookieModal = ref(false);
 const tempCookieInput = ref('');
@@ -1996,23 +1931,12 @@ const startPolling = () => {
         // 登录成功
         qrcodeStatus.value = 'success';
         configModel.value.p115_cookies = data.cookies;
-        // ★★★ 同时保存 Token ★★★
-        if (data.token) {
-          configModel.value.p115_token = data.token;
-          
-          // ★★★ 新增：同步 refresh_token 到前端模型，防止被 check115Status 覆盖 ★★★
-          if (data.refresh_token) {
-            configModel.value.p115_refresh_token = data.refresh_token;
-          }
-          
-          message.success('登录成功！Token 已自动保存');
-        } else {
-          message.success('登录成功！Cookies 已自动保存');
-        }
+        // Token 已由后端保存到数据库，前端只需保存 Cookie
+        message.success('登录成功！Cookie 已自动保存');
         stopPolling();
         setTimeout(() => {
           showQrcodeModal.value = false;
-          check115Status(); // 这里会触发保存，现在前端模型里有 refresh_token 了，就不会覆盖为空了
+          check115Status();
         }, 1500);
       } else if (data.status === 'expired') {
         qrcodeStatus.value = 'expired';
@@ -2043,8 +1967,8 @@ const closeQrcodeModal = () => {
 // 检查 115 状态
 const check115Status = async () => {
     // 支持 Token 或 Cookie 任意一个
-    if (!configModel.value.p115_token && !configModel.value.p115_cookies) {
-        message.warning('请先设置 Access Token 或 Cookie');
+    if (!configModel.value.p115_cookies) {
+        message.warning('请先扫码登录或设置 Cookie');
         return;
     }
     loading115Info.value = true;
@@ -2560,9 +2484,9 @@ onMounted(async () => {
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       // 支持 Token 或 Cookie 任意一个检查状态
-      if (configModel.value.p115_token || configModel.value.p115_cookies) {
-                check115Status();
-            }
+      if (configModel.value.p115_cookies) {
+        check115Status();
+      }
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }

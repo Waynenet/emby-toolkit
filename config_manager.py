@@ -103,8 +103,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY: (constants.CONFIG_SECTION_MONITOR, 'int', constants.DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY),
 
     # [115] 
-    constants.CONFIG_OPTION_115_TOKEN: (constants.CONFIG_SECTION_115, 'string', ""),
-    constants.CONFIG_OPTION_115_REFRESH_TOKEN: (constants.CONFIG_SECTION_115, 'string', ""),
     constants.CONFIG_OPTION_115_COOKIES: (constants.CONFIG_SECTION_115, 'string', ""),
     constants.CONFIG_OPTION_115_SAVE_PATH_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
     constants.CONFIG_OPTION_115_SAVE_PATH_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
@@ -269,12 +267,6 @@ def load_config():
 
         # 将加载好的动态配置也更新到全局配置中
         APP_CONFIG.update(final_dynamic_config)
-        
-        auth_data = settings_db.get_setting('p115_auth_tokens')
-        if auth_data:
-            APP_CONFIG[constants.CONFIG_OPTION_115_TOKEN] = auth_data.get('access_token', '')
-            APP_CONFIG[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = auth_data.get('refresh_token', '')
-
         logger.trace("  ➜ 动态应用配置已从数据库加载。")
 
     except Exception as e:
@@ -292,48 +284,32 @@ def load_config():
 def save_config(new_config: Dict[str, Any]):
     """
     【V4 - 健壮的合并保存模式】
+    1. 从数据库加载当前完整的动态配置。
+    2. 将前端传入的新配置（可能不完整）合并到加载的配置中。
+    3. 将合并后的完整配置对象存回数据库，确保任何标签页的保存都不会丢失其他标签页的设置。
     """
     global APP_CONFIG
     
     try:
-        # =================================================================
-        # ★★★ 拦截器：如果前端传来了 115 Token，直接劫持到“小金库”，不混入全局配置
-        # =================================================================
-        in_token = new_config.get(constants.CONFIG_OPTION_115_TOKEN)
-        in_refresh = new_config.get(constants.CONFIG_OPTION_115_REFRESH_TOKEN)
-        
-        if in_token is not None:
-            settings_db.save_setting('p115_auth_tokens', {
-                'access_token': in_token,
-                'refresh_token': in_refresh or ""
-            })
-            
-            # 同步更新内存，让前端刷新页面时能立刻看到新 Token
-            APP_CONFIG[constants.CONFIG_OPTION_115_TOKEN] = in_token
-            APP_CONFIG[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = in_refresh or ""
-
-            # 从全局配置字典中剔除，永远不再存入 dynamic_app_config
-            new_config.pop(constants.CONFIG_OPTION_115_TOKEN, None)
-            new_config.pop(constants.CONFIG_OPTION_115_REFRESH_TOKEN, None)
-        # =================================================================
-
-        # 步骤 1: 从数据库加载当前完整的动态配置
+        # 步骤 1: 从数据库加载当前完整的动态配置，如果不存在则视为空字典
         full_dynamic_config = settings_db.get_setting('dynamic_app_config') or {}
         
         # 步骤 2: 将前端传入的新配置更新（合并）到这个完整的配置对象中
+        # 这确保了只更新变化的键，而不会丢失其他键
         full_dynamic_config.update(new_config)
         
-        # 步骤 3: 创建一个最终要保存的字典
+        # 步骤 3: (可选但推荐) 创建一个最终要保存的字典，确保只包含在 DYNAMIC_CONFIG_DEF 中定义的合法键
+        # 这样可以防止任何意外的键被存入数据库
         dynamic_config_to_save = {
             key: value
             for key, value in full_dynamic_config.items()
             if key in DYNAMIC_CONFIG_DEF
         }
         
-        # 步骤 4: 存回数据库
+        # 步骤 4: 将这个合并后的、完整的、干净的配置对象作为一个整体存回数据库
         settings_db.save_setting('dynamic_app_config', dynamic_config_to_save)
         
-        # 步骤 5: 更新内存
+        # 步骤 5: 更新内存中的全局配置以立即生效
         APP_CONFIG.update(dynamic_config_to_save)
         logger.info("  ➜ 动态应用配置已成功合并保存到数据库，内存中的配置已同步。")
         
