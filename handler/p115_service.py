@@ -1637,8 +1637,8 @@ def task_sync_115_directory_tree(processor=None):
 
 def task_full_sync_strm_and_subs(processor=None):
     """
-    【V4 终极上帝视角版】全量生成 STRM 与 同步字幕
-    利用 115 分类目录级全局拉取 (type=4/1) + 本地 DB 目录树缓存，实现秒级增量同步！
+    【V5 防弹装甲版】全量生成 STRM 与 同步字幕
+    利用 115 官方 paths 数组精准还原路径，彻底解决漏文件、路径断裂问题！
     """
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
@@ -1663,9 +1663,13 @@ def task_full_sync_strm_and_subs(processor=None):
     known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
     known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
     
-    allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
+    # ★ 防弹装甲 1：强制净化扩展名，去除所有点号，防止配置错误导致全军覆没
+    configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
+    allowed_exts = set(e.lower().replace('.', '').strip() for e in configured_exts if e)
     if not allowed_exts:
         allowed_exts = known_video_exts | known_sub_exts
+    elif download_subs:
+        allowed_exts.update(known_sub_exts)
     
     if not local_root or not etk_url:
         update_progress(100, "错误：未配置本地 STRM 根目录或 ETK 访问地址！")
@@ -1681,9 +1685,9 @@ def task_full_sync_strm_and_subs(processor=None):
     rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
 
     # =================================================================
-    # 阶段 1: 加载规则与本地目录树缓存到内存 (耗时: 毫秒级)
+    # 阶段 1: 加载规则与本地目录树缓存
     # =================================================================
-    update_progress(5, "  🧠 正在加载本地目录树缓存到内存...")
+    update_progress(5, "  🧠 正在初始化路径推导引擎...")
     
     cid_to_rel_path = {}  
     target_cids = set()   
@@ -1694,46 +1698,54 @@ def task_full_sync_strm_and_subs(processor=None):
             target_cids.add(cid)
             cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
 
-    # 加载 DB 中的目录树
     dir_cache = {} 
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT id, parent_id, name FROM p115_filesystem_cache")
                 for row in cursor.fetchall():
-                    dir_cache[str(row['id'])] = {
-                        'pid': str(row['parent_id']), 
-                        'name': str(row['name'])
-                    }
+                    dir_cache[str(row['id'])] = {'pid': str(row['parent_id']), 'name': str(row['name'])}
     except Exception as e:
-        update_progress(100, f"读取本地目录缓存失败: {e}")
-        return
+        logger.warning(f"  ⚠️ 读取本地目录缓存失败 (将降级使用官方 paths): {e}")
 
-    # 内存路径推导函数 (核心魔法)
-    def resolve_local_dir(pid):
-        """根据文件的 pid，向上追溯直到命中 target_cids，返回拼接好的本地相对路径"""
-        pid = str(pid)
-        if pid in cid_to_rel_path:
-            return cid_to_rel_path[pid]
-            
-        parts = []
-        curr = pid
-        while curr and curr in dir_cache:
-            parts.append(dir_cache[curr]['name'])
-            curr = dir_cache[curr]['pid']
-            
-            if curr in cid_to_rel_path:
-                parts.append(cid_to_rel_path[curr])
-                parts.reverse()
-                return os.path.join(*parts)
+    # ★ 防弹装甲 2：双引擎路径推导 (优先官方 paths，兜底本地 cache)
+    def resolve_local_dir(item, target_cid):
+        # 引擎 A: 官方 paths 数组 (100% 精准，无视本地缓存)
+        paths = item.get('paths')
+        if paths and isinstance(paths, list):
+            target_idx = -1
+            for i, p in enumerate(paths):
+                if str(p.get('file_id') or p.get('cid') or '') == str(target_cid):
+                    target_idx = i
+                    break
+            if target_idx != -1:
+                rel_parts = [str(p.get('file_name') or p.get('name')) for p in paths[target_idx + 1:]]
+                base_rel = cid_to_rel_path.get(str(target_cid), "未识别")
+                return os.path.join(base_rel, *rel_parts) if rel_parts else base_rel
+
+        # 引擎 B: 本地 DB 缓存追溯
+        pid = str(item.get('pid') or item.get('parent_id') or item.get('cid') or '')
+        if pid:
+            if pid == str(target_cid):
+                return cid_to_rel_path.get(pid, "未识别")
+            parts = []
+            curr = pid
+            while curr and curr in dir_cache:
+                parts.append(dir_cache[curr]['name'])
+                curr = dir_cache[curr]['pid']
+                if curr == str(target_cid):
+                    parts.append(cid_to_rel_path.get(curr, "未识别"))
+                    parts.reverse()
+                    return os.path.join(*parts)
         return None
 
     # =================================================================
-    # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
+    # 阶段 2: 分类目录级全局拉取
     # =================================================================
     valid_local_files = set()
     files_generated = 0
     subs_downloaded = 0
+    debug_skipped = 0 # 用于限制错误日志刷屏
     
     fetch_types = [4] # 4=视频
     if download_subs: fetch_types.append(1) # 1=文档(含字幕)
@@ -1755,7 +1767,6 @@ def task_full_sync_strm_and_subs(processor=None):
                 if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
                 
                 try:
-                    # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
                     res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
                     data = res.get('data', [])
                     if not data: break
@@ -1763,19 +1774,24 @@ def task_full_sync_strm_and_subs(processor=None):
                     logger.info(f"  ➜ [{category_name}] - [{type_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
                     
                     for item in data:
-                        # 兼容 OpenAPI 键名
                         name = item.get('fn') or item.get('n') or item.get('file_name', '')
                         ext = name.split('.')[-1].lower() if '.' in name else ''
-                        if ext not in allowed_exts: continue
+                        
+                        if ext not in allowed_exts: 
+                            continue
                         
                         pc = item.get('pc') or item.get('pick_code')
-                        # 115 返回的文件数据中，pid/cid 代表它所在的父目录 ID
-                        pid = item.get('pid') or item.get('cid') or item.get('parent_id')
-                        if not pc or not pid: continue
+                        if not pc: 
+                            continue
                         
                         # ★ 瞬间推导本地路径
-                        rel_dir = resolve_local_dir(pid)
-                        if not rel_dir: continue 
+                        rel_dir = resolve_local_dir(item, target_cid)
+                        if not rel_dir: 
+                            # ★ 防弹装甲 3：打印跳过原因，让你死个明白
+                            if debug_skipped < 5:
+                                logger.warning(f"  ⚠️ [跳过] 无法推导路径: {name} | pid={item.get('pid')} | paths={item.get('paths')}")
+                                debug_skipped += 1
+                            continue 
                             
                         current_local_path = os.path.join(local_root, rel_dir)
                         os.makedirs(current_local_path, exist_ok=True)
@@ -1836,7 +1852,7 @@ def task_full_sync_strm_and_subs(processor=None):
     logger.info(f"  ✅ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
 
     # =================================================================
-    # 阶段 3: 本地失效文件清理 (耗时: 秒级)
+    # 阶段 3: 本地失效文件清理
     # =================================================================
     if enable_cleanup:
         update_progress(90, "  🧹 正在比对并清理本地失效文件...")
