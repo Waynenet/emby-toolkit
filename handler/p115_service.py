@@ -60,7 +60,7 @@ def refresh_115_token(failed_token=None):
                 new_access_token = resp['data']['access_token']
                 new_refresh_token = resp['data']['refresh_token']
                 expires_in = resp['data'].get('expires_in', 0)
-                hours = expires_in / 3600 if expires_in else '未知'
+                hours = round(expires_in / 3600, 1)
                 
                 # 写入数据库
                 save_115_tokens(new_access_token, new_refresh_token)
