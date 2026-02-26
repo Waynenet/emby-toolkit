@@ -107,7 +107,7 @@ class P115OpenAPIClient:
             resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
             # logger.info(f"🔮 [115] 请求响应: {resp}")
             # 115 OpenAPI Token 失效通常会返回 state: False 且 code 为 990001/990002
-            if not resp.get("state") and resp.get("code") in [40140125, 990001, 990002, 990007]:
+            if not resp.get("state") and resp.get("code") in [40140126,40140125, 990001, 990002, 990007]:
                 logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
                 
                 # 调用续期函数
@@ -1295,7 +1295,7 @@ class SmartOrganizer:
                 if '不存在' in err_msg or move_res.get('code') in [20004, 70004]:
                     logger.warning(f"  🧹 检测到目标目录在网盘中已不存在，正在清理失效缓存: CID {real_target_cid}")
                     P115CacheManager.delete_cid(real_target_cid)
-                    
+
         if delete_source and not is_source_file and moved_count > 0:
             self.client.fs_delete([source_root_id])
             logger.info(f"  🧹 已清理空目录")
