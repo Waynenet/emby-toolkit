@@ -1741,7 +1741,9 @@ def task_full_sync_strm_and_subs(processor=None):
     subs_downloaded = 0
     
     fetch_types = [4] # 4=视频
-    if download_subs: fetch_types.append(1) # 1=文档(含字幕)
+    if download_subs: 
+        # 1=文档(可能包含极少数被误认的字幕), 99=其他(115通常把srt/ass归类为其他)
+        fetch_types.extend([1, 99])
 
     total_targets = len(target_cids)
 
@@ -1754,7 +1756,11 @@ def task_full_sync_strm_and_subs(processor=None):
         update_progress(base_prog, f"  🌐 正在全局拉取分类 [{category_name}] 下的所有文件...")
         
         for f_type in fetch_types:
-            type_name = "视频" if f_type == 4 else "文档/字幕"
+            if f_type == 4: type_name = "视频"
+            elif f_type == 1: type_name = "文档"
+            elif f_type == 99: type_name = "其他(字幕)"
+            else: type_name = "未知"
+            
             offset = 0
             limit = 1000
             page = 1
@@ -1817,21 +1823,28 @@ def task_full_sync_strm_and_subs(processor=None):
                             strm_path = os.path.join(current_local_path, strm_name)
                             content = f"{etk_url}/api/p115/play/{pc}"
                             
+                            # ★ 优化：在写入前先判断文件存不存在
+                            is_new_file = not os.path.exists(strm_path)
                             need_write = True
-                            if os.path.exists(strm_path):
+                            
+                            if not is_new_file:
                                 try:
                                     with open(strm_path, 'r', encoding='utf-8') as f:
                                         old_content = f.read().strip()
                                         if old_content == content: 
                                             need_write = False
-                                        else:
-                                            logger.debug(f"  🔄 [更新] 内容不一致触发覆盖 -> 旧: [{old_content}] | 新: [{content}]")
                                 except Exception as e: pass
                                         
                             if need_write:
-                                with open(strm_path, 'w', encoding='utf-8') as f: f.write(content)
-                                if not os.path.exists(strm_path):
+                                with open(strm_path, 'w', encoding='utf-8') as f: 
+                                    f.write(content)
+                                
+                                # ★ 优化：准确打印日志
+                                if is_new_file:
                                     logger.debug(f"  📝 [新增] 生成 STRM: {strm_name}")
+                                else:
+                                    logger.debug(f"  🔄 [更新] 覆盖 STRM: {strm_name}")
+                                    
                                 files_generated += 1
                                 
                             valid_local_files.add(os.path.abspath(strm_path))
