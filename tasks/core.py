@@ -207,7 +207,7 @@ def get_task_registry(context: str = 'all'):
         'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         'scan-organize-115': (task_scan_and_organize_115, "网盘文件整理", 'media', True),
         'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', True),
-        'full-sync-strm': (task_full_sync_strm_and_subs, "全量生成STRM", 'media', True),
+        'full-sync-strm': (task_full_sync_strm_and_subs, "增量生成STRM", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "一键扫描全库剧集", 'watchlist', False),

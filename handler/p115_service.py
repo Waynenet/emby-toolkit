@@ -1739,14 +1739,14 @@ def task_sync_115_directory_tree(processor=None):
 
 def task_full_sync_strm_and_subs(processor=None):
     """
-    【V4 终极上帝视角版】全量生成 STRM 与 同步字幕
+    增量生成 STRM 与 同步字幕
     利用 115 分类目录级全局拉取 (type=4/1) + 本地 DB 目录树缓存，实现秒级增量同步！
     """
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
     
-    start_msg = "=== 🚀 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始极速全量同步 STRM (跳过字幕) ==="
+    start_msg = "=== 🚀 开始增量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始增量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
     logger.info(start_msg)
     
