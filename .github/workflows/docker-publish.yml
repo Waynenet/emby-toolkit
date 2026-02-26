@@ -22,6 +22,8 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         id: buildx
@@ -40,14 +42,15 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/emby-toolkit
           tags: |
             # 规则1: 如果事件是推送到一个分支，就用分支名作为 Docker 标签。
-            # 这会自动为默认分支(main)打上 'latest' 标签。
             type=ref,event=branch
+            # 规则1.1: 默认分支(main)额外打上 latest 标签。
+            type=raw,value=latest,enable={{is_default_branch}}
 
             # 规则2: 如果事件是推送一个 Git 标签，就直接使用该标签名作为 Docker 标签。
             type=ref,event=tag
 
       - name: Build and push multi-arch Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -55,5 +58,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=emby-toolkit-main
+            type=gha,scope=emby-toolkit-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=emby-toolkit-${{ github.ref_name }}

@@ -1,9 +1,15 @@
+# syntax=docker/dockerfile:1.7
+ARG BUILDPLATFORM
 # --- 阶段 1: 构建前端 ---
-FROM node:20-alpine AS frontend-build
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-build
 WORKDIR /app/emby-actor-ui
 COPY emby-actor-ui/package*.json ./
-RUN npm cache clean --force && \
-    npm install --no-fund --verbose --legacy-peer-deps
+RUN --mount=type=cache,id=emby-toolkit-npm-cache,target=/root/.npm \
+    if [ -f package-lock.json ]; then \
+      npm ci --prefer-offline --no-audit --no-fund --legacy-peer-deps; \
+    else \
+      npm install --prefer-offline --no-audit --no-fund --legacy-peer-deps; \
+    fi
 COPY emby-actor-ui/ ./
 RUN npm run build
 
