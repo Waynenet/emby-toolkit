@@ -480,100 +480,89 @@ def handle_sorting_rules():
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
 
-# ★ 修改 1：收紧限流器，2秒内只允许 1 次解析请求，专门对付 Emby 的并发探测
-api_limiter = RateLimiter(max_requests=1, period=2)
-# 全局解析锁：确保同一时间只有一个线程在请求 115 API，防止并发冲突
+# ★ 收紧限流器，专门对付 Emby 的并发探测 (1秒1次即可，保护 115 账号)
+api_limiter = RateLimiter(max_requests=1, period=1)
 fetch_lock = threading.Lock()
-
-# 用于存储已解析的 URL，格式改为: { cache_key: {"url": direct_url, "expire_at": timestamp} }
 _url_cache = {}
 
 def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     """
-    带缓存的 115 直链获取器 (修复 TTL 和 负面缓存 问题)
+    带缓存的 115 直链获取器 (智能区分真实播放与后台刮削)
     """
-    cache_key = (pick_code, user_agent, client_ip)
+    # ★ 恢复 UA 隔离：确保刮削器和播放器获取各自专属的直链，防止 403！
+    cache_key = (pick_code, user_agent) 
     now = time.time()
     
-    # 1. 先检查缓存及是否过期
+    # 1. 先检查缓存及是否过期 (无锁极速读取)
     if cache_key in _url_cache:
         cached_data = _url_cache[cache_key]
         if now < cached_data["expire_at"]:
-            cached_url = cached_data["url"]
-            if cached_url:
-                # 缓存命中且有效，直接返回（静默，不打印日志）
-                return cached_url
-            else:
-                # 命中短期的“失败缓存”，防止疯狂重试打死 115 API
-                return None
+            return cached_data["url"]
         else:
-            # 缓存已过期，清理掉
             del _url_cache[cache_key]
     
-    # 缓存未命中或已过期，需要请求 115 API
+    # =================================================================
+    # ★ 智能识别 Emby 后台刮削 (Lavf/ffmpeg)
+    # =================================================================
+    is_scanner = user_agent and 'Lavf' in user_agent
+    
+    # 如果是后台刮削，且触发了流控，直接瞬间返回 None，绝不阻塞 Flask 线程！
+    if is_scanner:
+        if not api_limiter.consume():
+            return None # 静默拦截，防止 2 万集并发把日志撑爆
+    
     client = P115Service.get_client()
     if not client: 
-        # 客户端未初始化，防刷缓存 10 秒
         _url_cache[cache_key] = {"url": None, "name": pick_code, "expire_at": now + 10}
         return None
     
-    # 使用锁：即使缓存失效，多个请求同时进来，也只有一个能去查 115 API
+    # 使用锁：即使并发进来，也只有一个能去查 115 API
     with fetch_lock:
         now = time.time()
         if cache_key in _url_cache and now < _url_cache[cache_key]["expire_at"]:
-            cached_url = _url_cache[cache_key]["url"]
-            if cached_url:
-                display_name = _url_cache[cache_key].get("name", pick_code[:8] + "...")
-                logger.info(f"  📥 [115直链] 命中缓存: {display_name}")
-                return cached_url
-        
-        # ★ 修改 2：触发流控时，不要 sleep，直接返回 None 让 Emby 滚蛋
-        if not api_limiter.consume():
-            logger.warning(f"  ⚠️ [流控] 请求过快，已拦截 pick_code: {pick_code}")
-            return None 
+            return _url_cache[cache_key]["url"]
             
         try:
-            # 增加一个小随机延迟，模拟人为行为
             time.sleep(0.1) 
             
-            # 使用 POST 方法获取直链
-            url_obj = client.download_url(pick_code, user_agent=user_agent)
-            if url_obj:
-                # download_url 现在返回直链字符串
-                direct_url = str(url_obj)
-                
-                # ★★★ 尝试从直链中提取真实文件名用于日志展示 ★★★
+            # 调用 OpenAPI 官方接口获取直链
+            down_resp = client.fs_downurl(pick_code)
+            direct_url = None
+            
+            if down_resp and down_resp.get('state'):
+                data_dict = down_resp.get('data', {})
+                for fid, info in data_dict.items():
+                    direct_url = info.get('url', {}).get('url')
+                    if direct_url: break
+            
+            if direct_url:
                 display_name = pick_code[:8] + "..."
                 try:
                     from urllib.parse import urlparse, parse_qs, unquote
                     parsed = urlparse(direct_url)
                     qs = parse_qs(parsed.query)
-                    # 115 的直链通常把文件名放在 file 或 filename 参数里
-                    if 'file' in qs:
-                        display_name = unquote(qs['file'][0])
-                    elif 'filename' in qs:
-                        display_name = unquote(qs['filename'][0])
+                    if 'file' in qs: display_name = unquote(qs['file'][0])
+                    elif 'filename' in qs: display_name = unquote(qs['filename'][0])
                     else:
-                        # 兜底：尝试从 URL 路径最后一段提取
                         path_name = unquote(os.path.basename(parsed.path))
-                        if path_name:
-                            display_name = path_name
-                except:
-                    pass
+                        if path_name: display_name = path_name
+                except: pass
 
-                # 首次获取日志，打印真实文件名
-                logger.info(f"  🎬 [115直链] 获取成功: {display_name}")
+                # =================================================================
+                # ★ 定制化日志输出：一眼看出是谁在请求
+                # =================================================================
+                if is_scanner:
+                    logger.info(f"  🤖 [神医插件] 提取媒体信息 -> {display_name}")
+                else:
+                    logger.info(f"  ▶️ [用户播放] 获取直链 -> {display_name}")
                 
-                # 存入缓存，把解析出的文件名也存进去，方便下次命中缓存时打印
                 _url_cache[cache_key] = {"url": direct_url, "name": display_name, "expire_at": now + 7200}
                 return direct_url
             else:
-                # 获取失败，存入短期负面缓存 (10秒)，防止播放器疯狂重试导致 115 封号
                 _url_cache[cache_key] = {"url": None, "name": pick_code, "expire_at": now + 10}
                 return None
         except Exception as e:
             logger.error(f"  ❌ 获取 115 直链 API 报错: {e}")
-            # 异常也存入短期负面缓存 (10秒)
             _url_cache[cache_key] = {"url": None, "name": pick_code, "expire_at": now + 10}
             return None
 

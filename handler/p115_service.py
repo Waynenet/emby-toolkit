@@ -1145,10 +1145,14 @@ class SmartOrganizer:
                         real_target_cid = s_cid
 
             if new_filename != file_name:
-                if self.client.fs_rename((fid, new_filename)).get('state'):
+                ren_res = self.client.fs_rename((fid, new_filename))
+                if ren_res.get('state'):
                     logger.info(f"  ✏️ [重命名] {file_name} -> {new_filename}")
+                else:
+                    logger.warning(f"  ⚠️ [重命名失败] {file_name} -> {new_filename}, 原因: {ren_res.get('error_msg', ren_res)}")
 
-            if self.client.fs_move(fid, real_target_cid).get('state'):
+            move_res = self.client.fs_move(fid, real_target_cid)
+            if move_res.get('state'):
                 if self.media_type == 'tv' and season_num is not None:
                     logger.info(f"  📁 [移动] {file_name} -> {std_root_name} - {s_name}")
                 else:
@@ -1283,7 +1287,15 @@ class SmartOrganizer:
                         
                     except Exception as e:
                         logger.error(f"  ❌ 生成 STRM 文件失败: {e}", exc_info=True)
-
+            else:
+                err_msg = str(move_res.get('error_msg', move_res))
+                logger.error(f"  ❌ [移动失败] {file_name} -> 目标CID:{real_target_cid}, 原因: {err_msg}")
+                
+                # ★ 智能自愈：如果是目标目录不存在，说明缓存失效了，立刻清理本地缓存！
+                if '不存在' in err_msg or move_res.get('code') in [20004, 70004]:
+                    logger.warning(f"  🧹 检测到目标目录在网盘中已不存在，正在清理失效缓存: CID {real_target_cid}")
+                    P115CacheManager.delete_cid(real_target_cid)
+                    
         if delete_source and not is_source_file and moved_count > 0:
             self.client.fs_delete([source_root_id])
             logger.info(f"  🧹 已清理空目录")
