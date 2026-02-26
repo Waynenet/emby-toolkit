@@ -1626,7 +1626,7 @@ def task_full_sync_strm_and_subs(processor=None):
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
     
-    start_msg = "=== 🚀 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始极速全量同步 STRM (跳过字幕) ==="
+    start_msg = "=== 🚀 开始全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始全量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
     logger.info(start_msg)
     
@@ -1733,7 +1733,7 @@ def task_full_sync_strm_and_subs(processor=None):
             valid_cids[cid] = cid_to_rel_path.get(cid, "未识别")
 
     total_dirs = len(valid_cids)
-    logger.info(f"  🎯 共筛选出 {total_dirs} 个有效媒体目录，开始扁平化极速扫描...")
+    logger.info(f"  🎯 共筛选出 {total_dirs} 个有效媒体目录，开始生成STRM...")
 
     def process_file_info(info, rel_dir):
         nonlocal files_generated, subs_downloaded
@@ -1760,7 +1760,7 @@ def task_full_sync_strm_and_subs(processor=None):
 
             if need_write:
                 with open(strm_path, 'w', encoding='utf-8') as f: f.write(content)
-                logger.debug(f"  📝 [增量] 生成 STRM: {strm_name}")
+                logger.info(f"  📝 已生成 STRM: {strm_name}")
                 files_generated += 1
 
             valid_local_files.add(os.path.abspath(strm_path))
@@ -1850,7 +1850,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     
         logger.info(f"  🧹 清理完成: 删除了 {cleaned_files} 个失效文件, {cleaned_dirs} 个空目录。")
 
-    update_progress(100, "=== 极速全量同步任务圆满结束 ===")
+    update_progress(100, "=== 全量生成STRM任务结束 ===")
 
 def delete_115_files_by_webhook(item_path, pickcodes):
     """
