@@ -78,7 +78,7 @@ def refresh_115_token():
                     P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
                 P115Service._token_cache = new_access_token
                 
-                logger.info("  🔄 [115] Token 自动续期成功！已存入独立金库。")
+                logger.info("  🔄 [115] Token 自动续期成功！已成功保存。")
                 return True
             else:
                 logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
