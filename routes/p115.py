@@ -183,44 +183,18 @@ def check_qrcode_status():
     status = _check_qrcode_status()
     
     if status.get('status') == 'success':
-        initial_access_token = _qrcode_data.get('access_token')
-        initial_refresh_token = _qrcode_data.get('refresh_token')
+        access_token = _qrcode_data.get('access_token')
+        refresh_token = _qrcode_data.get('refresh_token')
         
-        final_access_token = initial_access_token
-        final_refresh_token = initial_refresh_token
-        
-        if initial_access_token and initial_refresh_token:
+        if access_token and refresh_token:
             try:
                 from config_manager import save_config
                 config = get_config()
                 
-                # =================================================================
-                # ★★★ 核心绝杀：扫码成功后，立刻用 refresh_token 换取长效 Token！
-                # =================================================================
-                url = "https://passportapi.115.com/open/refreshToken"
-                payload = {"refresh_token": initial_refresh_token}
-                resp = requests.post(url, data=payload, timeout=10).json()
-                
-                if resp.get('state'):
-                    final_access_token = resp['data']['access_token']
-                    final_refresh_token = resp['data']['refresh_token']
-                    expires_in = resp['data'].get('expires_in', 0)
-                    
-                    # 换算成天数打印，直观感受寿命
-                    days = round(expires_in / 86400, 1)
-                    
-                    config[constants.CONFIG_OPTION_115_TOKEN] = final_access_token
-                    config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = final_refresh_token
-                    save_config(config)
-                    logger.info(f"  ✅ [115] 扫码成功！已自动原地刷新 Token！")
-                    logger.info(f"  ⏳ [115] 新 Token 寿命: {expires_in} 秒 (约 {days} 天)")
-                else:
-                    # 如果原地刷新失败，兜底保存短效的
-                    config[constants.CONFIG_OPTION_115_TOKEN] = initial_access_token
-                    config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = initial_refresh_token
-                    save_config(config)
-                    logger.warning(f"  ⚠️ [115] 转换为长效 Token 失败({resp.get('message')})，已保存 2 小时短效 Token。")
-                    
+                config[constants.CONFIG_OPTION_115_TOKEN] = access_token
+                config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = refresh_token
+                save_config(config)
+                logger.info(f"  ✅ [115] 扫码成功！Token 已保存。")
                     
             except Exception as e:
                 logger.error(f"  ❌ 保存 Token 到配置失败: {e}")
@@ -228,9 +202,9 @@ def check_qrcode_status():
         return jsonify({
             "success": True,
             "status": "success",
-            "message": "Token 获取成功！(已自动升级为长效凭证)",
-            "token": final_access_token,
-            "refresh_token": final_refresh_token,
+            "message": "Token 获取成功！",
+            "token": access_token,
+            "refresh_token": refresh_token,
         })
         
     elif status.get('status') == 'expired':
