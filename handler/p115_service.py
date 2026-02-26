@@ -35,8 +35,10 @@ def refresh_115_token():
         if resp.get('state'):
             new_access_token = resp['data']['access_token']
             new_refresh_token = resp['data']['refresh_token']
+
+            expires_in = resp['data'].get('expires_in', 0)
+            days = round(expires_in / 86400, 1)
             
-            # ★ 修复：绝对不要去动用户的 Cookie！只更新 Token
             from config_manager import save_config
             config[constants.CONFIG_OPTION_115_TOKEN] = new_access_token
             config[constants.CONFIG_OPTION_115_REFRESH_TOKEN] = new_refresh_token
@@ -48,7 +50,8 @@ def refresh_115_token():
                 P115Service._openapi_client.headers["Authorization"] = f"Bearer {new_access_token}"
             P115Service._token_cache = new_access_token
             
-            logger.info("  🔄 [115] Token 自动续期成功！满血复活！")
+            logger.info("  🔄 [115] Token 自动续期成功！")
+            logger.info(f"  ⏳ [115] 新 Token 寿命: {expires_in} 秒 (约 {days} 天)")
             return True
         else:
             logger.error(f"  ❌ Token 续期失败: {resp.get('message')}，可能需要重新扫码")
