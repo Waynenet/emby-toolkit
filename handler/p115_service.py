@@ -106,7 +106,6 @@ class P115OpenAPIClient:
         try:
             resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
             # logger.info(f"🔮 [115] 请求响应: {resp}")
-            # 115 OpenAPI Token 失效通常会返回 state: False 且 code 为 990001/990002
             if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
                 logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
                 

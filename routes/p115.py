@@ -543,7 +543,7 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
 
                 # 定制化日志输出
                 if is_scanner:
-                    logger.info(f"  🤖 [神医插件] 提取媒体信息 -> {display_name}")
+                    logger.info(f"  🤖 [神医助手] 提取媒体信息 -> {display_name}")
                 else:
                     logger.info(f"  ▶️ [用户播放] 获取直链 -> {display_name}")
                 
