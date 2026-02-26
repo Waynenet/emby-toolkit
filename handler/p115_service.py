@@ -119,6 +119,12 @@ class P115OpenAPIClient:
         if isinstance(payload, dict): params.update(payload)
         return self._do_request("GET", url, params=params)
 
+    def fs_downurl(self, pick_code):
+        """官方 OpenAPI：根据提取码获取下载地址"""
+        url = f"{self.base_url}/open/ufile/downurl"
+        # 接口要求 form-data 格式
+        return self._do_request("POST", url, data={"pick_code": pick_code})
+
     def fs_mkdir(self, name, pid):
         url = f"{self.base_url}/open/folder/add"
         resp = self._do_request("POST", url, data={"pid": str(pid), "file_name": str(name)})
@@ -343,6 +349,11 @@ class P115Service:
                 self._check_openapi()
                 self._rate_limit()
                 return self._openapi.fs_search(payload)
+            
+            def fs_downurl(self, pick_code):
+                self._check_openapi()
+                self._rate_limit()
+                return self._openapi.fs_downurl(pick_code)
 
             def fs_mkdir(self, name, pid):
                 self._check_openapi()
@@ -1874,18 +1885,39 @@ def task_full_sync_strm_and_subs(processor=None):
                             sub_path = os.path.join(current_local_path, name)
                             if not os.path.exists(sub_path):
                                 try:
-                                    import requests
-                                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
-                                    if url_obj:
-                                        headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
-                                        resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
-                                        resp.raise_for_status()
-                                        with open(sub_path, 'wb') as f:
-                                            for chunk in resp.iter_content(8192): f.write(chunk)
-                                        logger.info(f"  ⬇️ [增量] 下载字幕: {name}")
-                                        subs_downloaded += 1
+                                    # --- 修改开始：使用官方接口 ---
+                                    # item.get('fid') 是 115 的文件 ID，官方接口返回数据会用到它作为 Key
+                                    file_id = str(item.get('fid') or item.get('file_id') or "")
+                                    
+                                    # 调用官方 fs_downurl 接口
+                                    resp = client.fs_downurl(pc)
+                                    
+                                    if resp and resp.get('state'):
+                                        # 官方接口返回格式：{"data": {"文件ID": {"url": "..."}}}
+                                        file_info = resp.get('data', {}).get(file_id, {})
+                                        download_url = file_info.get('url')
+                                        
+                                        if download_url:
+                                            import requests
+                                            # 官方 API 下载通常不需要 Cookie，但带上 Authorization Header (在 client 逻辑中已处理)
+                                            # 注意：官方链接通常是直链，直接请求即可
+                                            sub_resp = requests.get(download_url, stream=True, timeout=15)
+                                            sub_resp.raise_for_status()
+                                            
+                                            with open(sub_path, 'wb') as f:
+                                                for chunk in sub_resp.iter_content(8192): 
+                                                    f.write(chunk)
+                                                    
+                                            logger.info(f"  ⬇️ [官方接口] 下载字幕: {name}")
+                                            subs_downloaded += 1
+                                        else:
+                                            logger.warning(f"  ⚠️ [官方接口] 获取链接成功但无 URL: {name}")
+                                    else:
+                                        logger.error(f"  ❌ [官方接口] 获取下载地址失败: {resp.get('message', '未知错误')}")
+                                    # --- 修改结束 ---
+
                                 except Exception as e:
-                                    logger.error(f"  ❌ 下载字幕失败 [{name}]: {e}")
+                                    logger.error(f"  ❌ 下载字幕异常 [{name}]: {e}")
                                     
                             valid_local_files.add(os.path.abspath(sub_path))
 
