@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-      - dev
-    tags:
-      - "v*"
   workflow_dispatch:
 
 env:
@@ -47,9 +44,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
 
       - name: Build and push by digest
         id: build
@@ -110,9 +105,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
 
       - name: Create and push multi-arch manifest
         env:
