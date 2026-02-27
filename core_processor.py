@@ -1140,6 +1140,7 @@ class MediaProcessor:
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
                         "emby_item_ids_json": json.dumps([primary_season_id]) if primary_season_id else '[]'
+                        "file_sha1_json": '[]'
                     })
                 
                 # ★★★ 4. 处理分集 (Episode) ★★★
@@ -1253,6 +1254,7 @@ class MediaProcessor:
                 if db_row_complete['subscription_status'] is None: db_row_complete['subscription_status'] = 'NONE'
                 if db_row_complete['subscription_sources_json'] is None: db_row_complete['subscription_sources_json'] = '[]'
                 if db_row_complete['emby_item_ids_json'] is None: db_row_complete['emby_item_ids_json'] = '[]'
+                if db_row_complete['file_sha1_json'] is None: db_row_complete['file_sha1_json'] = '[]'
 
                 r_date = db_row_complete.get('release_date')
                 if not r_date: db_row_complete['release_date'] = None
