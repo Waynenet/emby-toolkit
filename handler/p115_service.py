@@ -2019,6 +2019,7 @@ def task_full_sync_strm_and_subs(processor=None):
                         # ★★★ 终极修复：如果列表没给 SHA1，调用详情接口硬抠！ ★★★
                         if not file_sha1:
                             try:
+                                logger.info("  ➜ 正在提取SHA1")
                                 info_res = client.fs_get_info(fid)
                                 if info_res.get('state') and info_res.get('data'):
                                     file_sha1 = info_res['data'].get('sha1')
