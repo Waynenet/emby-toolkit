@@ -131,6 +131,10 @@ class P115OpenAPIClient:
         if isinstance(payload, dict): params.update(payload)
         return self._do_request("GET", url, params=params)
 
+    def fs_get_info(self, file_id):
+        url = f"{self.base_url}/open/folder/get_info"
+        return self._do_request("GET", url, params={"file_id": str(file_id)})
+
     def fs_mkdir(self, name, pid):
         url = f"{self.base_url}/open/folder/add"
         resp = self._do_request("POST", url, data={"pid": str(pid), "file_name": str(name)})
@@ -353,6 +357,11 @@ class P115Service:
                 self._check_openapi()
                 self._rate_limit()
                 return self._openapi.fs_search(payload)
+            
+            def fs_get_info(self, file_id):
+                self._check_openapi()
+                self._rate_limit()
+                return self._openapi.fs_get_info(file_id)
 
             def fs_mkdir(self, name, pid):
                 self._check_openapi()
@@ -1285,10 +1294,21 @@ class SmartOrganizer:
                                 f.write(strm_content)
                             logger.info(f"  📝 STRM 已生成 -> {strm_filename}")
 
+                            if not file_sha1 and fid:
+                                try:
+                                    info_res = self.client.fs_get_info(fid)
+                                    if info_res.get('state') and info_res.get('data'):
+                                        file_sha1 = info_res['data'].get('sha1')
+                                        if file_sha1:
+                                            logger.debug(f"  ➜ [API补充] 成功通过详情接口获取到 SHA1: {file_sha1}")
+                                except Exception as e_info:
+                                    logger.warning(f"  ⚠️ 调用详情接口获取 SHA1 失败: {e_info}")
+
+                            # 存入缓存表
                             if pick_code and fid:
                                 P115CacheManager.save_file_cache(fid, real_target_cid, new_filename, sha1=file_sha1, pick_code=pick_code)
-
-                            # ★★★ 秒传生成媒体信息 JSON ★★★
+                                
+                            # 实时跨号秒传
                             if file_sha1:
                                 try:
                                     with get_db_connection() as conn:
@@ -2003,17 +2023,22 @@ def task_full_sync_strm_and_subs(processor=None):
                         
                         pc = item.get('pc') or item.get('pick_code')
                         pid = item.get('pid') or item.get('cid') or item.get('parent_id')
-                        
-                        # ★★★ 补上这一行，提取 fid ★★★
                         fid = item.get('fid') or item.get('file_id') 
+                        file_sha1 = item.get('sha1') or item.get('sha')
                         
-                        file_sha1 = item.get('sha1')
-                        
-                        if not pc or not pid: continue
+                        if not pc or not pid or not fid: continue
 
-                        # 只要是文件，立刻把 SHA1 和 PC 码存入缓存表！
-                        if file_sha1 and pc and fid:
-                            P115CacheManager.save_file_cache(fid, pid, name, sha1=file_sha1, pick_code=pc)
+                        # ★★★ 终极修复：如果列表没给 SHA1，调用详情接口硬抠！ ★★★
+                        if not file_sha1:
+                            try:
+                                info_res = client.fs_get_info(fid)
+                                if info_res.get('state') and info_res.get('data'):
+                                    file_sha1 = info_res['data'].get('sha1')
+                            except Exception:
+                                pass
+
+                        # 存入缓存表
+                        P115CacheManager.save_file_cache(fid, pid, name, sha1=file_sha1, pick_code=pc)
                         
                         # ★ 智能推导本地路径 (传入 pid, 当前分类 cid, 当前分类的基准路径)
                         rel_dir = get_local_path_for_pid(pid, target_cid, category_name)
