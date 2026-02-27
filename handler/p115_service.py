@@ -1274,18 +1274,6 @@ class SmartOrganizer:
                         is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
 
                         if is_video:
-                            # =========================================================
-                            # ✨✨✨ [魔法日志] 扒光 115 实时整理返回的文件对象 ✨✨✨
-                            # =========================================================
-                            try:
-                                debug_json = json.dumps(file_item, ensure_ascii=False, indent=2)
-                                logger.info(f"\n🔮🔮🔮 [Magic Log - 实时整理] 115 原始数据 🔮🔮🔮\n"
-                                            f"文件名: {new_filename}\n"
-                                            f"完整数据:\n{debug_json}\n"
-                                            f"🔮🔮🔮 [Magic Log End] 🔮🔮🔮")
-                            except Exception as e:
-                                logger.error(f"🔮 [Magic Log] 序列化失败: {e}")
-                            # =========================================================
                             strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                             strm_filepath = os.path.join(local_dir, strm_filename)
                             strm_content = f"{etk_url}/api/p115/play/{pick_code}"
@@ -1325,7 +1313,7 @@ class SmartOrganizer:
                                                         mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
                                                         with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
                                                             json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
-                                                        logger.info(f"  ⚡ [实时秒传] 发现相同 SHA1，已自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
+                                                        logger.info(f"  ⚡ 发现相同 SHA1，已生成媒体信息文件: {os.path.basename(mediainfo_path)}")
                                                         break
                                 except Exception as e_sha1:
                                     logger.warning(f"  ⚠️ 尝试秒传媒体信息失败: {e_sha1}")

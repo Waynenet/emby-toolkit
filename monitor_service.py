@@ -46,10 +46,6 @@ class MediaFileHandler(FileSystemEventHandler):
         if os.path.exists(file_path) and os.path.isdir(file_path): 
             return False
         
-        # ★ 允许神医的 JSON 文件通过监控
-        if file_path.endswith('-mediainfo.json'):
-            return True
-        
         _, ext = os.path.splitext(file_path)
         if ext.lower() not in self.extensions: 
             return False
@@ -113,20 +109,12 @@ def process_batch_queue():
 
     files_to_scrape = []
     files_to_refresh_only = []
-    mediainfo_files = []
 
     for file_path in files_to_process:
-        if file_path.endswith('-mediainfo.json'):
-            mediainfo_files.append(file_path)
-        elif _is_path_excluded(file_path, exclude_paths):
+        if _is_path_excluded(file_path, exclude_paths):
             files_to_refresh_only.append(file_path)
         else:
             files_to_scrape.append(file_path)
-
-    # ★ 处理神医 JSON 生成事件
-    if mediainfo_files:
-        logger.info(f"  🎬 [实时监控] 发现 {len(mediainfo_files)} 个神医媒体信息提取完成，准备更新入库...")
-        threading.Thread(target=_handle_mediainfo_ready_task, args=(processor, mediainfo_files)).start()
 
     if files_to_scrape:
         grouped_files = {}
@@ -153,41 +141,6 @@ def process_batch_queue():
     if files_to_refresh_only:
         logger.info(f"  🚀 [实时监控] 发现 {len(files_to_refresh_only)} 个文件命中排除路径，将跳过刮削直接刷新 Emby。")
         threading.Thread(target=_handle_batch_refresh_only_task, args=(files_to_refresh_only,)).start()
-
-def _handle_mediainfo_ready_task(processor, file_paths: List[str]):
-    """
-    【北斗定位版】当神医提取完媒体信息后，直接从旁边的 STRM 提取 PC 码，
-    传递给核心处理器进行精准的数据库直写，彻底抛弃 Emby ID 依赖！
-    """
-    for file_path in file_paths:
-        try:
-            # 1. 推导对应的 strm 路径
-            strm_path = file_path.replace('-mediainfo.json', '.strm')
-            if not os.path.exists(strm_path):
-                logger.warning(f"  ⚠️ [媒体信息就绪] 找不到对应的 STRM 文件，跳过: {strm_path}")
-                continue
-
-            # 2. 提取 PC 码 (北斗坐标)
-            pick_code = None
-            with open(strm_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                import re
-                match = re.search(r'/play/([a-zA-Z0-9]+)', content)
-                if match: 
-                    pick_code = match.group(1)
-                else:
-                    match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
-                    if match: pick_code = match.group(1)
-
-            # 3. 发射坐标
-            if pick_code:
-                logger.info(f"  🚀 [媒体信息就绪] 提取到 PC 码 [{pick_code}]，正在呼叫直写打击...")
-                processor.inject_mediainfo_directly(pick_code, file_path)
-            else:
-                logger.warning(f"  ⚠️ [媒体信息就绪] 无法从 STRM 中提取 PC 码: {strm_path}")
-                
-        except Exception as e:
-            logger.error(f"  ❌ [媒体信息就绪] 处理失败 {file_path}: {e}")
 
 def _process_strm_conversions(file_paths: List[str]) -> List[str]:
     """

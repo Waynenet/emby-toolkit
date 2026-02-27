@@ -1332,123 +1332,6 @@ class MediaProcessor:
             logger.error(f"批量写入层级元数据到数据库时失败: {e}", exc_info=True)
             raise
 
-    # ======================================================================
-    # ★★★ 新增：轻量级直写 DB 方法 (供监控模块调用) ★★★
-    # ======================================================================
-    def inject_mediainfo_directly(self, pick_code: str, mediainfo_path: str):
-        """
-        接收 PC 码和 JSON 路径。
-        利用 PC 码在 file_pickcode_json 数组中的索引，精准更新 asset_details_json 中对应位置的数据。
-        完美解决多版本对应问题，全程 0 外部 API 调用！
-        """
-        if not pick_code or not os.path.exists(mediainfo_path): 
-            return
-
-        try:
-            # 1. 读取神医 JSON 提取核心流信息
-            with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                raw_shenyi_data = json.load(f)
-            
-            if not raw_shenyi_data or not isinstance(raw_shenyi_data, list): return
-            
-            primary_source = raw_shenyi_data[0].get("MediaSourceInfo", {})
-            media_streams = primary_source.get("MediaStreams", [])
-            
-            # 2. 查库定位 (寻找包含该 PC 码的记录)
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT tmdb_id, item_type, asset_details_json, file_pickcode_json 
-                    FROM media_metadata 
-                    WHERE file_pickcode_json @> %s::jsonb LIMIT 1
-                """, (json.dumps([pick_code]),))
-                
-                row = cursor.fetchone()
-                if not row:
-                    # 如果没找到，说明 Webhook 还没把这条记录建出来。
-                    # 没关系，等 Webhook 触发时，它会自己去读这个 JSON 的。
-                    logger.debug(f"  ➜ [直写DB] 数据库暂无 PC码 {pick_code} 的记录，等待 Webhook 兜底。")
-                    return
-                    
-                tmdb_id = row['tmdb_id']
-                item_type = row['item_type']
-                assets = row['asset_details_json']
-                pickcodes = row['file_pickcode_json']
-                
-                if isinstance(assets, str): assets = json.loads(assets)
-                if isinstance(pickcodes, str): pickcodes = json.loads(pickcodes)
-                
-                # 3. 寻找精准索引 (解决多版本的核心)
-                try:
-                    target_index = pickcodes.index(pick_code)
-                except ValueError:
-                    return
-                    
-                # 4. 提取并合并数据
-                if target_index < len(assets):
-                    target_asset = assets[target_index]
-                    
-                    # 更新基础信息
-                    target_asset['container'] = primary_source.get("Container")
-                    target_asset['size_bytes'] = primary_source.get("Size")
-                    
-                    runtime_ticks = primary_source.get('RunTimeTicks')
-                    target_asset['runtime_minutes'] = round(runtime_ticks / 600000000) if runtime_ticks else None
-                    
-                    # 提取流信息
-                    audio_tracks = []
-                    subtitles = []
-                    for stream in media_streams:
-                        stream_type = stream.get("Type")
-                        if stream_type == "Video":
-                            target_asset["video_codec"] = stream.get("Codec")
-                            target_asset["width"] = stream.get("Width")
-                            target_asset["height"] = stream.get("Height")
-                            if stream.get("BitRate"):
-                                target_asset["video_bitrate_mbps"] = round(stream.get("BitRate") / 1000000, 1)
-                            target_asset["bit_depth"] = stream.get("BitDepth")
-                            target_asset["frame_rate"] = stream.get("AverageFrameRate") or stream.get("RealFrameRate")
-                        elif stream_type == "Audio":
-                            audio_tracks.append({
-                                "language": stream.get("Language"), 
-                                "codec": stream.get("Codec"), 
-                                "channels": stream.get("Channels"), 
-                                "display_title": stream.get("DisplayTitle"),
-                                "is_default": stream.get("IsDefault")
-                            })
-                        elif stream_type == "Subtitle":
-                            subtitles.append({
-                                "language": stream.get("Language"), 
-                                "display_title": stream.get("DisplayTitle"),
-                                "is_forced": stream.get("IsForced"),  
-                                "format": stream.get("Codec") 
-                            })
-                    
-                    target_asset["audio_tracks"] = audio_tracks
-                    target_asset["subtitles"] = subtitles
-                    
-                    # ★ 塞入神医原文
-                    target_asset["raw_mediainfo"] = raw_shenyi_data
-                    
-                    # 重新生成前端展示用的 display 标签
-                    from tasks.helpers import analyze_media_asset
-                    fake_details = {'MediaStreams': media_streams, 'Path': target_asset.get('path', '')}
-                    display_tags = analyze_media_asset(fake_details)
-                    target_asset.update(display_tags)
-                    
-                    # 5. 写回数据库
-                    cursor.execute("""
-                        UPDATE media_metadata 
-                        SET asset_details_json = %s 
-                        WHERE tmdb_id = %s AND item_type = %s
-                    """, (json.dumps(assets, ensure_ascii=False), tmdb_id, item_type))
-                    conn.commit()
-                    
-                    logger.info(f"  ⚡ [直写DB] 成功通过 PC码({pick_code}) 定位并注入神医媒体信息！")
-
-        except Exception as e:
-            logger.error(f"  ❌ [直写DB] 注入媒体信息失败: {e}", exc_info=True)
-
     # --- 标记为已处理 ---
     def _mark_item_as_processed(self, cursor: psycopg2.extensions.cursor, item_id: str, item_name: str, score: float = 10.0):
         """
@@ -2276,26 +2159,48 @@ class MediaProcessor:
                 # 综合质检 (视频流检查 + 演员匹配度评分)
                 logger.info(f"  ➜ 正在评估《{item_name_for_log}》的处理质量...")
                 
-                # --- 1. 视频流数据完整性检查 ---
+                # --- 1. 视频流数据完整性检查 (重构版) ---
                 stream_check_passed = True
                 stream_fail_reason = ""
                 
+                # 内部辅助：检查单个资产列表
                 def _check_assets_list(assets_list, label_prefix=""):
                     if not assets_list:
                         return False, f"{label_prefix} 无资产数据"
-                    
+                    last_fail = "缺失媒体信息"
+                    # 只要有一个版本是好的，就算通过 (多版本情况)
                     for asset in assets_list:
-                        # ★★★ 核心修改：如果神医还没提取，直接放行！交给定时任务处理 ★★★
-                        if not asset.get('raw_mediainfo'):
-                            return True, ""
+                        # 适配 Emby API 结构 (MediaStreams) 和 DB 结构 (asset_details_json) 的差异
+                        # DB结构: 直接是 dict
+                        # Emby结构: 需要从 MediaStreams 提取
                         
-                        # 如果神医提取了，顺便检查一下流是否正常
-                        w = asset.get('width', 0)
-                        h = asset.get('height', 0)
-                        c = asset.get('video_codec', '')
+                        w, h, c = 0, 0, ""
+                        
+                        # 情况 A: DB 结构 (asset_details_json)
+                        if 'video_codec' in asset or 'width' in asset:
+                            w = asset.get('width')
+                            h = asset.get('height')
+                            c = asset.get('video_codec')
+                        
+                        # 情况 B: Emby API 结构 (MediaSource)
+                        elif 'MediaStreams' in asset:
+                            # 需遍历流找到 Video
+                            found_video = False
+                            for stream in asset.get('MediaStreams', []):
+                                if stream.get('Type') == 'Video':
+                                    w = stream.get('Width')
+                                    h = stream.get('Height')
+                                    c = stream.get('Codec')
+                                    found_video = True
+                                    break
+                            if not found_video: continue # 这个 Source 没视频流，看下一个
+                        
+                        # 调用通用质检函数
                         valid, reason = utils.check_stream_validity(w, h, c)
                         if valid:
                             return True, ""
+                        
+                        # 记录最后一个失败原因
                         last_fail = reason
 
                     return False, f"{label_prefix} {last_fail}"
