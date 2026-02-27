@@ -537,6 +537,27 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ❌ 清理 115 DB 缓存失败: {e}")
 
+    @staticmethod
+    def save_file_cache(fid, parent_id, name, sha1=None, pick_code=None):
+        """★ 新增：专门将文件(fc=1)的 SHA1 和 PC码 存入本地数据库缓存"""
+        if not fid or not parent_id or not name: return
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1, pick_code)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (parent_id, name)
+                        DO UPDATE SET 
+                            id = EXCLUDED.id, 
+                            sha1 = COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1), 
+                            pick_code = COALESCE(EXCLUDED.pick_code, p115_filesystem_cache.pick_code), 
+                            updated_at = NOW()
+                    """, (str(fid), str(parent_id), str(name), sha1, pick_code))
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"  ❌ 写入 115 文件缓存失败: {e}")
+
 def get_config():
     return config_manager.APP_CONFIG
 
@@ -1150,6 +1171,7 @@ class SmartOrganizer:
 
                 # 兼容 OpenAPI 键名
                 pick_code = file_item.get('pc') or file_item.get('pick_code')
+                file_sha1 = file_item.get('sha1')
                 local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
                 etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "http://127.0.0.1:5257").rstrip('/')
                 
@@ -1251,12 +1273,11 @@ class SmartOrganizer:
                                 f.write(strm_content)
                             logger.info(f"  📝 STRM 已生成 -> {strm_filename}")
 
+                            if file_sha1 and pick_code and fid:
+                                P115CacheManager.save_file_cache(fid, real_target_cid, new_filename, sha1=file_sha1, pick_code=pick_code)
+
                             # ★★★ 秒传生成媒体信息 JSON ★★★
-                            file_sha1 = file_item.get('sha1')
                             if file_sha1:
-                                # 顺手存入缓存表
-                                P115CacheManager.save_cid(fid, real_target_cid, new_filename, sha1=file_sha1)
-                                
                                 try:
                                     with get_db_connection() as conn:
                                         with conn.cursor() as cursor:
@@ -1272,7 +1293,7 @@ class SmartOrganizer:
                                                         mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
                                                         with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
                                                             json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
-                                                        logger.info(f"  ⚡ [秒传] 发现相同 SHA1，已自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
+                                                        logger.info(f"  ⚡ [实时秒传] 发现相同 SHA1，已自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
                                                         break
                                 except Exception as e_sha1:
                                     logger.warning(f"  ⚠️ 尝试秒传媒体信息失败: {e_sha1}")
@@ -1969,9 +1990,18 @@ def task_full_sync_strm_and_subs(processor=None):
                         if ext not in allowed_exts: continue
                         
                         pc = item.get('pc') or item.get('pick_code')
-                        # 115 返回的文件数据中，pid/cid 代表它所在的父目录 ID
                         pid = item.get('pid') or item.get('cid') or item.get('parent_id')
+                        
+                        # ★★★ 补上这一行，提取 fid ★★★
+                        fid = item.get('fid') or item.get('file_id') 
+                        
+                        file_sha1 = item.get('sha1')
+                        
                         if not pc or not pid: continue
+
+                        # 只要是文件，立刻把 SHA1 和 PC 码存入缓存表！
+                        if file_sha1 and pc and fid:
+                            P115CacheManager.save_file_cache(fid, pid, name, sha1=file_sha1, pick_code=pc)
                         
                         # ★ 智能推导本地路径 (传入 pid, 当前分类 cid, 当前分类的基准路径)
                         rel_dir = get_local_path_for_pid(pid, target_cid, category_name)
@@ -2017,10 +2047,10 @@ def task_full_sync_strm_and_subs(processor=None):
                             # ★★★ 秒传生成媒体信息 JSON ★★★
                             file_sha1 = item.get('sha1')
                             if file_sha1:
-                                P115CacheManager.save_cid(item.get('fid') or item.get('file_id'), pid, name, sha1=file_sha1)
                                 try:
                                     with get_db_connection() as conn:
                                         with conn.cursor() as cursor:
+                                            # 跨账号秒传：只要库里有这个 SHA1，直接把神医 JSON 吐出来！
                                             cursor.execute("""
                                                 SELECT asset_details_json FROM media_metadata 
                                                 WHERE file_sha1_json @> %s::jsonb LIMIT 1
@@ -2034,7 +2064,7 @@ def task_full_sync_strm_and_subs(processor=None):
                                                         if not os.path.exists(mediainfo_path):
                                                             with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
                                                                 json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
-                                                            logger.debug(f"  ⚡ [秒传] 自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
+                                                            logger.debug(f"  ⚡ [跨号秒传] 匹配到相同 SHA1，自动生成媒体信息: {os.path.basename(mediainfo_path)}")
                                                         break
                                 except Exception: pass
                                 

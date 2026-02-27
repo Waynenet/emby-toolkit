@@ -793,6 +793,31 @@ class MediaProcessor:
 
         return id_to_parent_map, lib_guid
 
+    # ★★★ 新增：直接从 STRM 文件中抠出 115 提取码 (PC码) ★★★
+    def _extract_pickcode_from_strm(self, strm_path: str) -> Optional[str]:
+        if not strm_path or not strm_path.lower().endswith('.strm') or not os.path.exists(strm_path):
+            return None
+        try:
+            with open(strm_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                match = re.search(r'/play/([a-zA-Z0-9]+)', content)
+                if match: return match.group(1)
+                match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
+                if match: return match.group(1)
+        except Exception: pass
+        return None
+
+    # ★★★ 新增：通过 PC 码反查 SHA1 (无视文件被MP移动或重命名) ★★★
+    def _get_sha1_by_pickcode(self, pick_code: str) -> Optional[str]:
+        if not pick_code: return None
+        try:
+            with get_central_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE pick_code = %s AND sha1 IS NOT NULL LIMIT 1", (pick_code,))
+                row = cursor.fetchone()
+                return row['sha1'] if row else None
+        except Exception: return None
+
     # --- 更新媒体元数据缓存 ---
     def _upsert_media_metadata(
         self,
@@ -958,23 +983,21 @@ class MediaProcessor:
                     emby_path = item_details_from_emby.get('Path', '')
                     mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                     
-                    base_filename = os.path.splitext(os.path.basename(emby_path))[0]
-                    cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE name LIKE %s AND sha1 IS NOT NULL LIMIT 1", (f"{base_filename}.%",))
-                    sha1_row = cursor.fetchone()
-                    file_sha1 = sha1_row['sha1'] if sha1_row else None
+                    file_pc = self._extract_pickcode_from_strm(emby_path)
+                    file_sha1 = self._get_sha1_by_pickcode(file_pc)
 
                     asset_details = parse_full_asset_details(
                         item_details_from_emby, 
                         id_to_parent_map=id_to_parent_map, 
                         library_guid=lib_guid,
-                        local_mediainfo_path=mediainfo_path # ★ 传入路径读取神医JSON
+                        local_mediainfo_path=mediainfo_path 
                     )
                     asset_details['source_library_id'] = source_lib_id
                     
-                    # ★ 保证三个数组一一对应
                     movie_record['asset_details_json'] = json.dumps([asset_details], ensure_ascii=False)
                     movie_record['emby_item_ids_json'] = json.dumps([item_id])
                     movie_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
+                    movie_record['file_pickcode_json'] = json.dumps([file_pc] if file_pc else [])
                     movie_record['in_library'] = True
 
                 movie_record['actors_json'] = json.dumps([{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")], ensure_ascii=False)
@@ -1202,11 +1225,8 @@ class MediaProcessor:
                         emby_path = primary_version.get('Path', '')
                         mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                         
-                        # ★ 获取 SHA1
-                        base_filename = os.path.splitext(os.path.basename(emby_path))[0]
-                        cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE name LIKE %s AND sha1 IS NOT NULL LIMIT 1", (f"{base_filename}.%",))
-                        sha1_row = cursor.fetchone()
-                        file_sha1 = sha1_row['sha1'] if sha1_row else None
+                        file_pc = self._extract_pickcode_from_strm(emby_path)
+                        file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
                         details = parse_full_asset_details(
                             primary_version,
@@ -1214,16 +1234,17 @@ class MediaProcessor:
                         )
                         details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
                         
-                        # ★ 保证三个数组一一对应
                         episode_record['asset_details_json'] = json.dumps([details], ensure_ascii=False)
                         episode_record['emby_item_ids_json'] = json.dumps([primary_version.get('Id')])
                         episode_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
+                        episode_record['file_pickcode_json'] = json.dumps([file_pc] if file_pc else [])
                         episode_record['in_library'] = True
                     else:
                         episode_record['in_library'] = False
                         episode_record['emby_item_ids_json'] = '[]'
                         episode_record['asset_details_json'] = '[]'
                         episode_record['file_sha1_json'] = '[]'
+                        episode_record['file_pickcode_json'] = '[]'
                         
                     records_to_upsert.append(episode_record)
 
@@ -1237,7 +1258,8 @@ class MediaProcessor:
                 "tmdb_id", "item_type", "title", "original_title", "overview", "release_date", "release_year",
                 "last_air_date", "backdrop_path", "homepage", "original_language", "poster_path", "rating", 
                 "actors_json", "parent_series_tmdb_id", "season_number", "episode_number", "in_library", 
-                "subscription_status", "subscription_sources_json", "emby_item_ids_json", "file_sha1_json", 
+                "subscription_status", "subscription_sources_json", "emby_item_ids_json", 
+                "file_sha1_json", "file_pickcode_json", # ★★★ 两个指纹都在这里
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
@@ -1255,6 +1277,7 @@ class MediaProcessor:
                 if db_row_complete['subscription_sources_json'] is None: db_row_complete['subscription_sources_json'] = '[]'
                 if db_row_complete['emby_item_ids_json'] is None: db_row_complete['emby_item_ids_json'] = '[]'
                 if db_row_complete['file_sha1_json'] is None: db_row_complete['file_sha1_json'] = '[]'
+                if db_row_complete['file_pickcode_json'] is None: db_row_complete['file_pickcode_json'] = '[]'
 
                 r_date = db_row_complete.get('release_date')
                 if not r_date: db_row_complete['release_date'] = None
