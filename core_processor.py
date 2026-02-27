@@ -1139,7 +1139,7 @@ class MediaProcessor:
                         "season_number": s_num,
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
-                        "emby_item_ids_json": json.dumps([primary_season_id]) if primary_season_id else '[]'
+                        "emby_item_ids_json": json.dumps([primary_season_id]) if primary_season_id else '[]',
                         "file_sha1_json": '[]'
                     })
                 
