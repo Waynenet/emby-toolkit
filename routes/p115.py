@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request, redirect
 from extensions import admin_required
 from database import settings_db
 from handler.p115_service import P115Service, get_config
+from tasks.helpers import convert_strm_content_to_etk
 import constants
 from functools import lru_cache, wraps
 
@@ -614,57 +615,24 @@ def fix_strm_files():
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read().strip()
                         
-                        pick_code = None
+                        # ★ 调用公共函数进行解析和转换
+                        needs_update, new_content = convert_strm_content_to_etk(content, etk_url)
                         
-                        # ----------------------------------------------------
-                        # ★ 核心升级：多模式兼容提取 pick_code
-                        # ----------------------------------------------------
-                        
-                        # 模式 1: ETK 现在的标准格式
-                        # 例: http://192.168.31.177:5257/api/p115/play/abc1234
-                        if '/api/p115/play/' in content:
-                            pick_code = content.split('/api/p115/play/')[-1].split('?')[0].strip()
-                            
-                        # 模式 2: MoviePilot P115StrmHelper 插件格式 
-                        # 例: http://10.0.0.10:3000/api/v1/plugin/P115StrmHelper/redirect_url?pickcode=dhkyszbgf16gzxi6e&file_name=...
-                        elif 'pickcode=' in content.lower() or 'pick_code=' in content.lower():
-                            # 正则提取 pickcode= 或 pick_code= 后面的字母数字组合
-                            match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
-                            if match:
-                                pick_code = match.group(1)
-                            
-                        # 模式 3: CMS 生成的格式
-                        # 解析逻辑：提取 /d/ 后面，直到出现 . 或 ? 或 / 之前的字符
-                        elif '/d/' in content:
-                            # 这里的正则改成了匹配 /d/ 后面非特殊符号的部分
-                            match = re.search(r'/d/([a-zA-Z0-9]+)[.?/]', content)
-                            if not match:
-                                # 如果后面没接符号，尝试匹配到字符串结尾
-                                match = re.search(r'/d/([a-zA-Z0-9]+)$', content)
-                                
-                            if match:
-                                pick_code = match.group(1)
-                                
-                        # ----------------------------------------------------
-                            
-                        if pick_code:
-                            # 拼接为当前最新的 etk_url 格式
-                            new_content = f"{etk_url}/api/p115/play/{pick_code}"
-                            
-                            # 只有当内容确实发生变化时才执行写入
-                            if content != new_content:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    f.write(new_content)
-                                fixed_count += 1
-                            else:
-                                skipped_count += 1
-                        else:
+                        if needs_update and new_content:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(new_content)
+                            fixed_count += 1
+                        elif new_content is None:
                             logger.warning(f"  ⚠️ 无法识别该 strm 格式，已跳过: {file_path}")
+                            skipped_count += 1
+                        else:
+                            # 已经是标准格式，无需修改
+                            skipped_count += 1
                             
                     except Exception as e:
                         logger.error(f"  ❌ 处理文件 {file_path} 失败: {e}")
         
-        msg = f"洗刷完毕！成功修正了 {fixed_count} 个文件"
+        msg = f"转换完毕！成功修正了 {fixed_count} 个文件"
         if skipped_count > 0:
             msg += f" (已跳过 {skipped_count} 个无需修改的文件)"
         logger.info(f"  🧹 [转换完毕] {msg}")
