@@ -1171,7 +1171,7 @@ class SmartOrganizer:
 
                 # 兼容 OpenAPI 键名
                 pick_code = file_item.get('pc') or file_item.get('pick_code')
-                file_sha1 = file_item.get('sha1')
+                file_sha1 = file_item.get('sha1') or file_item.get('sha')
                 local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
                 etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "http://127.0.0.1:5257").rstrip('/')
                 
@@ -1265,6 +1265,18 @@ class SmartOrganizer:
                         is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
 
                         if is_video:
+                            # =========================================================
+                            # ✨✨✨ [魔法日志] 扒光 115 实时整理返回的文件对象 ✨✨✨
+                            # =========================================================
+                            try:
+                                debug_json = json.dumps(file_item, ensure_ascii=False, indent=2)
+                                logger.info(f"\n🔮🔮🔮 [Magic Log - 实时整理] 115 原始数据 🔮🔮🔮\n"
+                                            f"文件名: {new_filename}\n"
+                                            f"完整数据:\n{debug_json}\n"
+                                            f"🔮🔮🔮 [Magic Log End] 🔮🔮🔮")
+                            except Exception as e:
+                                logger.error(f"🔮 [Magic Log] 序列化失败: {e}")
+                            # =========================================================
                             strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                             strm_filepath = os.path.join(local_dir, strm_filename)
                             strm_content = f"{etk_url}/api/p115/play/{pick_code}"
@@ -1273,7 +1285,7 @@ class SmartOrganizer:
                                 f.write(strm_content)
                             logger.info(f"  📝 STRM 已生成 -> {strm_filename}")
 
-                            if file_sha1 and pick_code and fid:
+                            if pick_code and fid:
                                 P115CacheManager.save_file_cache(fid, real_target_cid, new_filename, sha1=file_sha1, pick_code=pick_code)
 
                             # ★★★ 秒传生成媒体信息 JSON ★★★
