@@ -510,7 +510,6 @@ def prepare_for_library_rebuild() -> Dict[str, Dict]:
                         -- 1. 核心关联字段
                         in_library = FALSE,
                         emby_item_ids_json = '[]'::jsonb,  -- 设置为空数组，而不是 NULL
-                        asset_details_json = NULL,         -- 资产详情可以为 NULL
                         date_added = NULL,
                         
                         -- 2. 追剧状态重置 (库都没了，追剧状态自然要重置)
@@ -570,22 +569,31 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
         # ======================================================================
         def remove_id_from_metadata(cursor, target_emby_id):
             """
-            从 media_metadata 的 JSON 数组中移除指定的 Emby ID。
-            返回: (remaining_count, tmdb_id, item_type, parent_tmdb_id, season_number)
+            从 media_metadata 中移除指定的 Emby ID。
+            ★ 核心改造：保留 asset_details_json，仅将其内部的 emby_item_id 置空，
+            从而完美保留神医 JSON 缓存，且不破坏与 file_sha1_json 的数组索引对应关系！
             """
             sql_remove = """
                 UPDATE media_metadata
                 SET 
+                    -- 1. 从活跃 ID 列表中彻底移除
                     emby_item_ids_json = COALESCE((
                         SELECT jsonb_agg(elem)
                         FROM jsonb_array_elements_text(emby_item_ids_json) elem
                         WHERE elem != %s
                     ), '[]'::jsonb),
+                    
+                    -- 2. 墓碑机制：不删除资产对象，只把里面的 emby_item_id 设为 null
                     asset_details_json = COALESCE((
-                        SELECT jsonb_agg(elem)
+                        SELECT jsonb_agg(
+                            CASE
+                                WHEN (elem->>'emby_item_id') = %s THEN elem || '{"emby_item_id": null}'::jsonb
+                                ELSE elem
+                            END
+                        )
                         FROM jsonb_array_elements(COALESCE(asset_details_json, '[]'::jsonb)) elem
-                        WHERE (elem->>'emby_item_id') IS NULL OR (elem->>'emby_item_id') != %s
                     ), '[]'::jsonb),
+                    
                     last_updated_at = NOW()
                 WHERE emby_item_ids_json @> %s::jsonb
                 RETURNING tmdb_id, item_type, parent_series_tmdb_id, season_number, jsonb_array_length(emby_item_ids_json) as remaining_len;
@@ -639,7 +647,7 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                     logger.info(f"  ➜ 第 {season_num} 季已完全删除，正在检查父剧集 (TMDB: {parent_tmdb_id})...")
                     
                     cursor.execute(
-                        "UPDATE media_metadata SET in_library = FALSE, emby_item_ids_json = '[]'::jsonb, asset_details_json = NULL WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Episode'",
+                        "UPDATE media_metadata SET in_library = FALSE, emby_item_ids_json = '[]'::jsonb WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Episode'",
                         (parent_tmdb_id, season_num)
                     )
                     
@@ -677,7 +685,7 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                         cursor.execute(
                             """
                             UPDATE media_metadata 
-                            SET in_library = FALSE, asset_details_json = NULL 
+                            SET in_library = FALSE 
                             WHERE parent_series_tmdb_id = %s 
                               AND season_number = %s 
                               AND item_type = 'Season'
@@ -750,8 +758,7 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                         """
                         UPDATE media_metadata 
                         SET in_library = FALSE, 
-                            emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL
+                            emby_item_ids_json = '[]'::jsonb 
                         WHERE tmdb_id = %s AND item_type = %s
                         """,
                         (target_tmdb_id_for_full_cleanup, target_item_type_for_full_cleanup)
@@ -762,8 +769,7 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                             """
                             UPDATE media_metadata 
                             SET in_library = FALSE, 
-                                emby_item_ids_json = '[]'::jsonb, 
-                                asset_details_json = NULL
+                                emby_item_ids_json = '[]'::jsonb 
                             WHERE parent_series_tmdb_id = %s AND item_type IN ('Season', 'Episode')
                             """,
                             (target_tmdb_id_for_full_cleanup,)

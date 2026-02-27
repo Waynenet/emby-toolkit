@@ -1335,53 +1335,119 @@ class MediaProcessor:
     # ======================================================================
     # ★★★ 新增：轻量级直写 DB 方法 (供监控模块调用) ★★★
     # ======================================================================
-    def inject_mediainfo_directly(self, emby_item_id: str, mediainfo_path: str):
+    def inject_mediainfo_directly(self, pick_code: str, mediainfo_path: str):
         """
-        当监控到神医 JSON 生成时，直接读取并 UPDATE 数据库，不触发任何外部 API。
+        接收 PC 码和 JSON 路径。
+        利用 PC 码在 file_pickcode_json 数组中的索引，精准更新 asset_details_json 中对应位置的数据。
+        完美解决多版本对应问题，全程 0 外部 API 调用！
         """
-        try:
-            # 1. 仅获取基础详情 (为了拿到 tmdb_id 和 type)
-            item_details = emby.get_emby_item_details(emby_item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
-            if not item_details: return
-            
-            tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
-            item_type = item_details.get("Type")
-            if not tmdb_id: return
+        if not pick_code or not os.path.exists(mediainfo_path): 
+            return
 
-            # 2. 解析新的 asset_details (包含神医原文)
-            new_asset = parse_full_asset_details(item_details, local_mediainfo_path=mediainfo_path)
+        try:
+            # 1. 读取神医 JSON 提取核心流信息
+            with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                raw_shenyi_data = json.load(f)
             
-            # 3. 直写数据库
+            if not raw_shenyi_data or not isinstance(raw_shenyi_data, list): return
+            
+            primary_source = raw_shenyi_data[0].get("MediaSourceInfo", {})
+            media_streams = primary_source.get("MediaStreams", [])
+            
+            # 2. 查库定位 (寻找包含该 PC 码的记录)
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT asset_details_json FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(tmdb_id), item_type))
-                row = cursor.fetchone()
+                cursor.execute("""
+                    SELECT tmdb_id, item_type, asset_details_json, file_pickcode_json 
+                    FROM media_metadata 
+                    WHERE file_pickcode_json @> %s::jsonb LIMIT 1
+                """, (json.dumps([pick_code]),))
                 
-                if row and row['asset_details_json']:
-                    assets = row['asset_details_json']
-                    if isinstance(assets, str): assets = json.loads(assets)
+                row = cursor.fetchone()
+                if not row:
+                    # 如果没找到，说明 Webhook 还没把这条记录建出来。
+                    # 没关系，等 Webhook 触发时，它会自己去读这个 JSON 的。
+                    logger.debug(f"  ➜ [直写DB] 数据库暂无 PC码 {pick_code} 的记录，等待 Webhook 兜底。")
+                    return
                     
-                    # 遍历替换匹配的 emby_item_id (处理多版本情况)
-                    updated = False
-                    for i, asset in enumerate(assets):
-                        if str(asset.get('emby_item_id')) == str(emby_item_id):
-                            # 保留原有的权限和层级字段
-                            new_asset['source_library_id'] = asset.get('source_library_id')
-                            new_asset['ancestor_ids'] = asset.get('ancestor_ids')
-                            assets[i] = new_asset
-                            updated = True
-                            break
+                tmdb_id = row['tmdb_id']
+                item_type = row['item_type']
+                assets = row['asset_details_json']
+                pickcodes = row['file_pickcode_json']
+                
+                if isinstance(assets, str): assets = json.loads(assets)
+                if isinstance(pickcodes, str): pickcodes = json.loads(pickcodes)
+                
+                # 3. 寻找精准索引 (解决多版本的核心)
+                try:
+                    target_index = pickcodes.index(pick_code)
+                except ValueError:
+                    return
                     
-                    if updated:
-                        cursor.execute("""
-                            UPDATE media_metadata 
-                            SET asset_details_json = %s 
-                            WHERE tmdb_id = %s AND item_type = %s
-                        """, (json.dumps(assets, ensure_ascii=False), str(tmdb_id), item_type))
-                        conn.commit()
-                        logger.info(f"  ⚡ [直写DB] 成功将神医媒体信息注入数据库: {os.path.basename(mediainfo_path)}")
+                # 4. 提取并合并数据
+                if target_index < len(assets):
+                    target_asset = assets[target_index]
+                    
+                    # 更新基础信息
+                    target_asset['container'] = primary_source.get("Container")
+                    target_asset['size_bytes'] = primary_source.get("Size")
+                    
+                    runtime_ticks = primary_source.get('RunTimeTicks')
+                    target_asset['runtime_minutes'] = round(runtime_ticks / 600000000) if runtime_ticks else None
+                    
+                    # 提取流信息
+                    audio_tracks = []
+                    subtitles = []
+                    for stream in media_streams:
+                        stream_type = stream.get("Type")
+                        if stream_type == "Video":
+                            target_asset["video_codec"] = stream.get("Codec")
+                            target_asset["width"] = stream.get("Width")
+                            target_asset["height"] = stream.get("Height")
+                            if stream.get("BitRate"):
+                                target_asset["video_bitrate_mbps"] = round(stream.get("BitRate") / 1000000, 1)
+                            target_asset["bit_depth"] = stream.get("BitDepth")
+                            target_asset["frame_rate"] = stream.get("AverageFrameRate") or stream.get("RealFrameRate")
+                        elif stream_type == "Audio":
+                            audio_tracks.append({
+                                "language": stream.get("Language"), 
+                                "codec": stream.get("Codec"), 
+                                "channels": stream.get("Channels"), 
+                                "display_title": stream.get("DisplayTitle"),
+                                "is_default": stream.get("IsDefault")
+                            })
+                        elif stream_type == "Subtitle":
+                            subtitles.append({
+                                "language": stream.get("Language"), 
+                                "display_title": stream.get("DisplayTitle"),
+                                "is_forced": stream.get("IsForced"),  
+                                "format": stream.get("Codec") 
+                            })
+                    
+                    target_asset["audio_tracks"] = audio_tracks
+                    target_asset["subtitles"] = subtitles
+                    
+                    # ★ 塞入神医原文
+                    target_asset["raw_mediainfo"] = raw_shenyi_data
+                    
+                    # 重新生成前端展示用的 display 标签
+                    from tasks.helpers import analyze_media_asset
+                    fake_details = {'MediaStreams': media_streams, 'Path': target_asset.get('path', '')}
+                    display_tags = analyze_media_asset(fake_details)
+                    target_asset.update(display_tags)
+                    
+                    # 5. 写回数据库
+                    cursor.execute("""
+                        UPDATE media_metadata 
+                        SET asset_details_json = %s 
+                        WHERE tmdb_id = %s AND item_type = %s
+                    """, (json.dumps(assets, ensure_ascii=False), tmdb_id, item_type))
+                    conn.commit()
+                    
+                    logger.info(f"  ⚡ [直写DB] 成功通过 PC码({pick_code}) 定位并注入神医媒体信息！")
+
         except Exception as e:
-            logger.error(f"  ❌ [直写DB] 注入媒体信息失败: {e}")
+            logger.error(f"  ❌ [直写DB] 注入媒体信息失败: {e}", exc_info=True)
 
     # --- 标记为已处理 ---
     def _mark_item_as_processed(self, cursor: psycopg2.extensions.cursor, item_id: str, item_name: str, score: float = 10.0):

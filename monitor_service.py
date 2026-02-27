@@ -156,25 +156,36 @@ def process_batch_queue():
 
 def _handle_mediainfo_ready_task(processor, file_paths: List[str]):
     """
-    当神医提取完媒体信息后，反查 Emby ID 并直接注入数据库。
+    【北斗定位版】当神医提取完媒体信息后，直接从旁边的 STRM 提取 PC 码，
+    传递给核心处理器进行精准的数据库直写，彻底抛弃 Emby ID 依赖！
     """
-    config = config_manager.APP_CONFIG
-    base_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
-    api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
-    
     for file_path in file_paths:
         try:
-            # 推导对应的 strm 路径
+            # 1. 推导对应的 strm 路径
             strm_path = file_path.replace('-mediainfo.json', '.strm')
-            
-            # 反查 Emby 锚点 ID
-            anchor_id, anchor_name = emby.find_nearest_library_anchor(strm_path, base_url, api_key)
-            if anchor_id:
-                logger.info(f"  🚀 [媒体信息就绪] 正在直写数据库: '{anchor_name}' (ID: {anchor_id})")
-                # ★ 调用轻量级直写方法，不触发全量刮削
-                processor.inject_mediainfo_directly(anchor_id, file_path)
+            if not os.path.exists(strm_path):
+                logger.warning(f"  ⚠️ [媒体信息就绪] 找不到对应的 STRM 文件，跳过: {strm_path}")
+                continue
+
+            # 2. 提取 PC 码 (北斗坐标)
+            pick_code = None
+            with open(strm_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                import re
+                match = re.search(r'/play/([a-zA-Z0-9]+)', content)
+                if match: 
+                    pick_code = match.group(1)
+                else:
+                    match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
+                    if match: pick_code = match.group(1)
+
+            # 3. 发射坐标
+            if pick_code:
+                logger.info(f"  🚀 [媒体信息就绪] 提取到 PC 码 [{pick_code}]，正在呼叫直写打击...")
+                processor.inject_mediainfo_directly(pick_code, file_path)
             else:
-                logger.warning(f"  ⚠️ [媒体信息就绪] 无法在 Emby 中找到对应的媒体项: {os.path.basename(strm_path)}")
+                logger.warning(f"  ⚠️ [媒体信息就绪] 无法从 STRM 中提取 PC 码: {strm_path}")
+                
         except Exception as e:
             logger.error(f"  ❌ [媒体信息就绪] 处理失败 {file_path}: {e}")
 
