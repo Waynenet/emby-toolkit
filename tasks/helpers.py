@@ -386,10 +386,10 @@ def analyze_media_asset(item_details: dict) -> dict:
         "release_group_raw": release_group_list,
     }
 
-def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, library_guid: str = None) -> dict:
+def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, library_guid: str = None, local_mediainfo_path: str = None) -> dict:
     """
-    视频流分析主函数 (修复版)
-    优先从 MediaSources 获取真实的媒体信息，解决 .strm 文件数据为空的问题。
+    视频流分析主函数 (神医融合版)
+    优先读取神医插件生成的 -mediainfo.json，原文照搬并提取展示标签。
     """
     # 提取并计算时长 (分钟)
     runtime_ticks = item_details.get('RunTimeTicks')
@@ -400,46 +400,39 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
     if id_to_parent_map and item_id:
         ancestors = calculate_ancestor_ids(item_id, id_to_parent_map, library_guid)
 
-    # ★★★ 核心修复开始 ★★★
-    # 1. 尝试获取 MediaSources
-    media_sources = item_details.get("MediaSources", [])
+    # ★★★ 核心改造：优先读取神医生成的本地 JSON ★★★
+    raw_shenyi_data = None
+    if local_mediainfo_path and os.path.exists(local_mediainfo_path):
+        try:
+            with open(local_mediainfo_path, 'r', encoding='utf-8') as f:
+                raw_shenyi_data = json.load(f)
+        except Exception as e:
+            logger.error(f"读取神医媒体信息文件失败 {local_mediainfo_path}: {e}")
+
     primary_source = None
+    media_streams = []
     
-    # 2. 确定主要数据源
-    # 如果有 MediaSources，取第一个作为主数据源（通常包含真实路径、流信息、容器格式）
-    if media_sources and len(media_sources) > 0:
-        primary_source = media_sources[0]
-    
-    # 3. 提取关键字段 (优先用 Source 的，没有则回退到 Item 顶层)
-    # 注意：.strm 的顶层 Container 通常为 null，但 Source 里会有 'mkv' 等
+    # 如果成功读取到神医数据，使用神医数据作为解析源
+    if raw_shenyi_data and isinstance(raw_shenyi_data, list) and len(raw_shenyi_data) > 0:
+        primary_source = raw_shenyi_data[0].get("MediaSourceInfo", {})
+        media_streams = primary_source.get("MediaStreams", [])
+    else:
+        # 兜底：使用 Emby 原始数据 (通常在提取完成前)
+        media_sources = item_details.get("MediaSources", [])
+        if media_sources and len(media_sources) > 0:
+            primary_source = media_sources[0]
+        media_streams = (primary_source.get("MediaStreams") if primary_source else None) or item_details.get("MediaStreams", [])
+
     container = (primary_source.get("Container") if primary_source else None) or item_details.get("Container")
     size_bytes = (primary_source.get("Size") if primary_source else None) or item_details.get("Size")
-    
-    # 4. 提取流信息
-    # .strm 的流信息通常只在 Source 里
-    media_streams = (primary_source.get("MediaStreams") if primary_source else None) or item_details.get("MediaStreams", [])
-    # ★★★ 核心修复结束 ★★★
-
-    if not item_details:
-        return {
-            "emby_item_id": item_details.get("Id"), "path": item_details.get("Path", ""),
-            "size_bytes": None, "container": None, "video_codec": None,
-            "audio_tracks": [], "subtitles": [],
-            "resolution_display": "未知", "quality_display": "未知",
-            "effect_display": ["SDR"], "audio_display": "无", "subtitle_display": "无",
-            "audio_languages_raw": [], "subtitle_languages_raw": [],
-            "release_group_raw": [],
-            "runtime_minutes": runtime_min,
-            "ancestor_ids": ancestors,
-        }
 
     date_added_to_library = item_details.get("DateCreated")
 
     asset = {
         "emby_item_id": item_details.get("Id"), 
         "path": item_details.get("Path", ""),
-        "size_bytes": size_bytes,   # 使用修复后的变量
-        "container": container,     # 使用修复后的变量
+        "size_bytes": size_bytes,   
+        "container": container,     
         "video_codec": None, 
         "video_bitrate_mbps": None, 
         "bit_depth": None,          
@@ -448,10 +441,11 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
         "subtitles": [],
         "date_added_to_library": date_added_to_library,
         "ancestor_ids": ancestors,
-        "runtime_minutes": runtime_min 
+        "runtime_minutes": runtime_min,
+        "raw_mediainfo": raw_shenyi_data # ★ 将神医原文无损存入
     }
     
-    # 遍历修复后的 media_streams
+    # 遍历流信息提取基础数据
     for stream in media_streams:
         stream_type = stream.get("Type")
         if stream_type == "Video":
@@ -478,15 +472,9 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
                 "format": stream.get("Codec") 
             })
             
-    # analyze_media_asset 也需要使用正确的流数据，但该函数内部逻辑较复杂
-    # 我们可以稍微修改 analyze_media_asset 或者在这里把提取好的流传进去
-    # 为了最小化改动，我们保持 analyze_media_asset 不变，
-    # 但注意：analyze_media_asset 内部也使用了 item_details.get('MediaStreams')
-    # 如果要彻底修复 display 字段，建议把 analyze_media_asset 也改一下，
-    # 或者简单点，构造一个伪造的 item_details 传给它：
-    
+    # 生成前端展示用的 display 标签
     fake_details_for_analysis = item_details.copy()
-    fake_details_for_analysis['MediaStreams'] = media_streams # 注入正确的流
+    fake_details_for_analysis['MediaStreams'] = media_streams 
     
     display_tags = analyze_media_asset(fake_details_for_analysis)
     asset.update(display_tags)

@@ -495,18 +495,18 @@ class P115CacheManager:
             return None
 
     @staticmethod
-    def save_cid(cid, parent_cid, name):
-        """将 CID 存入本地数据库缓存"""
+    def save_cid(cid, parent_cid, name, sha1=None):
+        """将 CID 和 SHA1 存入本地数据库缓存"""
         if not cid or not parent_cid or not name: return
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO p115_filesystem_cache (id, parent_id, name)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1)
+                        VALUES (%s, %s, %s, %s)
                         ON CONFLICT (parent_id, name)
-                        DO UPDATE SET id = EXCLUDED.id, updated_at = NOW()
-                    """, (str(cid), str(parent_cid), str(name)))
+                        DO UPDATE SET id = EXCLUDED.id, sha1 = EXCLUDED.sha1, updated_at = NOW()
+                    """, (str(cid), str(parent_cid), str(name), sha1))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ❌ 写入 115 DB 缓存失败: {e}")
@@ -1250,6 +1250,32 @@ class SmartOrganizer:
                             with open(strm_filepath, 'w', encoding='utf-8') as f:
                                 f.write(strm_content)
                             logger.info(f"  📝 STRM 已生成 -> {strm_filename}")
+
+                            # ★★★ 秒传生成媒体信息 JSON ★★★
+                            file_sha1 = file_item.get('sha1')
+                            if file_sha1:
+                                # 顺手存入缓存表
+                                P115CacheManager.save_cid(fid, real_target_cid, new_filename, sha1=file_sha1)
+                                
+                                try:
+                                    with get_db_connection() as conn:
+                                        with conn.cursor() as cursor:
+                                            cursor.execute("""
+                                                SELECT asset_details_json FROM media_metadata 
+                                                WHERE file_sha1_json @> %s::jsonb LIMIT 1
+                                            """, (json.dumps([file_sha1]),))
+                                            row = cursor.fetchone()
+                                            if row and row['asset_details_json']:
+                                                assets = row['asset_details_json']
+                                                for asset in assets:
+                                                    if asset.get('raw_mediainfo'):
+                                                        mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
+                                                        with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
+                                                            json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
+                                                        logger.info(f"  ⚡ [秒传] 发现相同 SHA1，已自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
+                                                        break
+                                except Exception as e_sha1:
+                                    logger.warning(f"  ⚠️ 尝试秒传媒体信息失败: {e_sha1}")
                             
                         elif is_sub:
                             if config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True):
@@ -1987,6 +2013,30 @@ def task_full_sync_strm_and_subs(processor=None):
                                 files_generated += 1
                                 
                             valid_local_files.add(os.path.abspath(strm_path))
+
+                            # ★★★ 秒传生成媒体信息 JSON ★★★
+                            file_sha1 = item.get('sha1')
+                            if file_sha1:
+                                P115CacheManager.save_cid(item.get('fid') or item.get('file_id'), pid, name, sha1=file_sha1)
+                                try:
+                                    with get_db_connection() as conn:
+                                        with conn.cursor() as cursor:
+                                            cursor.execute("""
+                                                SELECT asset_details_json FROM media_metadata 
+                                                WHERE file_sha1_json @> %s::jsonb LIMIT 1
+                                            """, (json.dumps([file_sha1]),))
+                                            row = cursor.fetchone()
+                                            if row and row['asset_details_json']:
+                                                assets = row['asset_details_json']
+                                                for asset in assets:
+                                                    if asset.get('raw_mediainfo'):
+                                                        mediainfo_path = os.path.join(current_local_path, os.path.splitext(name)[0] + "-mediainfo.json")
+                                                        if not os.path.exists(mediainfo_path):
+                                                            with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
+                                                                json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
+                                                            logger.debug(f"  ⚡ [秒传] 自动生成媒体信息文件: {os.path.basename(mediainfo_path)}")
+                                                        break
+                                except Exception: pass
                                 
                         # 处理字幕下载
                         elif ext in known_sub_exts and download_subs:

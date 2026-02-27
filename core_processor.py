@@ -952,16 +952,29 @@ class MediaProcessor:
                 if is_pending:
                     movie_record['asset_details_json'] = '[]'
                     movie_record['emby_item_ids_json'] = '[]'
+                    movie_record['file_sha1_json'] = '[]'
                     movie_record['in_library'] = False
                 else:
+                    emby_path = item_details_from_emby.get('Path', '')
+                    mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                    
+                    base_filename = os.path.splitext(os.path.basename(emby_path))[0]
+                    cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE name LIKE %s AND sha1 IS NOT NULL LIMIT 1", (f"{base_filename}.%",))
+                    sha1_row = cursor.fetchone()
+                    file_sha1 = sha1_row['sha1'] if sha1_row else None
+
                     asset_details = parse_full_asset_details(
                         item_details_from_emby, 
                         id_to_parent_map=id_to_parent_map, 
-                        library_guid=lib_guid
+                        library_guid=lib_guid,
+                        local_mediainfo_path=mediainfo_path # ★ 传入路径读取神医JSON
                     )
                     asset_details['source_library_id'] = source_lib_id
+                    
+                    # ★ 保证三个数组一一对应
                     movie_record['asset_details_json'] = json.dumps([asset_details], ensure_ascii=False)
                     movie_record['emby_item_ids_json'] = json.dumps([item_id])
+                    movie_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
                     movie_record['in_library'] = True
 
                 movie_record['actors_json'] = json.dumps([{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")], ensure_ascii=False)
@@ -1044,9 +1057,11 @@ class MediaProcessor:
                 if is_pending:
                     series_record['in_library'] = False
                     series_record['emby_item_ids_json'] = '[]'
+                    series_record['file_sha1_json'] = '[]'
                 else:
                     series_record['in_library'] = True
                     series_record['emby_item_ids_json'] = json.dumps([item_id])
+                    series_record['file_sha1_json'] = '[]'
 
                 actors_relation = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")]
                 series_record['actors_json'] = json.dumps(actors_relation, ensure_ascii=False)
@@ -1182,19 +1197,32 @@ class MediaProcessor:
                     }
                     
                     if not is_pending and versions_of_episode:
-                        # ★★★ 核心修改：只取第一个版本（主版本），放弃多版本聚合 ★★★
                         primary_version = versions_of_episode[0]
+                        emby_path = primary_version.get('Path', '')
+                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                         
-                        details = parse_full_asset_details(primary_version)
+                        # ★ 获取 SHA1
+                        base_filename = os.path.splitext(os.path.basename(emby_path))[0]
+                        cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE name LIKE %s AND sha1 IS NOT NULL LIMIT 1", (f"{base_filename}.%",))
+                        sha1_row = cursor.fetchone()
+                        file_sha1 = sha1_row['sha1'] if sha1_row else None
+                        
+                        details = parse_full_asset_details(
+                            primary_version,
+                            local_mediainfo_path=mediainfo_path
+                        )
                         details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
                         
+                        # ★ 保证三个数组一一对应
                         episode_record['asset_details_json'] = json.dumps([details], ensure_ascii=False)
                         episode_record['emby_item_ids_json'] = json.dumps([primary_version.get('Id')])
+                        episode_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
                         episode_record['in_library'] = True
                     else:
                         episode_record['in_library'] = False
                         episode_record['emby_item_ids_json'] = '[]'
                         episode_record['asset_details_json'] = '[]'
+                        episode_record['file_sha1_json'] = '[]'
                         
                     records_to_upsert.append(episode_record)
 
@@ -1206,17 +1234,12 @@ class MediaProcessor:
             # ==================================================================
             all_possible_columns = [
                 "tmdb_id", "item_type", "title", "original_title", "overview", "release_date", "release_year",
-                "last_air_date", "backdrop_path", "homepage",
-                "original_language",
-                "poster_path", "rating", "actors_json", "parent_series_tmdb_id", "season_number", "episode_number",
-                "in_library", "subscription_status", "subscription_sources_json", "emby_item_ids_json", "date_added",
-                "official_rating_json",
-                "genres_json", "directors_json", "production_companies_json", "networks_json", "countries_json", "keywords_json", "ignore_reason",
-                "asset_details_json",
-                "runtime_minutes",
-                "overview_embedding",
-                "total_episodes",
-                "watchlist_tmdb_status"
+                "last_air_date", "backdrop_path", "homepage", "original_language", "poster_path", "rating", 
+                "actors_json", "parent_series_tmdb_id", "season_number", "episode_number", "in_library", 
+                "subscription_status", "subscription_sources_json", "emby_item_ids_json", "file_sha1_json", 
+                "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
+                "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
+                "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
             ]
             data_for_batch = []
             for record in records_to_upsert:
@@ -1283,6 +1306,57 @@ class MediaProcessor:
         except Exception as e:
             logger.error(f"批量写入层级元数据到数据库时失败: {e}", exc_info=True)
             raise
+
+    # ======================================================================
+    # ★★★ 新增：轻量级直写 DB 方法 (供监控模块调用) ★★★
+    # ======================================================================
+    def inject_mediainfo_directly(self, emby_item_id: str, mediainfo_path: str):
+        """
+        当监控到神医 JSON 生成时，直接读取并 UPDATE 数据库，不触发任何外部 API。
+        """
+        try:
+            # 1. 仅获取基础详情 (为了拿到 tmdb_id 和 type)
+            item_details = emby.get_emby_item_details(emby_item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
+            if not item_details: return
+            
+            tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
+            item_type = item_details.get("Type")
+            if not tmdb_id: return
+
+            # 2. 解析新的 asset_details (包含神医原文)
+            new_asset = parse_full_asset_details(item_details, local_mediainfo_path=mediainfo_path)
+            
+            # 3. 直写数据库
+            with get_central_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT asset_details_json FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(tmdb_id), item_type))
+                row = cursor.fetchone()
+                
+                if row and row['asset_details_json']:
+                    assets = row['asset_details_json']
+                    if isinstance(assets, str): assets = json.loads(assets)
+                    
+                    # 遍历替换匹配的 emby_item_id (处理多版本情况)
+                    updated = False
+                    for i, asset in enumerate(assets):
+                        if str(asset.get('emby_item_id')) == str(emby_item_id):
+                            # 保留原有的权限和层级字段
+                            new_asset['source_library_id'] = asset.get('source_library_id')
+                            new_asset['ancestor_ids'] = asset.get('ancestor_ids')
+                            assets[i] = new_asset
+                            updated = True
+                            break
+                    
+                    if updated:
+                        cursor.execute("""
+                            UPDATE media_metadata 
+                            SET asset_details_json = %s 
+                            WHERE tmdb_id = %s AND item_type = %s
+                        """, (json.dumps(assets, ensure_ascii=False), str(tmdb_id), item_type))
+                        conn.commit()
+                        logger.info(f"  ⚡ [直写DB] 成功将神医媒体信息注入数据库: {os.path.basename(mediainfo_path)}")
+        except Exception as e:
+            logger.error(f"  ❌ [直写DB] 注入媒体信息失败: {e}")
 
     # --- 标记为已处理 ---
     def _mark_item_as_processed(self, cursor: psycopg2.extensions.cursor, item_id: str, item_name: str, score: float = 10.0):
@@ -2111,48 +2185,26 @@ class MediaProcessor:
                 # 综合质检 (视频流检查 + 演员匹配度评分)
                 logger.info(f"  ➜ 正在评估《{item_name_for_log}》的处理质量...")
                 
-                # --- 1. 视频流数据完整性检查 (重构版) ---
+                # --- 1. 视频流数据完整性检查 ---
                 stream_check_passed = True
                 stream_fail_reason = ""
                 
-                # 内部辅助：检查单个资产列表
                 def _check_assets_list(assets_list, label_prefix=""):
                     if not assets_list:
                         return False, f"{label_prefix} 无资产数据"
-                    last_fail = "缺失媒体信息"
-                    # 只要有一个版本是好的，就算通过 (多版本情况)
+                    
                     for asset in assets_list:
-                        # 适配 Emby API 结构 (MediaStreams) 和 DB 结构 (asset_details_json) 的差异
-                        # DB结构: 直接是 dict
-                        # Emby结构: 需要从 MediaStreams 提取
+                        # ★★★ 核心修改：如果神医还没提取，直接放行！交给定时任务处理 ★★★
+                        if not asset.get('raw_mediainfo'):
+                            return True, ""
                         
-                        w, h, c = 0, 0, ""
-                        
-                        # 情况 A: DB 结构 (asset_details_json)
-                        if 'video_codec' in asset or 'width' in asset:
-                            w = asset.get('width')
-                            h = asset.get('height')
-                            c = asset.get('video_codec')
-                        
-                        # 情况 B: Emby API 结构 (MediaSource)
-                        elif 'MediaStreams' in asset:
-                            # 需遍历流找到 Video
-                            found_video = False
-                            for stream in asset.get('MediaStreams', []):
-                                if stream.get('Type') == 'Video':
-                                    w = stream.get('Width')
-                                    h = stream.get('Height')
-                                    c = stream.get('Codec')
-                                    found_video = True
-                                    break
-                            if not found_video: continue # 这个 Source 没视频流，看下一个
-                        
-                        # 调用通用质检函数
+                        # 如果神医提取了，顺便检查一下流是否正常
+                        w = asset.get('width', 0)
+                        h = asset.get('height', 0)
+                        c = asset.get('video_codec', '')
                         valid, reason = utils.check_stream_validity(w, h, c)
                         if valid:
                             return True, ""
-                        
-                        # 记录最后一个失败原因
                         last_fail = reason
 
                     return False, f"{label_prefix} {last_fail}"

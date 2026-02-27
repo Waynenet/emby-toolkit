@@ -154,6 +154,7 @@ def init_db():
                         -- 媒体库状态
                         in_library BOOLEAN DEFAULT FALSE NOT NULL,
                         emby_item_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        file_sha1_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                         date_added TIMESTAMP WITH TIME ZONE,
                         asset_details_json JSONB,
 
@@ -407,6 +408,7 @@ def init_db():
                         parent_id TEXT NOT NULL,       -- 父目录 ID (根目录为 '0')
                         name TEXT NOT NULL,            -- 文件/文件夹名称
                         local_path TEXT,               -- 本地映射路径 (如果已同步到本地)
+                        sha1 TEXT,
                         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), -- 最后同步时间
                         
                         -- 复合唯一约束：同一个父目录下不能有同名文件 (用于快速查找)
@@ -435,7 +437,8 @@ def init_db():
 
                     schema_upgrades = {
                         'p115_filesystem_cache': {
-                            "local_path": "TEXT"
+                            "local_path": "TEXT",
+                            "sha1": "TEXT"
                         },
                         'emby_users': {
                             "policy_json": "JSONB"  
@@ -449,7 +452,8 @@ def init_db():
                             "backdrop_path": "TEXT",  
                             "homepage": "TEXT", 
                             "production_companies_json": "JSONB",
-                            "networks_json": "JSONB"
+                            "networks_json": "JSONB",
+                            "file_sha1_json": "JSONB NOT NULL DEFAULT '[]'::jsonb"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",

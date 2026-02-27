@@ -46,6 +46,10 @@ class MediaFileHandler(FileSystemEventHandler):
         if os.path.exists(file_path) and os.path.isdir(file_path): 
             return False
         
+        # ★ 允许神医的 JSON 文件通过监控
+        if file_path.endswith('-mediainfo.json'):
+            return True
+        
         _, ext = os.path.splitext(file_path)
         if ext.lower() not in self.extensions: 
             return False
@@ -109,12 +113,20 @@ def process_batch_queue():
 
     files_to_scrape = []
     files_to_refresh_only = []
+    mediainfo_files = []
 
     for file_path in files_to_process:
-        if _is_path_excluded(file_path, exclude_paths):
+        if file_path.endswith('-mediainfo.json'):
+            mediainfo_files.append(file_path)
+        elif _is_path_excluded(file_path, exclude_paths):
             files_to_refresh_only.append(file_path)
         else:
             files_to_scrape.append(file_path)
+
+    # ★ 处理神医 JSON 生成事件
+    if mediainfo_files:
+        logger.info(f"  🎬 [实时监控] 发现 {len(mediainfo_files)} 个神医媒体信息提取完成，准备更新入库...")
+        threading.Thread(target=_handle_mediainfo_ready_task, args=(processor, mediainfo_files)).start()
 
     if files_to_scrape:
         grouped_files = {}
@@ -141,6 +153,30 @@ def process_batch_queue():
     if files_to_refresh_only:
         logger.info(f"  🚀 [实时监控] 发现 {len(files_to_refresh_only)} 个文件命中排除路径，将跳过刮削直接刷新 Emby。")
         threading.Thread(target=_handle_batch_refresh_only_task, args=(files_to_refresh_only,)).start()
+
+def _handle_mediainfo_ready_task(processor, file_paths: List[str]):
+    """
+    当神医提取完媒体信息后，反查 Emby ID 并直接注入数据库。
+    """
+    config = config_manager.APP_CONFIG
+    base_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+    api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+    
+    for file_path in file_paths:
+        try:
+            # 推导对应的 strm 路径
+            strm_path = file_path.replace('-mediainfo.json', '.strm')
+            
+            # 反查 Emby 锚点 ID
+            anchor_id, anchor_name = emby.find_nearest_library_anchor(strm_path, base_url, api_key)
+            if anchor_id:
+                logger.info(f"  🚀 [媒体信息就绪] 正在直写数据库: '{anchor_name}' (ID: {anchor_id})")
+                # ★ 调用轻量级直写方法，不触发全量刮削
+                processor.inject_mediainfo_directly(anchor_id, file_path)
+            else:
+                logger.warning(f"  ⚠️ [媒体信息就绪] 无法在 Emby 中找到对应的媒体项: {os.path.basename(strm_path)}")
+        except Exception as e:
+            logger.error(f"  ❌ [媒体信息就绪] 处理失败 {file_path}: {e}")
 
 def _process_strm_conversions(file_paths: List[str]) -> List[str]:
     """
