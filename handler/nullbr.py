@@ -613,7 +613,9 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
-    from handler.p115_service import P115Service, get_115_tokens
+    
+    from handler.p115_service import get_115_tokens
+    _, _, cookie = get_115_tokens()
     cookie = (cookie or "").strip()
     
     try:

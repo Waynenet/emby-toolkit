@@ -1011,7 +1011,7 @@
               style="margin: 0 auto 20px;"
             />
             <n-alert v-if="cookieQrcodeStatus === 'waiting'" type="info" :show-icon="true">
-              请使用对应的 115 客户端扫码
+              请选择不常用客户端，然后使用115生活APP扫码
             </n-alert>
             <n-alert v-if="cookieQrcodeStatus === 'success'" type="success" :show-icon="true">
               获取成功！Cookie 已自动保存到数据库
