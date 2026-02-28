@@ -257,11 +257,10 @@
                     <template #header>
                       <div style="display: flex; align-items: center; gap: 8px;">
                         <span class="card-title">账户与连接</span>
-                        <n-tag v-if="p115Info" type="success" size="small" round>
-                          {{ p115Info.msg || '连接正常' }}
+                        <n-tag v-if="p115Info" :type="p115Info.valid ? 'success' : 'error'" size="small" round>
+                          {{ p115Info.msg || (p115Info.valid ? '连接正常' : '连接异常') }}
                         </n-tag>
-                        <n-tag v-else-if="configModel.p115_token || configModel.p115_cookies" type="warning" size="small" round>未检查</n-tag>
-                        <n-tag v-else type="error" size="small" round>未配置</n-tag>
+                        <n-tag v-else type="warning" size="small" round>未检查</n-tag>
                       </div>
                     </template>
                     <template #header-extra>
@@ -307,22 +306,22 @@
                       </n-space>
                     </n-form-item>
 
-                    <!-- ★★★ 分离配置: Cookie (播放用) - 优化为直接显示状态 ★★★ -->
-                    <n-form-item label="Cookie" path="p115_cookies">
+                    <!-- ★★★ 分离配置: Cookie (播放用) - 纯展示 ★★★ -->
+                    <n-form-item label="Cookie (播放专用)">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
-                          <n-tag :type="configModel.p115_cookies ? 'success' : 'default'" size="small">
+                          <n-tag :type="p115Info?.has_cookie ? 'success' : 'default'" size="small">
                             <template #icon>
-                              <n-icon :component="configModel.p115_cookies ? CheckIcon : CloseIcon" />
+                              <n-icon :component="p115Info?.has_cookie ? CheckIcon : CloseIcon" />
                             </template>
-                            {{ configModel.p115_cookies ? '已配置' : '未配置' }}
+                            {{ p115Info?.has_cookie ? '已配置' : '未配置' }}
                           </n-tag>
                           <n-button size="small" type="primary" @click="openCookieModal">
-                            {{ configModel.p115_cookies ? '修改' : '粘贴Cookie' }}
+                            {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
                           </n-button>
                         </n-space>
                         <n-text depth="3" style="font-size:0.8em;">
-                          用于反代302播放。
+                          用于反代302播放，解决官方接口 403 封禁问题。
                         </n-text>
                       </n-space>
                     </n-form-item>
@@ -980,33 +979,76 @@
 
     </n-space>
     
-    <!-- ★★★ Cookie 独立设置弹窗 ★★★ -->
-    <n-modal v-model:show="showCookieModal" preset="card" title="设置 115 Cookie" style="width: 500px;">
-      <n-alert type="success" :show-icon="true" style="margin-bottom: 16px;">
-        <b>Cookie 说明：</b><br>
-        1. 用于播放：获取直链<br>
-        2. 可解决官方接口 403 封禁问题<br>
-        3. 302必须配置，建议用不大助手扫码获取
-      </n-alert>
-      
-      <n-form-item label="Cookie (网页端身份)">
-        <n-input 
-          v-model:value="tempCookieInput" 
-          type="textarea" 
-          placeholder="UID=...; CID=...; SEID=..." 
-          :rows="3" 
-        />
-      </n-form-item>
-
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showCookieModal = false">取消</n-button>
-          <n-button type="primary" @click="confirmCookies">确定保存</n-button>
+    <!-- ★★★ Cookie 扫码获取弹窗 ★★★ -->
+    <n-modal v-model:show="showCookieModal" preset="card" title="扫码获取 Cookie" style="width: 400px;" :mask-closable="false">
+      <n-space vertical>
+        <n-alert type="info" :show-icon="true" style="margin-bottom: 10px;">
+          请选择扫码的客户端类型。推荐使用 <b>支付宝小程序</b>，风控概率最低。
+        </n-alert>
+        
+        <n-space align="center">
+          <n-select 
+            v-model:value="cookieAppType" 
+            :options="cookieAppOptions" 
+            style="width: 220px;" 
+            @update:value="refreshCookieQrcode"
+          />
+          <n-button type="primary" @click="refreshCookieQrcode" :loading="cookieQrcodeLoading">
+            刷新二维码
+          </n-button>
         </n-space>
+
+        <div style="text-align: center; padding: 20px 0; min-height: 250px;">
+          <n-spin v-if="cookieQrcodeStatus === 'loading'" size="large">
+            <template #description>正在获取二维码...</template>
+          </n-spin>
+          
+          <div v-else-if="cookieQrcodeStatus === 'waiting' || cookieQrcodeStatus === 'success'">
+            <n-qr-code 
+              v-if="cookieQrcodeUrl" 
+              :value="cookieQrcodeUrl" 
+              :size="200"
+              style="margin: 0 auto 20px;"
+            />
+            <n-alert v-if="cookieQrcodeStatus === 'waiting'" type="info" :show-icon="true">
+              请使用对应的 115 客户端扫码
+            </n-alert>
+            <n-alert v-if="cookieQrcodeStatus === 'success'" type="success" :show-icon="true">
+              获取成功！Cookie 已自动保存到数据库
+            </n-alert>
+          </div>
+          
+          <div v-else-if="cookieQrcodeStatus === 'expired'">
+            <n-result status="warning" title="二维码已过期">
+              <template #footer>
+                <n-button type="primary" @click="refreshCookieQrcode">重新获取</n-button>
+              </template>
+            </n-result>
+          </div>
+        </div>
+        
+        <n-divider style="margin: 0;" />
+        <n-collapse>
+          <n-collapse-item title="手动粘贴 Cookie (备用方案)" name="manual">
+            <n-input 
+              v-model:value="tempCookieInput" 
+              type="textarea" 
+              placeholder="UID=...; CID=...; SEID=..." 
+              :rows="3" 
+            />
+            <n-button type="primary" size="small" style="margin-top: 8px;" @click="saveManualCookie">
+              保存手动输入的 Cookie
+            </n-button>
+          </n-collapse-item>
+        </n-collapse>
+      </n-space>
+      
+      <template #footer>
+        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'">关闭</n-button>
       </template>
     </n-modal>
 
-    <!-- ★★★ 新增：115 扫码登录弹窗 ★★★ -->
+    <!-- ★★★ 115 扫码登录弹窗 ★★★ -->
     <n-modal v-model:show="showQrcodeModal" preset="card" title="115 扫码登录" style="width: 350px;" :mask-closable="false">
       <div style="text-align: center; padding: 20px 0;">
         <!-- 加载中状态 -->
@@ -1897,21 +1939,104 @@ const languageOptions = ref([]);
 const keywordOptions = ref([]);
 const ratingOptions = ref([]);
 
-// ★★★ Cookie Modal 逻辑 (独立设置 Cookie) ★★★
+// ★★★ Cookie 扫码获取逻辑 ★★★
 const showCookieModal = ref(false);
 const tempCookieInput = ref('');
+const cookieAppType = ref('alipaymini');
+const cookieAppOptions = [
+  { label: '115生活(支付宝小程序)', value: 'alipaymini' },
+  { label: '网页版', value: 'web' },
+  { label: '115生活(微信小程序)', value: 'wechatmini' },
+  { label: '115生活(Android端)', value: 'android' },
+  { label: '115生活(iOS端)', value: 'ios' },
+  { label: '115网盘(Android电视端)', value: 'tv' }
+];
+
+const cookieQrcodeUrl = ref('');
+const cookieQrcodeStatus = ref('idle'); 
+const cookieQrcodeLoading = ref(false);
+const cookieQrcodePolling = ref(null);
 
 const openCookieModal = () => {
-  const raw = configModel.value.p115_cookies || '';
-  tempCookieInput.value = raw;
   showCookieModal.value = true;
+  tempCookieInput.value = '';
+  refreshCookieQrcode();
 };
 
-const confirmCookies = () => {
-  configModel.value.p115_cookies = tempCookieInput.value.trim();
+const refreshCookieQrcode = async () => {
+  stopCookiePolling();
+  cookieQrcodeStatus.value = 'loading';
+  cookieQrcodeLoading.value = true;
+  
+  try {
+    const res = await axios.get(`/api/p115/cookie_qrcode?app=${cookieAppType.value}`);
+    if (res.data && res.data.success) {
+      cookieQrcodeUrl.value = res.data.data.qrcode;
+      cookieQrcodeStatus.value = 'waiting';
+      startCookiePolling();
+    } else {
+      cookieQrcodeStatus.value = 'error';
+      message.error(res.data?.message || '获取二维码失败');
+    }
+  } catch (e) {
+    cookieQrcodeStatus.value = 'error';
+    message.error('获取二维码失败: ' + (e.response?.data?.message || e.message));
+  } finally {
+    cookieQrcodeLoading.value = false;
+  }
+};
+
+const startCookiePolling = () => {
+  cookieQrcodePolling.value = setInterval(async () => {
+    try {
+      const res = await axios.get(`/api/p115/cookie_qrcode/status?app=${cookieAppType.value}`);
+      const data = res.data;
+      
+      if (data.status === 'success') {
+        cookieQrcodeStatus.value = 'success';
+        message.success('Cookie 获取成功！');
+        stopCookiePolling();
+        setTimeout(() => {
+          showCookieModal.value = false;
+          check115Status(); // 刷新状态显示
+        }, 1500);
+      } else if (data.status === 'expired') {
+        cookieQrcodeStatus.value = 'expired';
+        stopCookiePolling();
+      }
+    } catch (e) {
+      console.error('检查 Cookie 二维码状态失败', e);
+    }
+  }, 2000);
+};
+
+const stopCookiePolling = () => {
+  if (cookieQrcodePolling.value) {
+    clearInterval(cookieQrcodePolling.value);
+    cookieQrcodePolling.value = null;
+  }
+};
+
+const closeCookieModal = () => {
+  stopCookiePolling();
   showCookieModal.value = false;
-  if (configModel.value.p115_cookies) {
-    check115Status();
+  cookieQrcodeStatus.value = 'idle';
+};
+
+const saveManualCookie = async () => {
+  if (!tempCookieInput.value.trim()) {
+    message.warning('请输入 Cookie');
+    return;
+  }
+  try {
+    const res = await axios.post('/api/p115/cookie', { cookie: tempCookieInput.value.trim() });
+    if (res.data.success) {
+      message.success('手动 Cookie 保存成功');
+      showCookieModal.value = false;
+      check115Status();
+    }
+  } catch (e) {
+    message.error('保存失败: ' + (e.response?.data?.message || e.message));
   }
 };
 
@@ -1954,9 +2079,6 @@ const startPolling = () => {
       
       if (data.status === 'success') {
         qrcodeStatus.value = 'success';
-        if (data.cookies) {
-           configModel.value.p115_cookies = data.cookies; // Cookie 还是保留在前端配置里
-        }
         message.success('登录成功！授权已自动保存');
         stopPolling();
         setTimeout(() => {
@@ -2501,10 +2623,8 @@ onMounted(async () => {
   componentIsMounted.value = true;
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
-      // 支持 Token 或 Cookie 任意一个检查状态
-      if (configModel.value.p115_token || configModel.value.p115_cookies) {
-                check115Status();
-            }
+      check115Status();
+      
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }

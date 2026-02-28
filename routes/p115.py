@@ -161,6 +161,103 @@ def _check_qrcode_status():
     except Exception as e:
         logger.error(f"检查二维码状态失败: {e}")
         return {"status": "error", "message": str(e)}
+    
+# --- ★★★ 新增：经典扫码获取 Cookie 流程 (支持多端) ★★★ ---
+_cookie_qrcode_data = {
+    "uid": None,
+    "time": None,
+    "sign": None
+}
+
+@p115_bp.route('/cookie_qrcode', methods=['GET'])
+@admin_required
+def get_cookie_qrcode():
+    """获取用于生成 Cookie 的二维码 (支持指定 APP 类型)"""
+    app_type = request.args.get('app', 'alipaymini') # 默认支付宝小程序
+    try:
+        url = f"https://qrcodeapi.115.com/api/1.0/web/1.0/token/?app={app_type}"
+        resp = requests.get(url, timeout=10).json()
+        
+        if resp.get('state') == 1:
+            data = resp.get('data', {})
+            _cookie_qrcode_data['uid'] = data.get('uid')
+            _cookie_qrcode_data['time'] = data.get('time')
+            _cookie_qrcode_data['sign'] = data.get('sign')
+            
+            return jsonify({
+                "success": True, 
+                "data": {"qrcode": data.get('qrcode')}
+            })
+        return jsonify({"success": False, "message": resp.get('message', '获取失败')}), 500
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@p115_bp.route('/cookie_qrcode/status', methods=['GET'])
+@admin_required
+def check_cookie_qrcode_status():
+    """轮询 Cookie 二维码状态并执行登录获取 Cookie"""
+    app_type = request.args.get('app', 'alipaymini')
+    uid = _cookie_qrcode_data.get('uid')
+    time_val = _cookie_qrcode_data.get('time')
+    sign = _cookie_qrcode_data.get('sign')
+    
+    if not uid:
+        return jsonify({"success": False, "status": "expired", "message": "请先获取二维码"})
+        
+    try:
+        # 1. 轮询状态
+        url = f"https://qrcodeapi.115.com/get/status/?uid={uid}&time={time_val}&sign={sign}"
+        resp = requests.get(url, timeout=10).json()
+        
+        state = resp.get('state')
+        if state == 0:
+            return jsonify({"success": False, "status": "expired", "message": "二维码已过期"})
+            
+        if state == 1:
+            status = resp.get('data', {}).get('status')
+            if status == 1:
+                return jsonify({"success": True, "status": "waiting", "message": "已扫码，请在手机端确认"})
+            elif status == 2:
+                # 2. 手机端已确认，调用登录接口换取 Cookie
+                login_url = "https://passportapi.115.com/app/1.0/web/1.0/login/qrcode"
+                payload = {"account": uid, "app": app_type}
+                
+                # ★ 关键：必须捕获响应头里的 Set-Cookie
+                login_resp = requests.post(login_url, data=payload, timeout=10)
+                login_data = login_resp.json()
+                
+                if login_data.get('state') == 1:
+                    # 提取 Cookie
+                    cookies_dict = login_resp.cookies.get_dict()
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+                    
+                    # ★ 保存到独立数据库
+                    from handler.p115_service import save_115_tokens
+                    save_115_tokens(None, None, cookie_str)
+                    
+                    # 重置客户端缓存
+                    P115Service.reset_cookie_client()
+                    
+                    return jsonify({"success": True, "status": "success", "message": "Cookie 获取成功！"})
+                else:
+                    return jsonify({"success": False, "status": "error", "message": login_data.get('message', '登录失败')})
+                    
+        return jsonify({"success": True, "status": "waiting", "message": "等待扫码..."})
+    except Exception as e:
+        return jsonify({"success": False, "status": "error", "message": str(e)}), 500
+
+@p115_bp.route('/cookie', methods=['POST'])
+@admin_required
+def save_manual_cookie():
+    """手动保存 Cookie 到独立数据库"""
+    cookie_str = request.json.get('cookie', '').strip()
+    try:
+        from handler.p115_service import save_115_tokens
+        save_115_tokens(None, None, cookie_str)
+        P115Service.reset_cookie_client()
+        return jsonify({"success": True, "message": "Cookie 已保存"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @p115_bp.route('/qrcode', methods=['POST'])
 @admin_required
@@ -237,12 +334,10 @@ class RateLimiter:
 def get_115_status():
     """检查 115 凭证状态 (分别检查 Token 和 Cookie)"""
     try:
-        from handler.p115_service import P115Service, get_config, get_115_tokens
-        config = get_config()
-        
-        token, _ = get_115_tokens()
+        from handler.p115_service import P115Service, get_115_tokens
+        token, _, cookie = get_115_tokens() # ★ 从数据库读
         token = (token or "").strip() 
-        cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "").strip()
+        cookie = (cookie or "").strip()
         
         result = {
             "has_token": bool(token),

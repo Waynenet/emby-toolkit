@@ -21,17 +21,27 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 def get_115_tokens():
-    """唯一真理：只从独立数据库获取 Token"""
+    """唯一真理：只从独立数据库获取 Token 和 Cookie"""
     auth_data = settings_db.get_setting('p115_auth_tokens')
     if auth_data:
-        return auth_data.get('access_token'), auth_data.get('refresh_token')
-    return None, None
+        cookie = auth_data.get('cookie')
+        # ★ 无缝迁移逻辑：如果数据库里没 Cookie，去老配置里找，找到就存进数据库
+        if not cookie:
+            old_cookie = get_config().get(constants.CONFIG_OPTION_115_COOKIES)
+            if old_cookie:
+                save_115_tokens(auth_data.get('access_token'), auth_data.get('refresh_token'), old_cookie)
+                cookie = old_cookie
+                
+        return auth_data.get('access_token'), auth_data.get('refresh_token'), cookie
+    return None, None, None
 
-def save_115_tokens(access_token, refresh_token):
+def save_115_tokens(access_token, refresh_token, cookie=None):
     """唯一真理：只写入独立数据库"""
+    existing = settings_db.get_setting('p115_auth_tokens') or {}
     settings_db.save_setting('p115_auth_tokens', {
-        'access_token': access_token,
-        'refresh_token': refresh_token
+        'access_token': access_token if access_token is not None else existing.get('access_token'),
+        'refresh_token': refresh_token if refresh_token is not None else existing.get('refresh_token'),
+        'cookie': cookie if cookie is not None else existing.get('cookie')
     })
 
 _refresh_lock = threading.Lock()
@@ -40,7 +50,7 @@ def refresh_115_token(failed_token=None):
     """使用 refresh_token 换取新的 access_token (纯数据库读写)"""
     with _refresh_lock:
         try:
-            current_access, current_refresh = get_115_tokens()
+            current_access, current_refresh, _ = get_115_tokens()
             if not current_refresh:
                 return False
                 
@@ -244,7 +254,7 @@ class P115Service:
     @classmethod
     def get_openapi_client(cls):
         """获取管理客户端 (OpenAPI) - 启动时初始化"""
-        token, _ = get_115_tokens()
+        token, _, _ = get_115_tokens()
         if not token:
             return None
 
@@ -263,8 +273,8 @@ class P115Service:
     @classmethod
     def init_cookie_client(cls):
         """初始化 Cookie 客户端 (延迟到播放请求时)"""
-        config = get_config()
-        cookie = config.get(constants.CONFIG_OPTION_115_COOKIES, "").strip()
+        _, _, cookie = get_115_tokens() # ★ 从数据库读
+        cookie = (cookie or "").strip()
         
         if not cookie:
             return None
@@ -431,13 +441,13 @@ class P115Service:
     @classmethod
     def get_cookies(cls):
         """获取 Cookie (用于直链下载等)"""
-        config = get_config()
-        return config.get(constants.CONFIG_OPTION_115_COOKIES)
+        _, _, cookie = get_115_tokens()
+        return cookie
     
     @classmethod
     def get_token(cls):
         """获取 Token (用于 API 调用)"""
-        token, _ = get_115_tokens()
+        token, _, _ = get_115_tokens()
         return token
 
 

@@ -613,7 +613,8 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
-    cookies = config.get('p115_cookies')
+    from handler.p115_service import P115Service, get_115_tokens
+    cookie = (cookie or "").strip()
     
     try:
         cid_val = config.get('p115_save_path_cid', 0)
@@ -621,7 +622,7 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     except:
         save_path_cid = 0
 
-    if not cookies:
+    if not cookie:
         raise ValueError("未配置 115 Cookies")
 
     clean_url = _clean_link(resource_link)
