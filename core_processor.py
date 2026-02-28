@@ -833,6 +833,7 @@ class MediaProcessor:
         - 修复了 ID=0 的脏数据问题。
         - 修复了回流时因类型不匹配导致无法标记入库的问题。
         - 【修复】多版本支持：现在会遍历并保存电影和分集的所有版本(MediaSources/Versions)的资产、SHA1和提取码。
+        - 【修复】指纹保护：当媒体离线(in_library=False)时，坚决保护 SHA1、提取码和资产路径等历史指纹不被空数组清空。
         """
         if not item_details_from_emby:
             logger.error("  ➜ 写入元数据缓存失败：缺少 Emby 详情数据。")
@@ -1287,7 +1288,7 @@ class MediaProcessor:
                 return
             
             # ==================================================================
-            # 批量写入数据库
+            # 批量写入数据库 (带指纹保护机制)
             # ==================================================================
             all_possible_columns = [
                 "tmdb_id", "item_type", "title", "original_title", "overview", "release_date", "release_year",
@@ -1340,13 +1341,20 @@ class MediaProcessor:
             for col in cols_to_protect:
                 if col in cols_to_update: cols_to_update.remove(col)
 
+            # ★★★ 定义需要保护的指纹字段 ★★★
+            cols_to_protect_from_empty = ['asset_details_json', 'file_sha1_json']
+
             update_clauses = []
             for col in cols_to_update:
-                # 针对 total_episodes 字段，检查锁定状态
-                # 逻辑：如果 total_episodes_locked 为 TRUE，则保持原值；否则使用新值 (EXCLUDED.total_episodes)
                 if col == 'total_episodes':
                     update_clauses.append(
                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
+                    )
+                elif col in cols_to_protect_from_empty:
+                    # ★ 核心拦截：如果新传入的指纹数据为空数组 '[]'，则强制保留数据库中原有的历史记录
+                    # 这样即使媒体离线 (in_library=False) 或处于 pending 状态，也不会丢失珍贵的 SHA1
+                    update_clauses.append(
+                        f"{col} = CASE WHEN EXCLUDED.{col}::text = '[]' THEN COALESCE(media_metadata.{col}, EXCLUDED.{col}) ELSE EXCLUDED.{col} END"
                     )
                 else:
                     # 其他字段正常更新
