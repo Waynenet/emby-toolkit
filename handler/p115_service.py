@@ -521,6 +521,19 @@ class P115CacheManager:
             logger.error(f"  ❌ 写入 115 DB 缓存失败: {e}")
 
     @staticmethod
+    def get_file_sha1(fid):
+        """从本地数据库获取已缓存的文件 SHA1"""
+        if not fid: return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE id = %s", (str(fid),))
+                    row = cursor.fetchone()
+                    return row['sha1'] if row else None
+        except Exception:
+            return None
+
+    @staticmethod
     def get_cid_by_name(name):
         """仅通过名称查找 CID (适用于带有 {tmdb=xxx} 的唯一主目录)"""
         if not name: return None
@@ -1814,9 +1827,19 @@ def task_full_sync_strm_and_subs(processor=None):
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
     
+    try:
+        import task_manager
+    except ImportError:
+        task_manager = None
+
+    def update_progress(prog, msg):
+        if task_manager: task_manager.update_status_from_thread(prog, msg)
+        logger.info(msg)
+
+    # ★ 修复：让前端第一时间收到启动消息
     start_msg = "=== 🚀 开始增量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始增量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
-    logger.info(start_msg)
+    update_progress(0, start_msg)
     
     try:
         import task_manager
@@ -1937,7 +1960,7 @@ def task_full_sync_strm_and_subs(processor=None):
                 P115CacheManager.save_cid(pid, path_nodes[-2].get('cid') if len(path_nodes)>1 else '0', path_nodes[-1].get('file_name'))
                 P115CacheManager.update_local_path(pid, final_path)
                 
-                logger.debug(f"  🔍 [动态推导] 成功向115问路并缓存新路径: {final_path}")
+                logger.info(f"  🔍 [动态推导] 缓存新路径: {final_path}")
                 return final_path
             else:
                 logger.warning(f"  ⚠️ 路径异常: 文件夹 {pid} 不在分类 {target_cid} 之下！")
@@ -2001,7 +2024,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     data = res.get('data', [])
                     if not data: break
                     
-                    logger.info(f"  ➜ [{category_name}] - [{task_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
+                    update_progress(base_prog, f"  ➜ [{category_name}] - [{task_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
                     
                     for item in data:
                         # 兼容 OpenAPI 键名
@@ -2016,15 +2039,21 @@ def task_full_sync_strm_and_subs(processor=None):
                         
                         if not pc or not pid or not fid: continue
 
-                        # ★★★ 终极修复：如果列表没给 SHA1，调用详情接口硬抠！ ★★★
+                        # 如果列表没给 SHA1，先查本地缓存，没有再调用详情接口硬抠！ 
                         if not file_sha1:
-                            try:
-                                logger.info("  ➜ 正在提取SHA1")
-                                info_res = client.fs_get_info(fid)
-                                if info_res.get('state') and info_res.get('data'):
-                                    file_sha1 = info_res['data'].get('sha1')
-                            except Exception:
-                                pass
+                            # 1. 优先查本地数据库缓存 (极速)
+                            cached_sha1 = P115CacheManager.get_file_sha1(fid)
+                            if cached_sha1:
+                                file_sha1 = cached_sha1
+                            else:
+                                # 2. 缓存没有，再向 115 发起网络请求
+                                try:
+                                    logger.info(f"  ➜ 正在通过 API 提取 SHA1: {name}")
+                                    info_res = client.fs_get_info(fid)
+                                    if info_res.get('state') and info_res.get('data'):
+                                        file_sha1 = info_res['data'].get('sha1')
+                                except Exception:
+                                    pass
 
                         # 存入缓存表
                         P115CacheManager.save_file_cache(fid, pid, name, sha1=file_sha1, pick_code=pc)
