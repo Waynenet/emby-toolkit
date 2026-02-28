@@ -1985,7 +1985,7 @@ def task_scan_incomplete_assets(processor):
                         
                         # 动作 A: 物理文件缺失，但数据库有副本 -> 恢复物理文件
                         if not phys_exists and has_raw:
-                            logger.info(f"  🔧 [自愈] 恢复物理文件: {os.path.basename(mediainfo_path)}")
+                            logger.info(f"  🔧 [自愈] 恢复媒体信息JSON: {os.path.basename(mediainfo_path)}")
                             try:
                                 os.makedirs(os.path.dirname(mediainfo_path), exist_ok=True)
                                 with open(mediainfo_path, 'w', encoding='utf-8') as f:
@@ -1999,7 +1999,7 @@ def task_scan_incomplete_assets(processor):
                         # 动作 B: 物理文件存在 (原本就在或刚恢复的)，但数据库不健康 -> 修复数据库
                         if phys_exists:
                             if not db_is_healthy:
-                                logger.info(f"  🔧 [自愈] 修复数据库资产: {os.path.basename(mediainfo_path)}")
+                                logger.info(f"  🔧 [自愈] 修复数据库媒体信息: {os.path.basename(mediainfo_path)}")
                                 if current_emby_id:
                                     item_details = emby.get_emby_item_details(
                                         current_emby_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id,
@@ -2023,7 +2023,7 @@ def task_scan_incomplete_assets(processor):
                                 is_valid = True
                                 break
                         else:
-                            fail_reason = "物理文件与数据库副本双重缺失"
+                            fail_reason = "缺失媒体信息"
                 
                 # 如果执行了自愈并更新了 assets，写回数据库
                 if db_needs_update:
