@@ -793,7 +793,7 @@ class MediaProcessor:
 
         return id_to_parent_map, lib_guid
 
-    # ★★★ 新增：直接从 STRM 文件中抠出 115 提取码 (PC码) ★★★
+    # 直接从 STRM 文件中抠出 115 提取码 (PC码)
     def _extract_pickcode_from_strm(self, strm_path: str) -> Optional[str]:
         if not strm_path or not strm_path.lower().endswith('.strm') or not os.path.exists(strm_path):
             return None
@@ -807,7 +807,7 @@ class MediaProcessor:
         except Exception: pass
         return None
 
-    # ★★★ 新增：通过 PC 码反查 SHA1 (无视文件被MP移动或重命名) ★★★
+    # 通过 PC 码反查 SHA1 (无视文件被MP移动或重命名)
     def _get_sha1_by_pickcode(self, pick_code: str) -> Optional[str]:
         if not pick_code: return None
         try:
@@ -832,29 +832,8 @@ class MediaProcessor:
         - 兼容 'pending' 预处理模式和 'webhook' 回流模式。
         - 修复了 ID=0 的脏数据问题。
         - 修复了回流时因类型不匹配导致无法标记入库的问题。
-        - 【修改】分集处理逻辑简化：只写入主版本数据，不再聚合多版本，防止实时处理污染数据。
+        - 【修复】多版本支持：现在会遍历并保存电影和分集的所有版本(MediaSources/Versions)的资产、SHA1和提取码。
         """
-        # =========================================================
-        # ✨✨✨ [魔法日志] START ✨✨✨
-        # =========================================================
-        # try:
-        #     if item_details_from_emby:
-        #         # 使用 default=str 处理 datetime 等无法 JSON 序列化的对象
-        #         debug_json = json.dumps(item_details_from_emby, ensure_ascii=False, indent=2, default=str)
-        #         logger.info(f"\n🔮🔮🔮 [Magic Log] 进入 _upsert_media_metadata 🔮🔮🔮\n"
-        #                     f"Item Type: {item_type}\n"
-        #                     f"Content of item_details_from_emby:\n{debug_json}\n"
-        #                     f"🔮🔮🔮 [Magic Log End] 🔮🔮🔮")
-        #     else:
-        #         logger.info(f"\n🔮🔮🔮 [Magic Log] 进入 _upsert_media_metadata 🔮🔮🔮\n"
-        #                     f"Item Type: {item_type}\n"
-        #                     f"⚠️ item_details_from_emby IS NONE OR EMPTY\n"
-        #                     f"🔮🔮🔮 [Magic Log End] 🔮🔮🔮")
-        # except Exception as e:
-        #     logger.error(f"🔮 [Magic Log] 序列化日志时发生错误: {e}")
-        # =========================================================
-        # ✨✨✨ [魔法日志] END ✨✨✨
-        # =========================================================
         if not item_details_from_emby:
             logger.error("  ➜ 写入元数据缓存失败：缺少 Emby 详情数据。")
             return
@@ -973,31 +952,74 @@ class MediaProcessor:
                 movie_record['runtime_minutes'] = get_representative_runtime([item_details_from_emby], movie_record.get('runtime'))
                 movie_record['rating'] = movie_record.get('vote_average')
                 
-                # ★ 资产信息处理
+                # ★ 资产信息处理 (支持多版本)
                 if is_pending:
                     movie_record['asset_details_json'] = '[]'
                     movie_record['emby_item_ids_json'] = '[]'
                     movie_record['file_sha1_json'] = '[]'
+                    movie_record['file_pickcode_json'] = '[]'
                     movie_record['in_library'] = False
                 else:
-                    emby_path = item_details_from_emby.get('Path', '')
-                    mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                    all_assets = []
+                    all_ids = [item_id]
+                    all_sha1s = []
+                    all_pcs = []
                     
-                    file_pc = self._extract_pickcode_from_strm(emby_path)
-                    file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                    media_sources = item_details_from_emby.get('MediaSources', [])
+                    
+                    # 如果有多个媒体源（多版本）
+                    if media_sources and len(media_sources) > 0:
+                        for source in media_sources:
+                            emby_path = source.get('Path', '')
+                            if not emby_path: continue
+                            
+                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                            file_pc = self._extract_pickcode_from_strm(emby_path)
+                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                            
+                            # 构造临时 item 传递给 parse_full_asset_details，确保解析的是当前版本的属性
+                            temp_item = item_details_from_emby.copy()
+                            temp_item['Path'] = emby_path
+                            if 'Container' in source: temp_item['Container'] = source['Container']
+                            if 'Size' in source: temp_item['Size'] = source['Size']
+                            if 'RunTimeTicks' in source: temp_item['RunTimeTicks'] = source['RunTimeTicks']
+                            
+                            asset_details = parse_full_asset_details(
+                                temp_item, 
+                                id_to_parent_map=id_to_parent_map, 
+                                library_guid=lib_guid,
+                                local_mediainfo_path=mediainfo_path 
+                            )
+                            asset_details['source_library_id'] = source_lib_id
+                            
+                            all_assets.append(asset_details)
+                            if file_pc: all_pcs.append(file_pc)
+                            if file_sha1: all_sha1s.append(file_sha1)
+                    else:
+                        # 兜底逻辑：如果没有 MediaSources，使用主 Path
+                        emby_path = item_details_from_emby.get('Path', '')
+                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                        
+                        file_pc = self._extract_pickcode_from_strm(emby_path)
+                        file_sha1 = self._get_sha1_by_pickcode(file_pc)
 
-                    asset_details = parse_full_asset_details(
-                        item_details_from_emby, 
-                        id_to_parent_map=id_to_parent_map, 
-                        library_guid=lib_guid,
-                        local_mediainfo_path=mediainfo_path 
-                    )
-                    asset_details['source_library_id'] = source_lib_id
+                        asset_details = parse_full_asset_details(
+                            item_details_from_emby, 
+                            id_to_parent_map=id_to_parent_map, 
+                            library_guid=lib_guid,
+                            local_mediainfo_path=mediainfo_path 
+                        )
+                        asset_details['source_library_id'] = source_lib_id
+                        
+                        all_assets.append(asset_details)
+                        if file_pc: all_pcs.append(file_pc)
+                        if file_sha1: all_sha1s.append(file_sha1)
                     
-                    movie_record['asset_details_json'] = json.dumps([asset_details], ensure_ascii=False)
-                    movie_record['emby_item_ids_json'] = json.dumps([item_id])
-                    movie_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
-                    movie_record['file_pickcode_json'] = json.dumps([file_pc] if file_pc else [])
+                    # 使用 dict.fromkeys 去重并保持顺序
+                    movie_record['asset_details_json'] = json.dumps(all_assets, ensure_ascii=False)
+                    movie_record['emby_item_ids_json'] = json.dumps(list(dict.fromkeys(all_ids)))
+                    movie_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
+                    movie_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                     movie_record['in_library'] = True
 
                 movie_record['actors_json'] = json.dumps([{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")], ensure_ascii=False)
@@ -1151,8 +1173,8 @@ class MediaProcessor:
                     season_poster = season.get('poster_path') or series_details.get('poster_path')
                     matched_emby_seasons = seasons_grouped_by_number.get(s_num_int, [])
 
-                    # ★★★ 修改：季也只取第一个版本，保持逻辑一致性 ★★★
-                    primary_season_id = matched_emby_seasons[0]['Id'] if matched_emby_seasons else None
+                    # ★ 提取所有匹配到的季文件夹 ID
+                    season_ids = [s['Id'] for s in matched_emby_seasons] if matched_emby_seasons else []
                     
                     records_to_upsert.append({
                         "tmdb_id": str(s_tmdb_id), "item_type": "Season", 
@@ -1162,7 +1184,7 @@ class MediaProcessor:
                         "season_number": s_num,
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
-                        "emby_item_ids_json": json.dumps([primary_season_id]) if primary_season_id else '[]',
+                        "emby_item_ids_json": json.dumps(season_ids),
                         "file_sha1_json": '[]'
                     })
                 
@@ -1220,24 +1242,37 @@ class MediaProcessor:
                         "runtime_minutes": final_runtime
                     }
                     
+                    # ★ 资产信息处理 (支持多版本)
                     if not is_pending and versions_of_episode:
-                        primary_version = versions_of_episode[0]
-                        emby_path = primary_version.get('Path', '')
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                        all_assets = []
+                        all_ids = []
+                        all_sha1s = []
+                        all_pcs = []
                         
-                        file_pc = self._extract_pickcode_from_strm(emby_path)
-                        file_sha1 = self._get_sha1_by_pickcode(file_pc)
-                        
-                        details = parse_full_asset_details(
-                            primary_version,
-                            local_mediainfo_path=mediainfo_path
-                        )
-                        details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
-                        
-                        episode_record['asset_details_json'] = json.dumps([details], ensure_ascii=False)
-                        episode_record['emby_item_ids_json'] = json.dumps([primary_version.get('Id')])
-                        episode_record['file_sha1_json'] = json.dumps([file_sha1] if file_sha1 else [])
-                        episode_record['file_pickcode_json'] = json.dumps([file_pc] if file_pc else [])
+                        # 遍历该集的所有版本
+                        for version in versions_of_episode:
+                            emby_path = version.get('Path', '')
+                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                            
+                            file_pc = self._extract_pickcode_from_strm(emby_path)
+                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                            
+                            details = parse_full_asset_details(
+                                version,
+                                local_mediainfo_path=mediainfo_path
+                            )
+                            details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
+                            
+                            all_assets.append(details)
+                            all_ids.append(version.get('Id'))
+                            if file_sha1: all_sha1s.append(file_sha1)
+                            if file_pc: all_pcs.append(file_pc)
+                            
+                        episode_record['asset_details_json'] = json.dumps(all_assets, ensure_ascii=False)
+                        # 使用 dict.fromkeys 去重并保持顺序
+                        episode_record['emby_item_ids_json'] = json.dumps(list(dict.fromkeys(all_ids)))
+                        episode_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
+                        episode_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                         episode_record['in_library'] = True
                     else:
                         episode_record['in_library'] = False
@@ -1259,7 +1294,7 @@ class MediaProcessor:
                 "last_air_date", "backdrop_path", "homepage", "original_language", "poster_path", "rating", 
                 "actors_json", "parent_series_tmdb_id", "season_number", "episode_number", "in_library", 
                 "subscription_status", "subscription_sources_json", "emby_item_ids_json", 
-                "file_sha1_json", "file_pickcode_json", # ★★★ 两个指纹都在这里
+                "file_sha1_json", "file_pickcode_json", 
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
