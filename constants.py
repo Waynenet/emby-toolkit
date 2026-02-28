@@ -62,6 +62,7 @@ CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"           # 是否下载�
 CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"           # 是否启用本地清理功能
 CONFIG_OPTION_115_MOUNT_EXTENSIONS = "p115_mount_extensions"     # 触发挂载模式的扩展名
 CONFIG_OPTION_115_MOUNT_PREFIX = "p115_mount_prefix"             # 挂载目录前缀
+DB_KEY_115_RENAME_CONFIG = "p115_rename_config"                  # 重命名配置模块
 
 # ==============================================================================
 # ✨ 通知服务 (Notification Services)

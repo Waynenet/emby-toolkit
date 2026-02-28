@@ -635,6 +635,11 @@ class SmartOrganizer:
 
         self.raw_metadata = self._fetch_raw_metadata()
         self.details = self.raw_metadata
+        self.rename_config = settings_db.get_setting(constants.DB_KEY_115_RENAME_CONFIG) or {
+            "main_title_lang": "zh", "main_year_en": True, "main_tmdb_fmt": "{tmdb=ID}",
+            "season_fmt": "Season {02}", "file_title_lang": "zh", "file_year_en": False,
+            "file_tmdb_fmt": "none", "file_params_en": True, "file_sep": " - "
+        }
         raw_rules = settings_db.get_setting(constants.DB_KEY_115_SORTING_RULES)
         self.rules = []
         
@@ -705,6 +710,7 @@ class SmartOrganizer:
 
             # 补充标题日期供重命名
             data['title'] = raw_details.get('title') or raw_details.get('name')
+            data['original_title'] = raw_details.get('original_title') or raw_details.get('original_name') or data['title']
             date_str = raw_details.get('release_date') or raw_details.get('first_air_date')
             data['date'] = date_str
             data['year'] = 0
@@ -973,8 +979,7 @@ class SmartOrganizer:
 
         return " · ".join(info_tags) if info_tags else ""
 
-    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False):
-        # 兼容 OpenAPI 键名
+    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
         if '.' not in original_name: return original_name, None
 
@@ -982,6 +987,7 @@ class SmartOrganizer:
         name_body = parts[0]
         ext = parts[1].lower()
 
+        # ... (保留原有的 is_sub 和 lang_suffix 逻辑) ...
         is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
         lang_suffix = ""
         if is_sub:
@@ -1001,21 +1007,42 @@ class SmartOrganizer:
                 if match:
                     lang_suffix = f".{match.group(1)}"
 
-        tag_suffix = ""
-        try:
-            search_name = original_name
-            if is_sub:
-                if lang_suffix and name_body.endswith(lang_suffix):
-                    clean_body = name_body[:-len(lang_suffix)]
-                    search_name = f"{clean_body}.mkv"
-                else:
-                    search_name = f"{name_body}.mkv"
+        # ★ 应用文件重命名配置
+        cfg = self.rename_config
+        base_title = original_title if cfg.get('file_title_lang') == 'original' and original_title else new_base_name
+        
+        # ★ 修复：将年份直接拼接到片名后面，用空格隔开
+        if cfg.get('file_year_en') and year:
+            base_title = f"{base_title} ({year})"
+            
+        file_sep = cfg.get('file_sep', ' - ')
 
-            video_info = self._extract_video_info(search_name)
-            if video_info:
-                tag_suffix = f" · {video_info}"
-        except Exception as e:
-            pass
+        tag_suffix = ""
+        if cfg.get('file_params_en', True):
+            try:
+                search_name = original_name
+                if is_sub:
+                    if lang_suffix and name_body.endswith(lang_suffix):
+                        clean_body = name_body[:-len(lang_suffix)]
+                        search_name = f"{clean_body}.mkv"
+                    else:
+                        search_name = f"{name_body}.mkv"
+
+                video_info = self._extract_video_info(search_name)
+                if video_info:
+                    if file_sep.strip() == '.':
+                        tag_suffix = f".{video_info.replace(' · ', '.')}"
+                    else:
+                        tag_suffix = f" · {video_info}"
+            except Exception as e:
+                pass
+
+        # 构建文件名主体
+        name_parts = [base_title] # 此时 base_title 已经包含了年份
+            
+        tmdb_fmt = cfg.get('file_tmdb_fmt', 'none')
+        if tmdb_fmt != 'none':
+            name_parts.append(tmdb_fmt.replace('ID', str(self.tmdb_id)))
 
         if is_tv:
             pattern = r'(?:s|S)(\d{1,2})(?:e|E)(\d{1,2})|Ep?(\d{1,2})|第(\d{1,3})[集话]'
@@ -1027,14 +1054,16 @@ class SmartOrganizer:
 
                 s_str = f"S{season_num:02d}"
                 e_str = f"E{episode_num:02d}"
-
-                new_name = f"{new_base_name} - {s_str}{e_str}{tag_suffix}{lang_suffix}.{ext}"
+                
+                name_parts.append(f"{s_str}{e_str}")
+                core_name = file_sep.join(name_parts)
+                new_name = f"{core_name}{tag_suffix}{lang_suffix}.{ext}"
                 return new_name, season_num
             else:
                 return original_name, None
         else:
-            movie_base = f"{new_base_name} ({year})" if year else new_base_name
-            new_name = f"{movie_base}{tag_suffix}{lang_suffix}.{ext}"
+            core_name = file_sep.join(name_parts)
+            new_name = f"{core_name}{tag_suffix}{lang_suffix}.{ext}"
             return new_name, None
 
     def _scan_files_recursively(self, cid, depth=0, max_depth=3):
@@ -1086,11 +1115,22 @@ class SmartOrganizer:
 
     def execute(self, root_item, target_cid, delete_source=True):
         title = self.details.get('title') or self.original_title
+        original_title = self.details.get('original_title') or title
         date_str = self.details.get('date') or ''
         year = date_str[:4] if date_str else ''
 
-        safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
-        std_root_name = f"{safe_title} ({year}) {{tmdb={self.tmdb_id}}}" if year else f"{safe_title} {{tmdb={self.tmdb_id}}}"
+        # ★ 应用主目录重命名配置
+        cfg = self.rename_config
+        base_title = original_title if cfg.get('main_title_lang') == 'original' else title
+        safe_title = re.sub(r'[\\/:*?"<>|]', '', base_title).strip()
+        
+        std_root_name = safe_title
+        if cfg.get('main_year_en', True) and year:
+            std_root_name += f" ({year})"
+            
+        main_tmdb_fmt = cfg.get('main_tmdb_fmt', '{tmdb=ID}')
+        if main_tmdb_fmt != 'none':
+            std_root_name += f" {main_tmdb_fmt.replace('ID', str(self.tmdb_id))}"
 
         # 兼容 OpenAPI 键名
         root_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name', '未知')
@@ -1185,9 +1225,19 @@ class SmartOrganizer:
                 file_item, safe_title, year=year, is_tv=(self.media_type=='tv')
             )
 
+            new_filename, season_num = self._rename_file_node(
+                file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), original_title=original_title
+            )
+
             real_target_cid = final_home_cid
             if self.media_type == 'tv' and season_num is not None:
-                s_name = f"Season {season_num:02d}"
+                # ★ 应用季目录重命名配置
+                season_fmt = cfg.get('season_fmt', 'Season {02}')
+                if '{02}' in season_fmt:
+                    s_name = season_fmt.replace('{02}', f"{season_num:02d}")
+                else:
+                    s_name = season_fmt.replace('{1}', f"{season_num}")
+                    
                 s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
                 
                 if s_cid:

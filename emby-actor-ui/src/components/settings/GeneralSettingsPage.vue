@@ -471,23 +471,40 @@
                   </n-card>
                 </n-gi>
 
-                <!-- 右侧：分类规则配置 -->
+                <!-- 右侧：分类规则与重命名 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header>
-                      <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <span class="card-title">智能分类规则</span>
-                        <n-button secondary type="primary" @click="showRuleManagerModal = true">
-                          <template #icon><n-icon :component="ListIcon" /></template>
-                          管理分类规则 ({{ sortingRules.length }})
-                        </n-button>
-                      </div>
-                    </template>
-                    <n-alert type="info" :show-icon="true">
-                      当开启“整理”时，系统将按顺序匹配规则。命中规则后，资源将被移动到指定的 115 目录中。
-                      <br>未命中的资源将移动到“未识别”目录。
-                    </n-alert>
-                  </n-card>
+                  <n-space vertical :size="24" style="height: 100%;">
+                    
+                    <!-- 卡片 1：分类规则 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                          <span class="card-title">智能分类规则</span>
+                          <n-button secondary type="primary" @click="showRuleManagerModal = true">
+                            <template #icon><n-icon :component="ListIcon" /></template>
+                            管理分类规则 ({{ sortingRules.length }})
+                          </n-button>
+                        </div>
+                      </template>
+                      <n-alert type="info" :show-icon="true">
+                        当开启“整理”时，系统将按顺序匹配规则。命中规则后，资源将被移动到指定的 115 目录中。
+                        <br>未命中的资源将移动到“未识别”目录。
+                      </n-alert>
+                    </n-card>
+
+                    <!-- ★ 卡片 2：自定义重命名 (移到这里) -->
+                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
+                      <template #header><span class="card-title">自定义重命名</span></template>
+                      <n-alert type="success" :show-icon="true" style="margin-bottom: 16px;">
+                        打造强迫症专属的完美媒体库命名格式。支持自定义主目录、季目录及文件的中英文、年份、TMDb标签等。
+                      </n-alert>
+                      <n-button type="primary" block dashed @click="renameModalRef?.open()">
+                        <template #icon><n-icon :component="ColorWandIcon" /></template>
+                        配置命名规则
+                      </n-button>
+                    </n-card>
+
+                  </n-space>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
@@ -1368,6 +1385,8 @@
         </n-space>
       </template>
     </n-modal>
+    <!-- ★ 引入自定义重命名模态框 -->
+    <RenameConfigModal ref="renameModalRef" />
   </n-layout>
   
   <!-- 导出选项模态框 -->
@@ -1391,7 +1410,6 @@
       <n-button type="primary" @click="handleExport" :disabled="tablesToExport.length === 0">确认导出</n-button>
     </template>
   </n-modal>
-
   <!-- 导入选项模态框 -->
   <n-modal v-model:show="importModalVisible" preset="dialog" title="恢复数据库备份">
     <n-space vertical>
@@ -1586,11 +1604,13 @@ import {
   CreateOutline as EditIcon,
   TrashOutline as DeleteIcon, 
   Menu as DragHandleIcon,
+  ColorWandOutline as ColorWandIcon,
   QrCodeOutline
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
+import RenameConfigModal from './RenameConfigModal.vue';
 import axios from 'axios';
-
+const renameModalRef = ref(null);
 const isFixingStrm = ref(false);
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);

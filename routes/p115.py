@@ -736,3 +736,29 @@ def fix_strm_files():
     except Exception as e:
         logger.error(f"  ❌ 批量修正异常: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500
+
+@p115_bp.route('/rename_config', methods=['GET', 'POST'])
+@admin_required
+def handle_rename_config():
+    """管理 115 自定义重命名独立配置"""
+    if request.method == 'GET':
+        config = settings_db.get_setting(constants.DB_KEY_115_RENAME_CONFIG) or {}
+        # 提供默认值，确保前端始终有完整的数据结构
+        defaults = {
+            "main_title_lang": "zh",       # zh, original
+            "main_year_en": True,          # bool
+            "main_tmdb_fmt": "{tmdb=ID}",  # {tmdb=ID}, [tmdbid=ID], tmdb-ID, none
+            "season_fmt": "Season {02}",   # Season {02}, Season {1}, S{02}, S{1}, 第{1}季
+            "file_title_lang": "zh",       # zh, original
+            "file_year_en": False,         # bool
+            "file_tmdb_fmt": "none",       # {tmdb=ID}, [tmdbid=ID], tmdb-ID, none
+            "file_params_en": True,        # bool
+            "file_sep": " - "              # " - ", ".", " ", "_"
+        }
+        defaults.update(config)
+        return jsonify({"success": True, "data": defaults})
+    
+    if request.method == 'POST':
+        new_config = request.json
+        settings_db.save_setting(constants.DB_KEY_115_RENAME_CONFIG, new_config)
+        return jsonify({"success": True, "message": "重命名规则已保存"})
