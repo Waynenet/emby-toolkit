@@ -1374,10 +1374,12 @@ class SmartOrganizer:
                                             if row and row['asset_details_json']:
                                                 assets = row['asset_details_json']
                                                 for asset in assets:
-                                                    if asset.get('raw_mediainfo'):
+                                                    raw_info = asset.get('raw_mediainfo')
+                                                    # ★ 严格校验：必须是列表且有内容
+                                                    if raw_info and isinstance(raw_info, list) and len(raw_info) > 0:
                                                         mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
                                                         with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
-                                                            json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
+                                                            json.dump(raw_info, f_json, ensure_ascii=False)
                                                         logger.info(f"  ⚡ 发现相同 SHA1，已生成媒体信息文件: {os.path.basename(mediainfo_path)}")
                                                         break
                                 except Exception as e_sha1:
@@ -2175,11 +2177,13 @@ def task_full_sync_strm_and_subs(processor=None):
                                             if row and row['asset_details_json']:
                                                 assets = row['asset_details_json']
                                                 for asset in assets:
-                                                    if asset.get('raw_mediainfo'):
+                                                    raw_info = asset.get('raw_mediainfo')
+                                                    # ★ 严格校验：必须是列表且有内容
+                                                    if raw_info and isinstance(raw_info, list) and len(raw_info) > 0:
                                                         mediainfo_path = os.path.join(current_local_path, os.path.splitext(name)[0] + "-mediainfo.json")
                                                         if not os.path.exists(mediainfo_path):
                                                             with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
-                                                                json.dump(asset['raw_mediainfo'], f_json, ensure_ascii=False)
+                                                                json.dump(raw_info, f_json, ensure_ascii=False)
                                                             logger.debug(f"  ⚡ [跨号秒传] 匹配到相同 SHA1，自动生成媒体信息: {os.path.basename(mediainfo_path)}")
                                                         break
                                 except Exception: pass
