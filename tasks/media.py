@@ -1972,16 +1972,12 @@ def task_scan_incomplete_assets(processor):
                     if file_path:
                         mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
                         
-                        # 1. 状态评估
+                        # 1. 状态评估：绝对纯粹，只认神医的产物
                         phys_exists = os.path.exists(mediainfo_path)
                         has_raw = bool(raw_mediainfo and isinstance(raw_mediainfo, list) and len(raw_mediainfo) > 0)
                         
-                        w = asset.get('width')
-                        h = asset.get('height')
-                        c = asset.get('video_codec')
-                        stream_valid, _ = utils.check_stream_validity(w, h, c)
-                        
-                        db_is_healthy = stream_valid and has_raw
+                        # 只要数据库里有完整的 raw_mediainfo 副本，就认为数据库是健康的
+                        db_is_healthy = has_raw
 
                         # =========================================================
                         # ★★★ 核心自愈逻辑 ★★★
