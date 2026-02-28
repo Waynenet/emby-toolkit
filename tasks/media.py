@@ -123,7 +123,7 @@ def task_sync_all_metadata(processor, item_id: str, item_name: str):
 
 def _wait_for_items_recovery(processor, item_ids: list, max_retries=60, interval=10) -> bool:
     """
-    轮询检查指定的一组 Emby ID 是否都已具备有效的视频流数据。
+    轮询检查指定的一组 Emby ID 是否都已具备有效的媒体信息文件 (-mediainfo.json)。
     用于等待神医插件处理网盘文件。
     """
     if not item_ids:
@@ -142,34 +142,28 @@ def _wait_for_items_recovery(processor, item_ids: list, max_retries=60, interval
         
         for eid in current_check_list:
             try:
-                # 获取详情 (只查 MediaSources 即可)
+                # 获取详情 (请求 Path 字段)
                 item_details = emby.get_emby_item_details(
                     eid, processor.emby_url, processor.emby_api_key, processor.emby_user_id,
-                    fields="MediaSources"
+                    fields="Path,MediaSources"
                 )
                 
                 is_healed = False
                 if item_details:
-                    media_sources = item_details.get("MediaSources", [])
-                    for source in media_sources:
-                        # 排除未分析的 strm
-                        if not source.get("Container") and not source.get("Path", "").endswith(".strm"):
-                            continue
-                            
-                        for stream in source.get("MediaStreams", []):
-                            if stream.get("Type") == "Video":
-                                w = stream.get("Width")
-                                h = stream.get("Height")
-                                c = stream.get("Codec")
-                                # 使用严格标准检查
-                                valid, _ = utils.check_stream_validity(w, h, c)
-                                if valid:
-                                    is_healed = True
-                                    break
-                        if is_healed: break
+                    # ★★★ 核心修改：直接查找物理文件 ★★★
+                    file_path = item_details.get("Path")
+                    if not file_path:
+                        media_sources = item_details.get("MediaSources", [])
+                        if media_sources:
+                            file_path = media_sources[0].get("Path")
+                    
+                    if file_path:
+                        mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
+                        if os.path.exists(mediainfo_path):
+                            is_healed = True
                 
                 if is_healed:
-                    logger.debug(f"    ✔ 项目 {eid} 已检测到完整媒体信息，移除监控队列。")
+                    logger.debug(f"    ✔ 项目 {eid} 已检测到媒体信息文件，移除监控队列。")
                     pending_ids.remove(eid)
                     
             except Exception:
@@ -1928,7 +1922,7 @@ def task_restore_local_cache_from_db(processor):
 def task_scan_incomplete_assets(processor):
     """
     【新任务 - 优化版】全库扫描资产数据不完整的项目。
-    直接利用 SQL Join 获取所需的 Emby ID，无需二次查询。
+    直接利用 SQL Join 获取所需的 Emby ID，并基于物理文件 (-mediainfo.json) 进行最终复核。
     """
     logger.trace("--- 开始执行全库资产完整性扫描 ---")
     
@@ -1954,23 +1948,23 @@ def task_scan_incomplete_assets(processor):
                 raw_assets = item['asset_details_json']
                 assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
                 
-                # 复核 (虽然 SQL 已经筛过，但 Python 再确认一次更稳妥)
+                # ★★★ 核心修改：基于物理文件复核，排除数据库脏数据导致的假报警 ★★★
                 is_valid = False
-                fail_reason = "未知原因"
+                fail_reason = "缺失文件路径"
                 
                 for asset in assets:
-                    w = asset.get('width')
-                    h = asset.get('height')
-                    c = asset.get('video_codec')
-                    valid, reason = utils.check_stream_validity(w, h, c)
-                    if valid:
-                        is_valid = True
-                        break
-                    fail_reason = reason
+                    file_path = asset.get('path')
+                    if file_path:
+                        mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
+                        if os.path.exists(mediainfo_path):
+                            is_valid = True
+                            break
+                        else:
+                            fail_reason = "缺失媒体信息文件 (-mediainfo.json)"
                 
                 if not is_valid:
                     # =========================================================
-                    # ★★★ 核心优化：直接从 item 字典中提取 Emby ID ★★★
+                    # 提取 Emby ID 并写入日志
                     # =========================================================
                     target_log_id = None
                     target_name = item['title']
@@ -1978,25 +1972,20 @@ def task_scan_incomplete_assets(processor):
                     final_reason = fail_reason
                     
                     if item['item_type'] == 'Movie':
-                        # 电影：取自己的 Emby ID
                         e_ids = item.get('emby_item_ids_json')
                         if e_ids and len(e_ids) > 0:
                             target_log_id = e_ids[0]
                             
                     elif item['item_type'] == 'Episode':
-                        # 分集：取父剧集的 Emby ID (SQL 已经 Join 好了)
                         p_ids = item.get('parent_emby_ids_json')
                         if p_ids and len(p_ids) > 0:
                             target_log_id = p_ids[0]
-                        
-                        # 优先使用父剧集标题
                         if item.get('parent_title'):
                             target_name = item['parent_title']
                             
                         target_type = 'Series'
                         final_reason = f"[S{item['season_number']}E{item['episode_number']}] {fail_reason}"
 
-                    # 兜底：如果实在没有 Emby ID (极少见)，回退到 TMDb ID
                     if not target_log_id:
                         target_log_id = item['parent_series_tmdb_id'] if item['item_type'] == 'Episode' else item['tmdb_id']
 
@@ -2016,7 +2005,7 @@ def task_scan_incomplete_assets(processor):
 
             conn.commit()
 
-        msg = f"扫描完成。共发现 {total} 个异常项，已将 {marked_count} 个(归并后)加入待复核列表。"
+        msg = f"扫描完成。共发现 {total} 个异常项，经物理文件复核后，已将 {marked_count} 个加入待复核列表。"
         logger.info(f"  ✅ {msg}")
         task_manager.update_status_from_thread(100, msg)
 

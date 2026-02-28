@@ -2159,62 +2159,31 @@ class MediaProcessor:
                 # 综合质检 (视频流检查 + 演员匹配度评分)
                 logger.info(f"  ➜ 正在评估《{item_name_for_log}》的处理质量...")
                 
-                # --- 1. 视频流数据完整性检查 (重构版) ---
+                # --- 1. 视频流数据完整性检查 (基于神医 mediainfo.json) ---
                 stream_check_passed = True
                 stream_fail_reason = ""
                 
-                # 内部辅助：检查单个资产列表
-                def _check_assets_list(assets_list, label_prefix=""):
-                    if not assets_list:
-                        return False, f"{label_prefix} 无资产数据"
-                    last_fail = "缺失媒体信息"
-                    # 只要有一个版本是好的，就算通过 (多版本情况)
-                    for asset in assets_list:
-                        # 适配 Emby API 结构 (MediaStreams) 和 DB 结构 (asset_details_json) 的差异
-                        # DB结构: 直接是 dict
-                        # Emby结构: 需要从 MediaStreams 提取
-                        
-                        w, h, c = 0, 0, ""
-                        
-                        # 情况 A: DB 结构 (asset_details_json)
-                        if 'video_codec' in asset or 'width' in asset:
-                            w = asset.get('width')
-                            h = asset.get('height')
-                            c = asset.get('video_codec')
-                        
-                        # 情况 B: Emby API 结构 (MediaSource)
-                        elif 'MediaStreams' in asset:
-                            # 需遍历流找到 Video
-                            found_video = False
-                            for stream in asset.get('MediaStreams', []):
-                                if stream.get('Type') == 'Video':
-                                    w = stream.get('Width')
-                                    h = stream.get('Height')
-                                    c = stream.get('Codec')
-                                    found_video = True
-                                    break
-                            if not found_video: continue # 这个 Source 没视频流，看下一个
-                        
-                        # 调用通用质检函数
-                        valid, reason = utils.check_stream_validity(w, h, c)
-                        if valid:
-                            return True, ""
-                        
-                        # 记录最后一个失败原因
-                        last_fail = reason
-
-                    return False, f"{label_prefix} {last_fail}"
+                def _check_mediainfo_file(file_path, label_prefix=""):
+                    if not file_path:
+                        return False, f"{label_prefix} 缺失文件路径"
+                    # 拼接出同名的 -mediainfo.json 路径
+                    mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
+                    if os.path.exists(mediainfo_path):
+                        return True, ""
+                    else:
+                        return False, f"{label_prefix} 缺失媒体信息文件 (-mediainfo.json)"
 
                 # --- 分类处理 ---
                 if item_type in ['Movie', 'Episode']:
-                    # Emby API 返回的是 MediaSources 列表
-                    passed, reason = _check_assets_list(item_details_from_emby.get("MediaSources", []), "")
+                    # 直接从 Emby 详情中获取物理路径
+                    emby_path = item_details_from_emby.get("Path")
+                    passed, reason = _check_mediainfo_file(emby_path, "")
                     if not passed:
                         stream_check_passed = False
                         stream_fail_reason = reason
 
                 elif item_type == 'Series':
-                    # 剧集：查库递归检查
+                    # 剧集：查库递归检查所有已入库分集
                     try:
                         # 使用刚刚写入的最新数据
                         cursor.execute("""
@@ -2232,8 +2201,13 @@ class MediaProcessor:
                             
                             assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
                             
-                            # 调用辅助函数检查
-                            passed, reason = _check_assets_list(assets, f"[S{s_idx}E{e_idx}]")
+                            # 从资产详情中提取物理路径
+                            ep_path = None
+                            if assets and len(assets) > 0:
+                                ep_path = assets[0].get('path')
+                            
+                            # 调用辅助函数检查物理文件
+                            passed, reason = _check_mediainfo_file(ep_path, f"[S{s_idx}E{e_idx}]")
                             
                             if not passed:
                                 stream_check_passed = False

@@ -3,6 +3,7 @@
 import collections
 import threading
 import time
+import os
 import random
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
@@ -446,13 +447,13 @@ def _enqueue_webhook_event(item_id, item_name, item_type):
 
 def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type):
     """
-    预检视频流数据。
+    预检视频流数据 (基于神医 mediainfo.json 物理文件检查)。
     """
     if item_type not in ['Movie', 'Episode']:
         _enqueue_webhook_event(item_id, item_name, item_type)
         return
 
-    logger.info(f"  ➜ [预检] 开始检查 '{item_name}' (ID:{item_id}) 的视频流数据...")
+    logger.info(f"  ➜ [预检] 开始检查 '{item_name}' (ID:{item_id}) 的媒体信息文件...")
 
     app_config = config_manager.APP_CONFIG
     emby_url = app_config.get("emby_server_url")
@@ -469,40 +470,34 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type):
                     emby_server_url=emby_url,
                     emby_api_key=emby_key,
                     user_id=emby_user_id,
-                    fields="MediaSources"
+                    fields="Path,MediaSources" # ★ 请求 Path 字段
                 )
 
             if not item_details:
                 logger.warning(f"  ➜ [预检] 无法获取 '{item_name}' 详情，可能已被删除。停止等待。")
                 return
 
-            media_sources = item_details.get("MediaSources", [])
             has_valid_video_stream = False
             
-            if media_sources:
-                for source in media_sources:
-                    media_streams = source.get("MediaStreams", [])
-                    for stream in media_streams:
-                        if stream.get("Type") == "Video":
-                            w = stream.get("Width")
-                            h = stream.get("Height")
-                            c = stream.get("Codec")
-                            
-                            # 调用 utils.check_stream_validity (必须 Width>0 AND Codec有效)
-                            is_valid, _ = utils.check_stream_validity(w, h, c)
-                            
-                            if is_valid:
-                                has_valid_video_stream = True
-                                break
-                    if has_valid_video_stream:
-                        break
+            # ★★★ 核心修改：直接查找物理文件 ★★★
+            file_path = item_details.get("Path")
+            if not file_path:
+                # 兜底：尝试从 MediaSources 中获取 Path
+                media_sources = item_details.get("MediaSources", [])
+                if media_sources:
+                    file_path = media_sources[0].get("Path")
+            
+            if file_path:
+                mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
+                if os.path.exists(mediainfo_path):
+                    has_valid_video_stream = True
             
             if has_valid_video_stream:
-                logger.info(f"  ➜ [预检] 成功检测到 '{item_name}' 的视频流数据 (耗时: {i * STREAM_CHECK_INTERVAL}s)，加入队列。")
+                logger.info(f"  ➜ [预检] 成功检测到 '{item_name}' 的媒体信息文件 (耗时: {i * STREAM_CHECK_INTERVAL}s)，加入队列。")
                 _enqueue_webhook_event(item_id, item_name, item_type)
                 return
             
-            logger.debug(f"  ➜ [预检] '{item_name}' 暂无视频流数据，等待重试 ({i+1}/{STREAM_CHECK_MAX_RETRIES})...")
+            logger.debug(f"  ➜ [预检] '{item_name}' 暂无媒体信息文件，等待神医提取 ({i+1}/{STREAM_CHECK_MAX_RETRIES})...")
             sleep(STREAM_CHECK_INTERVAL + random.uniform(0, 2))
 
         except Exception as e:
@@ -510,7 +505,7 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type):
             sleep(STREAM_CHECK_INTERVAL + random.uniform(0, 2))
 
     # 超时强制入库
-    logger.warning(f"  ➜ [预检] 超时！在 {STREAM_CHECK_MAX_RETRIES * STREAM_CHECK_INTERVAL} 秒内未提取到 '{item_name}' 的视频流数据。强制加入队列。")
+    logger.warning(f"  ➜ [预检] 超时！在 {STREAM_CHECK_MAX_RETRIES * STREAM_CHECK_INTERVAL} 秒内未提取到 '{item_name}' 的媒体信息文件。强制加入队列。")
     _enqueue_webhook_event(item_id, item_name, item_type)
 
 # --- Webhook 路由 ---
