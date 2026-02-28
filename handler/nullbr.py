@@ -519,16 +519,21 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     client = P115Service.get_client()
     if not client: raise Exception("无法初始化 115 客户端")
 
-    config = get_config()
-    cookies = config.get('p115_cookies')
+    # ★ 彻底抛弃 NULLBR 自身配置，统一使用全局配置读取 115 相关设置
+    global_config = config_manager.APP_CONFIG
+    
+    from handler.p115_service import get_115_tokens
+    _, _, cookie = get_115_tokens()
+    cookie = (cookie or "").strip()
     
     try:
-        cid_val = config.get('p115_save_path_cid', 0)
+        # ★ 从全局配置读取待整理目录 CID
+        cid_val = global_config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID, 0)
         save_path_cid = int(cid_val) if cid_val else 0
     except:
         save_path_cid = 0
 
-    if not cookies:
+    if not cookie:
         raise ValueError("未配置 115 Cookies")
 
     clean_url = _clean_link(resource_link)
@@ -539,7 +544,6 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
         files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0, 'record_open_time': 0, 'count_folders': 0})
         if files_res.get('data'):
             for item in files_res['data']:
-                # 兼容 OpenAPI 键名
                 item_id = item.get('fid') or item.get('cid') or item.get('file_id')
                 if item_id: existing_ids.add(str(item_id))
     except Exception as e:
@@ -606,7 +610,6 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
                 check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0, 'record_open_time': 0, 'count_folders': 0})
                 if check_res.get('data'):
                     for item in check_res['data']:
-                        # 兼容 OpenAPI 键名
                         current_id = item.get('fid') or item.get('cid') or item.get('file_id')
                         if current_id and (str(current_id) not in existing_ids):
                             found_item = item
@@ -617,14 +620,12 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
                 logger.debug(f"轮询出错: {e}")
         
         if found_item:
-            # 兼容 OpenAPI 键名
             item_name = found_item.get('n') or found_item.get('fn') or found_item.get('file_name', '未知')
             logger.info(f"  👀 捕获到新入库项目: {item_name}")
             
             if tmdb_id:
                 try:
-                    # ★ 修复 1：从全局配置中读取正确的 115 整理开关
-                    global_config = config_manager.APP_CONFIG
+                    # ★ 从全局配置读取整理开关
                     enable_organize = global_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
                     
                     if enable_organize:
@@ -633,7 +634,6 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
                         target_cid = organizer.get_target_cid()
                         organizer.execute(found_item, target_cid)
                     else:
-                        # ★ 修复 2：开关关闭时，彻底放手，不做任何操作
                         logger.info("  ⏭️ [整理] 智能整理开关未开启，仅转存，跳过整理操作。")
                         
                 except Exception as e:
