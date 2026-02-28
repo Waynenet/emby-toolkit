@@ -613,10 +613,7 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
-    
-    from handler.p115_service import get_115_tokens
-    _, _, cookie = get_115_tokens()
-    cookie = (cookie or "").strip()
+    cookies = config.get('p115_cookies')
     
     try:
         cid_val = config.get('p115_save_path_cid', 0)
@@ -624,7 +621,7 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     except:
         save_path_cid = 0
 
-    if not cookie:
+    if not cookies:
         raise ValueError("未配置 115 Cookies")
 
     clean_url = _clean_link(resource_link)
@@ -719,7 +716,9 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
             
             if tmdb_id:
                 try:
-                    enable_organize = config.get('enable_smart_organize', False)
+                    # ★ 修复 1：从全局配置中读取正确的 115 整理开关
+                    global_config = config_manager.APP_CONFIG
+                    enable_organize = global_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
                     
                     if enable_organize:
                         logger.info("  🧠 [整理] 智能整理已开启，开始分析...")
@@ -727,7 +726,8 @@ def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
                         target_cid = organizer.get_target_cid()
                         organizer.execute(found_item, target_cid)
                     else:
-                        _standardize_115_file(client, found_item, save_path_cid, title, tmdb_id, media_type)
+                        # ★ 修复 2：开关关闭时，彻底放手，不做任何操作
+                        logger.info("  ⏭️ [整理] 智能整理开关未开启，仅转存，跳过整理操作。")
                         
                 except Exception as e:
                     logger.error(f"  ❌ [整理] 智能整理执行失败: {e}", exc_info=True)
