@@ -2387,7 +2387,7 @@ def delete_115_files_by_webhook(item_path, pickcodes):
                 logger.info(f"  💥 [联动删除] 成功在 115 网盘删除了 {len(fids_to_delete)} 个文件！")
                 # 同步清理这些文件在本地数据库的缓存记录
                 P115CacheManager.delete_files(fids_to_delete)
-                logger.debug(f"  🧹 [联动删除] 已清理被删文件的本地缓存记录。")
+                logger.info(f"  🧹 [联动删除] 已清理被删文件的本地缓存记录。")
             else:
                 logger.error(f"  ❌ [联动删除] 115 删除接口调用失败: {resp}")
 
@@ -2409,9 +2409,12 @@ def delete_115_files_by_webhook(item_path, pickcodes):
 
             count_videos(base_cid)
             if video_count == 0:
-                client.fs_delete(base_cid)
-                P115CacheManager.delete_cid(base_cid)
-                logger.info(f"  🧹 [联动删除] 清理本地主目录缓存: {tmdb_folder_name}")
+                del_resp = client.fs_delete(base_cid)
+                if del_resp.get('state'):
+                    P115CacheManager.delete_cid(base_cid)
+                    logger.info(f"  🧹 [联动删除] 主目录已空，已删除网盘目录及本地目录缓存: {tmdb_folder_name}")
+                else:
+                    logger.warning(f"  ⚠️ [联动删除] 尝试删除空主目录失败: {del_resp.get('error_msg', '未知错误')}")
             else:
                 logger.debug(f"  🛡️ [联动删除] 目录内仍有视频或检查受阻，保留主目录。")
         else:
