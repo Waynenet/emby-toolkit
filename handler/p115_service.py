@@ -575,7 +575,7 @@ class P115CacheManager:
 
     @staticmethod
     def save_file_cache(fid, parent_id, name, sha1=None, pick_code=None):
-        """★ 新增：专门将文件(fc=1)的 SHA1 和 PC码 存入本地数据库缓存"""
+        """专门将文件(fc=1)的 SHA1 和 PC码 存入本地数据库缓存"""
         if not fid or not parent_id or not name: return
         try:
             with get_db_connection() as conn:
@@ -593,6 +593,19 @@ class P115CacheManager:
                     conn.commit()
         except Exception as e:
             logger.error(f"  ❌ 写入 115 文件缓存失败: {e}")
+
+    @staticmethod
+    def delete_files(fids):
+        """批量从缓存中物理删除文件记录"""
+        if not fids: return
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 使用 ANY 语法批量删除
+                    cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = ANY(%s)", (list(fids),))
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"  ❌ 清理 115 文件缓存失败: {e}")
 
 def get_config():
     return config_manager.APP_CONFIG
@@ -2284,6 +2297,9 @@ def delete_115_files_by_webhook(item_path, pickcodes):
             resp = client.fs_delete(fids_to_delete)
             if resp.get('state'):
                 logger.info(f"  💥 [联动删除] 成功在 115 网盘删除了 {len(fids_to_delete)} 个文件！")
+                # 同步清理这些文件在本地数据库的缓存记录
+                P115CacheManager.delete_files(fids_to_delete)
+                logger.debug(f"  🧹 [联动删除] 已清理被删文件的本地缓存记录。")
             else:
                 logger.error(f"  ❌ [联动删除] 115 删除接口调用失败: {resp}")
 
