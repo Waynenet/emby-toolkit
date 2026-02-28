@@ -1066,14 +1066,10 @@ def get_items_with_potentially_bad_assets() -> List[Dict[str, Any]]:
             m.season_number, 
             m.episode_number,
             m.asset_details_json,
-            -- ★★★ 新增：直接获取当前项的 Emby ID (用于电影) ★★★
             m.emby_item_ids_json,
-            -- ★★★ 新增：直接获取父剧集的 Emby ID (用于分集归类) ★★★
             p.emby_item_ids_json AS parent_emby_ids_json,
-            -- ★★★ 新增：直接获取父剧集的标题 (用于日志展示) ★★★
             p.title AS parent_title
         FROM media_metadata m
-        -- 自关联：如果 m 是分集，尝试找到它的父剧集 p
         LEFT JOIN media_metadata p ON m.parent_series_tmdb_id = p.tmdb_id AND p.item_type = 'Series'
         WHERE m.in_library = TRUE 
           AND m.item_type IN ('Movie', 'Episode')
@@ -1088,6 +1084,10 @@ def get_items_with_potentially_bad_assets() -> List[Dict[str, Any]]:
                  COALESCE((elem->>'height')::numeric, 0) <= 0
                  OR 
                  LOWER(COALESCE(elem->>'video_codec', '')) IN ('', 'null', 'none', 'unknown', 'und')
+                 -- ★★★ 新增：检查 raw_mediainfo 是否缺失或为空数组 ★★★
+                 OR elem->'raw_mediainfo' IS NULL
+                 OR jsonb_typeof(elem->'raw_mediainfo') != 'array'
+                 OR jsonb_array_length(elem->'raw_mediainfo') = 0
           )
     """
     try:
@@ -1124,6 +1124,10 @@ def get_bad_episode_emby_ids(parent_tmdb_id: str) -> List[str]:
                  COALESCE((elem->>'height')::numeric, 0) <= 0
                  OR 
                  LOWER(COALESCE(elem->>'video_codec', '')) IN ('', 'null', 'none', 'unknown', 'und')
+                 -- ★★★ 新增：检查 raw_mediainfo 是否缺失或为空数组 ★★★
+                 OR elem->'raw_mediainfo' IS NULL
+                 OR jsonb_typeof(elem->'raw_mediainfo') != 'array'
+                 OR jsonb_array_length(elem->'raw_mediainfo') = 0
           )
     """
     bad_emby_ids = []

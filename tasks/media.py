@@ -1921,13 +1921,15 @@ def task_restore_local_cache_from_db(processor):
 
 def task_scan_incomplete_assets(processor):
     """
-    【新任务 - 优化版】全库扫描资产数据不完整的项目。
-    直接利用 SQL Join 获取所需的 Emby ID，并基于物理文件 (-mediainfo.json) 进行最终复核。
+    【新任务 - 终极自愈版】全库扫描资产数据不完整的项目。
+    - 物理文件存在但DB缺失/异常 -> 读取物理文件修复DB。
+    - DB存在完整副本但物理文件缺失 -> 将DB副本写回硬盘恢复物理文件。
+    - 双重缺失 -> 标记为待复核，呼叫神医。
     """
-    logger.trace("--- 开始执行全库资产完整性扫描 ---")
+    logger.trace("--- 开始执行全库资产完整性扫描 (自愈版) ---")
     
     try:
-        # 1. 从数据库获取“嫌疑人” (已包含父级信息)
+        # 1. 从数据库获取“嫌疑人” (包含 width=0 或 raw_mediainfo 缺失的)
         bad_items = media_db.get_items_with_potentially_bad_assets()
         total = len(bad_items)
         
@@ -1936,76 +1938,149 @@ def task_scan_incomplete_assets(processor):
             task_manager.update_status_from_thread(100, "媒体信息扫描完成：无异常")
             return
 
-        logger.info(f"  ⚠️ 发现 {total} 个项目的媒体信息可能不完整，正在复核并标记...")
+        logger.info(f"  ⚠️ 发现 {total} 个项目的媒体信息可能不完整，正在执行双向自愈复核...")
         
         marked_count = 0
+        healed_db_count = 0
+        healed_file_count = 0
         
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
             
             for i, item in enumerate(bad_items):
-                # 解析资产
                 raw_assets = item['asset_details_json']
                 assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
                 
-                # ★★★ 核心修改：基于物理文件复核，排除数据库脏数据导致的假报警 ★★★
                 is_valid = False
                 fail_reason = "缺失文件路径"
+                db_needs_update = False
                 
-                for asset in assets:
+                # 获取当前项的 Emby ID (用于从 Emby 拉取最新数据以修复 DB)
+                current_emby_id = None
+                e_ids = item.get('emby_item_ids_json')
+                if e_ids:
+                    if isinstance(e_ids, str):
+                        try: e_ids = json.loads(e_ids)
+                        except: e_ids = []
+                    if isinstance(e_ids, list) and len(e_ids) > 0:
+                        current_emby_id = e_ids[0]
+
+                for asset_idx, asset in enumerate(assets):
                     file_path = asset.get('path')
+                    raw_mediainfo = asset.get('raw_mediainfo')
+                    
                     if file_path:
                         mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                        if os.path.exists(mediainfo_path):
-                            is_valid = True
-                            break
+                        
+                        # 1. 状态评估
+                        phys_exists = os.path.exists(mediainfo_path)
+                        has_raw = bool(raw_mediainfo and isinstance(raw_mediainfo, list) and len(raw_mediainfo) > 0)
+                        
+                        w = asset.get('width')
+                        h = asset.get('height')
+                        c = asset.get('video_codec')
+                        stream_valid, _ = utils.check_stream_validity(w, h, c)
+                        
+                        db_is_healthy = stream_valid and has_raw
+
+                        # =========================================================
+                        # ★★★ 核心自愈逻辑 ★★★
+                        # =========================================================
+                        
+                        # 动作 A: 物理文件缺失，但数据库有副本 -> 恢复物理文件
+                        if not phys_exists and has_raw:
+                            logger.info(f"  🔧 [自愈] 恢复物理文件: {os.path.basename(mediainfo_path)}")
+                            try:
+                                os.makedirs(os.path.dirname(mediainfo_path), exist_ok=True)
+                                with open(mediainfo_path, 'w', encoding='utf-8') as f:
+                                    json.dump(raw_mediainfo, f, ensure_ascii=False, indent=2)
+                                phys_exists = True # 标记为已存在，以便后续可能继续修复 DB
+                                healed_file_count += 1
+                            except Exception as e:
+                                fail_reason = f"恢复物理文件失败: {e}"
+                                continue # 无法恢复，看下一个版本
+
+                        # 动作 B: 物理文件存在 (原本就在或刚恢复的)，但数据库不健康 -> 修复数据库
+                        if phys_exists:
+                            if not db_is_healthy:
+                                logger.info(f"  🔧 [自愈] 修复数据库资产: {os.path.basename(mediainfo_path)}")
+                                if current_emby_id:
+                                    item_details = emby.get_emby_item_details(
+                                        current_emby_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id,
+                                        fields="Path,MediaSources"
+                                    )
+                                    if item_details:
+                                        # 重新解析资产 (会读取物理文件)
+                                        new_asset = parse_full_asset_details(item_details, local_mediainfo_path=mediainfo_path)
+                                        new_asset['source_library_id'] = asset.get('source_library_id')
+                                        assets[asset_idx] = new_asset
+                                        db_needs_update = True
+                                        is_valid = True
+                                        healed_db_count += 1
+                                        break
+                                    else:
+                                        fail_reason = "无法从 Emby 获取详情以修复数据库"
+                                else:
+                                    fail_reason = "缺少 Emby ID 无法修复数据库"
+                            else:
+                                # 完美状态
+                                is_valid = True
+                                break
                         else:
-                            fail_reason = "缺失媒体信息文件 (-mediainfo.json)"
+                            fail_reason = "物理文件与数据库副本双重缺失"
                 
+                # 如果执行了自愈并更新了 assets，写回数据库
+                if db_needs_update:
+                    try:
+                        cursor.execute(
+                            "UPDATE media_metadata SET asset_details_json = %s::jsonb WHERE tmdb_id = %s AND item_type = %s",
+                            (json.dumps(assets, ensure_ascii=False), item['tmdb_id'], item['item_type'])
+                        )
+                    except Exception as e:
+                        logger.error(f"  ❌ 更新数据库资产失败: {e}")
+                        is_valid = False
+                        fail_reason = "数据库更新写入失败"
+
+                # 如果双向自愈都救不回来，打入冷宫
                 if not is_valid:
-                    # =========================================================
-                    # 提取 Emby ID 并写入日志
-                    # =========================================================
                     target_log_id = None
                     target_name = item['title']
                     target_type = item['item_type']
                     final_reason = fail_reason
                     
                     if item['item_type'] == 'Movie':
-                        e_ids = item.get('emby_item_ids_json')
-                        if e_ids and len(e_ids) > 0:
-                            target_log_id = e_ids[0]
-                            
+                        target_log_id = current_emby_id
                     elif item['item_type'] == 'Episode':
                         p_ids = item.get('parent_emby_ids_json')
-                        if p_ids and len(p_ids) > 0:
-                            target_log_id = p_ids[0]
+                        if p_ids:
+                            if isinstance(p_ids, str):
+                                try: p_ids = json.loads(p_ids)
+                                except: p_ids = []
+                            if isinstance(p_ids, list) and len(p_ids) > 0:
+                                target_log_id = p_ids[0]
+                            
                         if item.get('parent_title'):
                             target_name = item['parent_title']
-                            
                         target_type = 'Series'
                         final_reason = f"[S{item['season_number']}E{item['episode_number']}] {fail_reason}"
 
                     if not target_log_id:
                         target_log_id = item['parent_series_tmdb_id'] if item['item_type'] == 'Episode' else item['tmdb_id']
 
-                    # 写入日志
                     processor.log_db_manager.save_to_failed_log(
                         cursor, target_log_id, target_name, 
-                        f"全库扫描发现异常: {final_reason}", 
+                        f"资产残缺: {final_reason}", 
                         target_type, score=0.0
                     )
-                    
                     processor.log_db_manager.save_to_processed_log(cursor, target_log_id, target_name, score=0.0)
-                    
                     marked_count += 1
                     
                     if i % 10 == 0:
-                        logger.info(f"  ➜ [标记] {target_name} (ID: {target_log_id}): {final_reason}")
+                        logger.info(f"  ➜ [标记复核] {target_name} (ID: {target_log_id}): {final_reason}")
 
             conn.commit()
 
-        msg = f"扫描完成。共发现 {total} 个异常项，经物理文件复核后，已将 {marked_count} 个加入待复核列表。"
+        msg = f"扫描完成。修复DB: {healed_db_count}个, 恢复文件: {healed_file_count}个。标记待复核: {marked_count}个。"
         logger.info(f"  ✅ {msg}")
         task_manager.update_status_from_thread(100, msg)
 
