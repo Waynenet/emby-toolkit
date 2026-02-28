@@ -2409,12 +2409,9 @@ def delete_115_files_by_webhook(item_path, pickcodes):
 
             count_videos(base_cid)
             if video_count == 0:
-                del_resp = client.fs_delete(base_cid)
-                if del_resp.get('state'):
-                    P115CacheManager.delete_cid(base_cid)
-                    logger.info(f"  🧹 [联动删除] 主目录已空，已删除网盘目录及本地目录缓存: {tmdb_folder_name}")
-                else:
-                    logger.warning(f"  ⚠️ [联动删除] 尝试删除空主目录失败: {del_resp.get('error_msg', '未知错误')}")
+                client.fs_delete(base_cid)
+                P115CacheManager.delete_cid(base_cid)
+                logger.info(f"  🧹 [联动删除] 主目录已空，已删除网盘目录及本地目录缓存: {tmdb_folder_name}")
             else:
                 logger.debug(f"  🛡️ [联动删除] 目录内仍有视频或检查受阻，保留主目录。")
         else:
