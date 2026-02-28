@@ -545,6 +545,20 @@ class P115CacheManager:
                     return row['id'] if row else None
         except Exception as e:
             return None
+        
+    @staticmethod
+    def get_files_by_pickcodes(pickcodes):
+        """通过 PC 码批量查出文件 ID 和 父目录 ID"""
+        if not pickcodes: return []
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 使用 ANY 语法进行数组匹配
+                    cursor.execute("SELECT id, parent_id, pick_code FROM p115_filesystem_cache WHERE pick_code = ANY(%s)", (list(pickcodes),))
+                    return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"  ❌ 查询文件缓存失败: {e}")
+            return []
 
     @staticmethod
     def delete_cid(cid):
@@ -2203,7 +2217,7 @@ def task_full_sync_strm_and_subs(processor=None):
 def delete_115_files_by_webhook(item_path, pickcodes):
     """
     接收神医 Webhook 传来的路径和提取码，精准销毁 115 网盘文件。
-    ★ 增加防风控限流与熔断保护机制
+    ★ 终极优化版：优先查本地缓存瞬间锁定，未命中再兜底扫描。
     """
     if not pickcodes or not item_path: return
 
@@ -2211,47 +2225,59 @@ def delete_115_files_by_webhook(item_path, pickcodes):
     if not client: return
 
     try:
-        # 1. 从本地路径中提取带有 TMDb ID 的主目录名称 (例如: 爱我爱我 (2026) {tmdb=1317672})
+        # 1. 提取主目录名称
         match = re.search(r'([^/\\]+\{tmdb=\d+\})', item_path)
         if not match:
             logger.warning(f"  ⚠️ [联动删除] 无法从路径提取 TMDb 目录名: {item_path}")
             return
         tmdb_folder_name = match.group(1)
 
-        # 2. 查找该主目录在 115 上的 CID
+        # 2. 查找主目录 CID
         base_cid = P115CacheManager.get_cid_by_name(tmdb_folder_name)
         if not base_cid:
-            # 缓存没命中，尝试模糊搜索兜底
             try:
                 res = client.fs_files({'search_value': tmdb_folder_name, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
                 for item in res.get('data', []):
                     if item.get('fn') == tmdb_folder_name and str(item.get('fc')) == '0':
                         base_cid = item.get('fid')
                         break
-            except Exception as e:
-                logger.warning(f"  ⚠️ [联动删除] 模糊搜索目录 '{tmdb_folder_name}' 时被风控或报错: {e}")
+            except Exception: pass
 
         if not base_cid:
             logger.warning(f"  ⚠️ [联动删除] 未在 115 找到对应主目录，可能已被删除: {tmdb_folder_name}")
             return
 
-        # 3. 递归扫描该主目录，将 Pickcode 映射为 115 的文件 ID (fid)
+        # =================================================================
+        # ★ 3. 核心优化：优先查本地数据库缓存，瞬间锁定文件 ID
+        # =================================================================
         fids_to_delete = []
+        cached_files = P115CacheManager.get_files_by_pickcodes(pickcodes)
         
-        def scan_and_match(cid):
-            try:
-                res = client.fs_files({'cid': cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
-                for item in res.get('data', []):
-                    if str(item.get('fc')) == '1':
-                        if item.get('pc') in pickcodes:
-                            fids_to_delete.append(item.get('fid'))
-                    elif str(item.get('fc')) == '0':
-                        scan_and_match(item.get('fid'))
-            except Exception as e:
-                logger.warning(f"  ⚠️ [联动删除] 扫描目录 {cid} 时被风控或报错: {e}")
+        for f in cached_files:
+            fids_to_delete.append(f['id'])
+            
+        # 找出哪些 PC 码没有在缓存中命中
+        cached_pcs = [f['pick_code'] for f in cached_files]
+        unmatched_pickcodes = set(pickcodes) - set(cached_pcs)
 
-        logger.debug(f"  🔍 [联动删除] 正在网盘目录 '{tmdb_folder_name}' 中匹配文件 (带防风控延迟)...")
-        scan_and_match(base_cid)
+        if not unmatched_pickcodes:
+            logger.info("  ⚡ [联动删除] 缓存全命中，瞬间锁定所有文件！")
+        else:
+            logger.info(f"  🔍 [联动删除] 有 {len(unmatched_pickcodes)} 个文件未命中缓存，启动网盘扫描兜底...")
+            # 兜底扫描：只匹配那些没找到的 PC 码
+            def scan_and_match(cid):
+                try:
+                    res = client.fs_files({'cid': cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
+                    for item in res.get('data', []):
+                        if str(item.get('fc')) == '1':
+                            if item.get('pc') in unmatched_pickcodes:
+                                fids_to_delete.append(item.get('fid'))
+                        elif str(item.get('fc')) == '0':
+                            scan_and_match(item.get('fid'))
+                except Exception as e:
+                    logger.warning(f"  ⚠️ [联动删除] 扫描目录 {cid} 报错: {e}")
+
+            scan_and_match(base_cid)
 
         # 4. 执行物理销毁
         if fids_to_delete:
@@ -2274,20 +2300,18 @@ def delete_115_files_by_webhook(item_path, pickcodes):
                                 video_count += 1
                         elif str(item.get('fc')) == '0':
                             count_videos(item.get('fid'))
-                except Exception as e:
-                    logger.warning(f"  ⚠️ [联动删除] 检查空目录 {cid} 时报错: {e}")
-                    # ★ 熔断保护：如果接口报错，假装里面还有视频，绝对不执行删目录操作！
+                except Exception:
                     video_count += 999 
 
             count_videos(base_cid)
             if video_count == 0:
                 client.fs_delete(base_cid)
-                P115CacheManager.delete_cid(base_cid) # 清理本地缓存
+                P115CacheManager.delete_cid(base_cid)
                 logger.info(f"  🧹 [联动删除] 清理本地主目录缓存: {tmdb_folder_name}")
             else:
                 logger.debug(f"  🛡️ [联动删除] 目录内仍有视频或检查受阻，保留主目录。")
         else:
-            logger.warning(f"  ⚠️ [联动删除] 扫描完毕，但未在网盘找到匹配的提取码文件。")
+            logger.warning(f"  ⚠️ [联动删除] 未在网盘找到匹配的提取码文件。")
 
     except Exception as e:
         logger.error(f"  ❌ [联动删除] 执行异常: {e}", exc_info=True)
