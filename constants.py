@@ -60,6 +60,8 @@ CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                  # ETK服务器�
 CONFIG_OPTION_115_ENABLE_SYNC_DELETE = "p115_enable_sync_delete" # 是否联动删除网盘文件
 CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"           # 是否下载字幕文件
 CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"           # 是否启用本地清理功能
+CONFIG_OPTION_115_MOUNT_EXTENSIONS = "p115_mount_extensions"     # 触发挂载模式的扩展名
+CONFIG_OPTION_115_MOUNT_PREFIX = "p115_mount_prefix"             # 挂载目录前缀
 
 # ==============================================================================
 # ✨ 通知服务 (Notification Services)

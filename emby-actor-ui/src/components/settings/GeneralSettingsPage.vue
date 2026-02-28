@@ -412,6 +412,29 @@
                         </template>
                     </n-form-item>
 
+                    <n-form-item label="挂载模式扩展名" path="p115_mount_extensions">
+                      <n-select
+                        v-model:value="configModel.p115_mount_extensions"
+                        multiple
+                        filterable
+                        tag
+                        placeholder="输入扩展名并回车 (如 iso)"
+                        :options="[]" 
+                      />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          命中这些扩展名时，将生成指向本地挂载路径的 STRM (解决原盘无法提取媒体信息的问题)。
+                        </n-text>
+                      </template>
+                    </n-form-item>
+
+                    <n-form-item label="挂载目录前缀" path="p115_mount_prefix">
+                        <n-input v-model:value="configModel.p115_mount_prefix" placeholder="例如: /cd2/115open" />
+                        <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">挂载模式 STRM 的绝对路径前缀，将与分类目录拼接。</n-text>
+                        </template>
+                    </n-form-item>
+
                     <n-form-item label="智能整理开关" path="p115_enable_organize">
                         <n-switch v-model:value="configModel.p115_enable_organize">
                             <template #checked>整理并生成STRM</template>

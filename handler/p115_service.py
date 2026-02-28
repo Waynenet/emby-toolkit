@@ -1326,7 +1326,22 @@ class SmartOrganizer:
                         if is_video:
                             strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                             strm_filepath = os.path.join(local_dir, strm_filename)
-                            strm_content = f"{etk_url}/api/p115/play/{pick_code}"
+                            # ★★★ 判断是否命中挂载扩展名 ★★★
+                            mount_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_MOUNT_EXTENSIONS, []))
+                            mount_prefix = config.get(constants.CONFIG_OPTION_115_MOUNT_PREFIX, "").rstrip('/')
+                            
+                            if ext in mount_exts and mount_prefix:
+                                # 拼接挂载路径 (前缀 + 相对分类路径 + 主目录 + 季目录 + 文件名)
+                                if self.media_type == 'tv' and season_num is not None:
+                                    mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, s_name, new_filename)
+                                else:
+                                    mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, new_filename)
+                                # 统一转换为正斜杠，防止 Windows 路径反斜杠导致 Emby 无法识别
+                                strm_content = mount_path.replace('\\', '/')
+                                logger.debug(f"  💿 [挂载模式] 生成 STRM: {strm_content}")
+                            else:
+                                # 默认的 ETK 302 直链模式
+                                strm_content = f"{etk_url}/api/p115/play/{pick_code}"
                             
                             with open(strm_filepath, 'w', encoding='utf-8') as f:
                                 f.write(strm_content)
@@ -2108,7 +2123,16 @@ def task_full_sync_strm_and_subs(processor=None):
                         if ext in known_video_exts:
                             strm_name = os.path.splitext(name)[0] + ".strm"
                             strm_path = os.path.join(current_local_path, strm_name)
-                            content = f"{etk_url}/api/p115/play/{pc}"
+                            # ★★★ 判断是否命中挂载扩展名 ★★★
+                            mount_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_MOUNT_EXTENSIONS, []))
+                            mount_prefix = config.get(constants.CONFIG_OPTION_115_MOUNT_PREFIX, "").rstrip('/')
+                            
+                            if ext in mount_exts and mount_prefix:
+                                # rel_dir 已经是相对媒体库根目录的完整路径了
+                                mount_path = os.path.join(mount_prefix, rel_dir, name)
+                                content = mount_path.replace('\\', '/')
+                            else:
+                                content = f"{etk_url}/api/p115/play/{pc}"
                             
                             # ★ 优化：在写入前先判断文件存不存在
                             is_new_file = not os.path.exists(strm_path)
@@ -2284,7 +2308,7 @@ def delete_115_files_by_webhook(item_path, pickcodes):
         unmatched_pickcodes = set(pickcodes) - set(cached_pcs)
 
         if not unmatched_pickcodes:
-            logger.info("  ⚡ [联动删除] 缓存全命中，瞬间锁定所有文件！")
+            logger.info("  ⚡ [联动删除] 缓存全命中，已定位所有待删除文件！")
         else:
             logger.info(f"  🔍 [联动删除] 有 {len(unmatched_pickcodes)} 个文件未命中缓存，启动网盘扫描兜底...")
             # 兜底扫描：只匹配那些没找到的 PC 码
