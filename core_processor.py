@@ -1354,20 +1354,13 @@ class MediaProcessor:
             for col in cols_to_protect:
                 if col in cols_to_update: cols_to_update.remove(col)
 
-            # ★★★ 定义需要保护的指纹字段 ★★★
-            cols_to_protect_from_empty = ['asset_details_json', 'file_sha1_json']
-
             update_clauses = []
             for col in cols_to_update:
+                # 针对 total_episodes 字段，检查锁定状态
+                # 逻辑：如果 total_episodes_locked 为 TRUE，则保持原值；否则使用新值 (EXCLUDED.total_episodes)
                 if col == 'total_episodes':
                     update_clauses.append(
                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
-                    )
-                elif col in cols_to_protect_from_empty:
-                    # ★ 核心拦截：如果新传入的指纹数据为空数组 '[]'，则强制保留数据库中原有的历史记录
-                    # 这样即使媒体离线 (in_library=False) 或处于 pending 状态，也不会丢失珍贵的 SHA1
-                    update_clauses.append(
-                        f"{col} = CASE WHEN EXCLUDED.{col}::text = '[]' THEN COALESCE(media_metadata.{col}, EXCLUDED.{col}) ELSE EXCLUDED.{col} END"
                     )
                 else:
                     # 其他字段正常更新

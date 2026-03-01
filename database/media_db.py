@@ -1048,57 +1048,6 @@ def cleanup_offline_internal_ids() -> int:
         logger.error(f"DB: 执行内部ID大扫除失败: {e}", exc_info=True)
         return 0
 
-# 获取可能有问题的资产列表    
-def get_items_with_potentially_bad_assets() -> List[Dict[str, Any]]:
-    """
-    【质检专用 - 优化版】查询所有已入库但资产数据可能不完整的项目。
-    
-    优化点：
-    1. 增加 LEFT JOIN 自关联，一次性获取父剧集的信息（Emby ID, 标题）。
-    2. 直接返回当前项的 Emby ID。
-    """
-    sql = """
-        SELECT 
-            m.tmdb_id, 
-            m.item_type, 
-            m.title, 
-            m.parent_series_tmdb_id, 
-            m.season_number, 
-            m.episode_number,
-            m.asset_details_json,
-            m.emby_item_ids_json,
-            p.emby_item_ids_json AS parent_emby_ids_json,
-            p.title AS parent_title
-        FROM media_metadata m
-        LEFT JOIN media_metadata p ON m.parent_series_tmdb_id = p.tmdb_id AND p.item_type = 'Series'
-        WHERE m.in_library = TRUE 
-          AND m.item_type IN ('Movie', 'Episode')
-          AND m.asset_details_json IS NOT NULL 
-          AND jsonb_array_length(m.asset_details_json) > 0
-          AND EXISTS (
-              SELECT 1 
-              FROM jsonb_array_elements(m.asset_details_json) AS elem
-              WHERE 
-                 COALESCE((elem->>'width')::numeric, 0) <= 0 
-                 OR 
-                 COALESCE((elem->>'height')::numeric, 0) <= 0
-                 OR 
-                 LOWER(COALESCE(elem->>'video_codec', '')) IN ('', 'null', 'none', 'unknown', 'und')
-                 -- ★★★ 新增：检查 raw_mediainfo 是否缺失或为空数组 ★★★
-                 OR elem->'raw_mediainfo' IS NULL
-                 OR jsonb_typeof(elem->'raw_mediainfo') != 'array'
-                 OR jsonb_array_length(elem->'raw_mediainfo') = 0
-          )
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            return [dict(row) for row in cursor.fetchall()]
-    except Exception as e:
-        logger.error(f"DB: 查询异常资产失败: {e}", exc_info=True)
-        return []
-
 # 获取指定剧集下坏分集的 Emby ID 列表    
 def get_bad_episode_emby_ids(parent_tmdb_id: str) -> List[str]:
     """
