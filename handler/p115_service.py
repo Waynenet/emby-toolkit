@@ -1446,7 +1446,7 @@ class SmartOrganizer:
                                                     cursor.execute("UPDATE p115_mediainfo_cache SET hit_count = hit_count + 1 WHERE sha1 = %s", (file_sha1,))
                                                     conn.commit()
                                                     
-                                                    logger.info(f"  ⚡ [指纹库秒传] 匹配到相同 SHA1，极速生成媒体信息: {os.path.basename(mediainfo_path)}")
+                                                    logger.info(f"  ⚡ [媒体信息缓存] 匹配到相同 SHA1，极速生成媒体信息: {os.path.basename(mediainfo_path)}")
                                 except Exception as e_sha1:
                                     logger.warning(f"  ⚠️ 尝试秒传媒体信息失败: {e_sha1}")
                             
