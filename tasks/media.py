@@ -2030,7 +2030,7 @@ def task_backup_mediainfo(processor):
                                         while len(sha1s) <= idx:
                                             sha1s.append(None)
                                         sha1s[idx] = current_sha1
-                                        needs_sha1_update = True
+                                        needs_db_update = True
                                         sha1_fixed_count += 1
                                         logger.info(f"    ✅ 成功获取 SHA1: {current_sha1}")
                             except Exception as e:
@@ -2075,7 +2075,7 @@ def task_backup_mediainfo(processor):
                                 except Exception as e:
                                     logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
                 
-                if needs_sha1_update:
+                if needs_db_update:
                     media_db.update_media_sha1_and_pc_json(tmdb_id, item_type, sha1s, pcs)
                 
                 if i > 0 and i % 50 == 0:
