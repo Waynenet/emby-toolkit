@@ -1925,11 +1925,12 @@ def task_backup_mediainfo(processor):
     1. 获取所有在库媒体项。
     2. 检查 SHA1，缺失的通过 PC -> FID -> 115 API 补齐并写入 media_metadata。
     3. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
-    只单向备份，打造永久资产库！
     """
     logger.info("--- 开始执行媒体信息单向备份任务 ---")
     
-    # 1. 获取所有在库项目
+    # ★ 修复前端无反馈：一开始就发送状态
+    task_manager.update_status_from_thread(0, "正在从数据库获取在库媒体项，请稍候...")
+    
     items = media_db.get_all_in_library_assets()
     if not items:
         task_manager.update_status_from_thread(100, "无在库项目需要备份")
@@ -1938,7 +1939,6 @@ def task_backup_mediainfo(processor):
     total = len(items)
     logger.info(f"  ➜ 共扫描到 {total} 个在库项目，准备执行备份检查...")
     
-    # 初始化 115 客户端 (用于补齐 SHA1)
     from handler.p115_service import P115Service, P115CacheManager
     client = P115Service.get_client()
     
@@ -1952,31 +1952,27 @@ def task_backup_mediainfo(processor):
             for i, item in enumerate(items):
                 if processor.is_stop_requested(): break
                 
-                if i % 50 == 0:
+                # ★ 提高进度更新频率
+                if i % 20 == 0:
                     task_manager.update_status_from_thread(int((i/total)*100), f"正在检查备份 ({i}/{total})...")
                 
                 tmdb_id = item['tmdb_id']
                 item_type = item['item_type']
                 title = item['title']
                 
-                # 解析 JSON 字段
                 pcs = item['file_pickcode_json'] if isinstance(item['file_pickcode_json'], list) else []
                 sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
                 assets = item['asset_details_json'] if isinstance(item['asset_details_json'], list) else []
                 
                 needs_sha1_update = False
                 
-                # 遍历该媒体的所有版本 (通常只有一个)
                 for idx, pc in enumerate(pcs):
                     if not pc: continue
                     
-                    # 安全获取当前版本的 SHA1 和 Path
                     current_sha1 = sha1s[idx] if idx < len(sha1s) else None
                     current_path = assets[idx].get('path') if idx < len(assets) else None
                     
-                    # ==========================================
                     # 阶段 1: 补齐缺失的 SHA1
-                    # ==========================================
                     if not current_sha1:
                         logger.info(f"  🔍 [{title}] 缺失 SHA1，正在通过 115 API 补齐...")
                         fid = P115CacheManager.get_fid_by_pickcode(pc)
@@ -1987,7 +1983,6 @@ def task_backup_mediainfo(processor):
                                     fetched_sha1 = info_res['data'].get('sha1')
                                     if fetched_sha1:
                                         current_sha1 = fetched_sha1
-                                        # 补齐数组
                                         while len(sha1s) <= idx:
                                             sha1s.append(None)
                                         sha1s[idx] = current_sha1
@@ -1997,11 +1992,12 @@ def task_backup_mediainfo(processor):
                             except Exception as e:
                                 logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
                                 
-                    # ==========================================
                     # 阶段 2: 备份媒体信息到指纹库
-                    # ==========================================
                     if current_sha1 and current_path:
-                        # 检查指纹库是否已有
+                        # ★ 修复：如果 current_path 是 HTTP 链接，跳过本地读取，交由本地遍历任务处理
+                        if current_path.startswith('http'):
+                            continue
+                            
                         if not media_db.is_mediainfo_cached(current_sha1):
                             mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
                             if os.path.exists(mediainfo_path):
@@ -2022,7 +2018,6 @@ def task_backup_mediainfo(processor):
                                 except Exception as e:
                                     logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
                 
-                # 如果补齐了 SHA1，更新回 media_metadata
                 if needs_sha1_update:
                     media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
             

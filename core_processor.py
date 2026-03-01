@@ -793,18 +793,29 @@ class MediaProcessor:
 
         return id_to_parent_map, lib_guid
 
-    # 直接从 STRM 文件中抠出 115 提取码 (PC码)
+    # 直接从 STRM 文件或 HTTP 链接中抠出 115 提取码 (PC码)
     def _extract_pickcode_from_strm(self, strm_path: str) -> Optional[str]:
-        if not strm_path or not strm_path.lower().endswith('.strm') or not os.path.exists(strm_path):
+        if not strm_path: return None
+        
+        # ★ 杀手锏：如果传入的直接是 HTTP 链接，直接正则提取，无需读文件！
+        if strm_path.startswith('http'):
+            match = re.search(r'/play/([a-zA-Z0-9]+)', strm_path)
+            if match: return match.group(1)
+            match = re.search(r'pick_?code=([a-zA-Z0-9]+)', strm_path, re.IGNORECASE)
+            if match: return match.group(1)
             return None
-        try:
-            with open(strm_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                match = re.search(r'/play/([a-zA-Z0-9]+)', content)
-                if match: return match.group(1)
-                match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
-                if match: return match.group(1)
-        except Exception: pass
+            
+        # 如果是本地物理文件
+        if strm_path.lower().endswith('.strm') and os.path.exists(strm_path):
+            try:
+                with open(strm_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    match = re.search(r'/play/([a-zA-Z0-9]+)', content)
+                    if match: return match.group(1)
+                    match = re.search(r'pick_?code=([a-zA-Z0-9]+)', content, re.IGNORECASE)
+                    if match: return match.group(1)
+            except Exception: pass
+            
         return None
 
     # 通过 PC 码反查 SHA1 (无视文件被MP移动或重命名)
@@ -972,11 +983,19 @@ class MediaProcessor:
                     # 如果有多个媒体源（多版本）
                     if media_sources and len(media_sources) > 0:
                         for source in media_sources:
-                            emby_path = source.get('Path', '')
-                            if not emby_path: continue
+                            raw_path = source.get('Path', '')
+                            if not raw_path: continue
                             
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
-                            file_pc = self._extract_pickcode_from_strm(emby_path)
+                            # 先提取 PC 码 (支持直接从 HTTP 链接提取)
+                            file_pc = self._extract_pickcode_from_strm(raw_path)
+                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                            
+                            # 强制兜底物理路径：如果 raw_path 是 http，尝试用顶层 Path 兜底
+                            emby_path = raw_path
+                            if emby_path.startswith('http'):
+                                emby_path = item_details_from_emby.get('Path', '')
+                                
+                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
                             # 构造临时 item 传递给 parse_full_asset_details，确保解析的是当前版本的属性
@@ -1261,10 +1280,15 @@ class MediaProcessor:
                         
                         # 遍历该集的所有版本
                         for version in versions_of_episode:
-                            emby_path = version.get('Path', '')
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
+                            raw_path = version.get('Path', '')
+                            file_pc = self._extract_pickcode_from_strm(raw_path)
+                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
-                            file_pc = self._extract_pickcode_from_strm(emby_path)
+                            emby_path = raw_path
+                            if emby_path.startswith('http'):
+                                emby_path = item_details_from_emby.get('Path', '')
+                                
+                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
                             details = parse_full_asset_details(
