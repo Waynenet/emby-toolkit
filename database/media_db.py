@@ -1250,42 +1250,46 @@ def get_dashboard_aggregation_map(emby_ids: List[str]) -> Dict[str, Dict[str, An
         logger.error(f"DB: 获取仪表盘聚合数据失败: {e}", exc_info=True)
         return {}
     
-# 获取在库的媒体资产总数 (用于分批处理)
-def get_in_library_assets_count() -> int:
+# 获取真正缺失媒体信息或 SHA1 的资产 (精准过滤版)
+def get_missing_mediainfo_assets() -> List[Dict[str, Any]]:
+    """
+    【核心优化】利用 PostgreSQL 的 LATERAL JOIN 和 ORDINALITY，
+    精准筛选出真正需要备份的媒体项：
+    1. 缺失 SHA1 (数组长度不够，或值为 NULL/空)
+    2. 有 SHA1，且路径不是 HTTP 直链，但指纹库里没有缓存
+    """
     sql = """
-        SELECT COUNT(*)
-        FROM media_metadata
-        WHERE in_library = TRUE 
-          AND item_type IN ('Movie', 'Episode')
-          AND asset_details_json IS NOT NULL
+        SELECT DISTINCT m.tmdb_id, m.item_type, m.title, m.file_pickcode_json, m.file_sha1_json, m.asset_details_json
+        FROM media_metadata m
+        -- 展开资产数组并带上索引
+        JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(m.asset_details_json) = 'array' THEN m.asset_details_json ELSE '[]'::jsonb END
+        ) WITH ORDINALITY AS a(asset, idx) ON true
+        -- 展开 SHA1 数组并带上索引，通过索引与资产一一对应
+        LEFT JOIN LATERAL jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(m.file_sha1_json) = 'array' THEN m.file_sha1_json ELSE '[]'::jsonb END
+        ) WITH ORDINALITY AS s(sha1_val, idx2) ON a.idx = s.idx2
+        
+        WHERE m.in_library = TRUE 
+          AND m.item_type IN ('Movie', 'Episode')
+          AND (
+              -- 条件1: SHA1 缺失或为空
+              s.sha1_val IS NULL 
+              OR s.sha1_val = ''
+              -- 条件2: 不是 HTTP 直链，且 SHA1 不在指纹库中
+              OR (
+                  (a.asset->>'path') NOT LIKE 'http%%' 
+                  AND NOT EXISTS (SELECT 1 FROM p115_mediainfo_cache c WHERE c.sha1 = s.sha1_val)
+              )
+          )
     """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
-            return cursor.fetchone()['count']
-    except Exception as e:
-        logger.error(f"DB: 获取在库资产总数失败: {e}")
-        return 0
-
-# 获取所有在库的媒体资产信息 (支持分页)
-def get_all_in_library_assets(limit: int = 1000, offset: int = 0) -> List[Dict[str, Any]]:
-    sql = """
-        SELECT tmdb_id, item_type, title, file_pickcode_json, file_sha1_json, asset_details_json
-        FROM media_metadata
-        WHERE in_library = TRUE 
-          AND item_type IN ('Movie', 'Episode')
-          AND asset_details_json IS NOT NULL
-        ORDER BY tmdb_id, item_type
-        LIMIT %s OFFSET %s
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (limit, offset))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        logger.error(f"DB: 获取在库资产失败: {e}")
+        logger.error(f"DB: 获取缺失媒体信息的资产失败: {e}")
         return []
 
 # 更新媒体的 SHA1 数组
