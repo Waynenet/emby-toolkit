@@ -1058,25 +1058,33 @@ def get_bad_episode_emby_ids(parent_tmdb_id: str) -> List[str]:
         return []
 
     sql = """
-        SELECT emby_item_ids_json
-        FROM media_metadata
-        WHERE parent_series_tmdb_id = %s
-          AND item_type = 'Episode'
-          AND in_library = TRUE
-          AND asset_details_json IS NOT NULL
-          AND EXISTS (
-              SELECT 1 
-              FROM jsonb_array_elements(asset_details_json) AS elem
-              WHERE 
-                 COALESCE((elem->>'width')::numeric, 0) <= 0 
-                 OR 
-                 COALESCE((elem->>'height')::numeric, 0) <= 0
-                 OR 
-                 LOWER(COALESCE(elem->>'video_codec', '')) IN ('', 'null', 'none', 'unknown', 'und')
-                 -- ★★★ 新增：检查 raw_mediainfo 是否缺失或为空数组 ★★★
-                 OR elem->'raw_mediainfo' IS NULL
-                 OR jsonb_typeof(elem->'raw_mediainfo') != 'array'
-                 OR jsonb_array_length(elem->'raw_mediainfo') = 0
+        SELECT m.emby_item_ids_json
+        FROM media_metadata m
+        WHERE m.parent_series_tmdb_id = %s
+          AND m.item_type = 'Episode'
+          AND m.in_library = TRUE
+          AND m.asset_details_json IS NOT NULL
+          AND (
+              -- 1. 检查基础资产信息是否缺失 (宽/高/编码)
+              EXISTS (
+                  SELECT 1 
+                  FROM jsonb_array_elements(m.asset_details_json) AS elem
+                  WHERE 
+                     COALESCE((elem->>'width')::numeric, 0) <= 0 
+                     OR COALESCE((elem->>'height')::numeric, 0) <= 0
+                     OR LOWER(COALESCE(elem->>'video_codec', '')) IN ('', 'null', 'none', 'unknown', 'und')
+              )
+              -- 2. 检查 SHA1 是否在指纹库中缺失，或者 file_sha1_json 根本没有有效值
+              OR jsonb_array_length(m.file_sha1_json) = 0
+              OR EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(m.file_sha1_json) AS sha1_val
+                  WHERE sha1_val IS NULL 
+                     OR sha1_val = ''
+                     OR NOT EXISTS (
+                         SELECT 1 FROM p115_mediainfo_cache c WHERE c.sha1 = sha1_val
+                     )
+              )
           )
     """
     bad_emby_ids = []
@@ -1242,10 +1250,10 @@ def get_dashboard_aggregation_map(emby_ids: List[str]) -> Dict[str, Dict[str, An
         logger.error(f"DB: 获取仪表盘聚合数据失败: {e}", exc_info=True)
         return {}
     
-# 获取所有在库的媒体资产信息 (用于备份任务)
-def get_all_in_library_assets() -> List[Dict[str, Any]]:
+# 获取在库的媒体资产总数 (用于分批处理)
+def get_in_library_assets_count() -> int:
     sql = """
-        SELECT tmdb_id, item_type, title, file_pickcode_json, file_sha1_json, asset_details_json
+        SELECT COUNT(*)
         FROM media_metadata
         WHERE in_library = TRUE 
           AND item_type IN ('Movie', 'Episode')
@@ -1255,6 +1263,26 @@ def get_all_in_library_assets() -> List[Dict[str, Any]]:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
+            return cursor.fetchone()['count']
+    except Exception as e:
+        logger.error(f"DB: 获取在库资产总数失败: {e}")
+        return 0
+
+# 获取所有在库的媒体资产信息 (支持分页)
+def get_all_in_library_assets(limit: int = 1000, offset: int = 0) -> List[Dict[str, Any]]:
+    sql = """
+        SELECT tmdb_id, item_type, title, file_pickcode_json, file_sha1_json, asset_details_json
+        FROM media_metadata
+        WHERE in_library = TRUE 
+          AND item_type IN ('Movie', 'Episode')
+          AND asset_details_json IS NOT NULL
+        ORDER BY tmdb_id, item_type
+        LIMIT %s OFFSET %s
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, (limit, offset))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(f"DB: 获取在库资产失败: {e}")

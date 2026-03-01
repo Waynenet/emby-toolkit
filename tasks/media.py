@@ -1921,132 +1921,134 @@ def task_restore_local_cache_from_db(processor):
 
 def task_backup_mediainfo(processor):
     """
-    【终极媒体信息备份任务】
-    1. 获取所有在库媒体项。
-    2. 检查 SHA1，缺失的通过解析 链接/STRM 提取 PC 码 -> 换取 FID -> 115 API 补齐并写入 media_metadata。
-    3. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
+    【终极媒体信息备份任务】(分批优化版)
+    1. 获取所有在库媒体项总数。
+    2. 分批拉取数据，避免爆内存。
+    3. 检查 SHA1，缺失的通过解析 链接/STRM 提取 PC 码 -> 换取 FID -> 115 API 补齐并写入 media_metadata。
+    4. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
     """
-    logger.info("--- 开始执行媒体信息单向备份任务 ---")
+    logger.info("--- 开始执行媒体信息单向备份任务 (分批模式) ---")
     
-    # ★ 修复前端无反馈：一开始就发送状态
-    task_manager.update_status_from_thread(0, "正在从数据库获取在库媒体项，请稍候...")
+    task_manager.update_status_from_thread(0, "正在统计在库媒体项总数，请稍候...")
     
-    items = media_db.get_all_in_library_assets()
-    if not items:
+    # 1. 获取总数
+    total = media_db.get_in_library_assets_count()
+    if total == 0:
         task_manager.update_status_from_thread(100, "无在库项目需要备份")
         return
 
-    total = len(items)
-    logger.info(f"  ➜ 共扫描到 {total} 个在库项目，准备执行备份检查...")
+    logger.info(f"  ➜ 共扫描到 {total} 个在库项目，准备分批执行备份检查...")
     
     from handler.p115_service import P115Service, P115CacheManager
     client = P115Service.get_client()
     
     sha1_fixed_count = 0
     mediainfo_backed_up_count = 0
+    processed_count = 0
+    batch_size = 500 # 每次处理 500 个媒体项
     
     try:
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
             
-            for i, item in enumerate(items):
+            # 2. 分批循环拉取
+            for offset in range(0, total, batch_size):
                 if processor.is_stop_requested(): break
                 
-                # ★ 提高进度更新频率
-                if i % 20 == 0:
-                    task_manager.update_status_from_thread(int((i/total)*100), f"正在检查备份 ({i}/{total})...")
+                items = media_db.get_all_in_library_assets(limit=batch_size, offset=offset)
                 
-                tmdb_id = item['tmdb_id']
-                item_type = item['item_type']
-                title = item['title']
-                
-                pcs = item['file_pickcode_json'] if isinstance(item['file_pickcode_json'], list) else []
-                sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
-                assets = item['asset_details_json'] if isinstance(item['asset_details_json'], list) else []
-                
-                needs_sha1_update = False
-                
-                # ★ 改为遍历 assets，以 Emby 实际路径为基准
-                for idx, asset in enumerate(assets):
-                    current_path = asset.get('path')
-                    if not current_path: continue
+                for item in items:
+                    if processor.is_stop_requested(): break
                     
-                    current_sha1 = sha1s[idx] if idx < len(sha1s) else None
-                    current_pc = pcs[idx] if idx < len(pcs) else None
+                    processed_count += 1
+                    if processed_count % 20 == 0:
+                        task_manager.update_status_from_thread(int((processed_count/total)*100), f"正在检查备份 ({processed_count}/{total})...")
                     
-                    extracted_pc = None
+                    tmdb_id = item['tmdb_id']
+                    item_type = item['item_type']
+                    title = item['title']
                     
-                    # ==========================================
-                    # ★ 核心修改：从 链接 或 STRM 文件中提取 PC 码
-                    # ==========================================
-                    if current_path.startswith('http'):
-                        # 如果是直链 (例如 http://.../play/abcde12345)，直接截取最后一段
-                        extracted_pc = current_path.rstrip('/').split('/')[-1]
-                    elif current_path.lower().endswith('.strm') and os.path.exists(current_path):
-                        # 如果是本地 STRM 文件，读取内容并提取 PC 码
-                        try:
-                            with open(current_path, 'r', encoding='utf-8') as f:
-                                strm_content = f.read().strip()
-                                if strm_content.startswith('http'):
-                                    extracted_pc = strm_content.rstrip('/').split('/')[-1]
-                        except Exception as e:
-                            logger.warning(f"  ⚠️ 读取 STRM 文件失败 {current_path}: {e}")
-                            
-                    # 优先使用提取到的 PC 码，如果没有则兜底使用数据库里的 PC 码
-                    actual_pc = extracted_pc or current_pc
+                    pcs = item['file_pickcode_json'] if isinstance(item['file_pickcode_json'], list) else []
+                    sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
+                    assets = item['asset_details_json'] if isinstance(item['asset_details_json'], list) else []
                     
-                    # 阶段 1: 补齐缺失的 SHA1
-                    if not current_sha1 and actual_pc:
-                        logger.info(f"  🔍 [{title}] 缺失 SHA1，正在通过 115 API 补齐 (PC: {actual_pc})...")
-                        # fs_get_info 需要 fid，所以先通过 PC 码查出 fid
-                        fid = P115CacheManager.get_fid_by_pickcode(actual_pc)
-                        if fid and client:
-                            try:
-                                info_res = client.fs_get_info(fid)
-                                if info_res and info_res.get('state'):
-                                    fetched_sha1 = info_res['data'].get('sha1')
-                                    if fetched_sha1:
-                                        current_sha1 = fetched_sha1
-                                        # 动态扩容 sha1s 列表以防越界
-                                        while len(sha1s) <= idx:
-                                            sha1s.append(None)
-                                        sha1s[idx] = current_sha1
-                                        needs_sha1_update = True
-                                        sha1_fixed_count += 1
-                                        logger.info(f"    ✅ 成功获取 SHA1: {current_sha1}")
-                            except Exception as e:
-                                logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
-                                
-                    # 阶段 2: 备份媒体信息到指纹库
-                    if current_sha1 and current_path:
-                        # ★ 如果 current_path 是 HTTP 链接，跳过本地读取
+                    needs_sha1_update = False
+                    
+                    for idx, asset in enumerate(assets):
+                        current_path = asset.get('path')
+                        if not current_path: continue
+                        
+                        current_sha1 = sha1s[idx] if idx < len(sha1s) else None
+                        current_pc = pcs[idx] if idx < len(pcs) else None
+                        
+                        extracted_pc = None
+                        
+                        # ==========================================
+                        # ★ 核心修改：从 链接 或 STRM 文件中提取 PC 码
+                        # ==========================================
                         if current_path.startswith('http'):
-                            continue
-                            
-                        if not media_db.is_mediainfo_cached(current_sha1):
-                            mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
-                            if os.path.exists(mediainfo_path):
+                            extracted_pc = current_path.rstrip('/').split('/')[-1]
+                        elif current_path.lower().endswith('.strm') and os.path.exists(current_path):
+                            try:
+                                with open(current_path, 'r', encoding='utf-8') as f:
+                                    strm_content = f.read().strip()
+                                    if strm_content.startswith('http'):
+                                        extracted_pc = strm_content.rstrip('/').split('/')[-1]
+                            except Exception as e:
+                                logger.warning(f"  ⚠️ 读取 STRM 文件失败 {current_path}: {e}")
+                                
+                        actual_pc = extracted_pc or current_pc
+                        
+                        # 阶段 1: 补齐缺失的 SHA1
+                        if not current_sha1 and actual_pc:
+                            logger.info(f"  🔍 [{title}] 缺失 SHA1，正在通过 115 API 补齐 (PC: {actual_pc})...")
+                            fid = P115CacheManager.get_fid_by_pickcode(actual_pc)
+                            if fid and client:
                                 try:
-                                    with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                                        raw_info = json.load(f)
-                                        
-                                    if raw_info and isinstance(raw_info, list):
-                                        cursor.execute("""
-                                            INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                            VALUES (%s, %s::jsonb)
-                                            ON CONFLICT (sha1) DO NOTHING
-                                        """, (current_sha1, json.dumps(raw_info, ensure_ascii=False)))
-                                        
-                                        if cursor.rowcount > 0:
-                                            mediainfo_backed_up_count += 1
-                                            logger.debug(f"  💾 [{title}] 媒体信息已成功备份至指纹库。")
+                                    info_res = client.fs_get_info(fid)
+                                    if info_res and info_res.get('state'):
+                                        fetched_sha1 = info_res['data'].get('sha1')
+                                        if fetched_sha1:
+                                            current_sha1 = fetched_sha1
+                                            while len(sha1s) <= idx:
+                                                sha1s.append(None)
+                                            sha1s[idx] = current_sha1
+                                            needs_sha1_update = True
+                                            sha1_fixed_count += 1
+                                            logger.info(f"    ✅ 成功获取 SHA1: {current_sha1}")
                                 except Exception as e:
-                                    logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
+                                    logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
+                                    
+                        # 阶段 2: 备份媒体信息到指纹库
+                        if current_sha1 and current_path:
+                            if current_path.startswith('http'):
+                                continue
+                                
+                            if not media_db.is_mediainfo_cached(current_sha1):
+                                mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
+                                if os.path.exists(mediainfo_path):
+                                    try:
+                                        with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                                            raw_info = json.load(f)
+                                            
+                                        if raw_info and isinstance(raw_info, list):
+                                            cursor.execute("""
+                                                INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
+                                                VALUES (%s, %s::jsonb)
+                                                ON CONFLICT (sha1) DO NOTHING
+                                            """, (current_sha1, json.dumps(raw_info, ensure_ascii=False)))
+                                            
+                                            if cursor.rowcount > 0:
+                                                mediainfo_backed_up_count += 1
+                                                logger.info(f"  💾 [{title}] 媒体信息已成功备份至数据库。")
+                                    except Exception as e:
+                                        logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
+                    
+                    if needs_sha1_update:
+                        media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
                 
-                if needs_sha1_update:
-                    media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
-            
-            conn.commit()
+                # ★ 每一批次提交一次事务，防止长事务锁表
+                conn.commit()
             
         msg = f"备份任务完成！补齐 SHA1: {sha1_fixed_count} 个，成功备份媒体信息: {mediainfo_backed_up_count} 个。"
         logger.info(f"  ✅ {msg}")
