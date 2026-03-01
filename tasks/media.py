@@ -1919,76 +1919,6 @@ def task_restore_local_cache_from_db(processor):
         logger.error(f"执行 '{task_name}' 时发生严重错误: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, f"任务失败: {e}")
 
-def task_build_mediainfo_fingerprints(processor):
-    """
-    遍历本地媒体库，提取存量媒体信息指纹。
-    读取 .strm 拿 PC，查 p115_filesystem_cache 拿 SHA1，读取 -mediainfo.json 存入新表。
-    """
-    logger.info("--- 开始执行存量媒体信息指纹提取任务 ---")
-    
-    local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
-    if not local_root or not os.path.exists(local_root):
-        logger.error("  ❌ 未配置本地 STRM 根目录或目录不存在。")
-        task_manager.update_status_from_thread(100, "目录不存在")
-        return
-
-    found_count = 0
-    inserted_count = 0
-    
-    try:
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            for dirpath, _, filenames in os.walk(local_root):
-                if processor.is_stop_requested(): break
-                
-                for filename in filenames:
-                    if not filename.lower().endswith('.strm'): continue
-                    
-                    strm_path = os.path.join(dirpath, filename)
-                    mediainfo_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
-                    
-                    if not os.path.exists(mediainfo_path): continue
-                    
-                    found_count += 1
-                    if found_count % 500 == 0:
-                        task_manager.update_status_from_thread(50, f"正在扫描本地文件... 已发现 {found_count} 个")
-                    
-                    # 1. 抠 PC
-                    pc = processor._extract_pickcode_from_strm(strm_path)
-                    if not pc: continue
-                    
-                    # 2. 查 SHA1
-                    sha1 = processor._get_sha1_by_pickcode(pc)
-                    if not sha1: continue
-                    
-                    # 3. 读 JSON 并存入新表
-                    try:
-                        with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                            raw_info = json.load(f)
-                            
-                        if raw_info and isinstance(raw_info, list):
-                            cursor.execute("""
-                                INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                VALUES (%s, %s::jsonb)
-                                ON CONFLICT (sha1) DO NOTHING
-                            """, (sha1, json.dumps(raw_info, ensure_ascii=False)))
-                            
-                            if cursor.rowcount > 0:
-                                inserted_count += 1
-                    except Exception as e:
-                        logger.warning(f"  ⚠️ 读取或写入失败 {filename}: {e}")
-            
-            conn.commit()
-            
-        msg = f"指纹提取完成！共扫描到 {found_count} 个本地文件，成功提取并入库 {inserted_count} 个全新指纹。"
-        logger.info(f"  ✅ {msg}")
-        task_manager.update_status_from_thread(100, msg)
-        
-    except Exception as e:
-        logger.error(f"提取指纹任务失败: {e}", exc_info=True)
-        task_manager.update_status_from_thread(-1, "任务失败")
-
 def task_backup_mediainfo(processor):
     """
     【终极媒体信息备份任务】
@@ -2064,7 +1994,7 @@ def task_backup_mediainfo(processor):
                                 
                     # 阶段 2: 备份媒体信息到指纹库
                     if current_sha1 and current_path:
-                        # ★ 修复：如果 current_path 是 HTTP 链接，跳过本地读取，交由本地遍历任务处理
+                        # ★ 修复：如果 current_path 是 HTTP 链接，跳过本地读取
                         if current_path.startswith('http'):
                             continue
                             
