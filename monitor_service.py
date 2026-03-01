@@ -26,6 +26,11 @@ QUEUE_LOCK = threading.Lock()
 DEBOUNCE_TIMER = None
 DEBOUNCE_DELAY = 3 # 防抖延迟秒数
 
+# --- 媒体信息更新专用队列 ---
+MEDIAINFO_EVENT_QUEUE = set()
+MEDIAINFO_QUEUE_LOCK = threading.Lock()
+MEDIAINFO_DEBOUNCE_TIMER = None
+
 class MediaFileHandler(FileSystemEventHandler):
     """
     文件系统事件处理器 (纯净版：仅监控新增和修改，忽略删除)
@@ -63,6 +68,35 @@ class MediaFileHandler(FileSystemEventHandler):
     def on_moved(self, event):
         if not event.is_directory and self._is_valid_media_file(event.dest_path):
             self._enqueue_file(event.dest_path)
+
+    def on_modified(self, event):
+        """专门监听 -mediainfo.json 的修改事件"""
+        if not event.is_directory and event.src_path.endswith('-mediainfo.json'):
+            self._enqueue_mediainfo(event.src_path)
+
+    def _enqueue_file(self, file_path: str):
+        """新增/移动文件入队"""
+        global DEBOUNCE_TIMER
+        with QUEUE_LOCK:
+            if file_path not in FILE_EVENT_QUEUE:
+                logger.info(f"  🔍 [实时监控] 文件加入队列: {file_path}")
+            
+            FILE_EVENT_QUEUE.add(file_path)
+            
+            if DEBOUNCE_TIMER: DEBOUNCE_TIMER.kill()
+            DEBOUNCE_TIMER = spawn_later(DEBOUNCE_DELAY, process_batch_queue)
+
+    def _enqueue_mediainfo(self, file_path: str):
+        """媒体信息入队逻辑 (独立防抖)"""
+        global MEDIAINFO_DEBOUNCE_TIMER
+        with MEDIAINFO_QUEUE_LOCK:
+            if file_path not in MEDIAINFO_EVENT_QUEUE:
+                logger.debug(f"  🔍 [实时监控] 媒体信息更新加入队列: {file_path}")
+            
+            MEDIAINFO_EVENT_QUEUE.add(file_path)
+            
+            if MEDIAINFO_DEBOUNCE_TIMER: MEDIAINFO_DEBOUNCE_TIMER.kill()
+            MEDIAINFO_DEBOUNCE_TIMER = spawn_later(DEBOUNCE_DELAY, process_mediainfo_queue)
 
     def _enqueue_file(self, file_path: str):
         """新增/移动文件入队"""
@@ -141,6 +175,87 @@ def process_batch_queue():
     if files_to_refresh_only:
         logger.info(f"  🚀 [实时监控] 发现 {len(files_to_refresh_only)} 个文件命中排除路径，将跳过刮削直接刷新 Emby。")
         threading.Thread(target=_handle_batch_refresh_only_task, args=(files_to_refresh_only,)).start()
+
+def process_mediainfo_queue():
+    """处理媒体信息更新队列"""
+    if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_ENABLED, False):
+        with MEDIAINFO_QUEUE_LOCK:
+            MEDIAINFO_EVENT_QUEUE.clear()
+        return
+    
+    global MEDIAINFO_DEBOUNCE_TIMER
+    with MEDIAINFO_QUEUE_LOCK:
+        files_to_process = list(MEDIAINFO_EVENT_QUEUE)
+        MEDIAINFO_EVENT_QUEUE.clear()
+        MEDIAINFO_DEBOUNCE_TIMER = None
+    
+    if not files_to_process: return
+    
+    threading.Thread(target=_handle_mediainfo_update_task, args=(files_to_process,)).start()
+
+def _handle_mediainfo_update_task(file_paths: List[str]):
+    """处理 -mediainfo.json 的更新，提取 SHA1 并覆盖备份到数据库"""
+    # 复用现有的稳定性检测，确保神医插件已经把文件写完了
+    valid_files = _wait_for_files_stability(file_paths)
+    if not valid_files: return
+
+    import json
+    from database.connection import get_db_connection
+
+    for file_path in valid_files:
+        try:
+            # 1. 读取更新后的 JSON
+            with open(file_path, 'r', encoding='utf-8') as f:
+                raw_info = json.load(f)
+            
+            if not raw_info or not isinstance(raw_info, list):
+                continue
+
+            # 2. 寻找对应的 SHA1
+            base_path = file_path.replace('-mediainfo.json', '')
+            base_name = os.path.basename(base_path)
+            
+            sha1 = None
+            pickcode = None
+
+            # 尝试从同名 STRM 提取 PC 码
+            strm_path = base_path + '.strm'
+            if os.path.exists(strm_path):
+                with open(strm_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content.startswith('http'):
+                        pickcode = content.rstrip('/').split('/')[-1]
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 优先通过 PC 码查 SHA1
+                    if pickcode:
+                        cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE pick_code = %s AND sha1 IS NOT NULL LIMIT 1", (pickcode,))
+                        row = cursor.fetchone()
+                        if row: sha1 = row['sha1']
+
+                    # 兜底：通过文件名前缀查 SHA1 (适配挂载模式)
+                    if not sha1:
+                        cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE name LIKE %s AND sha1 IS NOT NULL LIMIT 1", (f"{base_name}.%",))
+                        row = cursor.fetchone()
+                        if row: sha1 = row['sha1']
+
+                    # 3. 覆盖写入指纹库
+                    if sha1:
+                        cursor.execute("""
+                            INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json, created_at)
+                            VALUES (%s, %s::jsonb, NOW())
+                            ON CONFLICT (sha1) DO UPDATE SET 
+                                mediainfo_json = EXCLUDED.mediainfo_json,
+                                created_at = NOW()
+                        """, (sha1, json.dumps(raw_info, ensure_ascii=False)))
+                        conn.commit()
+                        logger.info(f"  💾 [实时监控] 检测到媒体信息更新，已成功覆盖备份至数据库: {os.path.basename(file_path)}")
+                    else:
+                        logger.debug(f"  ⚠️ [实时监控] 无法匹配到 SHA1，跳过备份: {os.path.basename(file_path)}")
+
+        except Exception as e:
+            logger.error(f"  ❌ [实时监控] 处理媒体信息更新失败 {file_path}: {e}")
 
 def _process_strm_conversions(file_paths: List[str]) -> List[str]:
     """
