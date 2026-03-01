@@ -1259,8 +1259,19 @@ def get_missing_mediainfo_assets() -> List[Dict[str, Any]]:
     2. 有 SHA1，且路径不是 HTTP 直链，但指纹库里没有缓存
     """
     sql = """
-        SELECT DISTINCT m.tmdb_id, m.item_type, m.title, m.file_pickcode_json, m.file_sha1_json, m.asset_details_json
+        SELECT DISTINCT 
+            m.tmdb_id, 
+            m.item_type, 
+            m.title, 
+            m.file_pickcode_json, 
+            m.file_sha1_json, 
+            m.asset_details_json,
+            m.emby_item_ids_json,
+            p.emby_item_ids_json AS parent_emby_ids_json,
+            p.title AS parent_title
         FROM media_metadata m
+        -- 关联父剧集 (用于分集报错时定位到剧集)
+        LEFT JOIN media_metadata p ON m.parent_series_tmdb_id = p.tmdb_id AND p.item_type = 'Series'
         -- 展开资产数组并带上索引
         JOIN LATERAL jsonb_array_elements(
             CASE WHEN jsonb_typeof(m.asset_details_json) = 'array' THEN m.asset_details_json ELSE '[]'::jsonb END

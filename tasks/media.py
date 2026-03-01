@@ -1921,16 +1921,16 @@ def task_restore_local_cache_from_db(processor):
 
 def task_backup_mediainfo(processor):
     """
-    【终极媒体信息备份任务】(精准过滤版)
+    【终极媒体信息备份任务】(精准过滤版 + 待复核标记)
     1. 通过高级 SQL 精准获取真正缺失 SHA1 或 缺失指纹缓存 的媒体项。
     2. 检查 SHA1，缺失的通过解析 链接/STRM 提取 PC 码 -> 换取 FID -> 115 API 补齐并写入 media_metadata。
-    3. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
+    3. 检查本地 -mediainfo.json，如果缺失则将该项目标记为“待复核”。
+    4. 如果存在，则读取并写入指纹库 p115_mediainfo_cache。
     """
     logger.info("--- 开始执行媒体信息单向备份任务 (精准模式) ---")
     
     task_manager.update_status_from_thread(0, "正在扫描需要备份的媒体项，请稍候...")
     
-    # 1. 直接获取精准过滤后的待处理列表
     items = media_db.get_missing_mediainfo_assets()
     total = len(items)
     
@@ -1953,13 +1953,34 @@ def task_backup_mediainfo(processor):
             for i, item in enumerate(items):
                 if processor.is_stop_requested(): break
                 
-                # 进度条现在会显示真实的待处理数量，例如 (1/260)
                 if i % 2 == 0: 
                     task_manager.update_status_from_thread(int((i/total)*100), f"正在处理 ({i+1}/{total}): {item['title']}...")
                 
                 tmdb_id = item['tmdb_id']
                 item_type = item['item_type']
                 title = item['title']
+                
+                # ==========================================
+                # ★ 智能定位 Emby ID (分集报错需定位到父剧集)
+                # ==========================================
+                emby_ids = item.get('emby_item_ids_json', [])
+                if isinstance(emby_ids, str):
+                    try: emby_ids = json.loads(emby_ids)
+                    except: emby_ids = []
+                target_emby_id = emby_ids[0] if emby_ids else None
+                
+                target_log_type = item_type
+                log_title = title
+                
+                if item_type == 'Episode' and item.get('parent_emby_ids_json'):
+                    parent_ids = item['parent_emby_ids_json']
+                    if isinstance(parent_ids, str):
+                        try: parent_ids = json.loads(parent_ids)
+                        except: parent_ids = []
+                    if parent_ids:
+                        target_emby_id = parent_ids[0]
+                        target_log_type = 'Series'
+                        log_title = f"{item.get('parent_title', '未知剧集')} - {title}"
                 
                 pcs = item['file_pickcode_json'] if isinstance(item['file_pickcode_json'], list) else []
                 sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
@@ -1976,9 +1997,6 @@ def task_backup_mediainfo(processor):
                     
                     extracted_pc = None
                     
-                    # ==========================================
-                    # 从 链接 或 STRM 文件中提取 PC 码
-                    # ==========================================
                     if current_path.startswith('http'):
                         extracted_pc = current_path.rstrip('/').split('/')[-1]
                     elif current_path.lower().endswith('.strm') and os.path.exists(current_path):
@@ -2012,14 +2030,28 @@ def task_backup_mediainfo(processor):
                             except Exception as e:
                                 logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
                                 
-                    # 阶段 2: 备份媒体信息到指纹库
-                    if current_sha1 and current_path:
-                        if current_path.startswith('http'):
-                            continue
-                            
-                        if not media_db.is_mediainfo_cached(current_sha1):
-                            mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
-                            if os.path.exists(mediainfo_path):
+                    # 阶段 2: 备份媒体信息到指纹库 & 缺失检查
+                    if current_path and not current_path.startswith('http'):
+                        mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
+                        
+                        if not os.path.exists(mediainfo_path):
+                            # ★★★ 核心新增：缺失 mediainfo.json，标记待复核 ★★★
+                            if target_emby_id:
+                                reason = f"缺失媒体信息文件: {os.path.basename(mediainfo_path)}"
+                                processor.log_db_manager.save_to_failed_log(
+                                    cursor, 
+                                    target_emby_id, 
+                                    log_title, 
+                                    reason, 
+                                    target_log_type, 
+                                    score=0.0
+                                )
+                                # 同时从 processed_log 移除，确保它真正在待复核列表显眼位置
+                                processor.log_db_manager.remove_from_processed_log(cursor, target_emby_id)
+                                logger.warning(f"  ⚠️ [{log_title}] 缺失本地 JSON，已标记为待复核: {os.path.basename(mediainfo_path)}")
+                        else:
+                            # 文件存在，如果有 SHA1 且未缓存，则备份
+                            if current_sha1 and not media_db.is_mediainfo_cached(current_sha1):
                                 try:
                                     with open(mediainfo_path, 'r', encoding='utf-8') as f:
                                         raw_info = json.load(f)
@@ -2033,18 +2065,16 @@ def task_backup_mediainfo(processor):
                                         
                                         if cursor.rowcount > 0:
                                             mediainfo_backed_up_count += 1
-                                            logger.debug(f"  💾 [{title}] 媒体信息已成功备份至指纹库。")
+                                            logger.debug(f"  💾 [{log_title}] 媒体信息已成功备份至指纹库。")
                                 except Exception as e:
                                     logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
                 
                 if needs_sha1_update:
                     media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
                 
-                # ★ 每处理 50 个项目提交一次事务，防止长事务锁表
                 if i > 0 and i % 50 == 0:
                     conn.commit()
             
-            # 循环结束最后提交一次
             conn.commit()
             
         msg = f"备份任务完成！补齐 SHA1: {sha1_fixed_count} 个，成功备份媒体信息: {mediainfo_backed_up_count} 个。"
