@@ -1919,11 +1919,53 @@ def task_restore_local_cache_from_db(processor):
         logger.error(f"执行 '{task_name}' 时发生严重错误: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, f"任务失败: {e}")
 
+def _extract_pickcode_from_strm(strm_path: str) -> Optional[str]:
+    """
+    从 STRM 文件内容中提取 115 PC码 (仅支持ETK标准格式)。
+    """
+    if not strm_path or not os.path.exists(strm_path):
+        return None
+    
+    try:
+        with open(strm_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        
+        if not content:
+            return None
+            
+        # ETK 标准格式: http://xxx/api/p115/play/{pickcode}
+        if '/api/p115/play/' in content:
+            pick_code = content.split('/api/p115/play/')[-1].split('?')[0].strip()
+            return pick_code if pick_code else None
+                
+    except Exception as e:
+        logger.warning(f"  ⚠️ 读取 STRM 文件失败 {strm_path}: {e}")
+    
+    return None
+
+def _extract_pickcode_from_url(url: str) -> Optional[str]:
+    """
+    从 URL 链接中提取 115 PC码 (仅支持ETK标准格式)。
+    """
+    if not url:
+        return None
+        
+    url = url.strip()
+    
+    # ETK 标准格式: http://xxx/api/p115/play/{pickcode}
+    if '/api/p115/play/' in url:
+        pick_code = url.split('/api/p115/play/')[-1].split('?')[0].strip()
+        return pick_code if pick_code else None
+    
+    return None
+
 def task_backup_mediainfo(processor):
     """
     【终极媒体信息备份任务】
     1. 获取所有在库媒体项。
-    2. 检查 SHA1，缺失的通过 PC -> FID -> 115 API 补齐并写入 media_metadata。
+    2. 检查 SHA1：
+       - 如果 path 是链接(URL)，直接从链接解析PC码，然后调用 client.fs_get_info 获取 SHA1
+       - 如果 path 是本地路径，从对应的 strm 文件提取PC码，然后调用 client.fs_get_info 获取 SHA1
     3. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
     """
     logger.info("--- 开始执行媒体信息单向备份任务 ---")
@@ -1939,11 +1981,17 @@ def task_backup_mediainfo(processor):
     total = len(items)
     logger.info(f"  ➜ 共扫描到 {total} 个在库项目，准备执行备份检查...")
     
+    # 立即更新前端状态，告知用户已获取到多少项目
+    task_manager.update_status_from_thread(1, f"获取到 {total} 个在库项目，开始检查 SHA1...")
+    
     from handler.p115_service import P115Service, P115CacheManager
     client = P115Service.get_client()
     
     sha1_fixed_count = 0
     mediainfo_backed_up_count = 0
+    
+    # 获取本地 STRM 根目录配置
+    local_strm_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) if processor.config else None
     
     try:
         with connection.get_db_connection() as conn:
@@ -1952,9 +2000,12 @@ def task_backup_mediainfo(processor):
             for i, item in enumerate(items):
                 if processor.is_stop_requested(): break
                 
-                # ★ 提高进度更新频率
-                if i % 20 == 0:
-                    task_manager.update_status_from_thread(int((i/total)*100), f"正在检查备份 ({i}/{total})...")
+                # ★ 提高进度更新频率：每个项目都更新
+                current_progress = int((i / total) * 95)  # 预留最后5%用于收尾
+                task_manager.update_status_from_thread(
+                    current_progress, 
+                    f"正在备份 ({i+1}/{total}): {item.get('title', 'Unknown')[:20]}..."
+                )
                 
                 tmdb_id = item['tmdb_id']
                 item_type = item['item_type']
@@ -1967,7 +2018,21 @@ def task_backup_mediainfo(processor):
                 needs_sha1_update = False
                 
                 for idx, pc in enumerate(pcs):
-                    if not pc: continue
+                    if not pc:
+                        # 如果没有预存的PC码，尝试从path或strm提取
+                        current_path = assets[idx].get('path') if idx < len(assets) else None
+                        if current_path:
+                            # 判断是URL还是本地路径
+                            if current_path.startswith('http'):
+                                # 从URL提取PC码
+                                pc = _extract_pickcode_from_url(current_path)
+                            elif local_strm_root and os.path.isabs(current_path):
+                                # 从本地路径构建strm路径并提取PC码
+                                strm_path = os.path.splitext(current_path)[0] + ".strm"
+                                pc = _extract_pickcode_from_strm(strm_path)
+                    
+                    if not pc:
+                        continue
                     
                     current_sha1 = sha1s[idx] if idx < len(sha1s) else None
                     current_path = assets[idx].get('path') if idx < len(assets) else None
@@ -1975,7 +2040,23 @@ def task_backup_mediainfo(processor):
                     # 阶段 1: 补齐缺失的 SHA1
                     if not current_sha1:
                         logger.info(f"  🔍 [{title}] 缺失 SHA1，正在通过 115 API 补齐...")
+                        
+                        # 优先尝试从本地缓存获取 FID
                         fid = P115CacheManager.get_fid_by_pickcode(pc)
+                        
+                        # 如果本地缓存没有FID，尝试直接使用PC码查询
+                        if not fid and client:
+                            try:
+                                # 尝试搜索文件来获取FID
+                                search_res = client.fs_search({'search_value': pc, 'limit': 1})
+                                if search_res and search_res.get('state') and search_res.get('data'):
+                                    for file_item in search_res['data']:
+                                        if file_item.get('pc') == pc or file_item.get('pick_code') == pc:
+                                            fid = file_item.get('fid') or file_item.get('file_id')
+                                            break
+                            except Exception as e_search:
+                                logger.warning(f"    ⚠️ 搜索PC码失败: {e_search}")
+                        
                         if fid and client:
                             try:
                                 info_res = client.fs_get_info(fid)
@@ -1991,6 +2072,22 @@ def task_backup_mediainfo(processor):
                                         logger.info(f"    ✅ 成功获取 SHA1: {current_sha1}")
                             except Exception as e:
                                 logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
+                    else:
+                        # 即使已有SHA1，也尝试更新本地缓存的FID
+                        if not P115CacheManager.get_fid_by_pickcode(pc) and client:
+                            try:
+                                search_res = client.fs_search({'search_value': pc, 'limit': 1})
+                                if search_res and search_res.get('state') and search_res.get('data'):
+                                    for file_item in search_res['data']:
+                                        if file_item.get('pc') == pc or file_item.get('pick_code') == pc:
+                                            fid = file_item.get('fid') or file_item.get('file_id')
+                                            parent_id = file_item.get('pid') or file_item.get('parent_id')
+                                            file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+                                            if fid and parent_id and file_name:
+                                                P115CacheManager.save_file_cache(fid, parent_id, file_name, sha1=current_sha1, pick_code=pc)
+                                            break
+                            except Exception:
+                                pass
                                 
                     # 阶段 2: 备份媒体信息到指纹库
                     if current_sha1 and current_path:
