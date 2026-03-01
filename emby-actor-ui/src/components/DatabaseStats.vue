@@ -18,15 +18,19 @@
               <n-spin v-if="loading.core || loading.library || loading.system" size="small" style="float: right" />
             </template>
             <n-space vertical :size="20">
-              <!-- 顶部关键指标 -->
-              <n-grid :cols="2" :x-gap="12">
+              <!-- 顶部关键指标 (改为3列) -->
+              <n-grid :cols="3" :x-gap="12">
                 <n-gi>
                   <n-statistic label="已缓存媒体" class="centered-statistic">
                     <span class="stat-value">{{ stats.media_library.cached_total }}</span>
                   </n-statistic>
                 </n-gi>
                 <n-gi>
-                  <!-- 这里保持显示总归档数，代表数字资产总量 -->
+                  <n-statistic label="已备份媒体信息" class="centered-statistic">
+                    <span class="stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
+                  </n-statistic>
+                </n-gi>
+                <n-gi>
                   <n-statistic label="已归档演员" class="centered-statistic">
                     <span class="stat-value">{{ stats.system.actor_mappings_total }}</span>
                   </n-statistic>
@@ -274,12 +278,19 @@
   <!-- ================================================================================== -->
   <n-layout v-else content-style="padding: 12px; background-color: transparent;">
     <div class="mobile-container">
-      <!-- 1. 核心数据概览 -->
-      <n-grid :cols="2" :x-gap="12" :y-gap="12">
+      <!-- 1. 核心数据概览 (改为3列) -->
+      <n-grid :cols="3" :x-gap="8" :y-gap="8">
         <n-gi>
           <n-card size="small" :bordered="false" class="mobile-stat-card">
             <n-statistic label="已缓存媒体">
               <span class="mobile-stat-value">{{ stats.media_library.cached_total }}</span>
+            </n-statistic>
+          </n-card>
+        </n-gi>
+        <n-gi>
+          <n-card size="small" :bordered="false" class="mobile-stat-card">
+            <n-statistic label="已备份信息">
+              <span class="mobile-stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
             </n-statistic>
           </n-card>
         </n-gi>
@@ -333,7 +344,6 @@
                   <n-icon :size="12" :component="PersonOutline" color="#999" />
                 </n-icon-wrapper>
               </template>
-              <!-- ★★★ 修正点：移动端也改为 actor_mappings_linked ★★★ -->
               {{ stats.system.actor_mappings_linked }}
             </n-statistic>
           </n-gi>
@@ -409,7 +419,6 @@ import {
   NPageHeader, NLayout, NGrid, NGi, NCard, NStatistic, NSpin, NIcon, NSpace, NDivider, NIconWrapper,
   NProgress, NEmpty, useThemeVars, NTag
 } from 'naive-ui';
-// 引入所有需要的图标
 import { PersonOutline, FilmOutline, TvOutline, LayersOutline, CheckmarkCircleOutline as CheckIcon,
   FlashOutline as FlashIcon } from '@vicons/ionicons5';
 import { use } from 'echarts/core';
@@ -432,7 +441,7 @@ const loading = reactive({
 });
 
 const stats = reactive({
-  media_library: { cached_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, resolution_stats: [] },
+  media_library: { cached_total: 0, mediainfo_backed_up_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, resolution_stats: [] },
   system: { actor_mappings_total: 0, actor_mappings_linked: 0, actor_mappings_unlinked: 0, translation_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
   subscriptions_card: {
     watchlist: { watching: 0, paused: 0, completed: 0 },
@@ -455,8 +464,13 @@ const themeVars = useThemeVars();
 const fetchCore = async () => {
   try {
     const res = await axios.get('/api/database/stats/core');
-    if (res.data.status === 'success') Object.assign(stats.media_library, { cached_total: res.data.data.media_cached_total });
-    if (res.data.status === 'success') Object.assign(stats.system, { actor_mappings_total: res.data.data.actor_mappings_total });
+    if (res.data.status === 'success') {
+      Object.assign(stats.media_library, { 
+        cached_total: res.data.data.media_cached_total,
+        mediainfo_backed_up_total: res.data.data.mediainfo_backed_up_total
+      });
+      Object.assign(stats.system, { actor_mappings_total: res.data.data.actor_mappings_total });
+    }
   } catch (e) { console.error(e); } finally { loading.core = false; }
 };
 const fetchLibrary = async () => {
@@ -469,7 +483,6 @@ const fetchSystem = async () => {
   try {
     const res = await axios.get('/api/database/stats/system');
     if (res.data.status === 'success') {
-      // 确保 actor_mappings_linked 被正确赋值
       Object.assign(stats.system, res.data.data);
     }
   } catch (e) { console.error(e); } finally { loading.system = false; }
@@ -499,7 +512,6 @@ const resolutionChartOptions = computed(() => {
   return {
     color: [ '#5470C6', '#91CC75', '#FAC858', '#73C0DE' ],
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    // 移动端隐藏图例，PC端显示
     legend: {
       show: !isMobile.value,
       orient: 'vertical',
@@ -512,7 +524,6 @@ const resolutionChartOptions = computed(() => {
       {
         name: '分辨率',
         type: 'pie',
-        // 移动端居中，PC端靠右
         radius: isMobile.value ? ['40%', '60%'] : ['50%', '70%'],
         center: isMobile.value ? ['50%', '50%'] : ['70%', '50%'],
         avoidLabelOverlap: false,
@@ -574,7 +585,7 @@ onUnmounted(() => {
 .quota-label-container { display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; color: var(--n-text-color-2); }
 
 /* Mobile 端专用样式 */
-.mobile-stat-value { font-size: 1.5em; font-weight: 600; }
+.mobile-stat-value { font-size: 1.3em; font-weight: 600; }
 .mobile-label { font-size: 12px; color: var(--n-text-color-3); }
 .mobile-value { font-size: 18px; font-weight: 600; }
 .mobile-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }

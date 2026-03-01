@@ -105,6 +105,7 @@ def get_stats_core() -> dict:
     sql = """
     SELECT
         (SELECT COUNT(*) FROM media_metadata WHERE item_type IN ('Movie', 'Series')) AS media_cached_total,
+        (SELECT COUNT(*) FROM p115_mediainfo_cache) AS mediainfo_backed_up_total,
         (SELECT COUNT(*) FROM person_identity_map) AS actor_mappings_total
     """
     return _execute_single_row_query(sql)
