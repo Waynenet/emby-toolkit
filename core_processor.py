@@ -1402,7 +1402,7 @@ class MediaProcessor:
             logger.info(f"  ➜ 成功将 {len(data_for_batch)} 条层级元数据记录批量写入数据库。")
 
             # ==================================================================
-            # ★ 将分离出来的媒体信息写入独立指纹库
+            # ★ 将分离出来的媒体信息写入数据库
             # ==================================================================
             if mediainfo_to_upsert:
                 # 去重，防止同一个 SHA1 在同一次批处理中重复
@@ -1416,7 +1416,7 @@ class MediaProcessor:
                         mediainfo_json = EXCLUDED.mediainfo_json
                 """
                 execute_batch(cursor, sql_mediainfo, batch_data)
-                logger.info(f"  ➜ 成功将 {len(batch_data)} 个媒体指纹分离并存入独立指纹库。")
+                logger.info(f"  ➜ 成功将 {len(batch_data)} 个媒体信息存入数据库。")
 
         except Exception as e:
             logger.error(f"批量写入层级元数据到数据库时失败: {e}", exc_info=True)
