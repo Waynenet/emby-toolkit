@@ -836,7 +836,8 @@ class MediaProcessor:
         item_type: str,
         final_processed_cast: List[Dict[str, Any]],
         source_data_package: Optional[Dict[str, Any]],
-        item_details_from_emby: Optional[Dict[str, Any]] = None
+        item_details_from_emby: Optional[Dict[str, Any]] = None,
+        specific_episode_ids: Optional[List[str]] = None
     ):
         """
         - 实时元数据写入 (终极稳健版)。
@@ -1259,6 +1260,18 @@ class MediaProcessor:
                     except (ValueError, TypeError): continue
 
                     versions_of_episode = episodes_grouped_by_number.get((s_num, e_num))
+
+                    # 追更模式下，跳过非目标分集，避免全量读写 
+                    if specific_episode_ids and not is_pending:
+                        is_target = False
+                        if versions_of_episode:
+                            for v in versions_of_episode:
+                                if str(v.get('Id')) in specific_episode_ids:
+                                    is_target = True
+                                    break
+                        if not is_target:
+                            continue # 不是本次入库的分集，直接跳过！
+
                     final_runtime = get_representative_runtime(versions_of_episode, episode.get('runtime'))
 
                     episode_record = {
@@ -2243,7 +2256,8 @@ class MediaProcessor:
                     item_type=item_type,
                     item_details_from_emby=item_details_from_emby,
                     final_processed_cast=final_processed_cast,
-                    source_data_package=tmdb_details_for_extra
+                    source_data_package=tmdb_details_for_extra,
+                    specific_episode_ids=specific_episode_ids
                 )
                 
                 # 综合质检 (视频流检查 + 演员匹配度评分)
