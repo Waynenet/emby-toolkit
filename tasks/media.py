@@ -1921,24 +1921,30 @@ def task_restore_local_cache_from_db(processor):
 
 def task_scan_incomplete_assets(processor):
     """
-    【新任务 - 终极自愈版】全库扫描资产数据不完整的项目。
-    - 物理文件存在但DB缺失/异常 -> 读取物理文件修复DB。
-    - DB存在完整副本但物理文件缺失 -> 将DB副本写回硬盘恢复物理文件。
+    【新任务 - 终极自愈版 (指纹库解耦)】
+    - 物理文件存在但新表缺失 -> 读取物理文件写入新表。
+    - 新表存在但物理文件缺失 -> 将新表数据写回硬盘恢复物理文件。
     - 双重缺失 -> 标记为待复核，呼叫神医。
     """
-    logger.trace("--- 开始执行全库资产完整性扫描 (自愈版) ---")
+    logger.trace("--- 开始执行全库资产完整性扫描 (指纹库自愈版) ---")
     
     try:
-        # 1. 从数据库获取“嫌疑人” (包含 width=0 或 raw_mediainfo 缺失的)
-        bad_items = media_db.get_items_with_potentially_bad_assets()
-        total = len(bad_items)
+        # 1. 获取所有在库项目
+        with connection.get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT tmdb_id, item_type, title, parent_series_tmdb_id, season_number, episode_number, 
+                       emby_item_ids_json, asset_details_json 
+                FROM media_metadata 
+                WHERE in_library = TRUE AND asset_details_json IS NOT NULL
+            """)
+            all_items = cursor.fetchall()
         
-        if total == 0:
-            logger.info("  ✅ 未发现媒体信息异常的项目。")
-            task_manager.update_status_from_thread(100, "媒体信息扫描完成：无异常")
+        if not all_items:
+            task_manager.update_status_from_thread(100, "无在库项目")
             return
 
-        logger.info(f"  ⚠️ 发现 {total} 个项目的媒体信息可能不完整，正在执行双向自愈复核...")
+        logger.info(f"  ⚠️ 正在扫描 {len(all_items)} 个项目的媒体信息完整性...")
         
         marked_count = 0
         healed_db_count = 0
@@ -1947,15 +1953,15 @@ def task_scan_incomplete_assets(processor):
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
             
-            for i, item in enumerate(bad_items):
+            for i, item in enumerate(all_items):
+                if processor.is_stop_requested(): break
+                
                 raw_assets = item['asset_details_json']
                 assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
                 
                 is_valid = False
                 fail_reason = "缺失文件路径"
-                db_needs_update = False
                 
-                # 获取当前项的 Emby ID (用于从 Emby 拉取最新数据以修复 DB)
                 current_emby_id = None
                 e_ids = item.get('emby_item_ids_json')
                 if e_ids:
@@ -1965,121 +1971,166 @@ def task_scan_incomplete_assets(processor):
                     if isinstance(e_ids, list) and len(e_ids) > 0:
                         current_emby_id = e_ids[0]
 
-                for asset_idx, asset in enumerate(assets):
+                for asset in assets:
                     file_path = asset.get('path')
-                    raw_mediainfo = asset.get('raw_mediainfo')
-                    
                     if file_path:
                         mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                        
-                        # 1. 状态评估：绝对纯粹，只认神医的产物
                         phys_exists = os.path.exists(mediainfo_path)
-                        has_raw = bool(raw_mediainfo and isinstance(raw_mediainfo, list) and len(raw_mediainfo) > 0)
                         
-                        # 只要数据库里有完整的 raw_mediainfo 副本，就认为数据库是健康的
-                        db_is_healthy = has_raw
+                        # 1. 提取 PC 和 SHA1
+                        pc = processor._extract_pickcode_from_strm(file_path)
+                        sha1 = processor._get_sha1_by_pickcode(pc)
+                        
+                        db_has_raw = False
+                        raw_mediainfo = None
+                        
+                        # 2. 查新表
+                        if sha1:
+                            cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (sha1,))
+                            row = cursor.fetchone()
+                            if row and row['mediainfo_json']:
+                                db_has_raw = True
+                                raw_mediainfo = row['mediainfo_json']
 
                         # =========================================================
                         # ★★★ 核心自愈逻辑 ★★★
                         # =========================================================
                         
-                        # 动作 A: 物理文件缺失，但数据库有副本 -> 恢复物理文件
-                        if not phys_exists and has_raw:
+                        # 动作 A: 物理文件缺失，但新表有副本 -> 恢复物理文件
+                        if not phys_exists and db_has_raw:
                             logger.info(f"  🔧 [自愈] 恢复媒体信息JSON: {os.path.basename(mediainfo_path)}")
                             try:
                                 os.makedirs(os.path.dirname(mediainfo_path), exist_ok=True)
                                 with open(mediainfo_path, 'w', encoding='utf-8') as f:
                                     json.dump(raw_mediainfo, f, ensure_ascii=False, indent=2)
-                                phys_exists = True # 标记为已存在，以便后续可能继续修复 DB
+                                phys_exists = True
                                 healed_file_count += 1
-                            except Exception as e:
-                                fail_reason = f"恢复物理文件失败: {e}"
-                                continue # 无法恢复，看下一个版本
-
-                        # 动作 B: 物理文件存在 (原本就在或刚恢复的)，但数据库不健康 -> 修复数据库
-                        if phys_exists:
-                            if not db_is_healthy:
-                                logger.info(f"  🔧 [自愈] 修复数据库媒体信息: {os.path.basename(mediainfo_path)}")
-                                if current_emby_id:
-                                    item_details = emby.get_emby_item_details(
-                                        current_emby_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id,
-                                        fields="Path,MediaSources"
-                                    )
-                                    if item_details:
-                                        # 重新解析资产 (会读取物理文件)
-                                        new_asset = parse_full_asset_details(item_details, local_mediainfo_path=mediainfo_path)
-                                        new_asset['source_library_id'] = asset.get('source_library_id')
-                                        assets[asset_idx] = new_asset
-                                        db_needs_update = True
-                                        is_valid = True
-                                        healed_db_count += 1
-                                        break
-                                    else:
-                                        fail_reason = "无法从 Emby 获取详情以修复数据库"
-                                else:
-                                    fail_reason = "缺少 Emby ID 无法修复数据库"
-                            else:
-                                # 完美状态
                                 is_valid = True
                                 break
+                            except Exception as e:
+                                fail_reason = f"恢复物理文件失败: {e}"
+                                continue
+
+                        # 动作 B: 物理文件存在，但新表缺失 -> 读取物理文件写入新表
+                        elif phys_exists and not db_has_raw and sha1:
+                            logger.info(f"  🔧 [自愈] 提取本地JSON存入指纹库: {os.path.basename(mediainfo_path)}")
+                            try:
+                                with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                                    local_raw = json.load(f)
+                                if local_raw and isinstance(local_raw, list):
+                                    cursor.execute("""
+                                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
+                                        VALUES (%s, %s::jsonb)
+                                        ON CONFLICT (sha1) DO NOTHING
+                                    """, (sha1, json.dumps(local_raw, ensure_ascii=False)))
+                                    healed_db_count += 1
+                                is_valid = True
+                                break
+                            except Exception as e:
+                                fail_reason = f"读取本地JSON失败: {e}"
+                                continue
+                                
+                        elif phys_exists and db_has_raw:
+                            is_valid = True
+                            break
                         else:
                             fail_reason = "缺失媒体信息"
                 
-                # 如果执行了自愈并更新了 assets，写回数据库
-                if db_needs_update:
-                    try:
-                        cursor.execute(
-                            "UPDATE media_metadata SET asset_details_json = %s::jsonb WHERE tmdb_id = %s AND item_type = %s",
-                            (json.dumps(assets, ensure_ascii=False), item['tmdb_id'], item['item_type'])
-                        )
-                    except Exception as e:
-                        logger.error(f"  ❌ 更新数据库资产失败: {e}")
-                        is_valid = False
-                        fail_reason = "数据库更新写入失败"
-
                 # 如果双向自愈都救不回来，打入冷宫
                 if not is_valid:
-                    target_log_id = None
+                    target_log_id = current_emby_id if item['item_type'] == 'Movie' else item['parent_series_tmdb_id']
                     target_name = item['title']
-                    target_type = item['item_type']
-                    final_reason = fail_reason
-                    
-                    if item['item_type'] == 'Movie':
-                        target_log_id = current_emby_id
-                    elif item['item_type'] == 'Episode':
-                        p_ids = item.get('parent_emby_ids_json')
-                        if p_ids:
-                            if isinstance(p_ids, str):
-                                try: p_ids = json.loads(p_ids)
-                                except: p_ids = []
-                            if isinstance(p_ids, list) and len(p_ids) > 0:
-                                target_log_id = p_ids[0]
-                            
-                        if item.get('parent_title'):
-                            target_name = item['parent_title']
-                        target_type = 'Series'
-                        final_reason = f"[S{item['season_number']}E{item['episode_number']}] {fail_reason}"
+                    target_type = 'Series' if item['item_type'] == 'Episode' else 'Movie'
+                    final_reason = f"[S{item['season_number']}E{item['episode_number']}] {fail_reason}" if item['item_type'] == 'Episode' else fail_reason
 
-                    if not target_log_id:
-                        target_log_id = item['parent_series_tmdb_id'] if item['item_type'] == 'Episode' else item['tmdb_id']
-
-                    processor.log_db_manager.save_to_failed_log(
-                        cursor, target_log_id, target_name, 
-                        f"资产残缺: {final_reason}", 
-                        target_type, score=0.0
-                    )
-                    processor.log_db_manager.save_to_processed_log(cursor, target_log_id, target_name, score=0.0)
-                    marked_count += 1
-                    
-                    if i % 10 == 0:
-                        logger.info(f"  ➜ [标记复核] {target_name} (ID: {target_log_id}): {final_reason}")
+                    if target_log_id:
+                        processor.log_db_manager.save_to_failed_log(
+                            cursor, target_log_id, target_name, 
+                            f"资产残缺: {final_reason}", 
+                            target_type, score=0.0
+                        )
+                        processor.log_db_manager.save_to_processed_log(cursor, target_log_id, target_name, score=0.0)
+                        marked_count += 1
+                        
+                        if marked_count % 10 == 0:
+                            logger.info(f"  ➜ [标记复核] {target_name} (ID: {target_log_id}): {final_reason}")
 
             conn.commit()
 
-        msg = f"扫描完成。修复DB: {healed_db_count}个, 恢复文件: {healed_file_count}个。标记待复核: {marked_count}个。"
+        msg = f"扫描完成。提取入库: {healed_db_count}个, 恢复文件: {healed_file_count}个。标记待复核: {marked_count}个。"
         logger.info(f"  ✅ {msg}")
         task_manager.update_status_from_thread(100, msg)
 
     except Exception as e:
         logger.error(f"执行资产扫描任务失败: {e}", exc_info=True)
+        task_manager.update_status_from_thread(-1, "任务失败")
+
+def task_backup_mediainfo(processor):
+    """
+    遍历本地媒体库，提取存量媒体信息指纹。
+    读取 .strm 拿 PC，查 p115_filesystem_cache 拿 SHA1，读取 -mediainfo.json 存入新表。
+    """
+    logger.info("--- 开始执行存量媒体信息指纹提取任务 ---")
+    
+    local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+    if not local_root or not os.path.exists(local_root):
+        logger.error("  ❌ 未配置本地 STRM 根目录或目录不存在。")
+        task_manager.update_status_from_thread(100, "目录不存在")
+        return
+
+    found_count = 0
+    inserted_count = 0
+    
+    try:
+        with connection.get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            for dirpath, _, filenames in os.walk(local_root):
+                if processor.is_stop_requested(): break
+                
+                for filename in filenames:
+                    if not filename.lower().endswith('.strm'): continue
+                    
+                    strm_path = os.path.join(dirpath, filename)
+                    mediainfo_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
+                    
+                    if not os.path.exists(mediainfo_path): continue
+                    
+                    found_count += 1
+                    if found_count % 500 == 0:
+                        task_manager.update_status_from_thread(50, f"正在扫描本地文件... 已发现 {found_count} 个")
+                    
+                    # 1. 抠 PC
+                    pc = processor._extract_pickcode_from_strm(strm_path)
+                    if not pc: continue
+                    
+                    # 2. 查 SHA1
+                    sha1 = processor._get_sha1_by_pickcode(pc)
+                    if not sha1: continue
+                    
+                    # 3. 读 JSON 并存入新表
+                    try:
+                        with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                            raw_info = json.load(f)
+                            
+                        if raw_info and isinstance(raw_info, list):
+                            cursor.execute("""
+                                INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
+                                VALUES (%s, %s::jsonb)
+                                ON CONFLICT (sha1) DO NOTHING
+                            """, (sha1, json.dumps(raw_info, ensure_ascii=False)))
+                            
+                            if cursor.rowcount > 0:
+                                inserted_count += 1
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ 读取或写入失败 {filename}: {e}")
+            
+            conn.commit()
+            
+        msg = f"指纹提取完成！共扫描到 {found_count} 个本地文件，成功提取并入库 {inserted_count} 个全新指纹。"
+        logger.info(f"  ✅ {msg}")
+        task_manager.update_status_from_thread(100, msg)
+        
+    except Exception as e:
+        logger.error(f"提取指纹任务失败: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, "任务失败")
