@@ -849,7 +849,7 @@ def proxy_all(path):
                                 player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
                                 client_ip = request.headers.get('X-Real-IP', request.remote_addr)
                                 real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                                break
+                                break # <--- 找到直链就跳出循环
             except Exception as e:
                 logger.error(f"[STREAM] 获取 115 直链失败: {e}")
             
@@ -922,6 +922,8 @@ def proxy_all(path):
                             strm_url = source.get('Path', '')
                             if isinstance(strm_url, str):
                                 pick_code = None
+                                real_115_cdn_url = None
+
                                 if '/api/p115/play/' in strm_url:
                                     pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
                                 else:
@@ -934,18 +936,17 @@ def proxy_all(path):
                                     client_ip = request.headers.get('X-Real-IP', request.remote_addr)
                                     real_115_cdn_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                                 
-                                # 只有非浏览器（本地客户端如 Android TV, Infuse 等）才进行劫持
-                                # 保持 Emby 原生的 .strm 逻辑，让客户端自己去请求流，然后我们在上面的拦截 H 处给它 302 重定向。
-                                source['RemoteUrl'] = real_115_cdn_url
-                                source['Path'] = real_115_cdn_url
-                                source['IsRemote'] = True
-                                source.pop('TranscodingUrl', None)
-                                source['Protocol'] = 'Http'
-                                source['SupportsDirectPlay'] = True
-                                source['SupportsDirectStream'] = True
-                                source['SupportsTranscoding'] = False
-                                # logger.info(f"  ✅ [PlaybackInfo] 识别为本地客户端，已注入 115 直链")
-                                modified = True
+                                # ★★★ 只有成功获取到直链，才进行劫持注入 ★★★
+                                if real_115_cdn_url:
+                                    source['RemoteUrl'] = real_115_cdn_url
+                                    source['Path'] = real_115_cdn_url
+                                    source['IsRemote'] = True
+                                    source.pop('TranscodingUrl', None)
+                                    source['Protocol'] = 'Http'
+                                    source['SupportsDirectPlay'] = True
+                                    source['SupportsDirectStream'] = True
+                                    source['SupportsTranscoding'] = False
+                                    modified = True
                     # else: 浏览器直接跳过，不获取115直链
                             
                     if modified:

@@ -1304,10 +1304,13 @@ def get_missing_mediainfo_assets() -> List[Dict[str, Any]]:
         return []
 
 def get_pickcode_by_emby_id(emby_id: str) -> Optional[str]:
-    """根据 Emby ID 获取对应的 115 PickCode"""
+    """
+    【增强版】根据 Emby ID 获取对应的 115 PickCode。
+    如果直接查不到 PC 码，尝试通过 SHA1 去 115 缓存表里反查。
+    """
     if not emby_id: return None
     sql = """
-        SELECT file_pickcode_json 
+        SELECT file_pickcode_json, file_sha1_json
         FROM media_metadata 
         WHERE emby_item_ids_json @> %s::jsonb 
         LIMIT 1
@@ -1317,12 +1320,24 @@ def get_pickcode_by_emby_id(emby_id: str) -> Optional[str]:
             with conn.cursor() as cursor:
                 cursor.execute(sql, (json.dumps([emby_id]),))
                 row = cursor.fetchone()
-                if row and row['file_pickcode_json']:
-                    pcs = row['file_pickcode_json']
-                    if isinstance(pcs, list):
-                        # 返回第一个有效的 PC 码
-                        for pc in pcs:
-                            if pc: return pc
+                if not row: return None
+
+                # 1. 优先直接获取 PC 码
+                pcs = row['file_pickcode_json']
+                if isinstance(pcs, list):
+                    for pc in pcs:
+                        if pc: return pc
+                
+                # 2. 曲线救国：如果没 PC 码，但有 SHA1，去缓存表里反查 PC 码！
+                sha1s = row['file_sha1_json']
+                if isinstance(sha1s, list):
+                    for sha1 in sha1s:
+                        if sha1:
+                            cursor.execute("SELECT pick_code FROM p115_filesystem_cache WHERE sha1 = %s AND pick_code IS NOT NULL LIMIT 1", (sha1,))
+                            cache_row = cursor.fetchone()
+                            if cache_row and cache_row['pick_code']:
+                                logger.debug(f"  🔍 [反代查询] 通过 SHA1 成功反查到 PC 码: {cache_row['pick_code']}")
+                                return cache_row['pick_code']
     except Exception as e:
         logger.error(f"DB: 根据 Emby ID 获取 PC 码失败: {e}")
     return None
