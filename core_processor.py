@@ -2384,7 +2384,7 @@ class MediaProcessor:
                 conn.commit()
 
             # 只有电影和剧集才需要刷新向量库，分集(Episode)入库不影响整体推荐，跳过以节省资源
-            is_pure_episode_update = (item_type == 'Series' and specific_episode_ids)
+            # is_pure_episode_update = (item_type == 'Series' and specific_episode_ids)
 
             # if item_type in ['Movie', 'Series'] and not is_pure_episode_update and \
             #    self.config.get(constants.CONFIG_OPTION_PROXY_ENABLED) and \
