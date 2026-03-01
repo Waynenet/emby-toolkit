@@ -1015,7 +1015,8 @@ class MediaProcessor:
                             asset_details['source_library_id'] = source_lib_id
 
                             raw_info = asset_details.pop('raw_mediainfo', None)
-                            if raw_info and file_sha1:
+                            # ★ 强校验：必须是列表且有内容才存入指纹库
+                            if raw_info and isinstance(raw_info, list) and len(raw_info) > 0 and file_sha1:
                                 mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                             
                             all_assets.append(asset_details)
@@ -1038,7 +1039,8 @@ class MediaProcessor:
                         asset_details['source_library_id'] = source_lib_id
 
                         raw_info = asset_details.pop('raw_mediainfo', None)
-                        if raw_info and file_sha1:
+                        # ★ 强校验：必须是列表且有内容才存入指纹库
+                        if raw_info and isinstance(raw_info, list) and len(raw_info) > 0 and file_sha1:
                             mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                         
                         all_assets.append(asset_details)
@@ -1311,7 +1313,8 @@ class MediaProcessor:
                             details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                             raw_info = details.pop('raw_mediainfo', None)
-                            if raw_info and file_sha1:
+                            # ★ 强校验：必须是列表且有内容才存入指纹库
+                            if raw_info and isinstance(raw_info, list) and len(raw_info) > 0 and file_sha1:
                                 mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                             
                             all_assets.append(details)
