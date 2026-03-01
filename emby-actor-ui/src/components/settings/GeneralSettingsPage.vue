@@ -1659,7 +1659,8 @@ const tableInfo = {
   'user_templates': { cn: '用户权限模板', isSharable: false },
   'invitations': { cn: '邀请链接', isSharable: false },
   'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
-  'p115_filesystem_cache': { cn: '115目录缓存', isSharable: true }
+  'p115_filesystem_cache': { cn: '115目录缓存', isSharable: false },
+  'p115_mediainfo_cache': {cn: '媒体信息缓存', isSharable: true }
 };
 const tableDependencies = {
   'emby_users': ['user_media_data', 'emby_users_extended'],
