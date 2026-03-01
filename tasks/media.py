@@ -2054,3 +2054,81 @@ def task_backup_mediainfo(processor):
     except Exception as e:
         logger.error(f"执行备份任务失败: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, "任务失败")
+
+def task_restore_mediainfo(processor):
+    """
+    【恢复媒体信息任务】
+    遍历本地媒体库，查找缺少 -mediainfo.json 的 .strm 文件。
+    提取 PC 码或文件名，从数据库指纹库中还原媒体信息。
+    """
+    logger.info("--- 开始执行媒体信息还原任务 ---")
+    task_manager.update_status_from_thread(0, "正在扫描本地媒体库目录...")
+    
+    local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+    if not local_root or not os.path.exists(local_root):
+        task_manager.update_status_from_thread(100, "未配置本地媒体库目录或目录不存在")
+        return
+        
+    # 1. 收集所有需要恢复的 strm 文件路径
+    strm_files_to_restore = []
+    for root, _, files in os.walk(local_root):
+        if processor.is_stop_requested(): return
+        for file in files:
+            if file.lower().endswith('.strm'):
+                strm_path = os.path.join(root, file)
+                json_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
+                # 如果同名 json 不存在，说明缺失
+                if not os.path.exists(json_path):
+                    strm_files_to_restore.append(strm_path)
+                    
+    total = len(strm_files_to_restore)
+    if total == 0:
+        task_manager.update_status_from_thread(100, "本地媒体库完整，无需还原媒体信息")
+        return
+        
+    logger.info(f"  ➜ 发现 {total} 个缺失媒体信息的媒体项，准备还原...")
+    
+    restored_count = 0
+    failed_count = 0
+    
+    for i, strm_path in enumerate(strm_files_to_restore):
+        if processor.is_stop_requested(): break
+        
+        if i % 10 == 0:
+            task_manager.update_status_from_thread(int((i/total)*100), f"正在还原 ({i+1}/{total})...")
+            
+        filename = os.path.basename(strm_path)
+        
+        # 2. 尝试从 STRM 提取 PC 码
+        pickcode = None
+        try:
+            with open(strm_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content.startswith('http'):
+                    pickcode = content.rstrip('/').split('/')[-1]
+        except Exception as e:
+            logger.warning(f"  ⚠️ 读取 STRM 失败 {strm_path}: {e}")
+            
+        # 提取文件名前缀 (例如 "Avatar (2009)")
+        video_name_prefix = os.path.splitext(filename)[0]
+        
+        # 3. 召唤数据库指纹查询大法
+        mediainfo = media_db.get_mediainfo_by_pc_or_prefix(pickcode, video_name_prefix)
+        
+        # 4. 写入本地文件
+        if mediainfo:
+            json_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
+            try:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(mediainfo, f, ensure_ascii=False)
+                restored_count += 1
+                logger.debug(f"  ✅ 成功还原媒体信息: {filename}")
+            except Exception as e:
+                logger.error(f"  ❌ 写入 JSON 失败 {json_path}: {e}")
+                failed_count += 1
+        else:
+            failed_count += 1
+            
+    msg = f"还原任务完成！成功还原: {restored_count} 个，未找到备份: {failed_count} 个。"
+    logger.info(f"  ✅ {msg}")
+    task_manager.update_status_from_thread(100, msg)
