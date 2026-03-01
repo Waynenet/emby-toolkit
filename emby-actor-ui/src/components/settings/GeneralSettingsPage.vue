@@ -335,10 +335,10 @@
                       </template>
                     </n-form-item>
 
-                    <n-form-item label="ETK 内部访问地址" path="etk_server_url">
+                    <n-form-item label="STRM 链接地址" path="etk_server_url">
                         <n-input v-model:value="configModel.etk_server_url" placeholder="http://192.168.X.X:5257" />
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">将写入 .strm 文件中，Emby 必须能访问此地址来请求直链</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">将写入 .strm 文件中，Emby 必须能访问此地址，支持http或挂载路径。</n-text>
                         </template>
                     </n-form-item>
 
@@ -362,7 +362,7 @@
                             一键更新本地所有 STRM 链接
                         </n-button>
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">当你修改了“ETK 内部访问地址”后，点击此按钮可批量把本地硬盘里所有的 .strm 文件更新为新地址，省去重刮削的麻烦。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">当你修改了“STRM 链接地址”后，点击此按钮可批量把本地硬盘里所有的 .strm 文件更新为新地址，省去重刮削的麻烦。</n-text>
                         </template>
                     </n-form-item>
                   </n-card>
@@ -409,29 +409,6 @@
                         <n-input v-model:value="configModel.local_strm_root" placeholder="例如: /mnt/media" />
                         <template #feedback>
                             <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件</n-text>
-                        </template>
-                    </n-form-item>
-
-                    <n-form-item label="挂载模式扩展名" path="p115_mount_extensions">
-                      <n-select
-                        v-model:value="configModel.p115_mount_extensions"
-                        multiple
-                        filterable
-                        tag
-                        placeholder="输入扩展名并回车 (如 iso)"
-                        :options="[]" 
-                      />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          命中这些扩展名时，将生成指向本地挂载路径的 STRM (解决原盘无法提取媒体信息的问题)。
-                        </n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="挂载目录前缀" path="p115_mount_prefix">
-                        <n-input v-model:value="configModel.p115_mount_prefix" placeholder="例如: /cd2/115open" />
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">挂载模式 STRM 的绝对路径前缀，将与分类目录拼接。</n-text>
                         </template>
                     </n-form-item>
 

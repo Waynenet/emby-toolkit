@@ -14,7 +14,7 @@ from flask import send_file
 from handler.poster_generator import get_missing_poster
 from gevent import spawn, joinall
 from websocket import create_connection
-from database import custom_collection_db, queries_db
+from database import custom_collection_db, queries_db, media_db
 from database.connection import get_db_connection
 from handler.custom_collection import RecommendationEngine
 import config_manager
@@ -837,12 +837,19 @@ def proxy_all(path):
                     data = resp.json()
                     for source in data.get('MediaSources', []):
                         strm_url = source.get('Path', '')
-                        if isinstance(strm_url, str) and '/api/p115/play/' in strm_url:
-                            pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
-                            player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                            client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                            real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                            break
+                        if isinstance(strm_url, str):
+                            pick_code = None
+                            if '/api/p115/play/' in strm_url:
+                                pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
+                            else:
+                                # 挂载模式：通过 item_id 查库获取 PC 码
+                                pick_code = media_db.get_pickcode_by_emby_id(item_id)
+                            
+                            if pick_code:
+                                player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+                                client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+                                real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
+                                break
             except Exception as e:
                 logger.error(f"[STREAM] 获取 115 直链失败: {e}")
             
@@ -913,12 +920,19 @@ def proxy_all(path):
                     if not is_browser:
                         for source in data.get('MediaSources', []):
                             strm_url = source.get('Path', '')
-                            if isinstance(strm_url, str) and '/api/p115/play/' in strm_url:
-                                pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
-                                
-                                player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                                client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                                real_115_cdn_url = _get_cached_115_url(pick_code, player_ua, client_ip)
+                            if isinstance(strm_url, str):
+                                pick_code = None
+                                if '/api/p115/play/' in strm_url:
+                                    pick_code = strm_url.split('/play/')[-1].split('?')[0].strip()
+                                else:
+                                    # 挂载模式：从请求路径提取 item_id 查库
+                                    item_id = path.split('/')[2]
+                                    pick_code = media_db.get_pickcode_by_emby_id(item_id)
+                                    
+                                if pick_code:
+                                    player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+                                    client_ip = request.headers.get('X-Real-IP', request.remote_addr)
+                                    real_115_cdn_url = _get_cached_115_url(pick_code, player_ua, client_ip)
                                 
                                 # 只有非浏览器（本地客户端如 Android TV, Infuse 等）才进行劫持
                                 # 保持 Emby 原生的 .strm 逻辑，让客户端自己去请求流，然后我们在上面的拦截 H 处给它 302 重定向。

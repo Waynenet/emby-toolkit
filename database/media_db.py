@@ -1303,16 +1303,40 @@ def get_missing_mediainfo_assets() -> List[Dict[str, Any]]:
         logger.error(f"DB: 获取缺失媒体信息的资产失败: {e}")
         return []
 
-# 更新媒体的 SHA1 数组
-def update_media_sha1_json(tmdb_id: str, item_type: str, sha1_list: list):
-    sql = "UPDATE media_metadata SET file_sha1_json = %s::jsonb WHERE tmdb_id = %s AND item_type = %s"
+def get_pickcode_by_emby_id(emby_id: str) -> Optional[str]:
+    """根据 Emby ID 获取对应的 115 PickCode"""
+    if not emby_id: return None
+    sql = """
+        SELECT file_pickcode_json 
+        FROM media_metadata 
+        WHERE emby_item_ids_json @> %s::jsonb 
+        LIMIT 1
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, (json.dumps([emby_id]),))
+                row = cursor.fetchone()
+                if row and row['file_pickcode_json']:
+                    pcs = row['file_pickcode_json']
+                    if isinstance(pcs, list):
+                        # 返回第一个有效的 PC 码
+                        for pc in pcs:
+                            if pc: return pc
+    except Exception as e:
+        logger.error(f"DB: 根据 Emby ID 获取 PC 码失败: {e}")
+    return None
+
+def update_media_sha1_and_pc_json(tmdb_id: str, item_type: str, sha1_list: list, pc_list: list):
+    """同时更新 SHA1 和 PC 码数组"""
+    sql = "UPDATE media_metadata SET file_sha1_json = %s::jsonb, file_pickcode_json = %s::jsonb WHERE tmdb_id = %s AND item_type = %s"
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(sql, (json.dumps(sha1_list, ensure_ascii=False), tmdb_id, item_type))
+            cursor.execute(sql, (json.dumps(sha1_list, ensure_ascii=False), json.dumps(pc_list, ensure_ascii=False), tmdb_id, item_type))
             conn.commit()
     except Exception as e:
-        logger.error(f"DB: 更新 SHA1 失败: {e}")
+        logger.error(f"DB: 更新 SHA1 和 PC 码失败: {e}")
 
 # 检查指纹库中是否已有该 SHA1
 def is_mediainfo_cached(sha1: str) -> bool:

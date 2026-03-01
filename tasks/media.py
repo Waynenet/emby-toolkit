@@ -1986,7 +1986,7 @@ def task_backup_mediainfo(processor):
                 sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
                 assets = item['asset_details_json'] if isinstance(item['asset_details_json'], list) else []
                 
-                needs_sha1_update = False
+                needs_db_update = False
                 
                 for idx, asset in enumerate(assets):
                     current_path = asset.get('path')
@@ -2009,6 +2009,12 @@ def task_backup_mediainfo(processor):
                             logger.warning(f"  ⚠️ 读取 STRM 文件失败 {current_path}: {e}")
                             
                     actual_pc = extracted_pc or current_pc
+
+                    # 如果从 STRM 里提取到了 PC 码，且数据库里没有，则更新 PC 数组
+                    if extracted_pc and current_pc != extracted_pc:
+                        while len(pcs) <= idx: pcs.append(None)
+                        pcs[idx] = extracted_pc
+                        needs_db_update = True
                     
                     # 阶段 1: 补齐缺失的 SHA1
                     if not current_sha1 and actual_pc:
@@ -2070,7 +2076,7 @@ def task_backup_mediainfo(processor):
                                     logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
                 
                 if needs_sha1_update:
-                    media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
+                    media_db.update_media_sha1_and_pc_json(tmdb_id, item_type, sha1s, pcs)
                 
                 if i > 0 and i % 50 == 0:
                     conn.commit()

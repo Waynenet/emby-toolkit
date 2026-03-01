@@ -695,7 +695,7 @@ def fix_strm_files():
     if not local_root or not os.path.exists(local_root):
         return jsonify({"success": False, "message": "未配置本地 STRM 根目录，或该目录在容器中不存在！"}), 400
     if not etk_url:
-        return jsonify({"success": False, "message": "未配置 ETK 内部访问地址！"}), 400
+        return jsonify({"success": False, "message": "未配置 STRM 链接地址！"}), 400
         
     fixed_count = 0
     skipped_count = 0

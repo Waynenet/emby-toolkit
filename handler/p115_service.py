@@ -1389,17 +1389,13 @@ class SmartOrganizer:
                         if is_video:
                             strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                             strm_filepath = os.path.join(local_dir, strm_filename)
-                            # ★★★ 判断是否命中挂载扩展名 ★★★
-                            mount_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_MOUNT_EXTENSIONS, []))
-                            mount_prefix = config.get(constants.CONFIG_OPTION_115_MOUNT_PREFIX, "").rstrip('/')
-                            
-                            if ext in mount_exts and mount_prefix:
-                                # 拼接挂载路径 (前缀 + 相对分类路径 + 主目录 + 季目录 + 文件名)
+                            # ★★★ 判断是否是否挂载 ★★★
+                            if not etk_url.startswith('http'):
+                                mount_prefix = etk_url
                                 if self.media_type == 'tv' and season_num is not None:
                                     mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, s_name, new_filename)
                                 else:
                                     mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, new_filename)
-                                # 统一转换为正斜杠，防止 Windows 路径反斜杠导致 Emby 无法识别
                                 strm_content = mount_path.replace('\\', '/')
                                 logger.debug(f"  💿 [挂载模式] 生成 STRM: {strm_content}")
                             else:
@@ -2190,15 +2186,16 @@ def task_full_sync_strm_and_subs(processor=None):
                         if ext in known_video_exts:
                             strm_name = os.path.splitext(name)[0] + ".strm"
                             strm_path = os.path.join(current_local_path, strm_name)
-                            # ★★★ 判断是否命中挂载扩展名 ★★★
-                            mount_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_MOUNT_EXTENSIONS, []))
-                            mount_prefix = config.get(constants.CONFIG_OPTION_115_MOUNT_PREFIX, "").rstrip('/')
                             
-                            if ext in mount_exts and mount_prefix:
-                                # rel_dir 已经是相对媒体库根目录的完整路径了
+                            # ★★★ 判断是否命中挂载扩展名 ★★★
+                            if not etk_url.startswith('http'):
+                                mount_prefix = etk_url
+                                # 在这个函数里，rel_dir 已经是计算好的完整相对路径了，直接拼上文件名 name 即可
                                 mount_path = os.path.join(mount_prefix, rel_dir, name)
                                 content = mount_path.replace('\\', '/')
+                                logger.debug(f"  💿 [挂载模式] 生成 STRM: {content}")
                             else:
+                                # 默认的 ETK 302 直链模式
                                 content = f"{etk_url}/api/p115/play/{pc}"
                             
                             # ★ 优化：在写入前先判断文件存不存在

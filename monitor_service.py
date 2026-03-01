@@ -155,7 +155,7 @@ def _process_strm_conversions(file_paths: List[str]) -> List[str]:
 
     etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
     if not etk_url:
-        logger.warning("  ⚠️ [实时监控] 开启了 STRM 转换，但未配置 ETK 内部访问地址，跳过转换。")
+        logger.warning("  ⚠️ [实时监控] 开启了 STRM 转换，但未配置 STRM 链接地址，跳过转换。")
         return file_paths
 
     for file_path in file_paths:
