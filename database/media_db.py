@@ -1292,3 +1292,43 @@ def get_dashboard_aggregation_map(emby_ids: List[str]) -> Dict[str, Dict[str, An
     except Exception as e:
         logger.error(f"DB: 获取仪表盘聚合数据失败: {e}", exc_info=True)
         return {}
+    
+# 获取所有在库的媒体资产信息 (用于备份任务)
+def get_all_in_library_assets() -> List[Dict[str, Any]]:
+    sql = """
+        SELECT tmdb_id, item_type, title, file_pickcode_json, file_sha1_json, asset_details_json
+        FROM media_metadata
+        WHERE in_library = TRUE 
+          AND item_type IN ('Movie', 'Episode')
+          AND asset_details_json IS NOT NULL
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error(f"DB: 获取在库资产失败: {e}")
+        return []
+
+# 更新媒体的 SHA1 数组
+def update_media_sha1_json(tmdb_id: str, item_type: str, sha1_list: list):
+    sql = "UPDATE media_metadata SET file_sha1_json = %s::jsonb WHERE tmdb_id = %s AND item_type = %s"
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, (json.dumps(sha1_list, ensure_ascii=False), tmdb_id, item_type))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"DB: 更新 SHA1 失败: {e}")
+
+# 检查指纹库中是否已有该 SHA1
+def is_mediainfo_cached(sha1: str) -> bool:
+    if not sha1: return False
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM p115_mediainfo_cache WHERE sha1 = %s LIMIT 1", (sha1,))
+            return cursor.fetchone() is not None
+    except Exception:
+        return False

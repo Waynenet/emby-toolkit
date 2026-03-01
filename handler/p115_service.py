@@ -467,6 +467,19 @@ class P115CacheManager:
                     return row['local_path'] if row else None
         except Exception:
             return None
+        
+    @staticmethod
+    def get_fid_by_pickcode(pick_code):
+        """通过 PC 码获取文件 FID"""
+        if not pick_code: return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT id FROM p115_filesystem_cache WHERE pick_code = %s LIMIT 1", (pick_code,))
+                    row = cursor.fetchone()
+                    return row['id'] if row else None
+        except Exception:
+            return None
 
     @staticmethod
     def update_local_path(cid, local_path):

@@ -1919,218 +1919,119 @@ def task_restore_local_cache_from_db(processor):
         logger.error(f"执行 '{task_name}' 时发生严重错误: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, f"任务失败: {e}")
 
-def task_scan_incomplete_assets(processor):
-    """
-    【新任务 - 终极自愈版 (指纹库解耦)】
-    - 物理文件存在但新表缺失 -> 读取物理文件写入新表。
-    - 新表存在但物理文件缺失 -> 将新表数据写回硬盘恢复物理文件。
-    - 双重缺失 -> 标记为待复核，呼叫神医。
-    """
-    logger.trace("--- 开始执行全库资产完整性扫描 (指纹库自愈版) ---")
-    
-    try:
-        # 1. 获取所有在库项目
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT tmdb_id, item_type, title, parent_series_tmdb_id, season_number, episode_number, 
-                       emby_item_ids_json, asset_details_json 
-                FROM media_metadata 
-                WHERE in_library = TRUE AND asset_details_json IS NOT NULL
-            """)
-            all_items = cursor.fetchall()
-        
-        if not all_items:
-            task_manager.update_status_from_thread(100, "无在库项目")
-            return
-
-        logger.info(f"  ⚠️ 正在扫描 {len(all_items)} 个项目的媒体信息完整性...")
-        
-        marked_count = 0
-        healed_db_count = 0
-        healed_file_count = 0
-        
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            for i, item in enumerate(all_items):
-                if processor.is_stop_requested(): break
-                
-                raw_assets = item['asset_details_json']
-                assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
-                
-                is_valid = False
-                fail_reason = "缺失文件路径"
-                
-                current_emby_id = None
-                e_ids = item.get('emby_item_ids_json')
-                if e_ids:
-                    if isinstance(e_ids, str):
-                        try: e_ids = json.loads(e_ids)
-                        except: e_ids = []
-                    if isinstance(e_ids, list) and len(e_ids) > 0:
-                        current_emby_id = e_ids[0]
-
-                for asset in assets:
-                    file_path = asset.get('path')
-                    if file_path:
-                        mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                        phys_exists = os.path.exists(mediainfo_path)
-                        
-                        # 1. 提取 PC 和 SHA1
-                        pc = processor._extract_pickcode_from_strm(file_path)
-                        sha1 = processor._get_sha1_by_pickcode(pc)
-                        
-                        db_has_raw = False
-                        raw_mediainfo = None
-                        
-                        # 2. 查新表
-                        if sha1:
-                            cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (sha1,))
-                            row = cursor.fetchone()
-                            if row and row['mediainfo_json']:
-                                db_has_raw = True
-                                raw_mediainfo = row['mediainfo_json']
-
-                        # =========================================================
-                        # ★★★ 核心自愈逻辑 ★★★
-                        # =========================================================
-                        
-                        # 动作 A: 物理文件缺失，但新表有副本 -> 恢复物理文件
-                        if not phys_exists and db_has_raw:
-                            logger.info(f"  🔧 [自愈] 恢复媒体信息JSON: {os.path.basename(mediainfo_path)}")
-                            try:
-                                os.makedirs(os.path.dirname(mediainfo_path), exist_ok=True)
-                                with open(mediainfo_path, 'w', encoding='utf-8') as f:
-                                    json.dump(raw_mediainfo, f, ensure_ascii=False, indent=2)
-                                phys_exists = True
-                                healed_file_count += 1
-                                is_valid = True
-                                break
-                            except Exception as e:
-                                fail_reason = f"恢复物理文件失败: {e}"
-                                continue
-
-                        # 动作 B: 物理文件存在，但新表缺失 -> 读取物理文件写入新表
-                        elif phys_exists and not db_has_raw and sha1:
-                            logger.info(f"  🔧 [自愈] 提取本地JSON存入指纹库: {os.path.basename(mediainfo_path)}")
-                            try:
-                                with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                                    local_raw = json.load(f)
-                                if local_raw and isinstance(local_raw, list):
-                                    cursor.execute("""
-                                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                        VALUES (%s, %s::jsonb)
-                                        ON CONFLICT (sha1) DO NOTHING
-                                    """, (sha1, json.dumps(local_raw, ensure_ascii=False)))
-                                    healed_db_count += 1
-                                is_valid = True
-                                break
-                            except Exception as e:
-                                fail_reason = f"读取本地JSON失败: {e}"
-                                continue
-                                
-                        elif phys_exists and db_has_raw:
-                            is_valid = True
-                            break
-                        else:
-                            fail_reason = "缺失媒体信息"
-                
-                # 如果双向自愈都救不回来，打入冷宫
-                if not is_valid:
-                    target_log_id = current_emby_id if item['item_type'] == 'Movie' else item['parent_series_tmdb_id']
-                    target_name = item['title']
-                    target_type = 'Series' if item['item_type'] == 'Episode' else 'Movie'
-                    final_reason = f"[S{item['season_number']}E{item['episode_number']}] {fail_reason}" if item['item_type'] == 'Episode' else fail_reason
-
-                    if target_log_id:
-                        processor.log_db_manager.save_to_failed_log(
-                            cursor, target_log_id, target_name, 
-                            f"资产残缺: {final_reason}", 
-                            target_type, score=0.0
-                        )
-                        processor.log_db_manager.save_to_processed_log(cursor, target_log_id, target_name, score=0.0)
-                        marked_count += 1
-                        
-                        if marked_count % 10 == 0:
-                            logger.info(f"  ➜ [标记复核] {target_name} (ID: {target_log_id}): {final_reason}")
-
-            conn.commit()
-
-        msg = f"扫描完成。提取入库: {healed_db_count}个, 恢复文件: {healed_file_count}个。标记待复核: {marked_count}个。"
-        logger.info(f"  ✅ {msg}")
-        task_manager.update_status_from_thread(100, msg)
-
-    except Exception as e:
-        logger.error(f"执行资产扫描任务失败: {e}", exc_info=True)
-        task_manager.update_status_from_thread(-1, "任务失败")
-
 def task_backup_mediainfo(processor):
     """
-    遍历本地媒体库，提取存量媒体信息指纹。
-    读取 .strm 拿 PC，查 p115_filesystem_cache 拿 SHA1，读取 -mediainfo.json 存入新表。
+    【终极媒体信息备份任务】
+    1. 获取所有在库媒体项。
+    2. 检查 SHA1，缺失的通过 PC -> FID -> 115 API 补齐并写入 media_metadata。
+    3. 检查 p115_mediainfo_cache，缺失的读取本地 -mediainfo.json 写入指纹库。
+    只单向备份，打造永久资产库！
     """
-    logger.info("--- 开始执行存量媒体信息指纹提取任务 ---")
+    logger.info("--- 开始执行媒体信息单向备份任务 ---")
     
-    local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
-    if not local_root or not os.path.exists(local_root):
-        logger.error("  ❌ 未配置本地 STRM 根目录或目录不存在。")
-        task_manager.update_status_from_thread(100, "目录不存在")
+    # 1. 获取所有在库项目
+    items = media_db.get_all_in_library_assets()
+    if not items:
+        task_manager.update_status_from_thread(100, "无在库项目需要备份")
         return
 
-    found_count = 0
-    inserted_count = 0
+    total = len(items)
+    logger.info(f"  ➜ 共扫描到 {total} 个在库项目，准备执行备份检查...")
+    
+    # 初始化 115 客户端 (用于补齐 SHA1)
+    from handler.p115_service import P115Service, P115CacheManager
+    client = P115Service.get_client()
+    
+    sha1_fixed_count = 0
+    mediainfo_backed_up_count = 0
     
     try:
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
             
-            for dirpath, _, filenames in os.walk(local_root):
+            for i, item in enumerate(items):
                 if processor.is_stop_requested(): break
                 
-                for filename in filenames:
-                    if not filename.lower().endswith('.strm'): continue
-                    
-                    strm_path = os.path.join(dirpath, filename)
-                    mediainfo_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
-                    
-                    if not os.path.exists(mediainfo_path): continue
-                    
-                    found_count += 1
-                    if found_count % 500 == 0:
-                        task_manager.update_status_from_thread(50, f"正在扫描本地文件... 已发现 {found_count} 个")
-                    
-                    # 1. 抠 PC
-                    pc = processor._extract_pickcode_from_strm(strm_path)
+                if i % 50 == 0:
+                    task_manager.update_status_from_thread(int((i/total)*100), f"正在检查备份 ({i}/{total})...")
+                
+                tmdb_id = item['tmdb_id']
+                item_type = item['item_type']
+                title = item['title']
+                
+                # 解析 JSON 字段
+                pcs = item['file_pickcode_json'] if isinstance(item['file_pickcode_json'], list) else []
+                sha1s = item['file_sha1_json'] if isinstance(item['file_sha1_json'], list) else []
+                assets = item['asset_details_json'] if isinstance(item['asset_details_json'], list) else []
+                
+                needs_sha1_update = False
+                
+                # 遍历该媒体的所有版本 (通常只有一个)
+                for idx, pc in enumerate(pcs):
                     if not pc: continue
                     
-                    # 2. 查 SHA1
-                    sha1 = processor._get_sha1_by_pickcode(pc)
-                    if not sha1: continue
+                    # 安全获取当前版本的 SHA1 和 Path
+                    current_sha1 = sha1s[idx] if idx < len(sha1s) else None
+                    current_path = assets[idx].get('path') if idx < len(assets) else None
                     
-                    # 3. 读 JSON 并存入新表
-                    try:
-                        with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                            raw_info = json.load(f)
-                            
-                        if raw_info and isinstance(raw_info, list):
-                            cursor.execute("""
-                                INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                VALUES (%s, %s::jsonb)
-                                ON CONFLICT (sha1) DO NOTHING
-                            """, (sha1, json.dumps(raw_info, ensure_ascii=False)))
-                            
-                            if cursor.rowcount > 0:
-                                inserted_count += 1
-                    except Exception as e:
-                        logger.warning(f"  ⚠️ 读取或写入失败 {filename}: {e}")
+                    # ==========================================
+                    # 阶段 1: 补齐缺失的 SHA1
+                    # ==========================================
+                    if not current_sha1:
+                        logger.info(f"  🔍 [{title}] 缺失 SHA1，正在通过 115 API 补齐...")
+                        fid = P115CacheManager.get_fid_by_pickcode(pc)
+                        if fid and client:
+                            try:
+                                info_res = client.fs_get_info(fid)
+                                if info_res and info_res.get('state'):
+                                    fetched_sha1 = info_res['data'].get('sha1')
+                                    if fetched_sha1:
+                                        current_sha1 = fetched_sha1
+                                        # 补齐数组
+                                        while len(sha1s) <= idx:
+                                            sha1s.append(None)
+                                        sha1s[idx] = current_sha1
+                                        needs_sha1_update = True
+                                        sha1_fixed_count += 1
+                                        logger.info(f"    ✅ 成功获取 SHA1: {current_sha1}")
+                            except Exception as e:
+                                logger.warning(f"    ⚠️ 获取 SHA1 失败: {e}")
+                                
+                    # ==========================================
+                    # 阶段 2: 备份媒体信息到指纹库
+                    # ==========================================
+                    if current_sha1 and current_path:
+                        # 检查指纹库是否已有
+                        if not media_db.is_mediainfo_cached(current_sha1):
+                            mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
+                            if os.path.exists(mediainfo_path):
+                                try:
+                                    with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                                        raw_info = json.load(f)
+                                        
+                                    if raw_info and isinstance(raw_info, list):
+                                        cursor.execute("""
+                                            INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
+                                            VALUES (%s, %s::jsonb)
+                                            ON CONFLICT (sha1) DO NOTHING
+                                        """, (current_sha1, json.dumps(raw_info, ensure_ascii=False)))
+                                        
+                                        if cursor.rowcount > 0:
+                                            mediainfo_backed_up_count += 1
+                                            logger.debug(f"  💾 [{title}] 媒体信息已成功备份至指纹库。")
+                                except Exception as e:
+                                    logger.warning(f"  ⚠️ 读取本地 JSON 失败 {mediainfo_path}: {e}")
+                
+                # 如果补齐了 SHA1，更新回 media_metadata
+                if needs_sha1_update:
+                    media_db.update_media_sha1_json(tmdb_id, item_type, sha1s)
             
             conn.commit()
             
-        msg = f"指纹提取完成！共扫描到 {found_count} 个本地文件，成功提取并入库 {inserted_count} 个全新指纹。"
+        msg = f"备份任务完成！补齐 SHA1: {sha1_fixed_count} 个，成功备份媒体信息: {mediainfo_backed_up_count} 个。"
         logger.info(f"  ✅ {msg}")
         task_manager.update_status_from_thread(100, msg)
         
     except Exception as e:
-        logger.error(f"提取指纹任务失败: {e}", exc_info=True)
+        logger.error(f"执行备份任务失败: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, "任务失败")
