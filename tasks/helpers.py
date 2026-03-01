@@ -1675,6 +1675,13 @@ def convert_strm_content_to_etk(content: str, etk_url: str) -> Tuple[bool, Optio
         if match:
             pick_code = match.group(1)
 
+    # --- 新增 模式 4: MH  格式 ---
+    # 示例: http://.../videoPlayUrl?fileId=bd7m16whkjpg48w4r&account=...
+    elif 'fileid=' in content.lower():
+        match = re.search(r'fileid=([a-zA-Z0-9]+)', content, re.IGNORECASE)
+        if match:
+            pick_code = match.group(1)
+
     # 如果提取到了 pick_code，拼接为标准格式
     if pick_code:
         logger.info(f"  ➜ [ETK链接转换] 识别到第三方STRM，正在转换为标准 ETK 链接...")
