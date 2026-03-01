@@ -931,6 +931,7 @@ class MediaProcessor:
                 return
 
             records_to_upsert = []
+            mediainfo_to_upsert = []
 
             # 生成向量逻辑
             overview_embedding_json = None
@@ -992,6 +993,10 @@ class MediaProcessor:
                                 local_mediainfo_path=mediainfo_path 
                             )
                             asset_details['source_library_id'] = source_lib_id
+
+                            raw_info = asset_details.pop('raw_mediainfo', None)
+                            if raw_info and file_sha1:
+                                mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                             
                             all_assets.append(asset_details)
                             if file_pc: all_pcs.append(file_pc)
@@ -1011,6 +1016,10 @@ class MediaProcessor:
                             local_mediainfo_path=mediainfo_path 
                         )
                         asset_details['source_library_id'] = source_lib_id
+
+                        raw_info = asset_details.pop('raw_mediainfo', None)
+                        if raw_info and file_sha1:
+                            mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                         
                         all_assets.append(asset_details)
                         if file_pc: all_pcs.append(file_pc)
@@ -1263,6 +1272,10 @@ class MediaProcessor:
                                 local_mediainfo_path=mediainfo_path
                             )
                             details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
+
+                            raw_info = details.pop('raw_mediainfo', None)
+                            if raw_info and file_sha1:
+                                mediainfo_to_upsert.append((file_sha1, json.dumps(raw_info, ensure_ascii=False)))
                             
                             all_assets.append(details)
                             all_ids.append(version.get('Id'))
@@ -1370,6 +1383,23 @@ class MediaProcessor:
             
             execute_batch(cursor, sql, data_for_batch)
             logger.info(f"  ➜ 成功将 {len(data_for_batch)} 条层级元数据记录批量写入数据库。")
+
+            # ==================================================================
+            # ★ 将分离出来的媒体信息写入独立指纹库
+            # ==================================================================
+            if mediainfo_to_upsert:
+                # 去重，防止同一个 SHA1 在同一次批处理中重复
+                unique_mediainfo = {sha1: info_json for sha1, info_json in mediainfo_to_upsert}
+                batch_data = [(sha1, info_json) for sha1, info_json in unique_mediainfo.items()]
+                
+                sql_mediainfo = """
+                    INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (sha1) DO UPDATE SET 
+                        mediainfo_json = EXCLUDED.mediainfo_json
+                """
+                execute_batch(cursor, sql_mediainfo, batch_data)
+                logger.info(f"  ➜ 成功将 {len(batch_data)} 个媒体指纹分离并存入独立指纹库。")
 
         except Exception as e:
             logger.error(f"批量写入层级元数据到数据库时失败: {e}", exc_info=True)

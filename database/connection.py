@@ -419,6 +419,16 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'p115_mediainfo_cache' 表 (独立媒体信息指纹库)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS p115_mediainfo_cache (
+                        sha1 TEXT PRIMARY KEY,
+                        mediainfo_json JSONB NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        hit_count INTEGER DEFAULT 0
+                    )
+                """)
+
                 # ======================================================================
                 # ★★★ 数据库平滑升级 (START) ★★★
                 # 此处代码用于新增在新版本中添加的列。

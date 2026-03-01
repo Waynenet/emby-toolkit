@@ -1416,22 +1416,24 @@ class SmartOrganizer:
                                 try:
                                     with get_db_connection() as conn:
                                         with conn.cursor() as cursor:
+                                            # ★ 极速指纹库查询
                                             cursor.execute("""
-                                                SELECT asset_details_json FROM media_metadata 
-                                                WHERE file_sha1_json @> %s::jsonb LIMIT 1
-                                            """, (json.dumps([file_sha1]),))
+                                                SELECT mediainfo_json FROM p115_mediainfo_cache 
+                                                WHERE sha1 = %s LIMIT 1
+                                            """, (file_sha1,))
                                             row = cursor.fetchone()
-                                            if row and row['asset_details_json']:
-                                                assets = row['asset_details_json']
-                                                for asset in assets:
-                                                    raw_info = asset.get('raw_mediainfo')
-                                                    # ★ 严格校验：必须是列表且有内容
-                                                    if raw_info and isinstance(raw_info, list) and len(raw_info) > 0:
-                                                        mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
-                                                        with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
-                                                            json.dump(raw_info, f_json, ensure_ascii=False)
-                                                        logger.info(f"  ⚡ 发现相同 SHA1，已生成媒体信息文件: {os.path.basename(mediainfo_path)}")
-                                                        break
+                                            if row and row['mediainfo_json']:
+                                                raw_info = row['mediainfo_json']
+                                                if isinstance(raw_info, list) and len(raw_info) > 0:
+                                                    mediainfo_path = os.path.join(local_dir, os.path.splitext(new_filename)[0] + "-mediainfo.json")
+                                                    with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
+                                                        json.dump(raw_info, f_json, ensure_ascii=False)
+                                                    
+                                                    # 更新命中次数
+                                                    cursor.execute("UPDATE p115_mediainfo_cache SET hit_count = hit_count + 1 WHERE sha1 = %s", (file_sha1,))
+                                                    conn.commit()
+                                                    
+                                                    logger.info(f"  ⚡ [指纹库秒传] 匹配到相同 SHA1，极速生成媒体信息: {os.path.basename(mediainfo_path)}")
                                 except Exception as e_sha1:
                                     logger.warning(f"  ⚠️ 尝试秒传媒体信息失败: {e_sha1}")
                             
@@ -2218,24 +2220,22 @@ def task_full_sync_strm_and_subs(processor=None):
                                 try:
                                     with get_db_connection() as conn:
                                         with conn.cursor() as cursor:
-                                            # 跨账号秒传：只要库里有这个 SHA1，直接把神医 JSON 吐出来！
                                             cursor.execute("""
-                                                SELECT asset_details_json FROM media_metadata 
-                                                WHERE file_sha1_json @> %s::jsonb LIMIT 1
-                                            """, (json.dumps([file_sha1]),))
+                                                SELECT mediainfo_json FROM p115_mediainfo_cache 
+                                                WHERE sha1 = %s LIMIT 1
+                                            """, (file_sha1,))
                                             row = cursor.fetchone()
-                                            if row and row['asset_details_json']:
-                                                assets = row['asset_details_json']
-                                                for asset in assets:
-                                                    raw_info = asset.get('raw_mediainfo')
-                                                    # ★ 严格校验：必须是列表且有内容
-                                                    if raw_info and isinstance(raw_info, list) and len(raw_info) > 0:
-                                                        mediainfo_path = os.path.join(current_local_path, os.path.splitext(name)[0] + "-mediainfo.json")
-                                                        if not os.path.exists(mediainfo_path):
-                                                            with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
-                                                                json.dump(raw_info, f_json, ensure_ascii=False)
-                                                            logger.debug(f"  ⚡ [跨号秒传] 匹配到相同 SHA1，自动生成媒体信息: {os.path.basename(mediainfo_path)}")
-                                                        break
+                                            if row and row['mediainfo_json']:
+                                                raw_info = row['mediainfo_json']
+                                                if isinstance(raw_info, list) and len(raw_info) > 0:
+                                                    mediainfo_path = os.path.join(current_local_path, os.path.splitext(name)[0] + "-mediainfo.json")
+                                                    if not os.path.exists(mediainfo_path):
+                                                        with open(mediainfo_path, 'w', encoding='utf-8') as f_json:
+                                                            json.dump(raw_info, f_json, ensure_ascii=False)
+                                                        
+                                                        cursor.execute("UPDATE p115_mediainfo_cache SET hit_count = hit_count + 1 WHERE sha1 = %s", (file_sha1,))
+                                                        conn.commit()
+                                                        logger.debug(f"  ⚡ [指纹库秒传] 匹配到相同 SHA1，自动生成媒体信息: {os.path.basename(mediainfo_path)}")
                                 except Exception: pass
                                 
                         # 处理字幕下载
