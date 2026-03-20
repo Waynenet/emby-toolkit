@@ -5,52 +5,56 @@ permissions:
 
 on:
   schedule:
-    - cron: "44 21 * * *" # 每日定时执行
-  workflow_dispatch: # 允许手动触发
+    - cron: "0 22 * * *"  # 每天运行
+  workflow_dispatch:
 
 jobs:
-  sync_latest_from_upstream:
-    name: Sync latest commits from upstream repo
+  sync-main:
+    name: Sync to main branch
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
-
+    
     steps:
-      # Step 1: 检出目标仓库代码
-      - name: Checkout target repo
+      - name: Checkout main branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 获取完整的提交历史，确保 rebase 能正常工作
-          token: ${{ secrets.PAT_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          
+      - name: Sync to main
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_sync_repo: hbq0405/emby-toolkit
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          test_mode: false
 
-      # Step 2: 添加上游仓库并获取更新
-      - name: Add upstream and fetch
-        run: |
-          if ! git remote | grep -q upstream; then
-            git remote add upstream https://github.com/hbq0405/emby-toolkit.git
-          fi
-          git fetch upstream main --tags
+  sync-dev:
+    name: Sync to dev branch
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+    needs: sync-main  # 等main同步完再同步dev
+    
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          
+      - name: Sync to dev
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_sync_repo: hbq0405/emby-toolkit
+          upstream_sync_branch: main
+          target_sync_branch: dev
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          test_mode: false
 
-      # Step 3: 设置 Git 用户信息
-      - name: Set Git user identity
+      - name: Sync check
+        if: failure()
         run: |
-          git config --global user.name "Waynenet"
-          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
-
-      # Step 4: 检测是否有上游更新（使用提交差异检测）
-      - name: Check for upstream changes
-        run: |
-          git checkout main
-          NEW_COMMITS=$(git log main..upstream/main --oneline | wc -l)
-          echo "NEW_COMMITS=$NEW_COMMITS" >> $GITHUB_ENV
-
-      # Step 5: 使用 rebase 同步上游改动，避免生成多余的 merge commit
-      - name: Rebase upstream changes
-        if: env.NEW_COMMITS != '0'
-        run: |
-          git rebase upstream/main
-
-      # Step 6: 强制推送更新后的代码到目标仓库
-      - name: Push changes to origin
-        if: env.NEW_COMMITS != '0'
-        run: |
-          git push origin main --force
+          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次，详细教程请查看项目README.md "
+          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork. Please refer to the project README.md for instructions. "
+          exit 1
