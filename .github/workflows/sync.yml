@@ -20,6 +20,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Set Git user identity
+        run: |
+          git config --global user.name "Waynenet"
+          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
           
       - name: Sync to main
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
@@ -27,7 +32,7 @@ jobs:
           upstream_sync_repo: hbq0405/emby-toolkit
           upstream_sync_branch: main
           target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
   sync-dev:
@@ -42,6 +47,11 @@ jobs:
         with:
           ref: dev
           fetch-depth: 0
+
+      - name: Set Git user identity
+        run: |
+          git config --global user.name "Waynenet"
+          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
           
       - name: Sync to dev
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
@@ -49,12 +59,11 @@ jobs:
           upstream_sync_repo: hbq0405/emby-toolkit
           upstream_sync_branch: main
           target_sync_branch: dev
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
       - name: Sync check
         if: failure()
         run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次，详细教程请查看项目README.md "
-          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork. Please refer to the project README.md for instructions. "
+          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次 "
           exit 1
