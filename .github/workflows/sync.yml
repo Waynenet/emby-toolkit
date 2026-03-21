@@ -37,6 +37,11 @@ jobs:
           target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
+      - name: Sync check main
+        if: failure()
+        run: |
+          echo "[Warning] 上游仓库 workflow 文件变更，本次自动同步可能未成功，请手动 Sync Fork"
+
       - name: Check if main was updated
         id: check_main
         run: |
@@ -45,6 +50,7 @@ jobs:
             echo "updated=false" >> $GITHUB_OUTPUT
           else
             echo "updated=true" >> $GITHUB_OUTPUT
+          fi
 
   sync-dev:
     name: Sync dev branch
@@ -75,6 +81,11 @@ jobs:
           target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
+      - name: Sync check dev
+        if: failure()
+        run: |
+          echo "[Warning] 上游仓库 workflow 文件变更，本次自动同步可能未成功，请手动 Sync Fork"
+
       - name: Check if dev was updated
         id: check_dev
         run: |
@@ -83,6 +94,7 @@ jobs:
             echo "updated=false" >> $GITHUB_OUTPUT
           else
             echo "updated=true" >> $GITHUB_OUTPUT
+          fi
 
   trigger-docker:
     name: Trigger Docker workflow if updated
@@ -102,12 +114,6 @@ jobs:
         if: needs.sync-dev.outputs.dev_updated == 'true'
         uses: benc-uk/workflow-dispatch@v1
         with:
-          workflow: 'docker-publish.yml'
+          workflow: 'docker-publish.yml' 
           ref: dev
           token: ${{ secrets.PAT_TOKEN }}
-
-      - name: Sync check
-        if: failure()
-        run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次 "
-          exit 1
