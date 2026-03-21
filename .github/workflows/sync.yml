@@ -5,115 +5,42 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 22 * * *"
-  workflow_dispatch:
+    - cron: "0 22 * * *" # 每天北京时间 06:00
+  workflow_dispatch: # 支持手动点击运行
 
 jobs:
-  sync-main:
-    name: Sync main branch
+  sync:
+    name: Sync Branch
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
-    outputs:
-      main_updated: ${{ steps.check_main.outputs.updated }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 定义需要同步的分支对
+        include:
+          - branch: main
+            upstream_branch: main
+          - branch: dev
+            upstream_branch: main
 
     steps:
-      - name: Checkout main branch
+      - name: Checkout target branch
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
-      - name: Set Git user identity
-        run: |
-          git config --global user.name "Waynenet"
-          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
-
-      - name: Sync main
+      - name: Sync with Upstream
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
           upstream_sync_repo: hbq0405/emby-toolkit
-          upstream_sync_branch: main
-          target_sync_branch: main
+          upstream_sync_branch: ${{ matrix.upstream_branch }}
+          target_sync_branch: ${{ matrix.branch }}
           target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
-      - name: Sync check main
+      - name: Sync Check
         if: failure()
         run: |
-          echo "[Warning] 上游仓库 workflow 文件变更，本次自动同步可能未成功，请手动 Sync Fork"
-
-      - name: Check if main was updated
-        id: check_main
-        run: |
-          git fetch origin main
-          if git diff --quiet origin/main main; then
-            echo "updated=false" >> $GITHUB_OUTPUT
-          else
-            echo "updated=true" >> $GITHUB_OUTPUT
-          fi
-
-  sync-dev:
-    name: Sync dev branch
-    runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
-    needs: sync-main
-    outputs:
-      dev_updated: ${{ steps.check_dev.outputs.updated }}
-
-    steps:
-      - name: Checkout dev branch
-        uses: actions/checkout@v4
-        with:
-          ref: dev
-          fetch-depth: 0
-
-      - name: Set Git user identity
-        run: |
-          git config --global user.name "Waynenet"
-          git config --global user.email "54445994+Waynenet@users.noreply.github.com"
-
-      - name: Sync dev
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-        with:
-          upstream_sync_repo: hbq0405/emby-toolkit
-          upstream_sync_branch: main
-          target_sync_branch: dev
-          target_repo_token: ${{ secrets.PAT_TOKEN }}
-          test_mode: false
-
-      - name: Sync check dev
-        if: failure()
-        run: |
-          echo "[Warning] 上游仓库 workflow 文件变更，本次自动同步可能未成功，请手动 Sync Fork"
-
-      - name: Check if dev was updated
-        id: check_dev
-        run: |
-          git fetch origin dev
-          if git diff --quiet origin/dev dev; then
-            echo "updated=false" >> $GITHUB_OUTPUT
-          else
-            echo "updated=true" >> $GITHUB_OUTPUT
-          fi
-
-  trigger-docker:
-    name: Trigger Docker workflow if updated
-    runs-on: ubuntu-latest
-    needs: [sync-main, sync-dev]
-
-    steps:
-      - name: Trigger Docker workflow for main
-        if: needs.sync-main.outputs.main_updated == 'true'
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: 'docker-publish.yml'
-          ref: main
-          token: ${{ secrets.PAT_TOKEN }}
-
-      - name: Trigger Docker workflow for dev
-        if: needs.sync-dev.outputs.dev_updated == 'true'
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: 'docker-publish.yml' 
-          ref: dev
-          token: ${{ secrets.PAT_TOKEN }}
+          echo "同步失败，可能是上游有强制更新或 Workflow 文件变动，请检查手动 Sync Fork。"
