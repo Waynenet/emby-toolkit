@@ -170,6 +170,13 @@ class P115OpenAPIClient:
         url = f"{self.base_url}/open/ufile/delete"
         fids_str = ",".join([str(f) for f in fids]) if isinstance(fids, list) else str(fids)
         return self._do_request("POST", url, data={"file_ids": fids_str})
+
+    def rb_del(self, tids=None):
+        url = f"{self.base_url}/open/rb/del"
+        data = {}
+        if tids:
+            data['tid'] = ",".join([str(t) for t in tids]) if isinstance(tids, list) else str(tids)
+        return self._do_request("POST", url, data=data)
     
     def fs_upload_init(self, file_name, file_size, target_cid, sha1, preid, sign_key=None, sign_val=None):
         """文件上传初始化调度接口"""
@@ -548,6 +555,11 @@ class P115Service:
                 self._check_openapi()
                 self._rate_limit()
                 return self._openapi.fs_delete(fids)
+            
+            def rb_del(self, tids=None):
+                self._check_openapi()
+                self._rate_limit()
+                return self._openapi.rb_del(tids)
             
             def upload_file_stream(self, file_stream, file_name, target_cid):
                 self._check_openapi()
@@ -2087,7 +2099,8 @@ class SmartOrganizer:
                 
                 # 3. 动漫特征 (剔除干扰后，寻找纯数字序号)
                 clean_c_name = re.sub(r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0', '', c_name)
-                if re.search(r'(?:-\s*|\[|【)(\d{2,4})(?:\s+|\]|】)', clean_c_name): 
+                # ★ 核心修复：严格匹配 [01] 或 【01】 或前后带空格的 - 01，防止误伤压制组编号
+                if re.search(r'(?:\s-\s+)(\d{2,4})(?:\s|$)|\[(\d{2,4})\]|【(\d{2,4})】', clean_c_name): 
                     is_actually_tv = True
                     break
             
