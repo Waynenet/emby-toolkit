@@ -5,15 +5,17 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 22 * * *"  # 每天运行
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 jobs:
   sync-main:
-    name: Sync to main branch
+    name: Sync main branch
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
-    
+    outputs:
+      main_updated: ${{ steps.check_main.outputs.updated }}
+
     steps:
       - name: Checkout main branch
         uses: actions/checkout@v4
@@ -25,8 +27,8 @@ jobs:
         run: |
           git config --global user.name "Waynenet"
           git config --global user.email "54445994+Waynenet@users.noreply.github.com"
-          
-      - name: Sync to main
+
+      - name: Sync main
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
           upstream_sync_repo: hbq0405/emby-toolkit
@@ -35,12 +37,23 @@ jobs:
           target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
 
+      - name: Check if main was updated
+        id: check_main
+        run: |
+          git fetch origin main
+          if git diff --quiet origin/main main; then
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "updated=true" >> $GITHUB_OUTPUT
+
   sync-dev:
-    name: Sync to dev branch
+    name: Sync dev branch
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
-    needs: sync-main  # 等main同步完再同步dev
-    
+    needs: sync-main
+    outputs:
+      dev_updated: ${{ steps.check_dev.outputs.updated }}
+
     steps:
       - name: Checkout dev branch
         uses: actions/checkout@v4
@@ -52,8 +65,8 @@ jobs:
         run: |
           git config --global user.name "Waynenet"
           git config --global user.email "54445994+Waynenet@users.noreply.github.com"
-          
-      - name: Sync to dev
+
+      - name: Sync dev
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
           upstream_sync_repo: hbq0405/emby-toolkit
@@ -61,6 +74,37 @@ jobs:
           target_sync_branch: dev
           target_repo_token: ${{ secrets.PAT_TOKEN }}
           test_mode: false
+
+      - name: Check if dev was updated
+        id: check_dev
+        run: |
+          git fetch origin dev
+          if git diff --quiet origin/dev dev; then
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "updated=true" >> $GITHUB_OUTPUT
+
+  trigger-docker:
+    name: Trigger Docker workflow if updated
+    runs-on: ubuntu-latest
+    needs: [sync-main, sync-dev]
+
+    steps:
+      - name: Trigger Docker workflow for main
+        if: needs.sync-main.outputs.main_updated == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: 'docker-publish.yml'
+          ref: main
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Trigger Docker workflow for dev
+        if: needs.sync-dev.outputs.dev_updated == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: 'docker-publish.yml'
+          ref: dev
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Sync check
         if: failure()
