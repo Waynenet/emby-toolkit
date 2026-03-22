@@ -227,25 +227,7 @@ def initialize_processors():
         # =========================================================
         # ★★★ Pro 版本在线验证逻辑 ★★★
         # =========================================================
-        config_manager.APP_CONFIG['is_pro_active'] = False 
-        
-        if server_id_local:
-            logger.info("  ➜ 正在验证 Pro 授权状态...")
-            try:
-                import requests
-                verify_url = "https://auth.55565576.xyz" 
-                # ★ 启动时只查岗，不消耗卡密
-                payload = {"action": "check", "server_id": server_id_local}
-                resp = requests.post(verify_url, json=payload, timeout=5).json()
-                
-                if resp.get("success") and resp.get("is_pro"):
-                    config_manager.APP_CONFIG['is_pro_active'] = True
-                    config_manager.APP_CONFIG['pro_expire_time'] = resp.get("expire_time", "")
-                    logger.info("  💎 Pro 验证通过！已解锁全部功能。")
-                else:
-                    logger.info("  ➜ 当前运行版本: 免费基础版 (升级 Pro 解锁 302 反代)")
-            except Exception as e:
-                logger.error(f"  ❌ Pro 验证服务器连接失败: {e}。已降级为免费基础版。")
+        config_manager.APP_CONFIG['is_pro_active'] = True 
 
     # 初始化 media_processor_instance_local
     try:

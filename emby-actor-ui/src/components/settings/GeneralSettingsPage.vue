@@ -33,7 +33,7 @@
                         <div style="font-size: 13px; color: #888; margin-top: 6px;">
                           {{ proStatusInfo.desc }}<br/>
                           <span v-if="configModel?.is_pro_active" style="color: #d48806; font-weight: bold; margin-top: 4px; display: inline-block;">
-                            {{ configModel?.pro_expire_time?.startsWith('2099') ? '到期时间：永久有效' : '到期时间：' + configModel?.pro_expire_time?.split('T')[0] }}
+                            {{ configModel?.pro_expire_time?.startsWith('2099') ? '到期时间：永久有效' : '到期时间：永生有效' }}
                           </span>
                         </div>
                       </div>
@@ -2010,7 +2010,7 @@ const proStatusInfo = computed(() => {
   } else if (key.includes('-M-')) {
     return { icon: '🌙', text: 'Pro 月费高级版', color: '#d48806', desc: '尊贵的月费 Pro 用户，您已解锁全部功能！' };
   } else {
-    return { icon: '💎', text: 'Pro 高级版', color: '#d48806', desc: '尊贵的 Pro 用户，您已解锁全部功能！' };
+    return { icon: '💎', text: 'Pro 永生高级版', color: '#d48806', desc: '尊贵的永生 Pro 用户，您已永生解锁全部功能！' };
   }
 });
 
