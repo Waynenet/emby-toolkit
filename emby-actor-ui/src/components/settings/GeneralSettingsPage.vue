@@ -293,17 +293,21 @@
                         <n-tag v-else type="warning" size="small" round>未检查</n-tag>
                       </div>
                     </template>
-                    <template #header-extra>
-                      <n-space align="center" :size="12">
-                        <n-button type="primary" size="small" @click="openQrcodeModal">
-                          <template #icon><n-icon :component="QrCodeOutline" /></template>
-                          扫码登录
+
+                    <!-- ★★★ 按钮单独一行 ★★★ -->
+                    <n-space align="center" :size="12" style="margin-bottom: 16px;">
+                      <n-button type="warning" size="small" @click="startWebAuth" :loading="isWebAuthing">
+                          <template #icon><n-icon :component="DiamondIcon" /></template>
+                          网页授权
                         </n-button>
-                        <n-button size="small" secondary type="success" @click="check115Status" :loading="loading115Info">
-                          检查连通性
-                        </n-button>
-                      </n-space>
-                    </template>
+                      <n-button type="primary" size="small" @click="openQrcodeModal">
+                        <template #icon><n-icon :component="QrCodeOutline" /></template>
+                        扫码登录
+                      </n-button>
+                      <n-button size="small" secondary type="success" @click="check115Status" :loading="loading115Info">
+                        检查连通性
+                      </n-button>
+                    </n-space>
 
                     <!-- ★★★ 新增：用户信息展示卡片 ★★★ -->
                     <div v-if="p115Info && p115Info.user_info" style="margin-bottom: 16px; padding: 12px; background: var(--n-action-color); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
@@ -2412,6 +2416,54 @@ const closeQrcodeModal = () => {
   showQrcodeModal.value = false;
   qrcodeUrl.value = '';
   qrcodeStatus.value = 'idle';
+};
+
+// ★★★ 全自动网页授权 (授权码模式) 逻辑 ★★★
+const isWebAuthing = ref(false);
+let webAuthPolling = null;
+
+const startWebAuth = () => {
+  // 1. 获取当前 ETK 的访问地址 (例如 http://192.168.1.100:5257)
+  const etkHost = window.location.origin; 
+  // 2. 拼接回调地址
+  const callbackUrl = `${etkHost}/api/p115/auto_save_auth`;
+  // 3. 拼接最终的 Worker 登录地址
+  const authUrl = `https://115.55565576.xyz/login?callback_url=${encodeURIComponent(callbackUrl)}`;
+  
+  // 4. 弹出一个居中的小窗口供用户登录
+  const width = 500;
+  const height = 600;
+  const left = (window.screen.width / 2) - (width / 2);
+  const top = (window.screen.height / 2) - (height / 2);
+  window.open(authUrl, '115AuthWindow', `width=${width},height=${height},top=${top},left=${left}`);
+  
+  isWebAuthing.value = true;
+  message.info('请在新弹出的窗口中完成 115 授权...', { duration: 5000 });
+  
+  // 5. 开始后台轮询，检查 Token 是否已经悄悄保存成功了
+  webAuthPolling = setInterval(async () => {
+    try {
+      const res = await axios.get('/api/p115/status');
+      if (res.data && res.data.data && res.data.data.has_token) {
+        // 发现 Token 已经有了！
+        clearInterval(webAuthPolling);
+        isWebAuthing.value = false;
+        message.success('🎉 网页授权成功！Token 已自动保存。');
+        check115Status(); // 刷新界面状态
+      }
+    } catch (e) {
+      // 轮询期间的错误静默忽略
+    }
+  }, 2000);
+  
+  // 6. 设置一个 3 分钟的超时，防止用户关了窗口导致一直转圈
+  setTimeout(() => {
+    if (isWebAuthing.value) {
+      clearInterval(webAuthPolling);
+      isWebAuthing.value = false;
+      message.warning('授权等待超时，请重试。');
+    }
+  }, 180000);
 };
 
 // ★★★ 自定义 STRM 正则状态与逻辑 ★★★

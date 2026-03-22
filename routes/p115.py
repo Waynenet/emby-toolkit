@@ -4,6 +4,7 @@ from flask import redirect
 import threading
 from datetime import datetime, timedelta
 import json
+import base64
 import os
 import re
 import time
@@ -313,6 +314,69 @@ def check_qrcode_status():
         return jsonify({"success": True, "status": "waiting", "message": "等待扫码..."})
     else:
         return jsonify({"success": False, "status": "error", "message": status.get('message', '检查状态失败')}), 500
+
+# --- 网页授权码模式登录 API ---
+@p115_bp.route('/auto_save_auth', methods=['GET'])
+@admin_required
+def auto_save_auth():
+    """接收 CF Worker 重定向回来的 Token 数据并自动保存"""
+    data = request.args.get('data', '').strip()
+    if not data:
+        return "授权失败：缺少 Token 数据", 400
+        
+    try:
+        # 1. Base64 解码
+        decoded_bytes = base64.b64decode(data)
+        token_data = json.loads(decoded_bytes.decode('utf-8'))
+        
+        access_token = token_data.get('access_token')
+        refresh_token = token_data.get('refresh_token')
+
+        if access_token and refresh_token:
+            # 2. 保存到数据库
+            from handler.p115_service import save_115_tokens, P115Service
+            save_115_tokens(access_token, refresh_token)
+            
+            # 强制清空旧的 OpenAPI 客户端缓存，让它立即使用新 Token
+            with P115Service._lock:
+                P115Service._openapi_client = None
+                
+            logger.info(f"  ✅ [115] 网页自动授权成功！Token 已无感保存。")
+            
+            # 3. 返回一个自动关闭的精美提示页
+            html = """
+            <!DOCTYPE html>
+            <html lang="zh-CN">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>授权成功</title>
+                <style>
+                    body { font-family: system-ui, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                    .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; }
+                    h2 { color: #18a058; margin-top: 0; }
+                    p { color: #666; font-size: 14px; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h2>✅ 授权成功！</h2>
+                    <p>Token 已自动保存到 ETK 系统。</p>
+                    <p style="color: #999; font-size: 12px;">本窗口将在 3 秒后自动关闭...</p>
+                </div>
+                <script>
+                    setTimeout(function() { window.close(); }, 3000);
+                </script>
+            </body>
+            </html>
+            """
+            return html
+        else:
+            return "无效的授权码格式：缺少 token", 400
+            
+    except Exception as e:
+        logger.error(f"自动保存授权码失败: {e}")
+        return f"解析授权码失败: {str(e)}", 400
 
 # --- 简单的令牌桶/计数器限流器 ---
 class RateLimiter:

@@ -794,114 +794,37 @@ def refresh_emby_item_metadata(item_emby_id: str,
         logger.error(f"  - 刷新请求时发生网络错误: {e}")
         return False
 
-# --- 仅查找路径对应的最近 Emby 锚点 ID，不刷新 ---
-def find_nearest_library_anchor(file_path: str, base_url: str, api_key: str) -> tuple[Optional[str], Optional[str]]:
+# --- 极速轻量级文件变更通知 ---
+def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str, update_type: str = "Created") -> bool:
     """
-    向上递归查找路径中“最近的一个已存在于 Emby 数据库的文件夹”。
-    返回: (Item Id, Item Name) 或 (None, None)
+    【极速轻量级刷新】
+    利用 Emby 的 /Library/Media/Updated 接口，直接通知底层文件系统变更。
+    支持 Created, Modified, Deleted。
     """
-    if not all([file_path, base_url, api_key]):
-        return None, None
-    
-    norm_path = os.path.normpath(file_path)
-    current_path = norm_path
-    
-    # 尝试最多向上找 10 层
-    for _ in range(10):
-        # 使用 /Items 接口按 Path 精确查询
-        query_url = f"{base_url.rstrip('/')}/Items"
-        params = {
-            "api_key": api_key,
-            "Path": current_path,
-            "Limit": 1,
-            "Recursive": "false",
-            "Fields": "Id,Name"
-        }
+    if not file_paths: 
+        return True
         
-        try:
-            response = emby_client.get(query_url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("Items"):
-                    item = data["Items"][0]
-                    return item["Id"], item["Name"]
-        except Exception:
-            pass 
-            
-        parent = os.path.dirname(current_path)
-        if parent == current_path: # 到达根目录
-            break
-        current_path = parent
-        
-    return None, None
-
-# --- 仅根据 ID 强制刷新 (Token 提权极速版) ---
-def refresh_item_by_id(item_id: str, base_url: str, api_key: str) -> bool:
-    """
-    对指定 ID 执行强制递归刷新。
-    【终极优化】优先使用管理员 Token 并伪装成 Web 客户端触发，获取 Emby 内部最高响应优先级！
-    """
-    refresh_url = f"{base_url.rstrip('/')}/Items/{item_id}/Refresh"
+    api_url = f"{base_url.rstrip('/')}/Library/Media/Updated"
     
-    # 基础参数 (不带 api_key)
-    refresh_params = {
-        "Recursive": "true", 
-        "ImageRefreshMode": "FullRefresh",
-        "MetadataRefreshMode": "FullRefresh",
-        "ReplaceAllMetadata": "false",
-        "ReplaceThumbnailImages": "false",
-        "ReplaceAllImages": "false"
+    # 构造 Payload，传入指定的 UpdateType
+    updates = [{"Path": path, "UpdateType": update_type} for path in file_paths]
+    payload = {"Updates": updates}
+    
+    # 将 UpdateType 转换为友好的中文
+    action_map = {
+        "Created": "新增",
+        "Modified": "修改",
+        "Deleted": "删除"
     }
-    
-    headers = {}
-    
-    # ★ 核心提权：尝试获取管理员 Token
-    access_token, _ = get_admin_access_token()
-    
-    if access_token:
-        # 完美伪装成 Web 客户端，骗过 Emby 的优先级调度器
-        headers = {
-            'X-Emby-Token': access_token,
-            'X-Emby-Client': 'Emby Web',
-            'X-Emby-Device-Name': 'Chrome Windows',
-            'X-Emby-Device-Id': '810639de-c2a7-488f-a610-0a86644b6fa9'
-        }
-        logger.debug(f"  🚀 [提权刷新] 伪装 Web 客户端触发刷新 (ID: {item_id})")
-    else:
-        # 兜底：如果没拿到 Token，老老实实用 API Key 排队
-        refresh_params["api_key"] = api_key
-        logger.debug(f"  🚀 [普通刷新] 使用 API Key 触发刷新 (ID: {item_id})")
+    action_zh = action_map.get(update_type, update_type)
     
     try:
-        emby_client.post(refresh_url, params=refresh_params, headers=headers)
+        emby_client.post(api_url, params={"api_key": api_key}, json=payload)
+        logger.info(f"  ⚡ [极速通知] 已通知 Emby 有 {len(file_paths)} 个文件{action_zh}。")
         return True
     except Exception as e:
-        logger.error(f"  ❌ 刷新请求失败 (ID: {item_id}): {e}")
+        logger.error(f"  ❌ [极速通知] 发送文件{action_zh}通知失败: {e}")
         return False
-
-# --- 最近锚点强制刷新版 ---
-def refresh_library_by_path(file_path: str, base_url: str, api_key: str) -> bool:
-    """
-    最近锚点强制刷新版
-    """
-    # 1. 查找锚点
-    logger.info(f"  🔍 [智能刷新] 正在为路径寻找最近的 Emby 锚点: {file_path}")
-    found_id, found_name = find_nearest_library_anchor(file_path, base_url, api_key)
-
-    # 2. 执行刷新
-    if found_id:
-        logger.info(f"  🚀 [智能刷新] 命中最近锚点: '{found_name}' (ID: {found_id})，执行强制刷新...")
-        return refresh_item_by_id(found_id, base_url, api_key)
-    else:
-        # 回退逻辑
-        logger.warning(f"  ⚠️ 未找到任何在库的父级目录，回退到系统通知接口...")
-        api_url = f"{base_url.rstrip('/')}/Library/Media/Updated"
-        payload = {"Updates": [{"Path": file_path, "UpdateType": "Modified"}]}
-        try:
-            emby_client.post(api_url, params={"api_key": api_key}, json=payload)
-            return True
-        except:
-            return False
 
 # ✨✨✨ 分批次地从 Emby 获取所有 Person 条目 ✨✨✨
 def get_all_persons_from_emby(
