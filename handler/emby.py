@@ -365,8 +365,9 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
         response = emby_client.get(url, params=params)
 
         if response.status_code != 200:
-            logger.trace(f"响应头部: {response.headers}")
-            logger.trace(f"响应内容 (前500字符): {response.text[:500]}")
+            pass
+            # logger.trace(f"响应头部: {response.headers}")
+            # logger.trace(f"响应内容 (前500字符): {response.text[:500]}")
 
         response.raise_for_status()
         item_data = response.json()
@@ -794,23 +795,74 @@ def refresh_emby_item_metadata(item_emby_id: str,
         logger.error(f"  - 刷新请求时发生网络错误: {e}")
         return False
 
+def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
+    """
+    【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。
+    """
+    current_path = target_dir
+    
+    # 最多向上找 4 级 (文件 -> 电影目录 -> 分类目录 -> 媒体库根目录)，防止扫到太顶层
+    for _ in range(4):
+        if not current_path or current_path == '/' or current_path == '\\':
+            break
+
+        if not os.path.exists(current_path):
+            #logger.debug(f"  👻 [防僵尸] 物理目录已不存在，强制向上追溯: {current_path}")
+            current_path = os.path.dirname(current_path)
+            continue
+            
+        # 查询 Emby 中是否存在这个路径
+        api_url = f"{base_url.rstrip('/')}/Items"
+        params = {
+            "api_key": api_key,
+            "Recursive": "true",
+            "Path": current_path,
+            "Fields": "Id,Path,Name"
+        }
+        
+        try:
+            resp = emby_client.get(api_url, params=params)
+            if resp.status_code == 200:
+                items = resp.json().get("Items", [])
+                if items:
+                    # 找到了 Emby 认识的父目录！
+                    target_id = items[0].get("Id")
+                    target_name = items[0].get("Name", current_path)
+                    
+                    #logger.info(f"  🎯 [定点扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
+                    
+                    # 对这个特定的父目录触发刷新
+                    refresh_url = f"{base_url.rstrip('/')}/Items/{target_id}/Refresh"
+                    refresh_params = {
+                        "api_key": api_key,
+                        "Recursive": "true",
+                        "MetadataRefreshMode": "Default",
+                        "ImageRefreshMode": "Default",
+                        "ReplaceAllImages": "false",
+                        "ReplaceAllMetadata": "false"
+                    }
+                    emby_client.post(refresh_url, params=refresh_params)
+                    logger.info(f"  🚀 [定点扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
+                    return True
+        except Exception as e:
+            pass # 忽略查询错误，继续向上找
+            
+        # 向上退一级 (例如从 /strm/电影/超级英雄/奇异博士 退到 /strm/电影/超级英雄)
+        current_path = os.path.dirname(current_path)
+        
+    logger.warning(f"  ⚠️ [定点扫描] 未能在 Emby 中找到 {target_dir} 的有效父目录，将等待 90 秒后自动扫描。")
+    return False
+
 # --- 极速轻量级文件变更通知 ---
 def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str, update_type: str = "Created") -> bool:
     """
     【极速轻量级刷新】
-    利用 Emby 的 /Library/Media/Updated 接口，直接通知底层文件系统变更。
-    支持 Created, Modified, Deleted。
+    直接提取文件所在目录，向上寻根并触发 Emby 的局部精准扫描。
+    彻底抛弃 Emby 带有 90 秒延迟的 Updated 队列接口。
     """
     if not file_paths: 
         return True
         
-    api_url = f"{base_url.rstrip('/')}/Library/Media/Updated"
-    
-    # 构造 Payload，传入指定的 UpdateType
-    updates = [{"Path": path, "UpdateType": update_type} for path in file_paths]
-    payload = {"Updates": updates}
-    
-    # 将 UpdateType 转换为友好的中文
     action_map = {
         "Created": "新增",
         "Modified": "修改",
@@ -819,11 +871,18 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
     action_zh = action_map.get(update_type, update_type)
     
     try:
-        emby_client.post(api_url, params={"api_key": api_key}, json=payload)
-        logger.info(f"  ⚡ [极速通知] 已通知 Emby 有 {len(file_paths)} 个文件{action_zh}。")
+        # 直接提取所有文件所在的目录，去重 (防止批量入库时重复刷新同一个父目录)
+        dirs_to_refresh = set(os.path.dirname(p) for p in file_paths if p)
+        
+        #logger.info(f"  ⚡ [极速通知] 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
+        
+        # 直接拿鞭子抽，让 Emby 扫目录
+        for d in dirs_to_refresh:
+            _force_refresh_directory_tree(d, base_url, api_key)
+            
         return True
     except Exception as e:
-        logger.error(f"  ❌ [极速通知] 发送文件{action_zh}通知失败: {e}")
+        logger.error(f"  ❌ [极速通知] 触发扫描失败: {e}")
         return False
 
 # ✨✨✨ 分批次地从 Emby 获取所有 Person 条目 ✨✨✨
