@@ -113,7 +113,13 @@ class P115OpenAPIClient:
     def _do_request(self, method, url, **kwargs):
         try:
             current_token = self.access_token # 记录当前请求使用的 token
-            resp = requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+            
+            # 支持自定义 headers 覆盖 (用于透传播放器 UA)
+            req_headers = self.headers.copy()
+            if 'headers' in kwargs:
+                req_headers.update(kwargs.pop('headers'))
+                
+            resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs).json()
             
             if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
                 logger.warning("  ⚠️ [115] 检测到 Token 已过期，正在触发自动续期...")
@@ -147,6 +153,14 @@ class P115OpenAPIClient:
         params = {"limit": 100, "offset": 0}
         if isinstance(payload, dict): params.update(payload)
         return self._do_request("GET", url, params=params)
+    
+    def fs_downurl(self, pick_code, user_agent=None):
+        """OpenAPI 获取下载直链"""
+        url = f"{self.base_url}/open/ufile/downurl"
+        headers = {}
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        return self._do_request("POST", url, data={"pick_code": str(pick_code)}, headers=headers)
 
     def fs_get_info(self, file_id):
         url = f"{self.base_url}/open/folder/get_info"
@@ -387,6 +401,24 @@ class P115CookieClient:
         payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': cid}
         r = self.request(url, method='POST', data=payload)
         return r.json() if hasattr(r, 'json') else r
+    
+    def life_batch_delete(self, delete_data_list):
+        url = "https://life.115.com/api/1.0/web/1.0/life/life_batch_delete"
+        # 115 要求 delete_data 是一个 JSON 字符串
+        payload = {"delete_data": json.dumps(delete_data_list)}
+        r = self.request(url, method='POST', data=payload)
+        return r.json() if hasattr(r, 'json') else r
+    
+    def life_behavior_detail(self, payload=None):
+        # ★ 彻底抛弃第三方库，直接用原生 requests，加上严格的 timeout 防止卡死！
+        url = "https://webapi.115.com/behavior/detail"
+        params = {"limit": 100, "offset": 0}
+        if isinstance(payload, dict): 
+            params.update(payload)
+        
+        # 强制加上 timeout=15，如果 15 秒没响应直接报错，绝不卡死线程
+        r = self.request(url, method='GET', params=params, timeout=15)
+        return r.json() if hasattr(r, 'json') else r
 
 
 # ======================================================================
@@ -564,6 +596,18 @@ class P115Service:
                 self._rate_limit()
                 return self._openapi.rb_del(tids)
             
+            def life_behavior_detail(self, payload=None):
+                self._rate_limit()
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法获取生活事件")
+                return self._cookie.life_behavior_detail(payload)
+
+            def life_batch_delete(self, delete_data_list):
+                self._rate_limit()
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法删除生活事件")
+                return self._cookie.life_batch_delete(delete_data_list)
+            
             def upload_file_stream(self, file_stream, file_name, target_cid):
                 self._check_openapi()
                 self._rate_limit() 
@@ -581,8 +625,8 @@ class P115Service:
                     cached_data = _DIRECT_URL_CACHE[cache_key]
                     if now < cached_data['expire_at']:
                         # ★ 提取缓存里的文件名打印
-                        display_name = cached_data.get('name', pick_code[:8])
-                        logger.info(f"  ⚡ [直链缓存] 命中直链 -> {display_name} (UA: {str(user_agent)[:15]}...)")
+                        #display_name = cached_data.get('name', pick_code[:8])
+                        #logger.info(f"  ⚡ [直链缓存] 命中直链 -> {display_name} (UA: {str(user_agent)[:15]}...)")
                         return cached_data['url']
 
                 with P115Service._downurl_lock:
@@ -615,13 +659,13 @@ class P115Service:
                                     if path_name: display_name = path_name
                             except: pass
 
-                            logger.info(f"  ✅ [115] 请求直链成功 -> {display_name}")
+                            logger.info(f"  ✅ [Cookie] 请求直链成功 -> {display_name}")
 
                             # ★ 将文件名一起存入缓存
                             _DIRECT_URL_CACHE[cache_key] = {
                                 'url': direct_url,
                                 'name': display_name,
-                                'expire_at': time.time() + 7200
+                                'expire_at': time.time() + 300
                             }
                             return direct_url
                         return None
@@ -633,6 +677,42 @@ class P115Service:
                         else:
                             P115Service._last_downurl_time = time.time()
                         raise e
+                    
+            def openapi_downurl(self, pick_code, user_agent=None):
+                """使用 OpenAPI 获取直链 (带缓存和 UA 透传)"""
+                self._check_openapi()
+                cache_key = (f"openapi_{pick_code}", user_agent)
+                now = time.time()
+                
+                if cache_key in _DIRECT_URL_CACHE:
+                    cached_data = _DIRECT_URL_CACHE[cache_key]
+                    if now < cached_data['expire_at']:
+                        return cached_data['url']
+
+                with P115Service._downurl_lock:
+                    if cache_key in _DIRECT_URL_CACHE and now < _DIRECT_URL_CACHE[cache_key]['expire_at']:
+                        return _DIRECT_URL_CACHE[cache_key]['url']
+
+                    self._rate_limit()
+                    try:
+                        res = self._openapi.fs_downurl(pick_code, user_agent)
+                        if res and res.get('state') and res.get('data'):
+                            data_dict = res['data']
+                            file_info = next(iter(data_dict.values()), None)
+                            if file_info and 'url' in file_info and 'url' in file_info['url']:
+                                direct_url = file_info['url']['url']
+                                display_name = file_info.get('file_name', pick_code)
+                                logger.info(f"  ✅ [OpenAPI] 请求直链成功 -> {display_name}")
+                                _DIRECT_URL_CACHE[cache_key] = {
+                                    'url': direct_url,
+                                    'name': display_name,
+                                    'expire_at': time.time() + 300 
+                                }
+                                return direct_url
+                        return None
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ [115 OpenAPI] 获取直链异常: {e}")
+                        return None
 
             def request(self, *args, **kwargs):
                 self._rate_limit()
@@ -1819,17 +1899,18 @@ class SmartOrganizer:
         
         if is_tv and (season_num is None or episode_num is None):
             # 1. 标准特征匹配 (S01E01, EP01, 第1集)
-            pattern = r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|e|episode)[ \.\-]*?(\d{1,4})\b|第(\d{1,4})[集话]'
+            pattern = r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话]'
             match = re.search(pattern, original_name, re.IGNORECASE)
             if match:
                 s = match.group(1)
                 e = match.group(2)
                 ep_only = match.group(3)
-                zh_ep = match.group(4)
+                e_only = match.group(4)
+                zh_ep = match.group(5)
                 if season_num is None:
                     season_num = int(s) if s else 1
                 if episode_num is None:
-                    episode_num = int(e) if e else (int(ep_only) if ep_only else int(zh_ep))
+                    episode_num = int(e) if e else (int(ep_only) if ep_only else (int(e_only) if e_only else int(zh_ep)))
             else:
                 # 2. ★ 纯数字兜底 (绝对安全：因为外层有 if is_tv 保护，绝不会把电影当成剧集)
                 name_without_ext = original_name.rsplit('.', 1)[0]
@@ -2163,7 +2244,7 @@ class SmartOrganizer:
                     break
                 
                 # 2. 标准特征 (EP01, S01E01)
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|e|episode)[ \.\-]*\d{1,4}\b|第\d{1,4}[集话]', c_name, re.IGNORECASE):
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\d{1,4}[集话]', c_name, re.IGNORECASE):
                     is_actually_tv = True
                     break
                 
@@ -2908,7 +2989,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
     else:
         # 将主目录名和文件名拼在一起，寻找剧集特征
         combined_text = f"{main_dir_name or ''} {filename}"
-        if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|e|episode)[ \.\-]*\d{1,4}\b|第[一二三四五六七八九十\d]+季|Season', combined_text, re.IGNORECASE):
+        if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第[一二三四五六七八九十\d]+季|Season', combined_text, re.IGNORECASE):
             media_type = 'tv'
 
     # 辅助函数：用已锁定的类型去 TMDb 查官方标题
@@ -3186,7 +3267,7 @@ def task_scan_and_organize_115(processor=None):
                     current_top_name = top_level_name if top_level_name else name
 
                     # 剧集特征嗅探
-                    is_tv_hint = bool(re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|e|episode)[ \.\-]*\d{1,4}\b|第[一二三四五六七八九十\d]+季', name, re.IGNORECASE))
+                    is_tv_hint = bool(re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第[一二三四五六七八九十\d]+季', name, re.IGNORECASE))
                     is_season_dir = is_folder and bool(re.search(r'^(Season\s?\d+|S\d+|第[一二三四五六七八九十\d]+季)$', name, re.IGNORECASE))
 
                     if is_folder:
@@ -4533,3 +4614,345 @@ def task_sync_music_library(processor=None):
         
     logger.info(end_msg)
     update_progress(100, f"同步完成！生成 {files_generated} 首，下载 {aux_downloaded} 个附属文件。")
+
+# ======================================================================
+# ★★★ 115 生活事件增量监控 (秒级同步 STRM) ★★★
+# ======================================================================
+def task_monitor_115_life_events(processor=None):
+    """
+    读取 115 生活事件，对比本地缓存，增量生成/删除 STRM。
+    支持目录递归扫描，完美处理“移动整个文件夹”的场景。
+    全面接入 P115CacheManager，逻辑更严密。
+    """
+    config = get_config()
+    if not config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
+        return
+
+    client = P115Service.get_client()
+    if not client:
+        return
+
+    try:
+        import task_manager
+    except ImportError:
+        task_manager = None
+
+    def update_progress(prog, msg):
+        if task_manager: task_manager.update_status_from_thread(prog, msg)
+        logger.info(msg)
+
+    update_progress(5, "=== 🚀 开始检查 115 增量生活事件 ===")
+
+    local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+    etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
+    download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
+    rename_config = settings_db.get_setting('p115_rename_config') or {}
+    
+    known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+    known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+    allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
+    if not allowed_exts: allowed_exts = known_video_exts | known_sub_exts
+
+    raw_rules = settings_db.get_setting('p115_sorting_rules')
+    if not raw_rules: return
+    rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
+    
+    target_cids = set()
+    cid_to_rel_path = {}
+    for r in rules:
+        if r.get('enabled', True) and r.get('cid') and str(r['cid']) != '0':
+            cid = str(r['cid'])
+            target_cids.add(cid)
+            cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
+
+    events_to_delete = [] 
+    added_count = 0
+    deleted_count = 0
+
+    # 辅助函数：推导本地路径
+    def resolve_local_dir(pid):
+        pid = str(pid)
+        if pid in cid_to_rel_path: return cid_to_rel_path[pid]
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    parts = []
+                    curr = pid
+                    while curr:
+                        cursor.execute("SELECT parent_id, name FROM p115_filesystem_cache WHERE id = %s", (curr,))
+                        row = cursor.fetchone()
+                        if not row: break
+                        parts.append(row['name'])
+                        curr = str(row['parent_id'])
+                        if curr in cid_to_rel_path:
+                            parts.append(cid_to_rel_path[curr])
+                            parts.reverse()
+                            return os.path.join(*parts)
+        except: pass
+        return None
+
+    # 辅助函数：通知 Emby
+    def _notify_emby(path):
+        emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+        emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+        if emby_url and emby_api_key:
+            try:
+                from handler import emby
+                emby.notify_emby_file_changes([path], emby_url, emby_api_key, update_type="Deleted")
+            except: pass
+
+    # ★ 核心处理逻辑 (全面接入 P115CacheManager)
+    def process_node(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size):
+        nonlocal added_count, deleted_count
+        
+        # 1. 获取旧状态
+        old_local_path = P115CacheManager.get_local_path(file_id)
+        
+        # 2. 获取新状态
+        new_rel_dir = None
+        if b_type != 22: 
+            new_rel_dir = resolve_local_dir(parent_id)
+
+        # ==========================================
+        # 分支 1：删除或移出监控目录
+        # ==========================================
+        if old_local_path and not new_rel_dir:
+            full_local_path = os.path.join(local_root, old_local_path)
+            db_ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+            
+            if db_ext in known_video_exts:
+                strm_full = os.path.splitext(full_local_path)[0] + ".strm"
+                if os.path.exists(strm_full):
+                    os.remove(strm_full)
+                    deleted_count += 1
+                    logger.info(f"  🗑️ [事件] 删除失效 STRM: {os.path.basename(strm_full)}")
+                    _notify_emby(strm_full)
+            elif db_ext in known_sub_exts:
+                if os.path.exists(full_local_path):
+                    os.remove(full_local_path)
+                    logger.info(f"  🗑️ [事件] 删除失效字幕: {file_name}")
+            else:
+                if os.path.exists(full_local_path) and os.path.isdir(full_local_path):
+                    import shutil
+                    shutil.rmtree(full_local_path)
+                    deleted_count += 1
+                    logger.info(f"  🗑️ [事件] 连锅端删除失效目录: {file_name}")
+                    _notify_emby(os.path.dirname(full_local_path))
+            
+            # 清理数据库
+            if is_folder: P115CacheManager.delete_cid(file_id)
+            else: P115CacheManager.delete_files([file_id])
+
+        # ==========================================
+        # 分支 2：新增、移入、改名、同目录移动
+        # ==========================================
+        elif new_rel_dir:
+            file_local_path = os.path.join(new_rel_dir, file_name).replace('\\', '/')
+            
+            # ★ 核心逻辑 1：如果路径完全没变，说明是 MP/TG 实时处理过的，直接跳过！
+            if old_local_path == file_local_path:
+                return
+                
+            # ★ 核心逻辑 2：如果以前存在，且路径变了 (移动/改名)，需要先删掉旧的本地文件！
+            if old_local_path and old_local_path != file_local_path:
+                old_full_path = os.path.join(local_root, old_local_path)
+                old_ext = old_local_path.split('.')[-1].lower() if '.' in old_local_path else ''
+                
+                if old_ext in known_video_exts:
+                    old_strm = os.path.splitext(old_full_path)[0] + ".strm"
+                    if os.path.exists(old_strm): 
+                        os.remove(old_strm)
+                        _notify_emby(old_strm)
+                elif old_ext in known_sub_exts:
+                    if os.path.exists(old_full_path): os.remove(old_full_path)
+                elif is_folder:
+                    if os.path.exists(old_full_path) and os.path.isdir(old_full_path):
+                        import shutil
+                        shutil.rmtree(old_full_path)
+                        _notify_emby(os.path.dirname(old_full_path))
+
+            # 开始生成新文件/目录
+            ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+            current_local_path = os.path.join(local_root, new_rel_dir)
+            
+            if not is_folder and ext in allowed_exts:
+                os.makedirs(current_local_path, exist_ok=True)
+                
+                if ext in known_video_exts and pick_code:
+                    strm_name = os.path.splitext(file_name)[0] + ".strm"
+                    strm_path = os.path.join(current_local_path, strm_name)
+                    
+                    if not etk_url.startswith('http'):
+                        rel_p = os.path.relpath(strm_path, local_root)
+                        content = os.path.join(etk_url, rel_p).replace('\\', '/')
+                        content = content[:-5] + f".{ext}"
+                    else:
+                        content = f"{etk_url}/api/p115/play/{pick_code}"
+                        if rename_config.get('strm_url_fmt') == 'with_name':
+                            content = f"{content}/{file_name}"
+                            
+                    with open(strm_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    
+                    P115CacheManager.save_file_cache(
+                        fid=file_id, parent_id=parent_id, name=file_name, 
+                        sha1=file_sha1, pick_code=pick_code, 
+                        local_path=file_local_path, size=file_size
+                    )
+                    
+                    added_count += 1
+                    action_str = "移动/改名" if old_local_path else "新增"
+                    logger.info(f"  ✨ [事件] {action_str} STRM: {file_name}")
+                    
+                    try:
+                        from monitor_service import enqueue_file_actively
+                        enqueue_file_actively(strm_path)
+                    except: pass
+
+                elif ext in known_sub_exts and download_subs and pick_code:
+                    sub_path = os.path.join(current_local_path, file_name)
+                    if not os.path.exists(sub_path):
+                        try:
+                            url_obj = client.download_url(pick_code, user_agent="Mozilla/5.0")
+                            if url_obj:
+                                import requests
+                                headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                                resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
+                                resp.raise_for_status()
+                                with open(sub_path, 'wb') as f:
+                                    for chunk in resp.iter_content(8192): f.write(chunk)
+                                logger.info(f"  ⬇️ [事件] 下载字幕: {file_name}")
+                        except: pass
+                            
+            else:
+                # 是目录，或者是不在白名单的文件，当做目录/空壳记录
+                os.makedirs(os.path.join(current_local_path, file_name), exist_ok=True)
+                P115CacheManager.save_cid(file_id, parent_id, file_name)
+                P115CacheManager.update_local_path(file_id, file_local_path)
+
+    # ★ 递归扫描目录内容的函数
+    def process_recursive(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size):
+        # 1. 先处理当前节点
+        process_node(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size)
+        
+        # 2. 如果是目录，且不是删除事件，则拉取里面的所有文件！
+        if is_folder and b_type != 22:
+            try:
+                offset = 0
+                while True:
+                    res = client.fs_files({'cid': file_id, 'limit': 1000, 'offset': offset})
+                    items = res.get('data', [])
+                    if not items: break
+                    
+                    for item in items:
+                        c_fid = str(item.get('fid') or item.get('file_id'))
+                        c_fname = item.get('fn') or item.get('n') or item.get('file_name')
+                        c_pid = file_id
+                        c_pc = item.get('pc') or item.get('pick_code')
+                        c_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                        c_is_folder = (c_fc == '0')
+                        c_sha1 = item.get('sha1') or item.get('sha')
+                        c_size = _parse_115_size(item.get('fs') or item.get('size'))
+                        
+                        # 递归调用
+                        process_recursive(c_fid, c_fname, c_pid, c_pc, c_is_folder, b_type, c_sha1, c_size)
+                        
+                    if len(items) < 1000: break
+                    offset += 1000
+            except Exception as e:
+                logger.error(f"  ❌ 递归拉取目录 {file_name} 失败: {e}")
+
+    try:
+        res = client.life_behavior_detail({"limit": 100, "offset": 0})
+        
+        if res.get('state'):
+            records = res.get('data', {}).get('list', [])
+
+            for record in records:
+                relation_id = record.get('id')
+                
+                try:
+                    b_type = int(record.get('type', 0))
+                except: continue
+                
+                if b_type not in [2, 6, 14, 22]: continue
+                
+                file_id = str(record.get('file_id') or '')
+                file_name = record.get('file_name') or ''
+                parent_id = str(record.get('parent_id') or '')
+                pick_code = record.get('pick_code') or ''
+                file_sha1 = record.get('sha1') or ''
+                file_size = record.get('file_size') or 0
+                
+                fc = str(record.get('file_category', '1'))
+                is_folder = (fc == '0')
+                
+                if not file_id: continue
+
+                # ★ 调用递归处理函数
+                process_recursive(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size)
+                        
+                # 映射为 Life API 需要的字符串
+                TYPE_MAP = {2: "upload_file", 6: "move_file", 14: "receive_files", 22: "delete_file"}
+                b_type_str = TYPE_MAP.get(b_type, str(b_type))
+                
+                events_to_delete.append({"relation_id": relation_id, "behavior_type": b_type_str})
+
+    except Exception as e:
+        logger.error(f"  ❌ 获取生活事件异常: {e}", exc_info=True)
+
+    # 4. 批量清空已处理的事件
+    if events_to_delete:
+        try:
+            chunk_size = 50
+            for i in range(0, len(events_to_delete), chunk_size):
+                chunk = events_to_delete[i:i+chunk_size]
+                del_res = client.life_batch_delete(chunk)
+                if not del_res.get('state'):
+                    logger.warning(f"  ⚠️ 清空生活事件失败: {del_res}")
+            logger.debug(f"  🧹 成功清空 {len(events_to_delete)} 条已处理的生活事件。")
+        except Exception as e:
+            logger.error(f"  ❌ 清空生活事件异常: {e}")
+
+    update_progress(100, f"=== 增量检查完成！新增/移动: {added_count}, 删除: {deleted_count} ===")
+
+# ======================================================================
+# ★★★ 后台守护线程：定时触发生活事件监控 ★★★
+# ======================================================================
+class LifeEventMonitorDaemon:
+    _timer = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def start_or_update(cls):
+        with cls._lock:
+            if cls._timer:
+                cls._timer.cancel()
+                cls._timer = None
+                
+            config = get_config()
+            if config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
+                interval_mins = config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_INTERVAL, 5)
+                interval_secs = max(5, interval_mins) * 60 # 最少 5 分钟
+                
+                logger.info(f"  ⏱️ [守护进程] 115 生活事件监控已启动，间隔: {interval_mins} 分钟。")
+                cls._schedule_next(interval_secs)
+
+    @classmethod
+    def _schedule_next(cls, interval_secs):
+        cls._timer = threading.Timer(interval_secs, cls._run_task, args=(interval_secs,))
+        cls._timer.daemon = True
+        cls._timer.start()
+
+    @classmethod
+    def _run_task(cls, interval_secs):
+        # ★ 增加心跳日志，证明守护线程活着
+        logger.info("  💓 [守护进程] 定时触发 115 生活事件监控...")
+        try:
+            task_monitor_115_life_events()
+        except Exception as e:
+            logger.error(f"生活事件监控守护线程异常: {e}")
+        finally:
+            with cls._lock:
+                if get_config().get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
+                    cls._schedule_next(interval_secs)
