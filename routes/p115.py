@@ -1,6 +1,5 @@
 # routes/p115.py
 import logging
-from flask import redirect
 import threading
 from datetime import datetime, timedelta
 import json
@@ -9,7 +8,7 @@ import os
 import re
 import time
 import requests
-from flask import Blueprint, jsonify, request, redirect
+from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app
 from extensions import admin_required
 from database import settings_db
 from handler.p115_service import P115Service, get_config
@@ -492,25 +491,42 @@ def handle_sorting_rules():
 @p115_bp.route('/play/<pick_code>/<path:filename>', methods=['GET', 'HEAD'])
 def play_115_video(pick_code, filename=None):
     """
-    终极极速 302 直链解析服务 (底层已实现全局缓存和防并发)
+    终极极速 302 直链解析服务 (双接口轮流尝试版)
     """
     if request.method == 'HEAD':
         return '', 200
 
     try:
+        # 恢复获取真实 UA
         player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
         
         client = P115Service.get_client()
         if not client:
             return "115 Client not initialized", 500
             
-        # ★ 直接调用底层，底层已经实现了完美的全局缓存和防并发锁
-        real_url = client.download_url(pick_code, user_agent=player_ua)
+        max_retries = 4
+        real_url = None
+        use_openapi = True # 优先使用 OpenAPI
+        
+        for i in range(max_retries):
+            try:
+                if use_openapi:
+                    real_url = client.openapi_downurl(pick_code, user_agent=player_ua)
+                else:
+                    real_url = client.download_url(pick_code, user_agent=player_ua)
+                    
+                if real_url:
+                    break
+            except Exception as e:
+                logger.warning(f"  ⚠️ [直链解析] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
+            
+            # 核心：如果没拿到，切换布尔值，下一次循环就换另一个接口
+            use_openapi = not use_openapi
+            time.sleep(0.5)
         
         if not real_url:
-            return "Too Many Requests - 115 API Protection", 429
+            return "Failed to get download URL or Rate Limited", 404
             
-        logger.info(f"  🚀 [302重定向] 客户端请求直链成功，已放行！")
         response = redirect(real_url, code=302)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
