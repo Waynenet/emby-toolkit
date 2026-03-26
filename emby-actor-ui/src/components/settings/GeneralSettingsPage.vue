@@ -18,7 +18,6 @@
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general" tab="通用设置">
               <n-grid cols="1 l:3" :x-gap="24" :y-gap="24" responsive="screen">
-                <!-- ★★★ 新增：Pro 状态专属卡片 (横跨整行) ★★★ -->
                 <n-gi span="1 l:3">
                   <n-card :bordered="false" class="dashboard-card" style="background: linear-gradient(135deg, #fffcf8 0%, #fff 100%); border: 1px solid #ffe5c4;">
                     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
@@ -129,33 +128,44 @@
                     </n-form-item>
 
                     <n-form-item label="监控路径" path="monitor_paths">
-                      <n-select
-                        v-model:value="configModel.monitor_paths"
-                        multiple
-                        filterable
-                        tag
-                        :show-arrow="false"
-                        placeholder="输入路径并回车"
-                        :options="[]" 
-                      />
+                      <n-input-group>
+                        <n-select
+                          v-model:value="configModel.monitor_paths"
+                          multiple
+                          filterable
+                          tag
+                          :show-arrow="false"
+                          placeholder="输入路径并回车，或点击右侧选择"
+                          :options="[]" 
+                          style="flex: 1;"
+                        />
+                        <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_paths', true)">
+                          <template #icon><n-icon :component="FolderIcon" /></template>
+                        </n-button>
+                      </n-input-group>
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          输入路径后<b>按回车</b>添加。请保持和 Emby 媒体库路径映射一致。
+                          请保持和 Emby 媒体库路径映射一致。
                         </n-text>
                       </template>
                     </n-form-item>
 
-                    <!-- 排除路径 -->
                     <n-form-item label="排除路径" path="monitor_exclude_dirs">
-                      <n-select
-                        v-model:value="configModel.monitor_exclude_dirs"
-                        multiple
-                        filterable
-                        tag
-                        :show-arrow="false"
-                        placeholder="输入路径并回车"
-                        :options="[]" 
-                      />
+                      <n-input-group>
+                        <n-select
+                          v-model:value="configModel.monitor_exclude_dirs"
+                          multiple
+                          filterable
+                          tag
+                          :show-arrow="false"
+                          placeholder="输入路径并回车，或点击右侧选择"
+                          :options="[]" 
+                          style="flex: 1;"
+                        />
+                        <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_exclude_dirs', true)">
+                          <template #icon><n-icon :component="FolderIcon" /></template>
+                        </n-button>
+                      </n-input-group>
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
                           命中这些路径的文件将<b>跳过刮削流程</b>，仅刷新。<br/>
@@ -239,7 +249,16 @@
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header><span class="card-title">数据源与API</span></template>
                     <n-form-item label="本地数据源路径" path="local_data_path">
-                      <n-input v-model:value="configModel.local_data_path" placeholder="神医TMDB缓存目录 (cache和override的上层)" />
+                      <n-input-group>
+                        <n-input 
+                          v-model:value="configModel.local_data_path" 
+                          placeholder="神医TMDB缓存目录 (cache和override的上层)" 
+                          @click="openLocalFolderSelector('local_data_path', false)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
+                      </n-input-group>
                     </n-form-item>
                     <n-form-item label="TMDB API Key" path="tmdb_api_key">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />
@@ -330,13 +349,13 @@
                           </n-button>
                         </n-space>
                         <n-text depth="3" style="font-size:0.8em;">
-                          用于网盘整理。请点击“登录授权”获取授权。
+                          用于网盘整理和视频播放。请点击“登录授权”获取授权。
                         </n-text>
                       </n-space>
                     </n-form-item>
 
                     <!-- ★★★ 分离配置: Cookie (播放用) - 纯展示 ★★★ -->
-                    <n-form-item label="Cookie (播放专用)">
+                    <n-form-item label="Cookie">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
                           <n-tag :type="p115Info?.has_cookie ? 'success' : 'default'" size="small">
@@ -350,10 +369,22 @@
                           </n-button>
                         </n-space>
                         <n-text depth="3" style="font-size:0.8em;">
-                          用于反代302播放，解决官方接口 403 封禁问题。
+                          用于TG、影巢转存和备用视频播放。
                         </n-text>
                       </n-space>
                     </n-form-item>
+
+                    <n-form-item label="播放接口" path="p115_playback_api_priority">
+                          <n-radio-group v-model:value="configModel.p115_playback_api_priority" name="api_priority_group">
+                            <n-space>
+                              <n-radio value="openapi">优先 OpenAPI</n-radio>
+                              <n-radio value="cookie">优先 Cookie</n-radio>
+                            </n-space>
+                          </n-radio-group>
+                          <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">决定反向代理获取直链时首次尝试的接口，失败会自动回退到另一个。</n-text>
+                          </template>
+                        </n-form-item>
 
                     <n-form-item label="API 请求间隔 (秒)" path="p115_request_interval">
                       <n-input-number v-model:value="configModel.p115_request_interval" :min="0.1" :step="0.1" placeholder="0.5" />
@@ -410,7 +441,6 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">整理与路径</span></template>
-                    
                     <n-form-item label="待整理目录" path="p115_save_path_cid">
                       <n-input-group>
                         <n-input 
@@ -460,12 +490,21 @@
                     </n-form-item>
 
                     <n-form-item label="本地 STRM 根目录" path="local_strm_root">
-                        <n-input v-model:value="configModel.local_strm_root" placeholder="例如: /mnt/media" />
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件</n-text>
-                        </template>
+                      <n-input-group>
+                        <n-input 
+                          v-model:value="configModel.local_strm_root" 
+                          placeholder="例如: /mnt/media" 
+                          @click="openLocalFolderSelector('local_strm_root', false)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_strm_root', false)">选择</n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件</n-text>
+                      </template>
                     </n-form-item>
-
+                    
                     <n-form-item label="智能整理开关" path="p115_enable_organize">
                         <n-switch v-model:value="configModel.p115_enable_organize">
                             <template #checked>整理并生成STRM</template>
@@ -538,7 +577,6 @@
                     </n-form-item>
                   </n-card>
                 </n-gi>
-
                 <!-- 右侧：分类规则与重命名 -->
                 <n-gi>
                   <n-space vertical :size="24" style="height: 100%;">
@@ -1333,6 +1371,38 @@
         </div>
       </div>
     </n-modal>
+
+    <!-- ★★★ 本地物理目录选择器弹窗 ★★★ -->
+    <n-modal v-model:show="showLocalFolderModal" preset="card" title="选择本地路径" style="width: 600px; max-width: 95vw;">
+      <n-spin :show="loadingLocalFolders">
+        <n-space vertical>
+          <!-- 顶部路径输入与刷新 -->
+          <n-input-group>
+            <n-input v-model:value="currentLocalPath" placeholder="当前路径" @keyup.enter="fetchLocalFolders(currentLocalPath)" />
+            <n-button type="primary" @click="fetchLocalFolders(currentLocalPath)">
+              <template #icon><n-icon :component="RefreshIcon" /></template>
+            </n-button>
+          </n-input-group>
+          
+          <!-- 目录列表 -->
+          <n-list hoverable clickable bordered style="max-height: 400px; overflow-y: auto; border-radius: 6px;">
+            <n-list-item v-for="folder in localFolders" :key="folder.path" @click="selectLocalFolder(folder)">
+              <template #prefix>
+                <n-icon :component="folder.is_parent ? ArrowUpIcon : FolderIcon" size="22" :color="folder.is_parent ? '#888' : '#f0a020'" />
+              </template>
+              <span :style="{ fontWeight: folder.is_parent ? 'bold' : 'normal' }">{{ folder.name }}</span>
+            </n-list-item>
+            <n-empty v-if="localFolders.length === 0" description="空目录或无权限访问" style="margin-top: 30px; margin-bottom: 30px;" />
+          </n-list>
+          
+          <!-- 底部按钮 -->
+          <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
+            <n-button @click="showLocalFolderModal = false">取消</n-button>
+            <n-button type="primary" @click="confirmLocalFolder">确定选择此目录</n-button>
+          </div>
+        </n-space>
+      </n-spin>
+    </n-modal>
     
     <!-- ★ 引入自定义重命名模态框 -->
     <RenameConfigModal ref="renameModalRef" />
@@ -1744,7 +1814,9 @@ import {
   ListOutline as ListIcon, 
   ColorWandOutline as ColorWandIcon,
   SearchOutline as SearchIcon,
-  DiamondOutline as DiamondIcon
+  DiamondOutline as DiamondIcon,
+  ArrowUpOutline as ArrowUpIcon,
+  RefreshOutline as RefreshIcon
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import RenameConfigModal from './RenameConfigModal.vue';
@@ -2359,6 +2431,91 @@ const saveManualCookie = async () => {
     message.error('保存失败: ' + (e.response?.data?.message || e.message));
   }
 };
+
+// --- 本地目录浏览器状态 ---
+const showLocalFolderModal = ref(false)
+const currentLocalPath = ref('')
+const localFolders = ref([])
+const loadingLocalFolders = ref(false)
+const currentLocalTargetField = ref('')
+const isCurrentLocalTargetArray = ref(false)
+
+// 打开本地目录浏览器 (增强版)
+const openLocalFolderSelector = (targetField, isArray = false) => {
+    currentLocalTargetField.value = targetField
+    isCurrentLocalTargetArray.value = isArray
+    
+    // 决定初始路径
+    let startPath = '/'
+    if (!isArray && configModel.value[targetField]) {
+        startPath = configModel.value[targetField]
+    } else if (isArray && configModel.value[targetField] && configModel.value[targetField].length > 0) {
+        // 如果是数组且有值，取最后一个值的父目录作为起点，方便连续添加
+        const lastPath = configModel.value[targetField][configModel.value[targetField].length - 1]
+        startPath = lastPath.substring(0, lastPath.lastIndexOf('/')) || '/'
+    }
+    
+    currentLocalPath.value = startPath
+    showLocalFolderModal.value = true
+    fetchLocalFolders(currentLocalPath.value)
+}
+
+// 获取本地目录列表 (保持不变)
+const fetchLocalFolders = async (path) => {
+    loadingLocalFolders.value = true
+    try {
+        const res = await axios.get('/api/p115/system/directories', { params: { path } })
+        if (res.data.code === 200) {
+            localFolders.value = res.data.data
+            if (res.data.current_path !== undefined) {
+                currentLocalPath.value = res.data.current_path
+            }
+        } else {
+            message.error(res.data.message || '获取目录失败')
+        }
+    } catch (error) {
+        if (error.response && error.response.status === 403) {
+            message.error('没有权限访问该目录！')
+        } else if (error.response && error.response.status === 404) {
+            message.error('目录不存在！')
+        } else {
+            message.error('请求目录失败: ' + (error.response?.data?.message || error.message))
+        }
+    } finally {
+        loadingLocalFolders.value = false
+    }
+}
+
+// 点击列表中的文件夹 (保持不变)
+const selectLocalFolder = (folder) => {
+    fetchLocalFolders(folder.path)
+}
+
+// 确认选择 (增强版)
+const confirmLocalFolder = () => {
+    const field = currentLocalTargetField.value
+    const path = currentLocalPath.value
+    
+    if (isCurrentLocalTargetArray.value) {
+        // 如果是多选数组 (如 monitor_paths)
+        if (!configModel.value[field]) {
+            configModel.value[field] = []
+        }
+        // 防止重复添加
+        if (!configModel.value[field].includes(path)) {
+            configModel.value[field].push(path)
+            message.success(`已追加路径: ${path}`)
+        } else {
+            message.warning('该路径已存在列表中')
+        }
+    } else {
+        // 如果是单选字符串 (如 local_strm_root)
+        configModel.value[field] = path
+        message.success(`已选择路径: ${path}`)
+    }
+    
+    showLocalFolderModal.value = false
+}
 
 // ★★★ 全自动网页授权 (授权码模式) 逻辑 ★★★
 const isWebAuthing = ref(false);
