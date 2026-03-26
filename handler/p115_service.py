@@ -2325,7 +2325,8 @@ class SmartOrganizer:
         configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
         allowed_exts = set(e.lower() for e in configured_exts)
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
-        MIN_VIDEO_SIZE = 10 * 1024 * 1024
+        min_size_mb = int(config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10))
+        MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
 
         # 获取“未识别”目录的 CID
         unidentified_cid = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
@@ -2937,7 +2938,7 @@ class SmartOrganizer:
         # ★★★ 终极清理：将所有不合规文件移入未识别目录 ★★★
         # =================================================================
         if unrecognized_fids and unidentified_cid:
-            logger.info(f"  🗑️ 发现 {len(unrecognized_fids)} 个不合规文件(扩展名不符/花絮/样本)，正在移入未识别目录...")
+            logger.info(f"  🗑️ 发现 {len(unrecognized_fids)} 个不合规文件(扩展名不符/花絮/样本/广告)，正在移入未识别目录...")
             # 同样传入列表，防止 115 API 报错
             self.client.fs_move(unrecognized_fids, unidentified_cid)
 
