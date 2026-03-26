@@ -579,8 +579,8 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
             # 3. 补全 SHA1 (内部自带 115 API 兜底)
             # =========================================================
             if not sha1 and pc:
-                logger.debug(f"  🔍 [路径解析] 成功提取SHA1: {sha1}")
                 sha1 = processor._get_sha1_by_pickcode(pc)
+                logger.debug(f"  🔍 [路径解析] 成功提取SHA1: {sha1}")
             
             if sha1:
                 media_data = None
@@ -853,7 +853,7 @@ def emby_webhook():
     # ======================================================================
     # ★★★ 处理 MoviePilot transfer.complete 事件 ★★★
     # ======================================================================
-    if mp_event_type == "transfer.complete":
+    if mp_event_type in ["transfer.complete", "transfer.subtitle.complete"]:
         nb_config = get_config()
         if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False):
             logger.debug("  🚫 智能整理未开启，忽略 MP 通知。")
@@ -900,7 +900,11 @@ def emby_webhook():
                     'season_num': begin_season,
                     'episode_num': begin_episode
                 }
-                logger.info(f"  🚀 [MP上传] 收到文件: {file_name}，开始整理...")
+                
+                # ★ 区分日志前缀，方便排错
+                log_prefix = "MP字幕上传" if mp_event_type == "transfer.subtitle.complete" else "MP视频上传"
+                logger.info(f"  🚀 [{log_prefix}] 收到文件: {file_name}，开始整理...")
+                
                 spawn(_process_single_mp_file, file_info)
                 return jsonify({"status": "processing_single_file"}), 200
             else:
