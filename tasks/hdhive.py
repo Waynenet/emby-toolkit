@@ -4,6 +4,8 @@ import time
 import logging
 from handler.hdhive_client import HDHiveClient
 from handler.p115_service import P115Service, SmartOrganizer, get_config
+from database import settings_db
+import task_manager
 import constants
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
     try:
         import_res = client.share_import(share_code, access_code, save_cid)
         
-        # ★ 修复 1：兼容 state 为 True (布尔值) 或 1 (数字/字符串) 的情况
+        # ★ 1：兼容 state 为 True (布尔值) 或 1 (数字/字符串) 的情况
         if not import_res or not import_res.get('state'):
             logger.error(f"  ❌ 115 转存失败: {import_res.get('error_msg', import_res)}")
             return False
@@ -71,22 +73,38 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
             logger.warning("  ⚠️ 转存成功但未返回文件名，交由全局定时扫描任务处理。")
             return True
 
-        # ★ 修复 2：去待整理目录搜索刚刚转存的文件，获取真实的 file_id
+        # ★ 2：去待整理目录搜索刚刚转存的文件，获取真实的 file_id (增加重试逻辑)
         logger.info(f"  🔍 正在定位转存文件，准备执行精准整理...")
-        time.sleep(2) # 稍微等2秒，防止 115 后端数据没同步
-        
-        search_res = client.fs_files({'cid': save_cid, 'search_value': receive_title, 'limit': 10})
-        saved_items = search_res.get('data', [])
         
         target_item = None
-        for item in saved_items:
-            name = item.get('fn') or item.get('file_name') or item.get('n')
-            if name == receive_title:
-                target_item = item
-                break
+        max_retries = 3
+        
+        for attempt in range(1, max_retries + 1):
+            # 递增等待时间：2秒, 4秒, 6秒
+            wait_time = attempt * 2
+            logger.debug(f"  ⏳ 等待 {wait_time} 秒后进行第 {attempt}/{max_retries} 次搜索...")
+            time.sleep(wait_time)
+            
+            try:
+                search_res = client.fs_files({'cid': save_cid, 'search_value': receive_title, 'limit': 10})
+                saved_items = search_res.get('data', [])
+                
+                for item in saved_items:
+                    name = item.get('fn') or item.get('file_name') or item.get('n')
+                    if name == receive_title:
+                        target_item = item
+                        break
+                        
+                if target_item:
+                    logger.info(f"  🎯 第 {attempt} 次搜索成功定位到文件！")
+                    break
+                else:
+                    logger.debug(f"  ❌ 第 {attempt} 次搜索未找到文件，115 索引可能尚未同步。")
+            except Exception as e:
+                logger.warning(f"  ⚠️ 第 {attempt} 次搜索请求发生异常: {e}")
                 
         if not target_item:
-            logger.warning(f"  ⚠️ 未能精准定位到文件 '{receive_title}'，将交由全局定时扫描任务处理。")
+            logger.warning(f"  ⚠️ 经过 {max_retries} 次重试，仍未能精准定位到文件 '{receive_title}'，将交由全局定时扫描任务处理。")
             return True
 
         # 构造 root_item 触发 SmartOrganizer (补全 pc, sha1, fs 等生成 STRM 必需的关键信息)
@@ -117,3 +135,42 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
     except Exception as e:
         logger.error(f"  ❌ 转存或整理过程中发生异常: {e}", exc_info=True)
         return False
+    
+def task_hdhive_auto_checkin(processor):
+    """
+    后台任务：影巢自动签到
+    """
+    logger.info("--- 开始执行影巢自动签到任务 ---")
+    task_manager.update_status_from_thread(0, "正在读取影巢配置...")
+
+    api_key = settings_db.get_setting('hdhive_api_key')
+    if not api_key:
+        logger.info("  ➜ 未配置影巢 API Key，跳过自动签到。")
+        task_manager.update_status_from_thread(100, "未配置 API Key，跳过")
+        return
+
+    client = HDHiveClient(api_key)
+    task_manager.update_status_from_thread(50, "正在发送签到请求...")
+
+    try:
+        # 默认使用普通签到，避免赌狗模式把用户的积分扣光（群友要是扣光了又要骂娘了）
+        res = client.checkin(is_gambler=False)
+
+        if res.get("success"):
+            res_data = res.get("data", {})
+            real_message = res_data.get("message") or res.get("message", "签到请求成功")
+
+            if res_data.get("checked_in") is False:
+                logger.info(f"  ➜ 影巢签到: {real_message}")
+                task_manager.update_status_from_thread(100, f"已签到: {real_message}")
+            else:
+                logger.info(f"  ✅ 影巢签到成功: {real_message}")
+                task_manager.update_status_from_thread(100, f"签到成功: {real_message}")
+        else:
+            error_msg = res.get("message", "签到失败")
+            logger.warning(f"  ⚠️ 影巢签到失败: {error_msg}")
+            task_manager.update_status_from_thread(-1, f"签到失败: {error_msg}")
+
+    except Exception as e:
+        logger.error(f"  ❌ 影巢自动签到发生异常: {e}", exc_info=True)
+        task_manager.update_status_from_thread(-1, "签到异常")
