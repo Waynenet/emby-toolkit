@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.2.5"  # 更新版本号
+APP_VERSION = "8.2.7"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -63,6 +63,7 @@ CONFIG_OPTION_115_ENABLE_SYNC_DELETE = "p115_enable_sync_delete" # 是否联动�
 CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"           # 是否下载字幕文件
 CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"           # 是否启用本地清理功能
 CONFIG_OPTION_115_MEDIAINFO_CENTER = "p115_mediainfo_center"     # 分布式媒体信息
+CONFIG_OPTION_115_APP_ID = "p115_app_id"                         # 115 自定义 AppID
 CONFIG_OPTION_115_LIFE_MONITOR_ENABLED = "p115_life_monitor_enabled" # 是否开启生活事件监控
 CONFIG_OPTION_115_LIFE_MONITOR_INTERVAL = "p115_life_monitor_interval" # 监控间隔(分钟)
 
