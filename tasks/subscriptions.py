@@ -16,6 +16,8 @@ import task_manager
 from handler import telegram
 from database import settings_db, request_db, user_db, media_db, watchlist_db
 from .helpers import is_movie_subscribable, check_series_completion, parse_series_title_and_season, should_mark_as_pending
+from handler.hdhive_client import HDHiveClient
+from tasks.hdhive import task_download_from_hdhive
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,21 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "sub_kor": ["KOR", "韩字", "韩文", "Korean"],   
     "sub_yue": ["CHT", "繁中", "繁体", "Cantonese"], 
 }
+# 解析影巢返回的体积字符串
+def _parse_size_to_gb(size_str):
+    """将影巢返回的体积字符串 (如 '58.3 GB', '1.77TB') 转换为 GB 浮点数"""
+    if not size_str:
+        return 0.0
+    size_str = size_str.upper().replace(' ', '')
+    match = re.search(r'([\d\.]+)([A-Z]+)', size_str)
+    if not match:
+        return 0.0
+    val = float(match.group(1))
+    unit = match.group(2)
+    if 'TB' in unit: return val * 1024
+    if 'GB' in unit: return val
+    if 'MB' in unit: return val / 1024
+    return 0.0
 
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
@@ -52,6 +69,9 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
     5. 检查是否完结/配置开启 -> 决定 best_version。
     6. 逐季提交订阅并更新本地数据库。
     """
+    watchlist_config = settings_db.get_setting('watchlist_config') or {}
+    tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
+
     try:
         # 1. 获取剧集详情
         series_details = tmdb.get_tv_details(tmdb_id, tmdb_api_key)
@@ -129,10 +149,10 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             else:
                 # 如果深挖了详情还是没有日期，通常意味着 TBD (To Be Determined)，也应视为未上映，防止错误订阅
                 is_future_season = True
-                logger.info(f"  ⏳ 季《{final_series_name}》S{s_num} 无发行日期，视为 '待上映'。")
+                logger.info(f"  ➜ 季《{final_series_name}》S{s_num} 无发行日期，视为 '待上映'。")
             
             if is_future_season:
-                logger.info(f"  ⏳ 《{final_series_name}》第 {s_num} 季 尚未播出 ({air_date_str})，已加入待上映列表。")
+                logger.info(f"  ➜ 《{final_series_name}》第 {s_num} 季 尚未播出 ({air_date_str})，已加入待上映列表。")
                 
                 media_info = {
                     'tmdb_id': str(s_id) if s_id else f"{tmdb_id}_S{s_num}",
@@ -162,7 +182,7 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             is_pending_logic, fake_total_episodes = should_mark_as_pending(tmdb_id, s_num, tmdb_api_key)
             
             if is_pending_logic:
-                logger.info(f"  ⏳ 季《{final_series_name}》S{s_num} 满足自动待定条件，将执行 [订阅 -> 转待定] 流程。")
+                logger.info(f"  ➜ 季《{final_series_name}》S{s_num} 满足自动待定条件，将执行 [订阅 -> 转待定] 流程。")
 
             # ==============================================================
             # 逻辑 C: 准备订阅 Payload
@@ -180,9 +200,11 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             # ==============================================================
             # 只有在【不满足】待定条件时，才去检查完结状态。
             # 如果已经是待定状态，说明肯定没完结，不需要检查，也不应该开启洗版。
+            is_completed = False # ★★★ 新增一个标志位
             if not is_pending_logic:
                 if check_series_completion(tmdb_id, tmdb_api_key, season_number=s_num, series_name=final_series_name):
                     mp_payload["best_version"] = 1
+                    is_completed = True # ★★★ 标记为已完结
                     logger.info(f"  ➜ S{s_num} 已完结，启用洗版模式订阅。")
                 else:
                     logger.info(f"  ➜ S{s_num} 未完结，使用追更模式订阅。")
@@ -192,7 +214,15 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             # ==============================================================
             # 逻辑 E: 提交订阅 & 后置状态修正
             # ==============================================================
-            if moviepilot.subscribe_with_custom_payload(mp_payload, config):
+            # ★★★ 修改开始：拦截 TG 频道追更 ★★★
+            if tg_channel_tracking and not is_completed:
+                logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{s_num} 的订阅。")
+                mp_submit_success = True # 模拟成功，以便更新本地数据库状态为已订阅
+                is_pending_logic = False # 既然没提交给MP，就不需要去MP改待定状态了
+            else:
+                mp_submit_success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+
+            if mp_submit_success:
                 any_success = True
                 
                 # ★★★ 核心修复：如果是待定逻辑，订阅成功后立即修改 MP 状态 ★★★
@@ -208,9 +238,9 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
                         total_episodes=fake_total_episodes
                     )
                     if mp_update_success:
-                        logger.info(f"  ✅ S{s_num} 已成功转为待定状态。")
+                        logger.info(f"  ➜ S{s_num} 已成功转为待定状态。")
                     else:
-                        logger.warning(f"  ⚠️ S{s_num} 订阅成功，但转待定状态失败。")
+                        logger.warning(f"  ➜ S{s_num} 订阅成功，但转待定状态失败。")
 
                 # 订阅成功后，更新本地数据库状态为 SUBSCRIBED
                 # (即使 MP 是 Pending，对于本地请求队列来说，它也算是“已处理/已订阅”)
@@ -254,6 +284,8 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
     try:
         config = config_manager.APP_CONFIG
         tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+        watchlist_config = settings_db.get_setting('watchlist_config') or {}
+        tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
         
         processed_count = 0
 
@@ -321,7 +353,6 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                     }
 
                     # B. ★★★ 核心：完结状态检查 ★★★
-                    # 手动订阅不看配置，只看事实：完结了就洗版(best_version=1)，没完结就追更。
                     is_completed = check_series_completion(
                         int(tmdb_id), 
                         tmdb_api_key, 
@@ -333,10 +364,14 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                         mp_payload["best_version"] = 1
                         logger.info(f"  ➜ [手动交互] S{season_number} 已完结，启用洗版模式 (best_version=1)。")
                     else:
-                        # 连载中 -> 不传 best_version (默认为0)
                         logger.info(f"  ➜ [手动交互] S{season_number} 尚未完结 (连载中)，使用普通追更模式。")
                     
-                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                    # ★★★ 拦截 TG 频道追更 ★★★
+                    if tg_channel_tracking and not is_completed:
+                        logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{season_number} 的订阅。")
+                        success = True # 模拟成功
+                    else:
+                        success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
                 # 3. 处理整剧订阅 (Series)
                 elif item_type == 'Series':
@@ -373,7 +408,7 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
             # 结果处理
             # ==================================================================
             if success:
-                logger.info(f"  ✅ 《{item_title_for_log}》订阅成功！")
+                logger.info(f"  ➜ 《{item_title_for_log}》订阅成功！")
                 settings_db.decrement_subscription_quota()
                 
                 # 更新数据库状态 (Series 类型在 _subscribe_full_series_with_logic 里处理了)
@@ -395,7 +430,7 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
             else:
                 logger.error(f"  ➜ 订阅《{item_title_for_log}》失败，请检查 MoviePilot 日志。")
         
-        final_message = f"  ✅ 手动订阅任务完成，成功处理 {processed_count}/{total_items} 个项目。"
+        final_message = f"  ➜ 手动订阅任务完成，成功处理 {processed_count}/{total_items} 个项目。"
         task_manager.update_status_from_thread(100, final_message)
         logger.info(f"--- '{task_name}' 任务执行完毕 ---")
 
@@ -681,7 +716,7 @@ def task_auto_subscribe(processor):
                 
                 if revived_ids:
                     request_db.update_movie_status_revived(revived_ids)
-                    logger.info(f"  ✅ 成功复活 {len(revived_ids)} 部电影 (MP状态->R)。")
+                    logger.info(f"  ➜ 成功复活 {len(revived_ids)} 部电影 (MP状态->R)。")
 
             # 2.2 暂停 (Pause: SUBSCRIBED -> PAUSED)
             # 对应 MP 状态: 'R' -> 'S'
@@ -704,11 +739,11 @@ def task_auto_subscribe(processor):
                             # 2. 补订成功后，再次尝试将其状态更新为 'S'
                             if moviepilot.update_subscription_status(int(tmdb_id), None, 'S', config):
                                 paused_ids.append(tmdb_id)
-                                logger.info(f"    - ✅ 《{title}》补订并暂停成功。")
+                                logger.info(f"    - ➜ 《{title}》补订并暂停成功。")
                             else:
-                                logger.warning(f"    - ⚠️ 《{title}》补订成功，但暂停状态同步失败。")
+                                logger.warning(f"    - ➜ 《{title}》补订成功，但暂停状态同步失败。")
                         else:
-                            logger.error(f"    - ❌ 《{title}》补订失败，无法执行暂停操作。")
+                            logger.error(f"    - ➜ 《{title}》补订失败，无法执行暂停操作。")
                 
                 if paused_ids:
                     request_db.update_movie_status_paused(paused_ids, pause_days=movie_pause_days)
@@ -738,7 +773,7 @@ def task_auto_subscribe(processor):
                     revived_count += 1
                     logger.debug(f"    - 《{item['title']}》已复活。")
                 
-                logger.info(f"  ✅ 成功复活了 {revived_count} 个项目，它们将在本次或下次任务中被重新处理。")
+                logger.info(f"  ➜ 成功复活了 {revived_count} 个项目，它们将在本次或下次任务中被重新处理。")
             else:
                 logger.debug("  ➜ 没有满足复活条件的项目。")
         
@@ -829,26 +864,117 @@ def task_auto_subscribe(processor):
 
             # 提交 MP 订阅
             success = False
+            watchlist_config = settings_db.get_setting('watchlist_config') or {}
+            tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
+            subscription_priority = strategy_config.get('subscription_priority', 'mp')
+
             if item_type == 'Movie':
-                mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
-                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                # ==========================================
+                # 电影逻辑：影巢优先 -> MP 兜底
+                # ==========================================
+                if subscription_priority == 'hdhive':
+                    logger.info(f"  ➜ [策略] 电影《{title}》启用影巢优先，正在检索并筛选资源...")
+                    hdhive_api_key = settings_db.get_setting('hdhive_api_key')
+                    
+                    if hdhive_api_key:
+                        hd_client = HDHiveClient(hdhive_api_key)
+                        resources = hd_client.get_resources(tmdb_id, 'movie')
+                        
+                        if resources:
+                            # --- ★★★ 智能漏斗：开始过滤资源 ★★★ ---
+                            valid_resources = []
+                            
+                            # 读取过滤配置
+                            hd_free_only = strategy_config.get('hdhive_free_only', False)
+                            hd_max_points = strategy_config.get('hdhive_max_points', 10)
+                            hd_max_size = strategy_config.get('hdhive_max_size_gb', 120)
+                            hd_res = strategy_config.get('hdhive_resolution', 'All')
+                            
+                            for r in resources:
+                                r_title = r.get('title', '未知标题')
+                                
+                                # 1. 计算实际消耗积分 (如果已解锁，则视为 0 分)
+                                is_unlocked = r.get('is_unlocked', False)
+                                raw_points = r.get('unlock_points') or 0
+                                effective_points = 0 if is_unlocked else raw_points
+                                
+                                # 积分过滤
+                                if hd_free_only and effective_points > 0:
+                                    continue
+                                if effective_points > hd_max_points:
+                                    continue
+                                    
+                                # 2. 体积过滤 (防大合集)
+                                size_gb = _parse_size_to_gb(r.get('share_size'))
+                                if size_gb > hd_max_size:
+                                    logger.debug(f"  ➜ 过滤掉超大资源: {r_title} ({size_gb:.1f}GB > {hd_max_size}GB)")
+                                    continue
+                                    
+                                # 3. 分辨率过滤
+                                if hd_res != 'All':
+                                    res_list = r.get('video_resolution', [])
+                                    if hd_res not in res_list:
+                                        continue
+                                        
+                                # 记录有效积分和体积，方便后续排序
+                                r['_effective_points'] = effective_points
+                                r['_size_gb'] = size_gb
+                                valid_resources.append(r)
+                            
+                            # --- ★★★ 智能排序：选出最优解 ★★★ ---
+                            if valid_resources:
+                                # 排序规则：优先选积分最少的(白嫖优先) -> 积分相同时，选体积最大的(画质更好)
+                                valid_resources.sort(key=lambda x: (x['_effective_points'], -x['_size_gb']))
+                                
+                                target_resource = valid_resources[0]
+                                slug = target_resource.get('slug')
+                                
+                                logger.info(f"  ➜ 筛选出最优影巢资源: {target_resource.get('title')} "
+                                            f"(体积: {target_resource['_size_gb']:.1f}GB, 需积分: {target_resource['_effective_points']})")
+                                
+                                if slug:
+                                    success = task_download_from_hdhive(hdhive_api_key, slug, tmdb_id, 'movie', title)
+                                    if success:
+                                        logger.info(f"  ➜ 影巢秒传成功！已跳过 MoviePilot 订阅。")
+                                    else:
+                                        logger.warning(f"  ➜ 影巢转存失败，准备降级到 MoviePilot 兜底...")
+                            else:
+                                logger.info(f"  ➜ 影巢有资源，但没有符合你设置的过滤条件 (积分/体积/分辨率)，准备降级到 MoviePilot 兜底...")
+                        else:
+                            logger.info(f"  ➜ 影巢未找到电影《{title}》的资源，准备降级到 MoviePilot 兜底...")
+                    else:
+                        logger.warning(f"  ➜ 未配置影巢 API Key，自动降级到 MoviePilot...")
+
+                # 如果影巢没开、没找到资源、或者转存失败，统一交由 MP 兜底
+                if not success:
+                    logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
+                    mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
+                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
             elif item_type == 'Series':
                 success = _subscribe_full_series_with_logic(int(tmdb_id), title, config, tmdb_api_key)
             elif item_type == 'Season' and parent_tmdb_id and season_number is not None:
                 mp_payload = {"name": title, "tmdbid": int(parent_tmdb_id), "type": "电视剧", "season": int(season_number)}
                 
-                # 判定洗版/追更 (此处仅针对新订阅，非 resubscribe 逻辑)
+                # 判定洗版/追更
                 is_pending, fake_eps = should_mark_as_pending(int(parent_tmdb_id), int(season_number), tmdb_api_key)
+                is_completed = False # ★★★ 新增标志位
+                
                 if not is_pending and check_series_completion(int(parent_tmdb_id), tmdb_api_key, season_number=int(season_number), series_name=title):
                     mp_payload["best_version"] = 1
+                    is_completed = True # ★★★ 标记为已完结
                 
-                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
-                if success and is_pending:
-                    moviepilot.update_subscription_status(int(parent_tmdb_id), int(season_number), 'P', config, total_episodes=fake_eps)
+                # ★★★ 拦截 TG 频道追更 ★★★
+                if tg_channel_tracking and not is_completed:
+                    logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{season_number} 的订阅。")
+                    success = True # 模拟成功
+                else:
+                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                    if success and is_pending:
+                        moviepilot.update_subscription_status(int(parent_tmdb_id), int(season_number), 'P', config, total_episodes=fake_eps)
 
             # 处理订阅结果
             if success:
-                logger.info(f"  ✅ 《{item['title']}》订阅成功！")
+                logger.info(f"  ➜ 《{item['title']}》订阅成功！")
                 
                 # 将状态从 WANTED 更新为 SUBSCRIBED
                 if item_type != 'Series':
@@ -929,13 +1055,13 @@ def task_auto_subscribe(processor):
                 user_chat_id = user_db.get_user_telegram_chat_id(user_id)
                 if user_chat_id:
                     items_list_str = "\n".join([f"· `{item}`" for item in failed_items])
-                    message_text = (f"⚠️ *您的部分订阅请求未被处理*\n\n下列内容因不满足条件而被跳过：\n{items_list_str}")
+                    message_text = (f"➜ *您的部分订阅请求未被处理*\n\n下列内容因不满足条件而被跳过：\n{items_list_str}")
                     telegram.send_telegram_message(user_chat_id, message_text)
             except Exception as e:
                 logger.error(f"为用户 {user_id} 发送自动订阅的合并失败通知时出错: {e}")
 
         if subscription_details:
-            header = f"  ✅ *统一订阅任务完成，成功处理 {len(subscription_details)} 项:*"
+            header = f"  ➜ *统一订阅任务完成，成功处理 {len(subscription_details)} 项:*"
             
             item_lines = []
             for detail in subscription_details:
@@ -950,7 +1076,7 @@ def task_auto_subscribe(processor):
             summary_message = "ℹ️ *统一订阅任务完成，无成功处理的订阅项。*"
 
         if rejected_details:
-            rejected_header = f"\n\n⚠️ *下列 {len(rejected_details)} 项因不满足订阅条件而被跳过:*"
+            rejected_header = f"\n\n➜ *下列 {len(rejected_details)} 项因不满足订阅条件而被跳过:*"
             
             rejected_lines = []
             for detail in rejected_details:
