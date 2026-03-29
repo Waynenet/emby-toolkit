@@ -490,6 +490,8 @@ def task_full_sync_strm_and_subs(processor=None):
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
+    min_size_mb = int(config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10))
+    MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
     
     start_msg = "=== 🚀 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== 🚀 开始极速全量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
@@ -685,6 +687,14 @@ def task_full_sync_strm_and_subs(processor=None):
                             
                             # 处理视频 STRM
                             if ext in known_video_exts:
+                                raw_size = item.get('fs') or item.get('size')
+                                file_size = _parse_115_size(raw_size)
+                                safe_file_size = int(file_size) if str(file_size).isdigit() else 0
+                                
+                                if 0 < safe_file_size < MIN_VIDEO_SIZE:
+                                    size_mb = safe_file_size / (1024 * 1024)
+                                    logger.debug(f"  🗑️ [全量同步] 视频体积过小 ({size_mb:.2f} MB)，判定为花絮/样本/广告，跳过生成 STRM: {name}")
+                                    continue # 直接跳过当前文件，不生成 STRM 也不写缓存
                                 strm_name = os.path.splitext(name)[0] + ".strm"
                                 strm_path = os.path.join(current_local_path, strm_name)
                                 
@@ -726,7 +736,6 @@ def task_full_sync_strm_and_subs(processor=None):
                                 # ==================================================
                                 fid = item.get('fid') or item.get('file_id')
                                 sha1 = item.get('sha1') or item.get('sha')
-                                file_size = _parse_115_size(item.get('fs') or item.get('size'))
                                 if pc and fid:
                                     file_local_path = os.path.join(rel_dir, name).replace('\\', '/')
                                     P115CacheManager.save_file_cache(
@@ -1294,7 +1303,8 @@ def task_monitor_115_life_events(processor=None):
                     # 确保 file_size 是整数
                     safe_file_size = int(file_size) if str(file_size).isdigit() else 0
                     if 0 < safe_file_size < MIN_VIDEO_SIZE:
-                        logger.debug(f"  🗑️ [事件] 视频体积过小 ({safe_file_size} 字节)，判定为花絮/样本/广告，忽略生成 STRM: {file_name}")
+                        size_mb = safe_file_size / (1024 * 1024)
+                        logger.debug(f"  🗑️ [事件] 视频体积过小 ({size_mb:.2f} MB)，判定为花絮/样本/广告，忽略生成 STRM: {file_name}")
                         return # 直接跳过，不生成 STRM，也不记录缓存
                 os.makedirs(current_local_path, exist_ok=True)
                 

@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.2.7"  # 更新版本号
+APP_VERSION = "8.2.8"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -83,6 +83,12 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'scan-cleanup-issues',        # 扫描重复媒体
     'system-auto-update',         # 系统自动更新
 ]
+CONFIG_OPTION_TG_USER_ENABLED = "tg_user_enabled"                  # TG用户登录
+CONFIG_OPTION_TG_USER_API_ID = "tg_user_api_id"                    # TG用户API ID
+CONFIG_OPTION_TG_USER_API_HASH = "tg_user_api_hash"                # TG用户API Hash
+CONFIG_OPTION_TG_USER_PHONE = "tg_user_phone"
+CONFIG_OPTION_TG_USER_2FA = "tg_user_2fa"
+CONFIG_OPTION_TG_MONITOR_CHANNELS = "tg_monitor_channels"
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)
