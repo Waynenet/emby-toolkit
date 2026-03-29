@@ -143,9 +143,17 @@ def save_config_and_reload(new_config: Dict[str, Any]):
         if config_manager.APP_CONFIG.get('is_pro_active', False):
             try:
                 from handler.tg_userbot import TGUserBotManager
+                # ★ 去掉 force_restart，让它安全地调用 start()
+                # 如果它已经在运行，start() 会被安全锁拦截。
+                # 但不用担心，白名单的更新会在它下次收到消息时自动生效！
                 TGUserBotManager.get_instance().start()
             except Exception as e:
-                logger.error(f"重启 TG UserBot 失败: {e}")
+                logger.error(f"重启 TG订阅 失败: {e}")
+        else:
+            try:
+                from handler.tg_userbot import TGUserBotManager
+                TGUserBotManager.get_instance().stop()
+            except: pass
         
         logger.info("  ✅ 新配置重新初始化完毕。")
         
@@ -249,7 +257,7 @@ def initialize_processors():
                 verify_url = "https://auth.55565576.xyz" 
                 # ★ 启动时只查岗，不消耗卡密
                 payload = {"action": "check", "server_id": server_id_local}
-                resp = requests.post(verify_url, json=payload, timeout=5).json()
+                resp = requests.post(verify_url, json=payload, timeout=10).json()
                 
                 if resp.get("success") and resp.get("is_pro"):
                     config_manager.APP_CONFIG['is_pro_active'] = True

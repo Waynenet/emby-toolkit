@@ -53,9 +53,12 @@ class TGUserBotManager:
         """启动后台线程"""
         cfg = self._get_config()
         if not cfg['enabled'] or not cfg['api_id'] or not cfg['api_hash']:
+            if self.is_running:
+                logger.info("  🛑 [TG订阅] 监听已在配置中关闭，正在停止服务...")
+                self.stop()
             return
 
-        # ★ 核心修复：如果线程已经活着，绝对不能重复启动，防止 Event Loop 冲突！
+        # ★ 绝对安全锁：只要线程活着，绝不重复启动，防止 asyncio 炸膛！
         if self.is_running and self.thread and self.thread.is_alive():
             return
 
