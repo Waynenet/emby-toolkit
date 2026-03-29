@@ -102,6 +102,7 @@ logging.getLogger("PIL").setLevel(logging.WARNING)
 logging.getLogger("geventwebsocket").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("watchdog").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 # --- 全局变量 ---
 
 JOB_ID_FULL_SCAN = "scheduled_full_scan"
@@ -137,6 +138,14 @@ def save_config_and_reload(new_config: Dict[str, Any]):
 
         # 动态刷新 115 生活事件守护进程
         LifeEventMonitorDaemon.start_or_update()
+
+        # 动态刷新 TG UserBot 监听服务
+        if config_manager.APP_CONFIG.get('is_pro_active', False):
+            try:
+                from handler.tg_userbot import TGUserBotManager
+                TGUserBotManager.get_instance().start()
+            except Exception as e:
+                logger.error(f"重启 TG UserBot 失败: {e}")
         
         logger.info("  ✅ 新配置重新初始化完毕。")
         
@@ -494,8 +503,11 @@ def main_app_start():
     # 启动 Telegram 机器人交互监听
     if config_manager.APP_CONFIG.get('is_pro_active', False):
         telegram.start_telegram_bot()
+        # 启动 UserBot 频道监听 ★★★
+        from handler.tg_userbot import TGUserBotManager
+        TGUserBotManager.get_instance().start()
     else:
-        logger.info("  ⚠️ [免费版限制] Telegram 机器人交互菜单与指令功能为 Pro 高级版专属！交互监听未启动。")
+        logger.info("  ⚠️ [免费版限制] Telegram 机器人交互菜单与订阅功能为 Pro 专属！交互监听未启动。")
 
     def warmup_vector_cache():
         try:

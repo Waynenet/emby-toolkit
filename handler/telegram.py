@@ -376,13 +376,14 @@ def _handle_callback_query(callback_query: dict):
         _execute_task_from_tg(chat_id, task_key)
 
 def _handle_incoming_message(message: dict):
-    """处理接收到的单条消息"""
+    """处理接收到的单条消息 (纯手动遥控器模式)"""
     chat_id = str(message.get('chat', {}).get('id', ''))
-    text = message.get('text', '').strip()
+    text = message.get('text', '') or message.get('caption', '') # 兼容带图片的 caption
+    text = text.strip()
     if not chat_id or not text:
         return
 
-    # 1. 权限校验：只允许管理员发送指令
+    # 1. 权限校验：只允许管理员发送指令 (或者来自全局频道)
     admin_ids = [str(aid) for aid in user_db.get_admin_telegram_chat_ids()]
     global_channel = str(APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID, ''))
     
@@ -392,56 +393,44 @@ def _handle_incoming_message(message: dict):
 
     # ★★★ 处理 M 菜单发来的命令 ★★★
     if text.startswith('/'):
-        cmd = text[1:].lower() # 去掉斜杠，提取命令内容 (例如 all_tasks 或 scan_organize_115)
-        
+        cmd = text[1:].lower()
         from tasks.core import get_task_registry
         registry = get_task_registry(context='all')
 
-        # 1. 如果点击的是“查看所有可用任务”
         if cmd in ['all_tasks', 'tasks', 'menu']:
             keyboard = []
             row = []
-            # 遍历注册表生成所有任务的按钮
             for key, info in registry.items():
                 desc = info[1]
                 row.append({"text": desc, "callback_data": f"run_task_{key}"})
                 if len(row) == 2:
                     keyboard.append(row)
                     row = []
-            if row:
-                keyboard.append(row)
-                
+            if row: keyboard.append(row)
             reply_markup = {"inline_keyboard": keyboard}
-            send_telegram_message(
-                chat_id, 
-                escape_markdown("📋 *所有可用任务列表*\n请点击下方按钮执行对应任务："), 
-                reply_markup=reply_markup
-            )
+            send_telegram_message(chat_id, escape_markdown("📋 *所有可用任务列表*\n请点击下方按钮执行对应任务："), reply_markup=reply_markup)
             return
 
-        # 2. 如果点击的是常用任务 (直接执行)
-        # 我们需要把命令 (如 scan_organize_115) 匹配回原来的 task_key (如 scan-organize-115)
         for key in registry.keys():
             expected_cmd = key.replace('-', '_').lower()
             if cmd == expected_cmd:
-                # 匹配成功，直接调用后台执行函数！
                 _execute_task_from_tg(chat_id, key)
                 return
 
     # 2. 识别链接类型
     is_magnet = text.lower().startswith('magnet:?')
     is_ed2k = text.lower().startswith('ed2k://')
-    # ★ 修复：兼容 115.com 和 115cdn.com
     is_115_share = re.search(r'115(?:cdn)?\.com/s/', text, re.IGNORECASE) is not None
 
     if not (is_magnet or is_ed2k or is_115_share):
         return
 
-    logger.info(f"  📥 [TG交互] 收到来自 {chat_id} 的资源链接，准备处理...")
-    # ★ 修复：使用 escape_markdown 转义特殊字符
+    # =================================================================
+    # ★ 纯手动处理逻辑 (不再包含任何自动订阅和查库代码)
+    # =================================================================
+    logger.info(f"  📥 [TG交互] 收到来自 {chat_id} 的手动资源链接，准备处理...")
     send_telegram_message(chat_id, escape_markdown("⏳ *收到链接，正在提交至 115...*"), disable_notification=True)
 
-    # 3. 获取 115 客户端和目标目录
     client = P115Service.get_client()
     if not client:
         send_telegram_message(chat_id, "❌ *提交失败*：115 客户端未初始化，请检查配置。")
@@ -452,15 +441,12 @@ def _handle_incoming_message(message: dict):
     try:
         # --- 处理 115 分享链接转存 ---
         if is_115_share:
-            # ★ 修复：兼容 115cdn.com 的正则提取
             share_code_match = re.search(r'115(?:cdn)?\.com/s/([a-zA-Z0-9]+)', text, re.IGNORECASE)
             share_code = share_code_match.group(1) if share_code_match else None
             
-            # 提取接收码 (密码)
             receive_code = ""
             pwd_match = re.search(r'(?:访问码|提取码|密码|password)[:：=\s]*([a-zA-Z0-9]{4})', text, re.IGNORECASE)
-            if pwd_match:
-                receive_code = pwd_match.group(1)
+            if pwd_match: receive_code = pwd_match.group(1)
 
             if not share_code:
                 send_telegram_message(chat_id, escape_markdown("❌ *解析失败*：未找到有效的 115 分享码。"))
@@ -470,45 +456,32 @@ def _handle_incoming_message(message: dict):
             
             if res and res.get('state'):
                 send_telegram_message(chat_id, escape_markdown("✅ *分享链接转存成功！*\n系统已自动触发整理任务。"))
-                
-                # ★★★ 新增：自动唤醒整理任务 ★★★
                 try:
                     import task_manager
-                    # 延迟 5 秒触发，给 115 服务器一点反应时间
                     threading.Timer(5.0, task_manager.trigger_115_organize_task).start()
-                    logger.info("  ➜ [TG交互] 已启动 115 整理任务。")
                 except Exception as e:
                     logger.error(f"  ⚠️ 唤醒整理任务失败: {e}")
-                    
             else:
-                err = res.get('error_msg', '未知错误') if res else '无响应'
+                err = res.get('error_msg') or res.get('message') or str(res) or '未知错误'
                 send_telegram_message(chat_id, escape_markdown(f"❌ *转存失败*：{err}"))
+                logger.error(f"  ❌ [TG交互] 转存失败: {err}")
 
         # --- 处理磁力/ED2K 离线下载 ---
         if is_magnet or is_ed2k:
-            # 提取纯链接，防止用户发了一段话里面夹着链接
             link_match = re.search(r'(magnet:\?xt=urn:btih:[a-zA-Z0-9]+.*?|ed2k://\|file\|.*?\|/)', text, re.IGNORECASE)
             target_url = link_match.group(1) if link_match else text
 
-            payload = {
-                "url[0]": target_url,
-                "wp_path_id": target_cid
-            }
+            payload = {"url[0]": target_url, "wp_path_id": target_cid}
             res = client.offline_add_urls(payload)
             
             if res and res.get('state'):
                 send_telegram_message(chat_id, escape_markdown("✅ *离线任务提交成功！*\n系统将在后台自动监控并整理入库。"))
-                
-                # ★★★ 新增：对于离线任务，由于下载需要时间，我们触发一次整理任务去“碰碰运气”
-                # 如果是秒传的，马上就能整理出来；如果没下完，整理任务会自动跳过。
                 try:
                     import task_manager
                     threading.Timer(10.0, task_manager.trigger_115_organize_task).start()
-                    logger.info("  ➜ [TG交互] 已启动 115 整理任务 (离线秒传检测)。")
-                except Exception as e:
-                    pass
+                except: pass
             else:
-                err = res.get('error_msg', '未知错误') if res else '无响应'
+                err = res.get('error_msg') or res.get('message') or str(res) or '未知错误'
                 send_telegram_message(chat_id, escape_markdown(f"❌ *离线提交失败*：{err}"))
 
     except Exception as e:
