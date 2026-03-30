@@ -843,7 +843,7 @@ class MediaProcessor:
         【挂载模式核心】通过 local_path 精准匹配 115 缓存表。
         返回 (pick_code, sha1)。
         """
-        if not self.config.get(constants.CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH, True):
+        if not self.config.get("monitor_sha1_pc_search", True):
             return None, None
         
         if not file_path: return None, None
@@ -892,7 +892,7 @@ class MediaProcessor:
 
     # 直接从 STRM 文件、HTTP 链接 或 挂载路径中抠出 115 提取码 (PC) 和 SHA1
     def _extract_115_fingerprints(self, file_path: str) -> Tuple[Optional[str], Optional[str]]:
-        if not self.config.get(constants.CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH, True):
+        if not self.config.get("monitor_sha1_pc_search", True):
             return None, None
         
         if not file_path: return None, None
@@ -933,7 +933,7 @@ class MediaProcessor:
 
     # 通过 PC 码反查 SHA1 (自带 115 API 兜底)
     def _get_sha1_by_pickcode(self, pick_code: str) -> Optional[str]:
-        if not self.config.get(constants.CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH, True):
+        if not self.config.get("monitor_sha1_pc_search", True):
             return None
         
         if not pick_code: return None
