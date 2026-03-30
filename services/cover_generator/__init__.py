@@ -53,7 +53,7 @@ class CoverGeneratorService:
             return False
         success = self.__set_library_image(emby_server_id, library, image_data)
         if success:
-            logger.info(f"  ✅ 成功更新媒体库 '{library['Name']}' 的封面！")
+            logger.info(f"  ➜ 成功更新媒体库 '{library['Name']}' 的封面！")
         else:
             logger.error(f"  ➜ 上传封面到媒体库 '{library['Name']}' 失败。")
         return success
@@ -235,7 +235,7 @@ class CoverGeneratorService:
             safe_rating_limit = config_limit # 应用配置的限制
 
         if safe_rating_limit is not None:
-            logger.trace(f"  🛡️ 媒体库 '{library_name}' 将应用分级限制: 等级 <= {safe_rating_limit}")
+            logger.trace(f"  ➜ 媒体库 '{library_name}' 将应用分级限制: 等级 <= {safe_rating_limit}")
 
         # ======================================================================
         # 策略 A: 实时筛选类合集 (Filter / AI Recommendation)

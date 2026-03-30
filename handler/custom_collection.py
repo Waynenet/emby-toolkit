@@ -327,11 +327,11 @@ class ListImporter:
                     discover_data = tmdb.discover_tv_tmdb(self.tmdb_api_key, params)
                     item_type_for_result = 'Series'
                 else:
-                    logger.warning(f"  🚫 无法从URL '{url}' 判断是电影还是电视剧，discover任务中止。")
+                    logger.warning(f"  ➜ 无法从URL '{url}' 判断是电影还是电视剧，discover任务中止。")
                     break
 
                 if not discover_data or not discover_data.get('results'):
-                    logger.info("    ➜ 在当前页未发现更多项目，获取结束。")
+                    logger.info("  ➜ 在当前页未发现更多项目，获取结束。")
                     break
 
                 if current_page == 1:
@@ -815,7 +815,7 @@ class RecommendationEngine:
         """
         【类方法】强制刷新缓存 (执行数据库读取和矩阵构建)
         """
-        logger.info("  🔄 [向量引擎] 开始后台刷新向量缓存...")
+        logger.info("  ➜ [向量引擎] 开始后台刷新向量缓存...")
         start_t = time.time()
         
         try:
@@ -831,7 +831,7 @@ class RecommendationEngine:
                 all_data = cursor.fetchall()
             
             if not all_data:
-                logger.warning("  ⚠️ [向量引擎] 数据库为空，无法刷新缓存。")
+                logger.warning("  ➜ [向量引擎] 数据库为空，无法刷新缓存。")
                 return
 
             ids, vectors, titles, types = [], [], [], []
@@ -855,10 +855,10 @@ class RecommendationEngine:
             cls._cache_titles = titles
             cls._cache_types = types
             
-            logger.info(f"  ✅ [向量引擎] 缓存刷新完成。共 {len(ids)} 条，耗时 {time.time() - start_t:.2f}s。")
+            logger.info(f"  ➜ [向量引擎] 缓存刷新完成。共 {len(ids)} 条，耗时 {time.time() - start_t:.2f}s。")
 
         except Exception as e:
-            logger.error(f"  ❌ [向量引擎] 刷新缓存失败: {e}", exc_info=True)
+            logger.error(f"  ➜ [向量引擎] 刷新缓存失败: {e}", exc_info=True)
 
     @classmethod
     def start_auto_refresh_loop(cls):
@@ -871,7 +871,7 @@ class RecommendationEngine:
         cls._is_refreshing_loop_running = True
         
         def loop():
-            logger.info("  🚀 [向量引擎] 自动刷新守护线程已启动。")
+            logger.info("  ➜ [向量引擎] 自动刷新守护线程已启动。")
             cls.refresh_cache()
             
             while True:

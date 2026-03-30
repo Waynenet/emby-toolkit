@@ -72,7 +72,7 @@ def task_enrich_aliases(processor, force_full_update: bool = False):
         tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
 
         if not tmdb_api_key:
-            logger.error(f"  🚫 任务 '{task_name}' 中止：未在配置中找到 TMDb API Key。")
+            logger.error(f"  ➜ 任务 '{task_name}' 中止：未在配置中找到 TMDb API Key。")
             task_manager.update_status_from_thread(-1, "错误：缺少TMDb API Key")
             return
 
@@ -171,7 +171,7 @@ def task_actor_translation(processor):
     actor = processor.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE)
 
     if not actor:
-        logger.info("  🚫 AI翻译功能未启用，跳过任务。")
+        logger.info("  ➜ AI翻译功能未启用，跳过任务。")
         return
     
     try:
@@ -299,12 +299,12 @@ def task_actor_translation(processor):
             for original_name, translated_name in translation_map.items():
                 # --- [新增日志] 详细记录跳过原因 ---
                 if not translated_name:
-                    logger.warning(f"    - ⚠️ [跳过] 原名: '{original_name}' -> 翻译结果为空")
+                    logger.warning(f"    - ➜ [跳过] 原名: '{original_name}' -> 翻译结果为空")
                     continue
                 
                 if original_name == translated_name:
                     # 如果翻译结果和原文一样，说明AI认为不需要翻译，或者翻译失败
-                    logger.info(f"    - ℹ️ [跳过] 原名: '{original_name}' -> 结果与原文相同 (未变)")
+                    logger.info(f"  ➜ [跳过] 原名: '{original_name}' -> 结果与原文相同 (未变)")
                     continue
                 # -----------------------------------
 
@@ -342,9 +342,9 @@ def task_actor_translation(processor):
                             batch_updated_count += 1
                         else:
                             # --- [新增日志] 记录API调用失败 ---
-                            logger.warning(f"    - ❌ [更新失败] Emby API 拒绝更新演员 ID: {task_info[0]} -> '{task_info[1]}'")
+                            logger.warning(f"    - ➜ [更新失败] Emby API 拒绝更新演员 ID: {task_info[0]} -> '{task_info[1]}'")
                     except Exception as exc:
-                        logger.error(f"    - ❌ [异常] 更新演员 (ID: {task_info[0]}) 时发生错误: {exc}")
+                        logger.error(f"    - ➜ [异常] 更新演员 (ID: {task_info[0]}) 时发生错误: {exc}")
 
             total_updated_count += batch_updated_count
             
@@ -354,7 +354,7 @@ def task_actor_translation(processor):
         # ======================================================================
         # 阶段 3: 任务结束
         # ======================================================================
-        final_message = f"  ✅ 任务完成！共成功翻译并更新了 {total_updated_count} 个演员名。"
+        final_message = f"  ➜ 任务完成！共成功翻译并更新了 {total_updated_count} 个演员名。"
         if processor.is_stop_requested():
             final_message = f"任务已中断。本次运行成功翻译并更新了 {total_updated_count} 个演员名。"
         
@@ -384,7 +384,7 @@ def task_merge_duplicate_actors(processor):
         library_ids_to_process = config.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS, [])
 
         if not library_ids_to_process:
-            logger.error("  🚫 任务中止：未在设置中选择任何要处理的媒体库。")
+            logger.error("  ➜ 任务中止：未在设置中选择任何要处理的媒体库。")
             task_manager.update_status_from_thread(-1, "任务失败：未选择媒体库")
             return
 
@@ -472,19 +472,19 @@ def task_merge_duplicate_actors(processor):
             person_details_log = [f"'{p['Name']}' (ID: {p['Id']}, 作品数: {len(actor_media_map.get(p['Id'], set()))})" for p in persons]
             logger.info(f"  ➜ [TMDb ID: {tmdb_id}] 决策:")
             logger.info(f"     - 分身列表: {', '.join(person_details_log)}")
-            logger.info(f"     - ✅ 保留 (主号): '{keeper['Name']}' (ID: {keeper['Id']})")
+            logger.info(f"     - ➜ 保留 (主号): '{keeper['Name']}' (ID: {keeper['Id']})")
 
             for person in persons:
                 if person['Id'] != keeper['Id']:
                     # 将TMDb ID也加入计划，以便后续数据库操作
                     merge_plan.append({'keeper': keeper, 'deletee': person, 'tmdb_id': tmdb_id})
-                    logger.warning(f"     - ❌ 合并并删除 (小号): '{person['Name']}' (ID: {person['Id']})")
+                    logger.warning(f"     - ➜ 合并并删除 (小号): '{person['Name']}' (ID: {person['Id']})")
 
         # ======================================================================
         # 阶段 4: 执行合并与删除
         # ======================================================================
         if processor.is_stop_requested():
-            logger.warning("  🚫 任务已中止，未执行任何合并或删除操作。")
+            logger.warning("  ➜ 任务已中止，未执行任何合并或删除操作。")
             task_manager.update_status_from_thread(100, "任务已中止。")
             return
 
@@ -500,7 +500,7 @@ def task_merge_duplicate_actors(processor):
 
         for i, plan in enumerate(merge_plan):
             if processor.is_stop_requested():
-                logger.warning("  🚫 合并操作被用户中止。")
+                logger.warning("  ➜ 合并操作被用户中止。")
                 break
             
             keeper = plan['keeper']
@@ -546,10 +546,10 @@ def task_merge_duplicate_actors(processor):
 
                     if update_success:
                         merged_item_count += 1
-                        logger.debug(f"    - ✅ 成功更新媒体项 '{item_details.get('Name')}' 的演员列表。")
+                        logger.debug(f"    - ➜ 成功更新媒体项 '{item_details.get('Name')}' 的演员列表。")
                     else:
                         all_media_updates_succeeded = False
-                        logger.error(f"    - ❌ 更新媒体项 '{item_details.get('Name')}' 失败！")
+                        logger.error(f"    - ➜ 更新媒体项 '{item_details.get('Name')}' 失败！")
 
             if all_media_updates_succeeded:
                 logger.info(f"  ➜ 所有媒体项已成功转移，准备删除“小号”演员 '{deletee['Name']}' (ID: {deletee['Id']})...")
@@ -676,7 +676,7 @@ def task_purge_ghost_actors(processor):
 
         for i, person in enumerate(orphans_to_delete):
             if processor.is_stop_requested():
-                logger.warning("  🚫 删除操作被用户中止。")
+                logger.warning("  ➜ 删除操作被用户中止。")
                 break
             
             person_id = person.get("Id")
@@ -728,7 +728,7 @@ def task_purge_unregistered_actors(processor):
         library_ids_to_process = config.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS, [])
 
         if not library_ids_to_process:
-            logger.error("  🚫 任务中止：未在设置中选择任何要处理的媒体库。")
+            logger.error("  ➜ 任务中止：未在设置中选择任何要处理的媒体库。")
             task_manager.update_status_from_thread(-1, "任务失败：未选择媒体库")
             return
 
@@ -769,7 +769,7 @@ def task_purge_unregistered_actors(processor):
         batch_size = 500
         for i in range(0, len(person_ids_to_fetch), batch_size):
             if processor.is_stop_requested():
-                logger.info("  🚫 在分批获取演员详情阶段，任务被中止。")
+                logger.info("  ➜ 在分批获取演员详情阶段，任务被中止。")
                 break
             
             batch_ids = person_ids_to_fetch[i:i + batch_size]
@@ -786,7 +786,7 @@ def task_purge_unregistered_actors(processor):
                 all_people_in_scope_details.extend(person_details_batch)
 
         if processor.is_stop_requested():
-            logger.warning("  🚫 任务已中止。")
+            logger.warning("  ➜ 任务已中止。")
             task_manager.update_status_from_thread(100, "任务已中止。")
             return
         
@@ -815,7 +815,7 @@ def task_purge_unregistered_actors(processor):
         # 6. 执行删除
         for i, person in enumerate(ghosts_to_delete):
             if processor.is_stop_requested():
-                logger.warning("  🚫 任务被用户中止。")
+                logger.warning("  ➜ 任务被用户中止。")
                 break
             
             person_id = person.get("Id")

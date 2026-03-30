@@ -219,7 +219,7 @@ def task_check_expired_users(processor):
     successful_disables = 0
     for i, user_info in enumerate(expired_users):
         if processor.is_stop_requested():
-            logger.warning("  🚫 任务被用户中止。")
+            logger.warning("  ➜ 任务被用户中止。")
             break
 
         user_id = user_info['emby_user_id']
@@ -258,7 +258,7 @@ def task_check_expired_users(processor):
 
     final_message = f"  ➜ 任务完成。共成功禁用 {successful_disables}/{total_to_disable} 个过期用户。"
     if processor.is_stop_requested():
-        final_message = f"  🚫 任务已中止。本次运行成功禁用了 {successful_disables} 个用户。"
+        final_message = f"  ➜ 任务已中止。本次运行成功禁用了 {successful_disables} 个用户。"
     
     logger.info(f">>> [{task_name}] {final_message}")
     task_manager.update_status_from_thread(100, final_message)
@@ -369,7 +369,7 @@ def task_auto_sync_template_on_policy_change(processor, updated_user_id: str):
                                 policy_to_apply['IsDisabled'] = current_disabled_state
                                 logger.debug(f"    │  保留用户 '{user_name_to_push}' 的禁用状态: {current_disabled_state}")
                         except Exception as e:
-                            logger.warning(f"    │  ⚠️ 获取用户 '{user_name_to_push}' 实时状态失败，可能导致禁用状态重置: {e}")
+                            logger.warning(f"    │  ➜ 获取用户 '{user_name_to_push}' 实时状态失败，可能导致禁用状态重置: {e}")
 
                         # 3. 使用修改后的策略(policy_to_apply)进行推送
                         emby.force_set_user_policy(

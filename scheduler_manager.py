@@ -167,7 +167,7 @@ def _get_next_run_time_str(cron_expression: str) -> str:
         return final_str.replace("  ", " ").replace("在 ", "").replace("的开始", "开始")
 
     except Exception as e:
-        logger.warning(f"  ⚠️ 无法智能解析CRON表达式 '{cron_expression}': {e}，回退到备用模式。")
+        logger.warning(f"  ➜ 无法智能解析CRON表达式 '{cron_expression}': {e}，回退到备用模式。")
         try:
             tz = pytz.timezone(constants.TIMEZONE)
             now = datetime.now(tz)
@@ -197,7 +197,7 @@ class SchedulerManager:
             # 在启动时，根据当前配置更新所有任务
             self.update_all_scheduled_jobs()
         except Exception as e:
-            logger.error(f"  ⚠️ 启动定时任务调度器失败: {e}", exc_info=True)
+            logger.error(f"  ➜ 启动定时任务调度器失败: {e}", exc_info=True)
 
     def shutdown(self):
         """安全地关闭调度器。"""
@@ -227,11 +227,11 @@ class SchedulerManager:
         """
         try:
             self.scheduler.remove_job(job_id)
-            logger.debug(f"  ⚠️ 已成功移除旧的 '{job_name}' 作业 (ID: {job_id})。")
+            logger.debug(f"  ➜ 已成功移除旧的 '{job_name}' 作业 (ID: {job_id})。")
         except JobLookupError:
-            logger.debug(f"  ⚠️ 没有找到旧的 '{job_name}' 作业 (ID: {job_id})，无需移除。")
+            logger.debug(f"  ➜ 没有找到旧的 '{job_name}' 作业 (ID: {job_id})，无需移除。")
         except Exception as e:
-            logger.error(f"  ⚠️ 尝试移除旧的 '{job_name}' 作业时发生意外错误: {e}", exc_info=True)
+            logger.error(f"  ➜ 尝试移除旧的 '{job_name}' 作业时发生意外错误: {e}", exc_info=True)
 
         config = config_manager.APP_CONFIG
         is_enabled = config.get(enabled_key, False)
@@ -242,7 +242,7 @@ class SchedulerManager:
             registry = get_task_registry()
             task_info = registry.get(task_key)
             if not task_info:
-                logger.error(f"  ⚠️ 设置 '{job_name}' 失败：在任务注册表中未找到任务键 '{task_key}'。")
+                logger.error(f"  ➜ 设置 '{job_name}' 失败：在任务注册表中未找到任务键 '{task_key}'。")
                 return
             
             task_function, _, processor_type = task_info
@@ -280,9 +280,9 @@ class SchedulerManager:
                 logger.info(log_message)
 
             except ValueError as e:
-                logger.error(f"  ⚠️ 设置 '{job_name}' 失败：CRON表达式 '{cron_str}' 无效。错误: {e}")
+                logger.error(f"  ➜ 设置 '{job_name}' 失败：CRON表达式 '{cron_str}' 无效。错误: {e}")
             except Exception as e:
-                logger.error(f"  ⚠️ 添加新的 '{job_name}' 作业时发生未知错误: {e}", exc_info=True)
+                logger.error(f"  ➜ 添加新的 '{job_name}' 作业时发生未知错误: {e}", exc_info=True)
         else:
             logger.info(f"  ➜ '{job_name}' 未启用或配置不完整，本次不设置定时任务。")
 
@@ -328,7 +328,7 @@ class SchedulerManager:
         task_info = registry.get('update-daily-theme')
         
         if not task_info:
-            logger.error("  ⚠️ 设置'每日主题'任务失败：在任务注册表中未找到 'update-daily-theme'。")
+            logger.error("  ➜ 设置'每日主题'任务失败：在任务注册表中未找到 'update-daily-theme'。")
             return
             
         task_function, task_description, processor_type = task_info
