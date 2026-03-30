@@ -255,7 +255,7 @@
       </div>
     </transition>
     <!-- 订阅策略配置模态框 -->
-    <n-modal v-model:show="showStrategyModal" preset="card" title="订阅策略配置" style="width: 600px;">
+    <n-modal v-model:show="showStrategyModal" preset="card" title="订阅策略配置" style="width: 600px;" :auto-focus="false">
       <n-form label-placement="left" label-width="auto" require-mark-placement="right-hanging">
         
         <n-divider title-placement="left">电影订阅策略 (剧集由智能追剧策略管理)</n-divider>
@@ -299,6 +299,16 @@
                   <n-input-number v-model:value="strategyConfig.hdhive_max_size_gb" size="small" :min="1">
                     <template #suffix>GB</template>
                   </n-input-number>
+                </n-form-item>
+              </n-grid-item>
+              <n-grid-item>
+                <n-form-item label="仅含中文字幕">
+                  <n-switch v-model:value="strategyConfig.hdhive_zh_sub_only" size="small" />
+                </n-form-item>
+              </n-grid-item>
+              <n-grid-item>
+                <n-form-item label="排除原盘 (ISO)">
+                  <n-switch v-model:value="strategyConfig.hdhive_exclude_iso" size="small" />
                 </n-form-item>
               </n-grid-item>
             </n-grid>
@@ -409,7 +419,9 @@ const strategyConfig = ref({
   hdhive_free_only: false,
   hdhive_max_points: 10,
   hdhive_max_size_gb: 120,
-  hdhive_resolution: 'All'
+  hdhive_resolution: 'All',
+  hdhive_zh_sub_only: true,
+  hdhive_exclude_iso: false
 });
 
 const loadStrategyConfig = async () => {
