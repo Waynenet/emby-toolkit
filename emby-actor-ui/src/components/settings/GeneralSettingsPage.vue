@@ -242,7 +242,7 @@
                       <n-switch v-model:value="configModel.monitor_sha1_pc_search" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          文件SHA1查询。
+                          文件SHA1查询，非115可关闭，关闭则影响备份媒体信息、媒体信息中心化等。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
