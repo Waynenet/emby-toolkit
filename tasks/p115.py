@@ -224,7 +224,7 @@ def task_scan_and_organize_115(processor=None):
         moved_to_unidentified = 0
         
         if physical_groups:
-            logger.info(f"  📦 [阶段二] 物理扫盘完成，共分拣出 {len(physical_groups)} 个媒体组，开始定性查询与批量整理...")
+            logger.info(f"  ➜ [阶段二] 物理扫盘完成，共分拣出 {len(physical_groups)} 个媒体组，开始定性查询与批量整理...")
             active_tasks = 0 
             
             total_items_to_process = sum(len(g["files"]) for g in physical_groups.values())
@@ -544,7 +544,7 @@ def task_full_sync_strm_and_subs(processor=None):
         # =================================================================
         # 阶段 1: 加载规则与本地目录树缓存到内存 (耗时: 毫秒级)
         # =================================================================
-        update_progress(5, "  🧠 正在加载本地目录树缓存到内存...")
+        update_progress(5, "  ➜ 正在加载本地目录树缓存到内存...")
         
         cid_to_rel_path = {}  
         target_cids = set()   
@@ -641,7 +641,7 @@ def task_full_sync_strm_and_subs(processor=None):
         for idx, target_cid in enumerate(target_cids):
             category_name = cid_to_rel_path.get(target_cid, "未知分类")
             base_prog = 10 + int((idx / total_targets) * 80)
-            update_progress(base_prog, f"  🌐 正在全局拉取分类 [{category_name}] 下的所有文件...")
+            update_progress(base_prog, f"  ➜ 正在全局拉取分类 [{category_name}] 下的所有文件...")
             
             for f_type in fetch_types:
                 type_name = "视频" if f_type == 4 else "文档/字幕"
@@ -720,7 +720,7 @@ def task_full_sync_strm_and_subs(processor=None):
                                             if old_content == content: 
                                                 need_write = False
                                             else:
-                                                logger.debug(f"  🔄 [更新] 内容不一致触发覆盖 -> 旧: [{old_content}] | 新: [{content}]")
+                                                logger.debug(f"  ➜ [更新] 内容不一致触发覆盖 -> 旧: [{old_content}] | 新: [{content}]")
                                     except Exception as e: pass
                                             
                                 if need_write:
