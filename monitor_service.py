@@ -196,8 +196,7 @@ def process_mediainfo_queue():
 
 def _handle_mediainfo_update_task(file_paths: List[str]):
     """处理 -mediainfo.json 的更新，提取 SHA1 并覆盖备份到数据库"""
-    # 添加 P115 启用检查
-    if not self.config.get("p115_mediainfo_center", True):
+    if not self.config.get(constants.CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH, True):
         return
     
     # 复用现有的稳定性检测，确保神医插件已经把文件写完了
