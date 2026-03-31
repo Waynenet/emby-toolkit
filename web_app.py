@@ -1,6 +1,19 @@
 # web_app.py
 from gevent import monkey
 monkey.patch_all()
+import logging
+#过滤底层日志
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("docker").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+logging.getLogger("geventwebsocket").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("watchdog").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 import os
 import sys
 import shutil
@@ -55,7 +68,6 @@ from routes.p115 import p115_bp
 from routes.hdhive import hdhive_bp
 # --- 核心模块导入 ---
 import constants # 你的常量定义\
-import logging
 from logger_setup import frontend_log_queue, add_file_handler # 日志记录器和前端日志队列
 import config_manager
 from database import connection, settings_db
@@ -91,20 +103,7 @@ else:
     except Exception as e:
         logger.warning(f"无法保存 Session 密钥，重启后用户需重新登录: {e}")
 
-#过滤底层日志
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("docker").setLevel(logging.WARNING)
-logging.getLogger("PIL").setLevel(logging.WARNING)
-logging.getLogger("geventwebsocket").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("watchdog").setLevel(logging.WARNING)
-logging.getLogger("telethon").setLevel(logging.WARNING)
 # --- 全局变量 ---
-
 JOB_ID_FULL_SCAN = "scheduled_full_scan"
 JOB_ID_SYNC_PERSON_MAP = "scheduled_sync_person_map"
 JOB_ID_PROCESS_WATCHLIST = "scheduled_process_watchlist"
@@ -251,7 +250,7 @@ def initialize_processors():
         config_manager.APP_CONFIG['is_pro_active'] = False 
         
         if server_id_local:
-            logger.info("  ➜ 正在验证 Pro 授权状态...")
+            logger.debug("  ➜ 正在验证 Pro 授权状态...")
             try:
                 import requests
                 verify_url = "https://auth.55565576.xyz" 
@@ -545,7 +544,7 @@ def main_app_start():
             try:
                 internal_proxy_port = 7758
                 external_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)
-                logger.info(f"  ➜ [302反代] 服务器已启动 (容器监听端口: {external_port})")
+                logger.info(f"  ➜ [302反代] 服务已启动 (容器监听端口: {external_port})")
                 proxy_server = WSGIServer(('0.0.0.0', internal_proxy_port), proxy_app, handler_class=WebSocketHandler)
                 proxy_server.serve_forever()
             except Exception as e:
@@ -556,7 +555,7 @@ def main_app_start():
     gevent.spawn(run_proxy_server)
 
     main_app_port = int(constants.WEB_APP_PORT)
-    logger.info(f"  ➜ [主应用] 服务器已启动 (容器监听端口: {main_app_port})")
+    logger.info(f"  ➜ [主应用] 服务已启动 (容器监听端口: {main_app_port})")
     
     class NullLogger:
         def write(self, data): pass
