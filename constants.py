@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.3.6"  # 更新版本号
+APP_VERSION = "8.4.2"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -40,6 +40,7 @@ CONFIG_OPTION_MONITOR_EXCLUDE_DIRS = "monitor_exclude_dirs"
 DEFAULT_MONITOR_EXCLUDE_DIRS = [] # 默认排除路径列表
 CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY = "monitor_exclude_refresh_delay"
 DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY = 0 # 默认不延迟
+CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH = "monitor_sha1_pc_search" 
 
 # ==============================================================================
 # ✨ 115 网盘配置 (115 Cloud Drive) 

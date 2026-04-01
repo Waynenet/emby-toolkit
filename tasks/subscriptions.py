@@ -907,10 +907,10 @@ def task_auto_subscribe(processor):
                             hd_exclude_iso = strategy_config.get('hdhive_exclude_iso', False)
                             
                             for i, r in enumerate(resources, 1):
-                                r_title = r.get('title', '未知标题')
-                                r_source = r.get('source', [])
-                                r_sub_lang = r.get('subtitle_language', [])
-                                r_remark = r.get('remark', '')
+                                r_title = r.get('title') or '未知标题'
+                                r_source = r.get('source') or []
+                                r_sub_lang = r.get('subtitle_language') or []
+                                r_remark = r.get('remark') or ''
                                 
                                 # 提前计算积分和体积，用于日志打印
                                 is_unlocked = r.get('is_unlocked', False)
@@ -963,7 +963,7 @@ def task_auto_subscribe(processor):
                                     has_zh_sub = False
                                     if any(lang in ['简中', '繁中', '中文', '国语', '粤语', '中英'] for lang in r_sub_lang):
                                         has_zh_sub = True
-                                    elif re.search(r'(中字|简中|繁中|特效字幕|国语|粤语|简繁|中英)', r_title + r_remark, re.IGNORECASE):
+                                    elif re.search(r'(中字|简中|繁中|特效字幕|国语|粤语|简繁|中英)', (r_title or "") + (r_remark or ""), re.IGNORECASE):
                                         has_zh_sub = True
                                     
                                     if not has_zh_sub:
