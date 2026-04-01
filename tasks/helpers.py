@@ -92,7 +92,7 @@ RELEASE_GROUPS: Dict[str, List[str]] = {
     "ultrahd": [],
     "others": ['B(?:MDru|eyondHD|TN)', 'C(?:fandora|trlhd|MRG)', 'DON', 'EVO', 'FLUX', 'HONE(?:yG|)',
                'N(?:oGroup|T(?:b|G))', 'PandaMoon', 'SMURF', 'T(?:EPES|aengoo|rollHD )'],
-    "anime": ['ANi', 'HYSUB', 'KTXP', 'LoliHouse', 'MCE', 'Nekomoe kissaten', 'SweetSub', 'MingY',
+    "anime": [r'\bANi\b', r'\bHYSUB\b', r'\bKTXP\b', 'LoliHouse', r'\bMCE\b', 'Nekomoe kissaten', 'SweetSub', 'MingY',
               '(?:Lilith|NC)-Raws', '织梦字幕组', '枫叶字幕组', '猎户手抄部', '喵萌奶茶屋', '漫猫字幕社',
               '霜庭云花Sub', '北宇治字幕组', '氢气烤肉架', '云歌字幕组', '萌樱字幕组', '极影字幕社',
               '悠哈璃羽字幕社',
@@ -1644,11 +1644,14 @@ def translate_tmdb_metadata_recursively(
             # 调用 AI
             trans_results = ai_translator.batch_translate_overviews(batch_dict, context_title=item_name)
             
-            # 回填结果
+            # 回填结果 (★★★ 增加防御性编程 ★★★)
             for tmdb_id_str, trans_text in trans_results.items():
                 if trans_text and utils.contains_chinese(trans_text):
-                    pending_items[tmdb_id_str]["ref"]['overview'] = trans_text
-                    translated_count += 1
+                    if tmdb_id_str in pending_items:
+                        pending_items[tmdb_id_str]["ref"]['overview'] = trans_text
+                        translated_count += 1
+                    else:
+                        logger.warning(f"    ├─ [AI幻觉拦截] AI返回了未知的ID(简介): {tmdb_id_str}，已跳过。")
             
             import time
             time.sleep(1) # 避免触发频率限制
@@ -1663,12 +1666,15 @@ def translate_tmdb_metadata_recursively(
             # 调用 AI
             trans_results = ai_translator.batch_translate_titles(batch_dict, media_type="Episode")
             
-            # 回填结果
+            # 回填结果 (★★★ 增加防御性编程 ★★★)
             for tmdb_id_str, trans_text in trans_results.items():
                 if trans_text and utils.contains_chinese(trans_text):
-                    title_key = pending_items[tmdb_id_str]["title_key"]
-                    pending_items[tmdb_id_str]["ref"][title_key] = trans_text
-                    translated_count += 1
+                    if tmdb_id_str in pending_items:
+                        title_key = pending_items[tmdb_id_str]["title_key"]
+                        pending_items[tmdb_id_str]["ref"][title_key] = trans_text
+                        translated_count += 1
+                    else:
+                        logger.warning(f"    ├─ [AI幻觉拦截] AI返回了未知的ID(标题): {tmdb_id_str}，已跳过。")
             
             import time
             time.sleep(1)
