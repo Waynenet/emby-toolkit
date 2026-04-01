@@ -1031,8 +1031,18 @@ def emby_webhook():
                     else:
                         update_data['played'] = False
 
+            # 发送有灵魂的图文播放通知 
+            notify_types = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
+            if 'playback' in notify_types and event_type in ["playback.start", "playback.pause", "playback.stop"]:
+                try:
+                    # 使用 spawn 异步丢给后台处理，杜绝网络波动卡住 Emby Webhook 导致延迟
+                    spawn(telegram.send_playback_notification, data)
+                except Exception as e:
+                    logger.error(f"  ➜ 发送播放通知任务分配失败: {e}")
+
         try:
             if len(update_data) > 2:
+                user_db.upsert_user_media_data(update_data)
                 user_db.upsert_user_media_data(update_data)
                 item_name_for_log = f"ID:{id_to_update_in_db}"
                 try:

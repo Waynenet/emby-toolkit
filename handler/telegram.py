@@ -6,7 +6,7 @@ import requests
 import logging
 from datetime import datetime
 from config_manager import APP_CONFIG, get_proxies_for_requests
-from handler.tmdb import get_movie_details, get_tv_details
+from database import media_db
 from handler.emby import get_emby_item_details
 from database import user_db, request_db
 import constants
@@ -193,24 +193,19 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                 formatted_episodes = _format_episode_ranges(raw_episodes)
                 episode_info_text = f"🎞️ *集数*: `{formatted_episodes}`\n"
 
-        # --- 3. 调用 tmdb_handler 获取图片路径 ---
+        # --- 3. 调用本地数据库获取图片路径 ---
         photo_url = None
-        if tmdb_id:
-            tmdb_api_key = APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
-            image_details = None
-            try:
-                if item_type == 'Movie':
-                    image_details = get_movie_details(int(tmdb_id), tmdb_api_key, append_to_response=None)
-                elif item_type == 'Series':
-                    image_details = get_tv_details(int(tmdb_id), tmdb_api_key, append_to_response=None)
-
-                if image_details:
-                    if image_details.get('backdrop_path'):
-                        photo_url = f"https://image.tmdb.org/t/p/w780{image_details['backdrop_path']}"
-                    elif image_details.get('poster_path'):
-                        photo_url = f"https://image.tmdb.org/t/p/w500{image_details['poster_path']}"
-            except Exception as e:
-                 logger.error(f"  ➜ [通知] 调用 tmdb_handler 获取图片信息时出错: {e}", exc_info=True)
+        try:
+            db_info = media_db.get_notification_media_info_by_emby_id(item_id)
+            if db_info:
+                # 优先横幅，其次竖图，如果是分集没图，找它爹(剧集)要横幅
+                path = db_info.get('backdrop_path') or db_info.get('poster_path')
+                if not path and db_info.get('item_type') == 'Episode':
+                    path = db_info.get('parent_backdrop_path') or db_info.get('parent_poster_path')
+                if path:
+                    photo_url = f"https://image.tmdb.org/t/p/w780{path}"
+        except Exception as e:
+            logger.error(f"  ➜ [通知] 从本地数据库获取图片信息时出错: {e}", exc_info=True)
         
         # --- 4. 组装最终的通知文本 (Caption) ---
         notification_title_map = {
@@ -238,38 +233,36 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         }
         subscriber_chat_ids = {chat_id for chat_id in subscriber_chat_ids if chat_id}
 
-        # --- 6. 发送全局通知 ---
+        # --- 6 & 7. 发送全局和管理员通知 ---
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
-        if global_channel_id:
-            logger.info(f"  ➜ 正在向全局频道 {global_channel_id} 发送通知...")
-            if photo_url:
-                send_telegram_photo(global_channel_id, photo_url, caption)
-            else:
-                send_telegram_message(global_channel_id, caption)
-
-        # --- 7. 发送管理员通知 ---
-        # 逻辑：如果管理员没有配置频道，或者管理员想接收所有入库通知，但又不想和个人订阅通知重复
-        all_admin_chat_ids = set(user_db.get_admin_telegram_chat_ids())
-
-        if all_admin_chat_ids:
-            # 预处理订阅者 ID 集合
-            subscriber_id_set = {str(sid) for sid in subscriber_chat_ids}
-            
-            for admin_chat_id in all_admin_chat_ids:
-                # 排除掉频道 ID
-                if str(admin_chat_id) == str(global_channel_id):
-                    continue
-
-                # ★★★ 核心去重：如果管理员也是订阅者，跳过 ★★★
-                if str(admin_chat_id) in subscriber_id_set:
-                    logger.info(f"  ➜ 管理员 {admin_chat_id} 也是订阅者，跳过通用通知，等待发送个人通知。")
-                    continue
-                
-                logger.info(f"  ➜ 正在向管理员 {admin_chat_id} 发送全局入库通知...")
+        notify_types = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
+        
+        # ★ 严格判定：只有勾选了“入库通知”，才允许向频道和管理员发送非订阅类的公播消息
+        if 'library_new' in notify_types:
+            # A. 发送给频道
+            if global_channel_id:
+                logger.info(f"  ➜ 正在向全局频道 {global_channel_id} 发送通知...")
                 if photo_url:
-                    send_telegram_photo(admin_chat_id, photo_url, caption)
+                    send_telegram_photo(global_channel_id, photo_url, caption)
                 else:
-                    send_telegram_message(admin_chat_id, caption)
+                    send_telegram_message(global_channel_id, caption)
+
+            # B. 发送给管理员
+            all_admin_chat_ids = set(user_db.get_admin_telegram_chat_ids())
+            if all_admin_chat_ids:
+                subscriber_id_set = {str(sid) for sid in subscriber_chat_ids}
+                for admin_chat_id in all_admin_chat_ids:
+                    # 去重：不发给频道，也不发给已经是订阅者的管理员
+                    if str(admin_chat_id) == str(global_channel_id) or str(admin_chat_id) in subscriber_id_set:
+                        continue
+                    
+                    logger.info(f"  ➜ 正在向管理员 {admin_chat_id} 发送全局入库通知...")
+                    if photo_url:
+                        send_telegram_photo(admin_chat_id, photo_url, caption)
+                    else:
+                        send_telegram_message(admin_chat_id, caption)
+        else:
+            logger.debug(f"  ➜ [通知] '入库通知' 设置为关闭，跳过频道和管理员的全局广播。")
 
         # --- 8. 发送个人订阅到货通知 ---
         if subscriber_chat_ids:
@@ -289,6 +282,165 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             
     except Exception as e:
         logger.error(f"  ➜ 发送媒体通知时发生严重错误: {e}", exc_info=True)
+
+def send_transfer_success_notification(task: dict):
+    """发送频道监听转存成功的通知"""
+    try:
+        title = task.get('title', '未知标题')
+        year = task.get('year', '')
+        item_type = task.get('item_type', 'movie')
+        season_number = task.get('season_number')
+        episode_number = task.get('episode_number')
+        is_pack = task.get('is_pack', False)
+        tmdb_id = task.get('tmdb_id')
+
+        display_title = f"{title} ({year})" if year else title
+        escaped_title = escape_markdown(display_title)
+        
+        type_str = "🎬 电影" if item_type == 'movie' else "📺 剧集"
+        
+        season_info = ""
+        if item_type == 'tv':
+            if season_number is not None:
+                if episode_number is not None:
+                    if is_pack:
+                        season_info = f"📦 *季集*: `S{season_number:02d} 包含 {episode_number} 集`\n"
+                    else:
+                        season_info = f"📦 *季集*: `S{season_number:02d}E{episode_number:02d}`\n"
+                else:
+                    season_info = f"📦 *季集*: `S{season_number:02d}`\n"
+
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 尝试获取 TMDB 图片和评分
+        photo_url = None
+        rating = ""
+        overview_text = "" 
+        
+        if tmdb_id:
+            # ★★★ 核心修复：剥离内部兜底 ID，只取纯数字的主 ID ★★★
+            base_tmdb_id = str(tmdb_id).split('-')[0]
+            
+            if base_tmdb_id and base_tmdb_id.isdigit():
+                try:
+                    db_type = 'Movie' if item_type == 'movie' else 'Series'
+                    db_info = media_db.get_media_details(base_tmdb_id, db_type)
+                    
+                    if db_info:
+                        path = db_info.get('backdrop_path') or db_info.get('poster_path')
+                        if path:
+                            photo_url = f"https://image.tmdb.org/t/p/w780{path}"
+                            
+                        vote_average = db_info.get('rating')
+                        if vote_average:
+                            rating = f"✨ *评分*: `{vote_average:.1f}/10`\n"
+                            
+                        raw_overview = db_info.get('overview', '')
+                        if raw_overview:
+                            if len(raw_overview) > 200:
+                                raw_overview = raw_overview[:200] + "..."
+                            overview_text = f"📝 *剧情*: {escape_markdown(raw_overview)}\n"
+                except Exception as e:
+                    logger.debug(f"  ➜ 获取转存通知图片失败: {e}")
+
+        # 组装卡片文本
+        caption = (
+            f"📥 *转存成功*\n"
+            f"*{escaped_title}*\n\n"
+            f"{season_info}"
+            f"🕒 *时间*: `{current_time}`\n"
+            f"🎭 *类别*: {type_str}\n"
+            f"{rating}"
+            f"{overview_text}" 
+        )
+
+        global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
+        admin_ids = set(user_db.get_admin_telegram_chat_ids())
+
+        targets = set()
+        if global_channel_id:
+            targets.add(str(global_channel_id))
+        for aid in admin_ids:
+            targets.add(str(aid))
+
+        for target in targets:
+            if photo_url:
+                send_telegram_photo(target, photo_url, caption)
+            else:
+                send_telegram_message(target, caption)
+
+    except Exception as e:
+        logger.error(f"  ➜ 发送转存成功通知时出错: {e}", exc_info=True)
+
+def send_playback_notification(data: dict):
+    """发送图文并茂的播放状态通知 (附带剧集或电影海报，注入灵魂版)"""
+    try:
+        event_type = data.get("Event")
+        user_name = data.get("User", {}).get("Name", "未知用户")
+        device_name = data.get("Session", {}).get("DeviceName", "未知设备")
+        client_name = data.get("Session", {}).get("Client", "未知客户端")
+        
+        item = data.get("Item", {})
+        original_item_name = item.get("Name", "未知项目")
+        original_item_type = item.get("Type", "Unknown")
+        item_id = item.get("Id")
+        
+        display_item_name = original_item_name
+        if original_item_type == "Episode" and item.get("SeriesName"):
+            display_item_name = f"{item.get('SeriesName')} - {original_item_name}"
+            
+        # --- 本地数据库提取图片 (极速，无网络请求依赖) ---
+        photo_url = None
+        if item_id:
+            db_info = media_db.get_notification_media_info_by_emby_id(item_id)
+            if db_info:
+                # 优先横幅，如果没有再用竖图。如果是分集没图，自动用父剧集的横幅图
+                path = db_info.get('backdrop_path') or db_info.get('poster_path')
+                if not path and db_info.get('item_type') == 'Episode':
+                    path = db_info.get('parent_backdrop_path') or db_info.get('parent_poster_path')
+                if path:
+                    photo_url = f"https://image.tmdb.org/t/p/w780{path}"
+                    
+        action_map = {
+            "playback.start": "▶️ 开始播放",
+            "playback.pause": "⏸ 暂停播放",
+            "playback.stop": "⏹ 停止播放"
+        }
+        action_str = action_map.get(event_type, "🎬 播放状态改变")
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        caption = (
+            f"{action_str}\n\n"
+            f"👤 *用户*: `{escape_markdown(user_name)}`\n"
+            f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
+            f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
+            f"🕒 *时间*: `{escape_markdown(current_time)}`"
+        )
+        
+        # --- 收集发送目标 (频道 + 所有管理员) ---
+        global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
+        admin_ids = set(user_db.get_admin_telegram_chat_ids())
+
+        targets = set()
+        if global_channel_id:
+            targets.add(str(global_channel_id))
+        for aid in admin_ids:
+            if aid:
+                targets.add(str(aid))
+
+        if not targets:
+            logger.debug("  ➜ [播放通知] 未配置接收人 (频道或管理员均为空)，跳过发送。")
+            return
+
+        # --- 遍历发送 (移除所有静音参数，让通知发出清脆的叮咚声！) ---
+        for target in targets:
+            if photo_url:
+                send_telegram_photo(target, photo_url, caption)
+            else:
+                send_telegram_message(target, caption)
+                
+    except Exception as e:
+        logger.error(f"  ➜ 组装/发送播放图文通知时发生异常: {e}")
 
 # ======================================================================
 # ★★★ Telegram 机器人交互监听 (长轮询) ★★★
