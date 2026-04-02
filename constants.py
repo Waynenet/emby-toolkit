@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.4.5"  # 更新版本号
+APP_VERSION = "8.4.7"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -84,13 +84,6 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'scan-cleanup-issues',        # 扫描重复媒体
     'system-auto-update',         # 系统自动更新
 ]
-CONFIG_OPTION_TG_USER_ENABLED = "tg_user_enabled"                  # TG用户登录
-CONFIG_OPTION_TG_USER_API_ID = "tg_user_api_id"                    # TG用户API ID
-CONFIG_OPTION_TG_USER_API_HASH = "tg_user_api_hash"                # TG用户API Hash
-CONFIG_OPTION_TG_USER_PHONE = "tg_user_phone"                      # TG用户手机号
-CONFIG_OPTION_TG_USER_2FA = "tg_user_2fa"                          # TG用户2FA
-CONFIG_OPTION_TG_MONITOR_CHANNELS = "tg_monitor_channels"          # 监控的频道列表
-CONFIG_OPTION_TG_MONITOR_TYPE = "tg_monitor_type"                  # 订阅的资源类型，movie/tv
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
 DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success'] # ★ 默认开启入库和转存
 

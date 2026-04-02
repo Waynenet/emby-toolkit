@@ -10,6 +10,7 @@ from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
 
 import config_manager
 import constants
+from database import settings_db
 from handler.p115_service import P115Service
 from database.connection import get_db_connection
 from gevent import spawn
@@ -39,15 +40,15 @@ class TGUserBotManager:
             return cls._instance
 
     def _get_config(self):
-        cfg = config_manager.APP_CONFIG
+        cfg = settings_db.get_setting('tg_userbot_config') or {}
         return {
-            'enabled': cfg.get(constants.CONFIG_OPTION_TG_USER_ENABLED, False),
-            'api_id': cfg.get(constants.CONFIG_OPTION_TG_USER_API_ID, ''),
-            'api_hash': cfg.get(constants.CONFIG_OPTION_TG_USER_API_HASH, ''),
-            'phone': cfg.get(constants.CONFIG_OPTION_TG_USER_PHONE, ''),
-            'password': cfg.get(constants.CONFIG_OPTION_TG_USER_2FA, ''),
-            'channels': cfg.get(constants.CONFIG_OPTION_TG_MONITOR_CHANNELS) or [],
-            'monitor_types': cfg.get(constants.CONFIG_OPTION_TG_MONITOR_TYPE) or ['movie', 'tv']
+            'enabled': cfg.get('enabled', False),
+            'api_id': cfg.get('api_id', ''),
+            'api_hash': cfg.get('api_hash', ''),
+            'phone': cfg.get('phone', ''),
+            'password': cfg.get('password', ''),
+            'channels': cfg.get('channels', []),
+            'monitor_types': cfg.get('monitor_types', ['movie', 'tv'])
         }
 
     def start(self):
@@ -496,6 +497,7 @@ def _process_tg_queue():
                     results = tmdb.search_media(title, api_key, item_type=item_type, year=year)
                     if results:
                         tmdb_id = str(results[0]['id'])
+                        task['tmdb_id'] = tmdb_id # 更新任务字典，供后续步骤使用
                         logger.debug(f"  ➜ [频道监听] 反查成功！精准匹配到 TMDB ID: {tmdb_id}")
                     else:
                         logger.warning(f"  ➜ [频道监听] 反查失败，TMDb 未找到该{'剧集' if item_type=='tv' else '电影'}，任务终止。")

@@ -1691,7 +1691,7 @@ class SmartOrganizer:
 
         return info_dict
 
-    def _fetch_and_parse_mediainfo(self, sha1, guessed_info=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None):
+    def _fetch_and_parse_mediainfo(self, sha1, guessed_info=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
         """
         通过 SHA1 获取真实的媒体信息，并转换为乐高重命名参数
         """
@@ -1736,90 +1736,101 @@ class SmartOrganizer:
                 source_info = raw_json
 
             streams = source_info.get("MediaStreams", [])
-            video_stream = next((s for s in streams if s.get("Type") == "Video"), None)
-            audio_streams = [s for s in streams if s.get("Type") == "Audio"]
+            
+            # ★ 核心修复：物理数据是唯一真理。只要存在流信息，强制接管这 6 个核心参数
+            if streams:
+                # 默认全部置空。如果下方没有解析出对应属性，就会用空值彻底洗掉文件名瞎猜的错误标签
+                info = {
+                    'resolution': '', 'codec': '', 'effect': '', 
+                    'fps': '', 'audio': '', 'audio_count': ''
+                }
 
-            if video_stream:
-                w = video_stream.get("Width", 0)
-                if w >= 3800: info['resolution'] = '2160p'
-                elif w >= 1900: info['resolution'] = '1080p'
-                elif w >= 1200: info['resolution'] = '720p'
+                video_stream = next((s for s in streams if s.get("Type") == "Video"), None)
+                audio_streams = [s for s in streams if s.get("Type") == "Audio"]
 
-                codec_raw = video_stream.get("Codec", "").lower()
-                # ★ 核心修改：统一映射为商业名 HEVC 和 AVC
-                codec_map = {'hevc': 'HEVC', 'h265': 'HEVC', 'h264': 'AVC', 'avc': 'AVC', 'av1': 'AV1'}
-                c_str = codec_map.get(codec_raw, codec_raw.upper())
-                
-                bit_depth = video_stream.get("BitDepth")
-                if bit_depth and bit_depth > 8:
-                    info['codec'] = f"{c_str} {bit_depth}bit"
-                else:
-                    info['codec'] = c_str
+                if video_stream:
+                    w = video_stream.get("Width", 0)
+                    if w >= 3800: info['resolution'] = '2160p'
+                    elif w >= 1900: info['resolution'] = '1080p'
+                    elif w >= 1200: info['resolution'] = '720p'
+                    elif w > 0: info['resolution'] = '480p' # 补充低分辨率兜底，防止伪 4K 逃脱
 
-                v_range = video_stream.get("VideoRange", "")
-                ext_type = video_stream.get("ExtendedVideoType", "")
-                ext_sub_type = video_stream.get("ExtendedVideoSubType", "")
-                ext_desc = video_stream.get("ExtendedVideoSubTypeDescription", "")
+                    codec_raw = video_stream.get("Codec", "").lower()
+                    codec_map = {'hevc': 'HEVC', 'h265': 'HEVC', 'h264': 'AVC', 'avc': 'AVC', 'av1': 'AV1'}
+                    c_str = codec_map.get(codec_raw, codec_raw.upper())
+                    
+                    bit_depth = video_stream.get("BitDepth")
+                    if bit_depth and bit_depth > 8:
+                        info['codec'] = f"{c_str} {bit_depth}bit"
+                    else:
+                        info['codec'] = c_str
 
-                is_dv = "DolbyVision" in v_range or "DolbyVision" in ext_type
-                
-                hdr_str = ""
-                if "HDR10+" in v_range or "HDR10+" in ext_desc: hdr_str = "HDR10+"
-                elif "HDR10" in v_range or "HDR10" in ext_desc: hdr_str = "HDR10"
-                elif "HDR" in v_range or video_stream.get("ColorTransfer") == "smpte2084": hdr_str = "HDR"
+                    v_range = video_stream.get("VideoRange", "")
+                    ext_type = video_stream.get("ExtendedVideoType", "")
+                    ext_sub_type = video_stream.get("ExtendedVideoSubType", "")
+                    ext_desc = video_stream.get("ExtendedVideoSubTypeDescription", "")
 
-                dv_str = "DV"
-                if is_dv:
-                    if "Profile8" in ext_sub_type or "Profile 8" in ext_desc: dv_str = "DoVi P8"
-                    elif "Profile7" in ext_sub_type or "Profile 7" in ext_desc: dv_str = "DoVi P7"
-                    elif "Profile5" in ext_sub_type or "Profile 5" in ext_desc: dv_str = "DoVi P5"
-                    else: dv_str = "DoVi"
+                    is_dv = "DolbyVision" in v_range or "DolbyVision" in ext_type
+                    
+                    hdr_str = ""
+                    if "HDR10+" in v_range or "HDR10+" in ext_desc: hdr_str = "HDR10+"
+                    elif "HDR10" in v_range or "HDR10" in ext_desc: hdr_str = "HDR10"
+                    elif "HDR" in v_range or video_stream.get("ColorTransfer") == "smpte2084": hdr_str = "HDR"
 
-                if is_dv and hdr_str: info['effect'] = f"{hdr_str} {dv_str}"
-                elif is_dv: info['effect'] = dv_str
-                elif hdr_str: info['effect'] = hdr_str
+                    dv_str = "DV"
+                    if is_dv:
+                        if "Profile8" in ext_sub_type or "Profile 8" in ext_desc: dv_str = "DoVi P8"
+                        elif "Profile7" in ext_sub_type or "Profile 7" in ext_desc: dv_str = "DoVi P7"
+                        elif "Profile5" in ext_sub_type or "Profile 5" in ext_desc: dv_str = "DoVi P5"
+                        else: dv_str = "DoVi"
 
-                fps = video_stream.get("RealFrameRate") or video_stream.get("AverageFrameRate")
-                if fps: info['fps'] = f"{round(fps)}fps"
+                    if is_dv and hdr_str: info['effect'] = f"{hdr_str} {dv_str}"
+                    elif is_dv: info['effect'] = dv_str
+                    elif hdr_str: info['effect'] = hdr_str
 
-            if audio_streams:
-                audio_tags = []
-                
-                # ★ 核心修改：音轨数独立赋值给 audio_count
-                num_audios = len(audio_streams)
-                if num_audios > 1: 
-                    info['audio_count'] = f"{num_audios}Audios"
+                    fps = video_stream.get("RealFrameRate") or video_stream.get("AverageFrameRate")
+                    if fps: info['fps'] = f"{round(fps)}fps"
 
-                primary_audio = next((s for s in audio_streams if s.get("IsDefault")), audio_streams[0])
-                acodec = primary_audio.get("Codec", "").lower()
-                profile = primary_audio.get("Profile", "").lower()
+                if audio_streams:
+                    audio_tags = []
+                    
+                    # ★ 如果这里只有 1 条音轨，info['audio_count'] 会保持上面的空字符串，从而洗掉文件名的 "2Audios"
+                    num_audios = len(audio_streams)
+                    if num_audios > 1: 
+                        info['audio_count'] = f"{num_audios}Audios"
 
-                if acodec == 'truehd' and 'atmos' in profile: audio_tags.append("TrueHD Atmos")
-                elif acodec == 'truehd': audio_tags.append("TrueHD")
-                elif acodec == 'dts' and 'ma' in profile: audio_tags.append("DTS-HD MA")
-                elif acodec == 'dts': audio_tags.append("DTS")
-                elif acodec == 'eac3': audio_tags.append("DDP")
-                elif acodec == 'ac3': audio_tags.append("AC3")
-                elif acodec == 'aac': audio_tags.append("AAC")
-                elif acodec == 'flac': audio_tags.append("FLAC")
+                    primary_audio = next((s for s in audio_streams if s.get("IsDefault")), audio_streams[0])
+                    acodec = primary_audio.get("Codec", "").lower()
+                    profile = primary_audio.get("Profile", "").lower()
 
-                channels = primary_audio.get("Channels")
-                if channels == 8: audio_tags.append("7.1")
-                elif channels == 6: audio_tags.append("5.1")
-                elif channels == 2: audio_tags.append("2.0")
+                    if acodec == 'truehd' and 'atmos' in profile: audio_tags.append("TrueHD Atmos")
+                    elif acodec == 'truehd': audio_tags.append("TrueHD")
+                    elif acodec == 'dts' and 'ma' in profile: audio_tags.append("DTS-HD MA")
+                    elif acodec == 'dts': audio_tags.append("DTS")
+                    elif acodec == 'eac3': audio_tags.append("DDP")
+                    elif acodec == 'ac3': audio_tags.append("AC3")
+                    elif acodec == 'aac': audio_tags.append("AAC")
+                    elif acodec == 'flac': audio_tags.append("FLAC")
 
-                if audio_tags:
-                    info['audio'] = " ".join(audio_tags)
+                    channels = primary_audio.get("Channels")
+                    if channels == 8: audio_tags.append("7.1")
+                    elif channels == 6: audio_tags.append("5.1")
+                    elif channels == 2: audio_tags.append("2.0")
+
+                    if audio_tags:
+                        info['audio'] = " ".join(audio_tags)
 
         except Exception as e:
             logger.warning(f"  ➜ 解析真实媒体信息失败: {e}")
 
-        # ★★★ 神医赋能日志转移到这里，并区分数据源 ★★★
-        if guessed_info is not None and info:
+        # ★★★ 纠错日志：遍历真理字典中的每一个键进行对比 ★★★
+        if guessed_info is not None and info and not silent_log:
             corrected_items = []
-            for k, v in info.items():
-                if v and guessed_info.get(k) != v:
-                    corrected_items.append(f"{k}: '{guessed_info.get(k, '空')}' -> '{v}'")
+            for k in info.keys():
+                old_v = guessed_info.get(k, '')
+                new_v = info.get(k, '')
+                if old_v != new_v:
+                    corrected_items.append(f"{k}: '{old_v or '空'}' -> '{new_v or '空'}'")
             
             if corrected_items:
                 logger.info(f"  ➜ [智能重命名] 成功利用 {data_source} 补全/纠错文件参数: {', '.join(corrected_items)}")
@@ -1883,7 +1894,7 @@ class SmartOrganizer:
 
         return "".join(final_parts)
 
-    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None):
+    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
         if '.' not in original_name: return original_name, None, False
 
@@ -1901,6 +1912,25 @@ class SmartOrganizer:
             if not lang_suffix:
                 match = re.search(r'(?:\.|-|_|\s)(chs|cht|zh-cn|zh-tw|eng|jpn|kor|tc|sc)(?:\.|-|_|$)', name_body, re.IGNORECASE)
                 if match: lang_suffix = f".{match.group(1)}"
+                # ★★★ 强制基础名注入 (专为 MP 字幕挂起等待机制设计) ★★★
+                forced_base_name = file_node.get('_forced_base_name')
+                if forced_base_name:
+                    new_name = f"{forced_base_name}{lang_suffix}.{ext}"
+                    season_num = file_node.get('_forced_season')
+                    episode_num = file_node.get('_forced_episode')
+                    s_name = None
+                    if is_tv and season_num is not None:
+                        cfg = self.rename_config
+                        season_format = cfg.get('season_dir_format', ['season_name_en'])
+                        s_name = self._build_name_from_format(
+                            season_format, 
+                            is_tv=True, 
+                            season_num=season_num, 
+                            original_title=original_title, 
+                            safe_title=new_base_name
+                        )
+                        if not s_name: s_name = f"Season {season_num:02d}"
+                    return new_name, season_num, episode_num, s_name, False
 
         cfg = self.rename_config
         
@@ -1917,11 +1947,10 @@ class SmartOrganizer:
         if not is_sub and enable_smart_rename:
             sha1 = file_node.get('sha1') or file_node.get('sha')
             if sha1:
-                # ★ 将预获取的两个字典都传进去
-                real_info, is_center_cached = self._fetch_and_parse_mediainfo(sha1, video_info, pre_fetched_mediainfo, local_pre_fetched_mediainfo)
+                real_info, is_center_cached = self._fetch_and_parse_mediainfo(sha1, video_info, pre_fetched_mediainfo, local_pre_fetched_mediainfo, silent_log=silent_log)
                 if real_info:
                     for k, v in real_info.items():
-                        if v: video_info[k] = v
+                        video_info[k] = v
                     
         # 解析季集号
         # ★ 优先使用 Webhook 强塞进来的精准数据
@@ -2522,6 +2551,44 @@ class SmartOrganizer:
             allowed_exts = known_video_exts | {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
 
         # =================================================================
+        # ★★★ 同批次字幕完美对齐视频命名 (解决 MP 单文件上传分离问题) ★★★
+        # =================================================================
+        batch_video_names = {} # key: (season, episode) -> base_name
+        if not keep_original and is_batch:
+            # 1. 预扫描视频，生成标准命名
+            for file_item in candidates:
+                fn = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+                ext = fn.split('.')[-1].lower() if '.' in fn else ''
+                if ext in known_video_exts:
+                    # 临时调用重命名获取名字
+                    v_name, v_s, v_e, _, _ = self._rename_file_node(
+                        file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), 
+                        original_title=original_title, pre_fetched_mediainfo=pre_fetched_mediainfo, 
+                        local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
+                        silent_log=True  # ★ 开启静默，防止预扫描时重复打印日志
+                    )
+                    key = (v_s, v_e) if self.media_type == 'tv' else 'movie'
+                    batch_video_names[key] = v_name.rsplit('.', 1)[0]
+            
+            # 2. 将视频基础名注入到同批次的字幕中
+            if batch_video_names:
+                for file_item in candidates:
+                    fn = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+                    ext = fn.split('.')[-1].lower() if '.' in fn else ''
+                    if ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']:
+                        s_num = file_item.get('_forced_season')
+                        e_num = file_item.get('_forced_episode')
+                        if self.media_type == 'tv' and (s_num is None or e_num is None):
+                            match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', fn, re.IGNORECASE)
+                            if match:
+                                s_num, e_num = int(match.group(1)), int(match.group(2))
+                        
+                        key = (s_num, e_num) if self.media_type == 'tv' else 'movie'
+                        if key in batch_video_names:
+                            file_item['_forced_base_name'] = batch_video_names[key]
+                            logger.debug(f"  ➜ [字幕对齐] 成功将字幕 '{fn}' 绑定至视频基础名 '{batch_video_names[key]}'")
+
+        # =================================================================
         # ★★★ 核心性能修复：内存级目录缓存 ★★★
         # 解决超大季/超多集整理时，频繁查询本地DB和请求115 API导致的严重卡死问题
         # =================================================================
@@ -2880,7 +2947,6 @@ class SmartOrganizer:
                                 if str(rule.get('cid')) == str(target_cid):
                                     category_name = rule.get('dir_name', '未识别')
                                     break
-                            from handler.p115_service import P115RecordManager
                             P115RecordManager.add_or_update_record(
                                 file_id=fid,
                                 original_name=file_name,
