@@ -62,9 +62,7 @@
                     <n-form-item-grid-item label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
                       <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5"/>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="豆瓣API默认冷却时间 (秒)" path="api_douban_default_cooldown_seconds">
-                      <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="例如: 1.0"/>
-                    </n-form-item-grid-item>
+                    
                     <n-form-item-grid-item label="需手动处理的最低评分阈值" path="min_score_for_review">
                       <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">处理质量评分低于此值的项目将进入待复核列表。</n-text></template>
@@ -234,15 +232,10 @@
                       <n-switch v-model:value="configModel.monitor_sha1_pc_search" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          文件SHA1查询，非115可关闭，关闭则影响备份媒体信息、媒体信息中心化等。
+                          文件SHA1查询，非115网盘勿启用。
                         </n-text>
                       </template>
                     </n-form-item>
-                    <n-alert type="info" :show-icon="true" style="margin-top: 10px;">
-                      <span style="font-size: 0.85em;">
-                        <b>友情提示：</b> 开启实时监控后，系统会自动处理新增媒体并通知Emby扫描入库，所以请关闭Emby媒体库的实时监控以免冲突。
-                      </span>
-                    </n-alert>
                   </n-card>
                 </n-gi>
                 <n-gi>
@@ -267,29 +260,32 @@
                       <n-input v-model:value="configModel.tmdb_api_base_url" placeholder="https://api.themoviedb.org/3" />
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">TMDb API的基础URL，通常不需要修改。</n-text></template>
                     </n-form-item>
-                    <n-form-item label="允许成人内容探索" path="tmdb_include_adult">
+                    <n-form-item label="成人内容探索" path="tmdb_include_adult">
                       <n-space align="center">
                         <n-switch v-model:value="configModel.tmdb_include_adult" />
                         <n-text depth="3" style="font-size: 0.9em; margin-left: 8px;">
-                          开启后，仅当在探索页面筛选“Emby分级15”的中文标签时，才会返回 TMDb 成人内容。
+                          控制影视探索是否返回成人内容。
                         </n-text>
                       </n-space>
                     </n-form-item>
                     <n-form-item label="GitHub 个人访问令牌" path="github_token">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.github_token" placeholder="可选，用于提高API请求频率限制"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;"><a href="https://github.com/settings/tokens/new" target="_blank" style="font-size: 1.3em; margin-left: 8px; color: var(--n-primary-color); text-decoration: underline;">免费申请GithubTOKEN</a></n-text></template>
+                      <template #feedback><n-text depth="3" style="font-size:0.8em;"><a href="https://github.com/settings/tokens/new" target="_blank" style="font-size: 1.3em; margin-left: 4px; color: var(--n-primary-color); text-decoration: underline;">免费申请GithubTOKEN</a></n-text></template>
                     </n-form-item>
                     <n-form-item label="启用在线豆瓣API" path="douban_enable_online_api">
                       <n-space align="center">
                         <n-switch v-model:value="configModel.douban_enable_online_api" />
                         <n-text depth="3" style="font-size: 0.9em; margin-left: 8px;">
-                          关闭后仅使用本地缓存，不再发起在线请求。
+                          关闭后仅使用本地缓存。
                         </n-text>
                       </n-space>
                     </n-form-item>
+                    <n-form-item-grid-item label="豆瓣API冷却时间 (秒)" path="api_douban_default_cooldown_seconds">
+                      <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="例如: 1.0"/>
+                    </n-form-item-grid-item>
                     <n-form-item label="豆瓣登录 Cookie" path="douban_cookie">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="从浏览器开发者工具中获取"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">非必要不用配置，当日志频繁出现“豆瓣API请求失败: 需要登录...”的提示时再配置。</n-text></template>
+                      <template #feedback><n-text depth="3" style="font-size:0.8em;">非必要不用配置，作用有限。</n-text></template>
                     </n-form-item>
                   </n-card>
                 </n-gi>
@@ -1168,65 +1164,16 @@
                       </n-checkbox-group>
                     </n-form-item-grid-item>
 
-                    <n-divider title-placement="left" style="margin-top: 15px;">订阅频道 (Pro)</n-divider>
+                    <!-- ★ 修改点：移除原有的表单，换成呼出模态框的按钮 -->
+                    <n-divider title-placement="left" style="margin-top: 15px;">频道订阅监听 (Pro)</n-divider>
                     <n-alert type="warning" :show-icon="true" style="margin-bottom: 12px;">
-                      自动监听频道消息，根据订阅选择性转存资源到待处理目录。
+                      自动监听频道消息，根据订阅选择性转存资源。为防止冲突，此功能已独立配置。
                     </n-alert>
-
-                    <n-form-item-grid-item label="启用监听" path="tg_user_enabled">
-                      <n-switch v-model:value="configModel.tg_user_enabled" />
-                    </n-form-item-grid-item>
-
-                    <template v-if="configModel.tg_user_enabled">
-                      <n-form-item-grid-item label="订阅类型" path="tg_monitor_type">
-                        <n-checkbox-group v-model:value="configModel.tg_monitor_type">
-                          <n-space>
-                            <n-checkbox value="movie" label="电影" />
-                            <n-checkbox value="tv" label="电视剧" />
-                          </n-space>
-                        </n-checkbox-group>
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="API ID" path="tg_user_api_id">
-                        <n-input v-model:value="configModel.tg_user_api_id" placeholder="例如: 1234567" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="API Hash" path="tg_user_api_hash">
-                        <n-input v-model:value="configModel.tg_user_api_hash" type="password" show-password-on="click" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="手机号 (带国家代码)" path="tg_user_phone">
-                        <n-input v-model:value="configModel.tg_user_phone" placeholder="例如: +8613800138000" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="两步验证密码 (2FA)" path="tg_user_2fa">
-                        <n-input v-model:value="configModel.tg_user_2fa" type="password" show-password-on="click" placeholder="如果没有设置请留空" />
-                      </n-form-item-grid-item>
-                      
-                      <n-form-item-grid-item label="监听频道白名单" path="tg_monitor_channels">
-                        <n-select v-model:value="configModel.tg_monitor_channels" multiple filterable tag placeholder="输入频道 Username 或 ID 并回车 (如 hdtv115)" :options="[]" />
-                      </n-form-item-grid-item>
-
-                      <!-- 登录交互区 -->
-                      <n-form-item-grid-item label="账号授权状态">
-                        <n-space align="center">
-                          <n-tag :type="userBotStatus === 'authorized' ? 'success' : 'error'">
-                            {{ userBotStatus === 'authorized' ? '已登录 (监听中)' : '未登录' }}
-                          </n-tag>
-                          
-                          <n-button v-if="userBotStatus !== 'authorized'" type="primary" size="small" @click="sendUserBotCode" :loading="isSendingCode">
-                            获取验证码
-                          </n-button>
-                          <n-button v-else type="error" ghost size="small" @click="logoutUserBot">
-                            注销账号
-                          </n-button>
-                        </n-space>
-                      </n-form-item-grid-item>
-
-                      <!-- 验证码输入框 (点击获取验证码后显示) -->
-                      <n-form-item-grid-item v-if="showCodeInput" label="输入验证码">
-                        <n-input-group>
-                          <n-input v-model:value="userBotCode" placeholder="输入 TG 收到的验证码" />
-                          <n-button type="primary" @click="submitUserBotCode" :loading="isSubmittingCode">登录</n-button>
-                        </n-input-group>
-                      </n-form-item-grid-item>
-                    </template>
+                    
+                    <n-button block type="primary" secondary @click="tgMonitorModalRef?.open()">
+                      <template #icon><n-icon :component="ListIcon" /></template>
+                      配置频道订阅监听
+                    </n-button>
 
                   </n-card>
                 </n-gi>
@@ -1865,11 +1812,13 @@
         </n-space>
       </template>
     </n-modal>
+    <!-- ★ 引入频道监听模态框 -->
+    <TGMonitorModal ref="tgMonitorModalRef" />
 </template>
 
 <script setup>
 import { ref, watch, computed, onMounted, onUnmounted, nextTick, isShallow } from 'vue'; 
-import draggable from 'vuedraggable';
+import TGMonitorModal from './TGMonitorModal.vue';
 import { 
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
@@ -1904,6 +1853,7 @@ import RenameConfigModal from './RenameConfigModal.vue';
 import MusicManagerModal from './MusicManagerModal.vue';
 import RuleManagerModal from './RuleManagerModal.vue'; 
 import axios from 'axios';
+const tgMonitorModalRef = ref(null);
 const renameModalRef = ref(null);
 const musicModalRef = ref(null);
 const ruleManagerRef = ref(null);
@@ -2881,68 +2831,6 @@ const handleCreateFolder = async () => {
   } catch (e) {
     message.error("请求失败: " + e.message);
   }
-};
-
-// --- UserBot 逻辑 ---
-const userBotStatus = ref('unauthorized');
-const showCodeInput = ref(false);
-const userBotCode = ref('');
-const isSendingCode = ref(false);
-const isSubmittingCode = ref(false);
-
-const checkUserBotStatus = async () => {
-  try {
-    const res = await axios.get('/api/tg_userbot/status');
-    if (res.data.success) {
-      userBotStatus.value = res.data.data.status;
-    }
-  } catch (e) {}
-};
-
-const sendUserBotCode = async () => {
-  // 必须先保存配置，后端才能拿到最新的 API_ID 和 Phone
-  await save(); 
-  isSendingCode.value = true;
-  try {
-    const res = await axios.post('/api/tg_userbot/send_code');
-    if (res.data.success) {
-      message.success(res.data.message);
-      showCodeInput.value = true;
-    } else {
-      message.error(res.data.message);
-    }
-  } catch (e) {
-    message.error(e.response?.data?.message || '请求失败');
-  } finally {
-    isSendingCode.value = false;
-  }
-};
-
-const submitUserBotCode = async () => {
-  if (!userBotCode.value) return message.warning('请输入验证码');
-  isSubmittingCode.value = true;
-  try {
-    const res = await axios.post('/api/tg_userbot/login', { code: userBotCode.value });
-    if (res.data.success) {
-      message.success(res.data.message);
-      showCodeInput.value = false;
-      checkUserBotStatus();
-    } else {
-      message.error(res.data.message);
-    }
-  } catch (e) {
-    message.error(e.response?.data?.message || '登录失败');
-  } finally {
-    isSubmittingCode.value = false;
-  }
-};
-
-const logoutUserBot = async () => {
-  try {
-    await axios.post('/api/tg_userbot/logout');
-    message.success('已注销');
-    checkUserBotStatus();
-  } catch (e) {}
 };
 
 const confirmFolderSelection = () => {
