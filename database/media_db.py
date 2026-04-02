@@ -169,10 +169,10 @@ def ensure_media_record_exists(media_info_list: List[Dict[str, Any]]):
                 
                 sql = """
                     INSERT INTO media_metadata (
-                        tmdb_id, item_type, title, original_title, release_date, poster_path, 
+                        tmdb_id, item_type, title, original_title, release_date, poster_path, backdrop_path,
                         overview, season_number, parent_series_tmdb_id
                     ) VALUES (
-                        %(tmdb_id)s, %(item_type)s, %(title)s, %(original_title)s, %(release_date)s, %(poster_path)s,
+                        %(tmdb_id)s, %(item_type)s, %(title)s, %(original_title)s, %(release_date)s, %(poster_path)s, %(backdrop_path)s,
                         %(overview)s, %(season_number)s, %(parent_series_tmdb_id)s
                     )
                     ON CONFLICT (tmdb_id, item_type) DO UPDATE SET
@@ -180,6 +180,7 @@ def ensure_media_record_exists(media_info_list: List[Dict[str, Any]]):
                         original_title = EXCLUDED.original_title,
                         release_date = EXCLUDED.release_date,
                         poster_path = EXCLUDED.poster_path,
+                        backdrop_path = EXCLUDED.backdrop_path,
                         overview = EXCLUDED.overview,
                         season_number = EXCLUDED.season_number,
                         parent_series_tmdb_id = EXCLUDED.parent_series_tmdb_id,
@@ -196,6 +197,7 @@ def ensure_media_record_exists(media_info_list: List[Dict[str, Any]]):
                         "original_title": info.get("original_title"),
                         "release_date": info.get("release_date") or None,
                         "poster_path": info.get("poster_path"),
+                        "backdrop_path": info.get("backdrop_path"),  
                         "overview": info.get("overview"),
                         "season_number": info.get("season_number"),
                         "parent_series_tmdb_id": info.get("parent_series_tmdb_id")
@@ -779,6 +781,7 @@ def batch_ensure_basic_movies(movies_list: List[Dict[str, Any]]):
             'original_title': m.get('original_title'),
             'release_date': m.get('release_date') or None, # 处理空字符串
             'poster_path': m.get('poster_path'),
+            'backdrop_path': m.get('backdrop_path'), # ★★★ 增加宽版横幅
             'overview': m.get('overview'),
             'in_library': False, # 默认为不在库
             'subscription_status': 'NONE'
@@ -786,8 +789,8 @@ def batch_ensure_basic_movies(movies_list: List[Dict[str, Any]]):
 
     sql = """
         INSERT INTO media_metadata 
-        (tmdb_id, item_type, title, original_title, release_date, poster_path, overview, in_library, subscription_status, last_updated_at)
-        VALUES (%(tmdb_id)s, %(item_type)s, %(title)s, %(original_title)s, %(release_date)s, %(poster_path)s, %(overview)s, %(in_library)s, %(subscription_status)s, NOW())
+        (tmdb_id, item_type, title, original_title, release_date, poster_path, backdrop_path, overview, in_library, subscription_status, last_updated_at)
+        VALUES (%(tmdb_id)s, %(item_type)s, %(title)s, %(original_title)s, %(release_date)s, %(poster_path)s, %(backdrop_path)s, %(overview)s, %(in_library)s, %(subscription_status)s, NOW())
         ON CONFLICT (tmdb_id, item_type) DO NOTHING;
     """
 
@@ -1446,4 +1449,44 @@ def get_notification_media_info_by_emby_id(emby_id: str) -> dict:
                 if row: return dict(row)
     except Exception as e:
         logger.error(f"DB: 获取通知图片信息失败: {e}")
+    return {}
+
+# 根据 TMDB ID 快速获取用于转存通知的媒体信息
+def get_notification_media_info_by_tmdb_id(tmdb_id: str) -> dict:
+    """
+    【转存通知专用】根据 TMDB ID 快速盲查本地数据库的图片、评分和简介。
+    排序权重保证优先使用 Series(剧集) 和 Movie(电影) 级别的高清横幅，
+    如果是分集或季数据，自动回退寻找父剧集的图片。
+    """
+    if not tmdb_id: return {}
+    sql = """
+        SELECT 
+            m.item_type, 
+            m.backdrop_path, 
+            m.poster_path, 
+            m.rating, 
+            m.overview,
+            p.backdrop_path AS parent_backdrop_path,
+            p.poster_path AS parent_poster_path
+        FROM media_metadata m
+        LEFT JOIN media_metadata p ON m.parent_series_tmdb_id = p.tmdb_id AND p.item_type = 'Series'
+        WHERE m.tmdb_id = %s
+        ORDER BY 
+            CASE m.item_type 
+                WHEN 'Series' THEN 1 
+                WHEN 'Movie' THEN 2 
+                WHEN 'Season' THEN 3 
+                WHEN 'Episode' THEN 4 
+                ELSE 5 
+            END
+        LIMIT 1
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, (str(tmdb_id),))
+                row = cursor.fetchone()
+                if row: return dict(row)
+    except Exception as e:
+        logger.error(f"DB: 获取转存通知图片信息(TMDB ID)失败: {e}")
     return {}

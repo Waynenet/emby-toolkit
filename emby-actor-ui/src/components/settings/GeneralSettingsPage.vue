@@ -85,14 +85,6 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="备份集图片" path="backup_episode_image">
-                      <n-switch v-model:value="configModel.backup_episode_image" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          备份所有的集图片。
-                        </n-text>
-                      </template>
-                    </n-form-item-grid-item>
                     <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
                       <n-switch v-model:value="configModel.keyword_to_tags" />
                       <template #feedback>
@@ -1171,6 +1163,7 @@
                           <n-checkbox value="library_new" label="入库通知" />
                           <n-checkbox value="transfer_success" label="转存通知" />
                           <n-checkbox value="playback" label="播放通知" />
+                          <n-checkbox value="hdhive_checkin" label="影巢签到通知" />
                         </n-space>
                       </n-checkbox-group>
                     </n-form-item-grid-item>

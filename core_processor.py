@@ -399,6 +399,7 @@ class MediaProcessor:
                                     "episode_number": e_num,
                                     "air_date": str(e_row['release_date']) if e_row['release_date'] else None,
                                     "vote_average": e_row['rating'],
+                                    "still_path": e_row['poster_path']
                                 }
                                 episodes_data[key] = e_data
 
@@ -1385,26 +1386,21 @@ class MediaProcessor:
                         try: seasons_grouped_by_number[int(idx)].append(s_ver)
                         except: pass
 
-                processed_emby_seasons = set() # ★ 新增：记录已处理的 Emby 季
-
                 for season in seasons_details:
                     if not isinstance(season, dict): continue
                     
+                    # ★★★ 核心修复：严防死守 ID=0 ★★★
+                    s_tmdb_id = season.get('id')
+                    if not s_tmdb_id or str(s_tmdb_id) in ['0', 'None', '']:
+                        continue
+
                     s_num = season.get('season_number')
                     if s_num is None: continue 
                     try: s_num_int = int(s_num)
                     except ValueError: continue
 
-                    # ★★★ 核心修改：允许缺失 TMDb ID 的季使用内部兜底 ID 入库 ★★★
-                    s_tmdb_id = season.get('id')
-                    if not s_tmdb_id or str(s_tmdb_id) in ['0', 'None', '']:
-                        s_tmdb_id = f"{series_details.get('id')}-S{s_num_int}"
-
                     season_poster = season.get('poster_path') or series_details.get('poster_path')
                     matched_emby_seasons = seasons_grouped_by_number.get(s_num_int, [])
-
-                    if matched_emby_seasons:
-                        processed_emby_seasons.add(s_num_int) # ★ 记录已处理
 
                     # ★ 提取所有匹配到的季文件夹 ID
                     season_ids = [s['Id'] for s in matched_emby_seasons] if matched_emby_seasons else []
@@ -1417,31 +1413,6 @@ class MediaProcessor:
                         "season_number": s_num,
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
-                        "emby_item_ids_json": json.dumps(season_ids),
-                        "file_sha1_json": '[]'
-                    })
-
-                # ★★★ 新增：兜底处理 Emby 中存在，但 TMDb 中完全没有的季 ★★★
-                for s_num, matched_emby_seasons in seasons_grouped_by_number.items():
-                    if s_num in processed_emby_seasons:
-                        continue
-
-                    fallback_s_tmdb_id = f"{series_details.get('id')}-S{s_num}"
-                    logger.debug(f"  ➜ [入库兜底] 发现 Emby 本地季 S{s_num} 在 TMDb 中不存在，生成内部 ID: {fallback_s_tmdb_id}")
-
-                    season_ids = [s['Id'] for s in matched_emby_seasons]
-
-                    records_to_upsert.append({
-                        "tmdb_id": fallback_s_tmdb_id,
-                        "item_type": "Season",
-                        "parent_series_tmdb_id": str(series_details.get('id')),
-                        "title": matched_emby_seasons[0].get('Name') or f"Season {s_num}",
-                        "overview": None,
-                        "release_date": matched_emby_seasons[0].get('PremiereDate'),
-                        "poster_path": series_details.get('poster_path'), 
-                        "season_number": s_num,
-                        "total_episodes": 0,
-                        "in_library": True,
                         "emby_item_ids_json": json.dumps(season_ids),
                         "file_sha1_json": '[]'
                     })
@@ -1509,7 +1480,9 @@ class MediaProcessor:
                         "title": episode.get('name'), "overview": episode.get('overview'), 
                         "release_date": episode.get('air_date'), 
                         "season_number": s_num, "episode_number": e_num,
-                        "runtime_minutes": final_runtime
+                        "runtime_minutes": final_runtime,
+                        "poster_path": episode.get('still_path'),
+                        "backdrop_path": episode.get('still_path')
                     }
                     
                     # ★ 资产信息处理 (支持多版本)
@@ -1612,7 +1585,9 @@ class MediaProcessor:
                         "overview": emby_ep.get('Overview'), 
                         "release_date": emby_ep.get('PremiereDate'), 
                         "season_number": s_num, "episode_number": e_num,
-                        "runtime_minutes": final_runtime
+                        "runtime_minutes": final_runtime,
+                        "poster_path": None,    # ★★★ 新增
+                        "backdrop_path": None,   # ★★★ 新增
                     }
 
                     all_assets = []
@@ -2603,18 +2578,6 @@ class MediaProcessor:
                     logger.info(f"  ➜ [快速模式] 检测到完美本地数据，跳过图片下载、文件写入及 Emby 刷新。")
                 
                 else:
-                    # --- 分支 B: 正常处理/追更模式 ---
-                    # 写入 override 文件
-                    # 注意：sync_single_item_assets 内部已经有针对 episode_ids_to_sync 的优化，
-                    # 它只会下载新分集的图片，并复制新分集的 JSON，不会重新下载全套图片。
-                    self.sync_single_item_assets(
-                        item_id=item_id,
-                        update_description="主流程处理完成" if not specific_episode_ids else f"追更: {len(specific_episode_ids)}个分集",
-                        final_cast_override=final_processed_cast,
-                        episode_ids_to_sync=specific_episode_ids,
-                        metadata_override=tmdb_details_for_extra 
-                    )
-
                     # 通过 API 实时更新 Emby 演员库中的名字
                     self._update_emby_person_names_from_final_cast(final_processed_cast, item_name_for_log)
 
@@ -3888,64 +3851,6 @@ class MediaProcessor:
             logger.error(f"  ➜ 获取编辑数据失败 for ItemID {item_id}: {e}", exc_info=True)
             return None
     
-    # --- 实时覆盖缓存同步 ---
-    def sync_single_item_assets(self, item_id: str, 
-                                update_description: Optional[str] = None, 
-                                sync_timestamp_iso: Optional[str] = None,
-                                final_cast_override: Optional[List[Dict[str, Any]]] = None,
-                                episode_ids_to_sync: Optional[List[str]] = None,
-                                metadata_override: Optional[Dict[str, Any]] = None): 
-        """
-        纯粹的项目经理，负责接收设计师的所有材料，并分发给施工队。
-        """
-        log_prefix = f"实时覆盖缓存同步"
-        logger.trace(f"--- {log_prefix} 开始执行 (ItemID: {item_id}) ---")
-
-        if not self.local_data_path:
-            logger.warning(f"  ➜ {log_prefix} 任务跳过，因为未配置本地数据源路径。")
-            return
-
-        try:
-            item_details = emby.get_emby_item_details(
-                item_id, self.emby_url, self.emby_api_key, self.emby_user_id,
-                fields="ProviderIds,Type,Name,IndexNumber,ParentIndexNumber"
-            )
-            if not item_details:
-                raise ValueError("在Emby中找不到该项目。")
-
-            tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
-            if not tmdb_id:
-                logger.warning(f"{log_prefix} 项目 '{item_details.get('Name')}' 缺少TMDb ID，无法同步。")
-                return
-
-            # 1. 调度外墙施工队
-            self.sync_item_images(item_details, update_description, episode_ids_to_sync=episode_ids_to_sync)
-            
-            # 2. 调度精装修施工队，并把所有图纸和材料都给他
-            self.sync_item_metadata(
-                item_details, 
-                tmdb_id, 
-                final_cast_override=final_cast_override, 
-                episode_ids_to_sync=episode_ids_to_sync,
-                metadata_override=metadata_override 
-            )
-
-            # 3. 记录工时
-            timestamp_to_log = sync_timestamp_iso or datetime.now(timezone.utc).isoformat()
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                self.log_db_manager.mark_assets_as_synced(
-                    cursor, 
-                    item_id, 
-                    timestamp_to_log
-                )
-                conn.commit()
-            
-            logger.trace(f"--- {log_prefix} 成功完成 (ItemID: {item_id}) ---")
-
-        except Exception as e:
-            logger.error(f"{log_prefix} 执行时发生错误 (ItemID: {item_id}): {e}", exc_info=True)
-
     # --- 备份图片 ---
     def sync_item_images(self, item_details: Dict[str, Any], update_description: Optional[str] = None, episode_ids_to_sync: Optional[List[str]] = None) -> bool:
         """
@@ -4022,47 +3927,6 @@ class MediaProcessor:
                         logger.warning(f"  ➜ {log_prefix} 收到停止信号，中止图片下载。")
                         return False
                     emby.download_emby_image(item_id, image_type, os.path.join(image_override_dir, filename), self.emby_url, self.emby_api_key)
-            
-            # --- 分集图片逻辑 ---
-            if item_type == "Series" and self.config.get(constants.CONFIG_OPTION_BACKUP_EPISODE_IMAGE, False):
-                children_to_process = []
-                # 获取所有子项信息，用于查找 (增加 ImageTags 字段请求)
-                all_children = emby.get_series_children(
-                    item_id, self.emby_url, self.emby_api_key, self.emby_user_id, 
-                    series_name_for_log=item_name_for_log,
-                    fields="Id,Name,ParentIndexNumber,IndexNumber,Overview,ImageTags"
-                ) or []
-                
-                if episode_ids_to_sync:
-                    # 模式一：只处理指定的分集
-                    logger.info(f"  ➜ {log_prefix} 将只同步 {len(episode_ids_to_sync)} 个指定分集的图片。")
-                    id_set = set(episode_ids_to_sync)
-                    children_to_process = [child for child in all_children if child.get("Id") in id_set]
-                elif images_to_sync == full_image_map:
-                    # 模式二：处理所有子项（原逻辑）
-                    children_to_process = all_children
-
-                for child in children_to_process:
-                    if self.is_stop_requested():
-                        logger.warning(f"  ➜ {log_prefix} 收到停止信号，中止子项目图片下载。")
-                        return False
-                    
-                    child_type, child_id = child.get("Type"), child.get("Id")
-                    
-                    # ★★★ 优雅处理：检查该分集/季是否真的有独立图片 ★★★
-                    # 如果没有 Primary 标签，说明 Emby 只是在用父级海报占位，直接跳过，避免触发 500 错误和重试耗时
-                    if "Primary" not in child.get("ImageTags", {}):
-                        # logger.trace(f"  ➜ {log_prefix} {child_type} (ID:{child_id}) 暂无独立封面，优雅跳过。")
-                        continue
-
-                    if child_type == "Season":
-                        season_number = child.get("IndexNumber")
-                        if season_number is not None:
-                            emby.download_emby_image(child_id, "Primary", os.path.join(image_override_dir, f"season-{season_number}.jpg"), self.emby_url, self.emby_api_key)
-                    elif child_type == "Episode":
-                        season_number, episode_number = child.get("ParentIndexNumber"), child.get("IndexNumber")
-                        if season_number is not None and episode_number is not None:
-                            emby.download_emby_image(child_id, "Primary", os.path.join(image_override_dir, f"season-{season_number}-episode-{episode_number}.jpg"), self.emby_url, self.emby_api_key)
             
             logger.trace(f"  ➜ {log_prefix} 成功完成 '{item_name_for_log}' 的覆盖缓存-图片备份。")
             return True
@@ -4216,32 +4080,50 @@ class MediaProcessor:
                         if s_num is not None and s_poster:
                             downloads.append((s_poster, f"season-{s_num}.jpg"))
 
-            # 5. 执行下载
+                # --- E. 剧集分集图片 (Still)  ---
+                if aggregated_tmdb_data and "episodes_details" in aggregated_tmdb_data:
+                    episodes = aggregated_tmdb_data["episodes_details"]
+                    ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
+                    for ep in ep_list:
+                        s_num = ep.get("season_number")
+                        e_num = ep.get("episode_number")
+                        e_still = ep.get("still_path")
+                        if s_num is not None and e_num is not None and e_still:
+                            downloads.append((e_still, f"season-{s_num}-episode-{e_num}.jpg"))
+
+            # 5. 执行下载 (★★★ 多线程并发提速版 ★★★)
             base_image_url = "https://image.tmdb.org/t/p/original"
-            success_count = 0
             import requests
+            import concurrent.futures
             
             # ★ 获取系统配置的代理
             proxies = config_manager.get_proxies_for_requests()
             
-            for tmdb_path, local_name in downloads:
-                if not tmdb_path: continue
+            def _download_single_image(tmdb_path, local_name):
+                if not tmdb_path: return 0
                 full_url = f"{base_image_url}{tmdb_path}"
                 save_path = os.path.join(image_override_dir, local_name)
                 
+                # 如果文件已存在且大小不为0，直接跳过
                 if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                    continue
+                    return 0
 
                 try:
-                    # ★ 在请求中加入 proxies 参数
                     resp = requests.get(full_url, timeout=15, proxies=proxies)
                     if resp.status_code == 200:
                         with open(save_path, 'wb') as f:
                             f.write(resp.content)
-                        success_count += 1
-                        time_module.sleep(0.1)
+                        return 1
                 except Exception as e:
                     logger.warning(f"  ➜ 下载图片失败 {local_name}: {e}")
+                return 0
+
+            success_count = 0
+            # 开启 5 个并发线程同时下载，速度起飞
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [executor.submit(_download_single_image, path, name) for path, name in downloads]
+                for future in concurrent.futures.as_completed(futures):
+                    success_count += future.result()
 
             logger.info(f"  ➜ {log_prefix} 共下载 {success_count} 张图片。")
             return True
@@ -4757,6 +4639,8 @@ class MediaProcessor:
                             child_data['air_date'] = specific_tmdb_data.get('air_date')
                         if specific_tmdb_data.get('vote_average'):
                             child_data['vote_average'] = specific_tmdb_data.get('vote_average')
+                        if specific_tmdb_data.get('still_path'):
+                            child_data['still_path'] = specific_tmdb_data.get('still_path')
 
                 # 2. 处理分季 (Season)
                 elif is_season_file and tmdb_seasons_data and current_s_num is not None:
