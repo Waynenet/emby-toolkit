@@ -85,14 +85,6 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="备份集图片" path="backup_episode_image">
-                      <n-switch v-model:value="configModel.backup_episode_image" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          备份所有的集图片。
-                        </n-text>
-                      </template>
-                    </n-form-item-grid-item>
                     <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
                       <n-switch v-model:value="configModel.keyword_to_tags" />
                       <template #feedback>
@@ -1165,6 +1157,17 @@
                       <n-input v-model:value="configModel.telegram_channel_id" placeholder="例如: -100123456789" />
                     </n-form-item-grid-item>
 
+                    <n-form-item-grid-item label="通知类型" path="telegram_notify_types">
+                      <n-checkbox-group v-model:value="configModel.telegram_notify_types">
+                        <n-space>
+                          <n-checkbox value="library_new" label="入库通知" />
+                          <n-checkbox value="transfer_success" label="转存通知" />
+                          <n-checkbox value="playback" label="播放通知" />
+                          <n-checkbox value="hdhive_checkin" label="影巢签到通知" />
+                        </n-space>
+                      </n-checkbox-group>
+                    </n-form-item-grid-item>
+
                     <n-divider title-placement="left" style="margin-top: 15px;">订阅频道 (Pro)</n-divider>
                     <n-alert type="warning" :show-icon="true" style="margin-bottom: 12px;">
                       自动监听频道消息，根据订阅选择性转存资源到待处理目录。
@@ -1183,7 +1186,6 @@
                           </n-space>
                         </n-checkbox-group>
                       </n-form-item-grid-item>
-
                       <n-form-item-grid-item label="API ID" path="tg_user_api_id">
                         <n-input v-model:value="configModel.tg_user_api_id" placeholder="例如: 1234567" />
                       </n-form-item-grid-item>

@@ -975,6 +975,7 @@ def process_subscription_items_and_update_db(
                     'original_title': parent_details.get('original_name'),
                     'release_date': parent_details.get('first_air_date'),
                     'poster_path': parent_details.get('poster_path'),
+                    'backdrop_path': parent_details.get('backdrop_path'),
                     'overview': parent_details.get('overview')
                 }
 
@@ -984,6 +985,7 @@ def process_subscription_items_and_update_db(
                     details['parent_series_tmdb_id'] = str(parent_id)
                     details['parent_title'] = parent_details.get('name')
                     details['parent_poster_path'] = parent_details.get('poster_path')
+                    details['parent_backdrop_path'] = parent_details.get('backdrop_path')
                     
                     # 获取真实的季 ID
                     real_season_id = str(details.get('id'))
@@ -1018,6 +1020,7 @@ def process_subscription_items_and_update_db(
                 'release_year': release_year, 
                 'overview': details.get('overview'),
                 'poster_path': details.get('poster_path') or details.get('parent_poster_path'),
+                'backdrop_path': details.get('backdrop_path') or details.get('parent_backdrop_path'),
                 'parent_series_tmdb_id': details.get('parent_series_tmdb_id'),
                 'season_number': details.get('season_number'),
                 'source': subscription_source # 直接使用传入的 source
@@ -1322,6 +1325,7 @@ def construct_metadata_payload(item_type: str, tmdb_data: Dict[str, Any],
                     ep_skeleton['overview'] = ep_data.get('overview')
                     ep_skeleton['air_date'] = ep_data.get('air_date')
                     ep_skeleton['vote_average'] = ep_data.get('vote_average')
+                    ep_skeleton['still_path'] = ep_data.get('still_path')
                     
                     # 演员
                     ep_credits = ep_data.get('credits', {})

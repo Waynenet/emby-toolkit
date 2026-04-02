@@ -259,10 +259,10 @@ class SchedulerManager:
         task_sequence = config.get(sequence_key, [])
 
         if is_enabled and cron_str and task_sequence:
-            
+
             # 修复 APScheduler 星期映射 Bug
             fixed_cron_str = _fix_apscheduler_cron_dow(cron_str)
-
+            
             registry = get_task_registry()
             task_info = registry.get(task_key)
             if not task_info:

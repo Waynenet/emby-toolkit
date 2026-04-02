@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.3.9"  # 更新版本号
+APP_VERSION = "8.4.4"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -90,7 +90,9 @@ CONFIG_OPTION_TG_USER_API_HASH = "tg_user_api_hash"                # TG用户API
 CONFIG_OPTION_TG_USER_PHONE = "tg_user_phone"                      # TG用户手机号
 CONFIG_OPTION_TG_USER_2FA = "tg_user_2fa"                          # TG用户2FA
 CONFIG_OPTION_TG_MONITOR_CHANNELS = "tg_monitor_channels"          # 监控的频道列表
-CONFIG_OPTION_TG_MONITOR_TYPE = "tg_monitor_type"                  # 新增：订阅的资源类型，movie/tv
+CONFIG_OPTION_TG_MONITOR_TYPE = "tg_monitor_type"                  # 订阅的资源类型，movie/tv
+CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
+DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success'] # ★ 默认开启入库和转存
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)
@@ -125,7 +127,6 @@ DEFAULT_MAX_ACTORS_TO_PROCESS = 50                              # 默认的演�
 CONFIG_OPTION_MIN_SCORE_FOR_REVIEW = "min_score_for_review"     # 低于此评分的项目将进入手动处理列表
 DEFAULT_MIN_SCORE_FOR_REVIEW = 6.0                              # 默认的最低分
 CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS = "remove_actors_without_avatars" # 是否移除无头像的演员
-CONFIG_OPTION_BACKUP_EPISODE_IMAGE = "backup_episode_image"     # 是否备份原有的集图片
 CONFIG_OPTION_KEYWORD_TO_TAGS = "keyword_to_tags"               # 关键词写入标签 
 CONFIG_OPTION_STUDIO_TO_CHINESE = "studio_to_chinese"           # 是否将工作室/电视网名称转换为中文  
 
