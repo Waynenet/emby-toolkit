@@ -252,6 +252,9 @@
                         </n-input>
                         <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
                       </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">留空使用NFO模式。</n-text>
+                      </template>
                     </n-form-item>
                     <n-form-item label="TMDB API Key" path="tmdb_api_key">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />

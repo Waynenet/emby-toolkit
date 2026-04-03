@@ -56,7 +56,7 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             s.release_date as release_year,
             
             -- 季的状态
-            COALESCE(NULLIF(s.watching_status, 'NONE'), p.watching_status) as status,
+            s.watching_status as status,
             
             -- 剧集层面的状态
             p.watching_status as series_status,
@@ -89,6 +89,8 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             AND s.season_number > 0
             AND p.item_type = 'Series'
             AND p.watching_status != 'NONE'
+            AND s.watching_status != 'NONE'
+            AND (s.watching_status != 'Completed' OR s.in_library = TRUE)
             AND (
                 -- 1. 缺集 (未集齐) -> 显示
                 (s.total_episodes = 0 OR COALESCE(es.collected_count, 0) < s.total_episodes)
