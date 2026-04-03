@@ -24,7 +24,7 @@ from extensions import SYSTEM_UPDATE_MARKERS, SYSTEM_UPDATE_LOCK, RECURSION_SUPP
 from core_processor import MediaProcessor
 from tasks.watchlist import task_process_watchlist
 from tasks.users import task_auto_sync_template_on_policy_change
-from tasks.media import task_sync_all_metadata, task_sync_images
+from tasks.media import task_sync_all_metadata
 from handler.custom_collection import RecommendationEngine
 from handler import tmdb_collections as collections_handler
 from services.cover_generator import CoverGeneratorService
@@ -473,7 +473,7 @@ def _process_batch_webhook_events():
             
             # ★★★ 优化核心：如果不在线，直接踢出缓存，视为新项目重跑 ★★★
             if not is_online_in_db:
-                logger.info(f"  ➜ ➜ 缓存命中 '{parent_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
+                logger.info(f"  ➜ 缓存命中 '{parent_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
                 
                 # 从内存缓存中移除
                 if parent_id in extensions.media_processor_instance.processed_items_cache:
@@ -507,18 +507,6 @@ def _trigger_metadata_update_task(item_id, item_name):
         processor_type='media',
         item_id=item_id,
         item_name=item_name
-    )
-
-def _trigger_images_update_task(item_id, item_name, update_description, sync_timestamp_iso):
-    """触发图片备份任务"""
-    logger.info(f"  ➜ 防抖计时器到期，为 '{item_name}' (ID: {item_id}) 执行图片备份任务。")
-    task_manager.submit_task(
-        task_sync_images,
-        task_name=f"图片备份: {item_name}",
-        processor_type='media',
-        item_id=item_id,
-        update_description=update_description,
-        sync_timestamp_iso=sync_timestamp_iso
     )
 
 def _enqueue_webhook_event(item_id, item_name, item_type):
@@ -555,7 +543,7 @@ def _dispatch_item(item_id, item_name, item_type):
         if is_already_processed:
             is_online_in_db = media_db.is_emby_id_in_library(item_id)
             if not is_online_in_db:
-                logger.info(f"  ➜ ➜ 缓存命中 '{item_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
+                logger.info(f"  ➜ 缓存命中 '{item_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
                 if item_id in extensions.media_processor_instance.processed_items_cache:
                     del extensions.media_processor_instance.processed_items_cache[item_id]
                 is_already_processed = False
@@ -1251,7 +1239,7 @@ def emby_webhook():
         logger.info(f"  ➜ Webhook: 收到入库事件 '{original_item_name}'，已分派预检任务。")
         return jsonify({"status": "processing_started_with_stream_check", "item_id": original_item_id}), 202
 
-    # --- 为 metadata.update 和 image.update 事件准备通用变量 ---
+    # --- 为 元数据更新 事件准备变量 ---
     id_to_process = original_item_id
     name_for_task = original_item_name
     
@@ -1272,7 +1260,7 @@ def emby_webhook():
         if full_series_details:
             name_for_task = full_series_details.get("Name", f"未知剧集(ID:{id_to_process})")
 
-    # --- 分离 metadata.update 和 image.update 的处理逻辑 ---
+    # --- 处理元数据更新事件 ---
     if event_type == "metadata.update":
         with UPDATE_DEBOUNCE_LOCK:
             if id_to_process in UPDATE_DEBOUNCE_TIMERS:
@@ -1289,38 +1277,5 @@ def emby_webhook():
             )
             UPDATE_DEBOUNCE_TIMERS[id_to_process] = new_timer
         return jsonify({"status": "metadata_update_task_debounced", "item_id": id_to_process}), 202
-
-    elif event_type == "image.update":
-        
-        # 1. 先获取原始的描述
-        original_update_description = data.get("Description", "Webhook Image Update")
-        webhook_received_at_iso = datetime.now(timezone.utc).isoformat()
-
-        # 2. 准备一个变量来存放最终要执行的描述
-        final_update_description = original_update_description
-
-        with UPDATE_DEBOUNCE_LOCK:
-            # 3. 检查是否已有计时器
-            if id_to_process in UPDATE_DEBOUNCE_TIMERS:
-                old_timer = UPDATE_DEBOUNCE_TIMERS[id_to_process]
-                old_timer.kill()
-                logger.debug(f"  ➜ 已为 '{name_for_task}' 取消了旧的同步计时器，将以最新的封面更新事件为准。")
-                
-                # ★★★ 关键逻辑：如果取消了旧的，说明发生了合并，我们不再相信单一描述 ★★★
-                logger.info(f"  ➜ 检测到图片更新事件合并，将任务升级为“完全同步”。")
-                final_update_description = "Multiple image updates detected" # 给一个通用描述
-
-            logger.info(f"  ➜ 为 '{name_for_task}' 设置了 {UPDATE_DEBOUNCE_TIME} 秒的封面备份延迟...")
-            new_timer = spawn_later(
-                UPDATE_DEBOUNCE_TIME,
-                _trigger_images_update_task,
-                item_id=id_to_process,
-                item_name=name_for_task,
-                update_description=final_update_description, # <-- 使用我们最终决定的描述
-                sync_timestamp_iso=webhook_received_at_iso
-            )
-            UPDATE_DEBOUNCE_TIMERS[id_to_process] = new_timer
-        
-        return jsonify({"status": "asset_update_task_debounced", "item_id": id_to_process}), 202
 
     return jsonify({"status": "event_unhandled"}), 500

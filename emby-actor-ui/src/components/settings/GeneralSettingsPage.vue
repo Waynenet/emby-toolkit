@@ -241,21 +241,6 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header><span class="card-title">数据源与API</span></template>
-                    <n-form-item label="本地数据源路径" path="local_data_path">
-                      <n-input-group>
-                        <n-input 
-                          v-model:value="configModel.local_data_path" 
-                          placeholder="神医TMDB缓存目录 (cache和override的上层)" 
-                          @click="openLocalFolderSelector('local_data_path', false)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">留空使用NFO模式。</n-text>
-                      </template>
-                    </n-form-item>
                     <n-form-item label="TMDB API Key" path="tmdb_api_key">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />
                     </n-form-item>
@@ -579,7 +564,7 @@
                             <template #unchecked>本地媒体信息</template>
                         </n-switch>
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">开启时，在线从中心服务器获取媒体信息数据。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">在线从中心服务器获取媒体信息数据，需要神医Pro。</n-text>
                         </template>
                     </n-form-item>
                     <n-form-item label="同步下载字幕" path="p115_download_subs">
