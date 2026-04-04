@@ -701,3 +701,122 @@ def clear_tagging_now():
         rating_filters=rating_filters
     )
     return jsonify({"message": "批量移除任务已启动"})
+
+# ✨✨✨ 手动替换媒体图片 (海报/Logo/背景) ✨✨✨
+@media_api_bp.route('/update_media_image/<item_id>', methods=['POST'])
+@admin_required
+@processor_ready_required
+def api_update_media_image(item_id):
+    """
+    接收前端传来的图片 URL 或 图片文件，直接覆盖物理文件并刷新 Emby。
+    支持 multipart/form-data (文件上传) 或 application/json (URL)。
+    """
+    try:
+        image_type = None
+        image_url = None
+        image_bytes = None
+
+        # 1. 解析请求数据 (兼容 JSON 和 FormData)
+        if request.is_json:
+            data = request.json
+            image_type = data.get('image_type')
+            image_url = data.get('image_url')
+        else:
+            image_type = request.form.get('image_type')
+            image_url = request.form.get('image_url')
+            file = request.files.get('file')
+            if file and file.filename:
+                image_bytes = file.read()
+
+        # 2. 基础校验
+        if not image_type:
+            return jsonify({"error": "缺少 image_type 参数 (可选值: poster, clearlogo, fanart, landscape)"}), 400
+            
+        if not image_url and not image_bytes:
+            return jsonify({"error": "必须提供 image_url 或上传 file"}), 400
+
+        # 3. 调用核心处理器执行物理替换
+        success, message = extensions.media_processor_instance.update_media_image_manually(
+            item_id=item_id,
+            image_type=image_type,
+            image_url=image_url,
+            image_bytes=image_bytes
+        )
+
+        if success:
+            return jsonify({"message": message}), 200
+        else:
+            return jsonify({"error": message}), 500
+
+    except Exception as e:
+        logger.error(f"API /update_media_image 发生错误: {e}", exc_info=True)
+        return jsonify({"error": "服务器内部错误"}), 500
+
+# ✨✨✨ 获取 TMDb 备选图片列表 ✨✨✨
+@media_api_bp.route('/tmdb_images/<item_id>', methods=['GET'])
+@processor_ready_required
+def api_get_tmdb_images(item_id):
+    """
+    获取指定媒体在 TMDb 上的所有备选图片（海报、背景、Logo）。
+    """
+    try:
+        # 1. 获取 Emby 详情以拿到 TMDb ID
+        item_details = emby.get_emby_item_details(
+            item_id,
+            extensions.media_processor_instance.emby_url,
+            extensions.media_processor_instance.emby_api_key,
+            extensions.media_processor_instance.emby_user_id
+        )
+        
+        if not item_details:
+            return jsonify({"error": "无法获取 Emby 媒体详情"}), 404
+            
+        tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
+        item_type = item_details.get("Type")
+        
+        if not tmdb_id:
+            return jsonify({"error": "该媒体缺少 TMDb ID，无法获取图片"}), 400
+
+        # 2. 调用 TMDb API 获取图片
+        import handler.tmdb as tmdb
+        api_key = extensions.media_processor_instance.tmdb_api_key
+        
+        # 尽可能多地获取图片（中文、英文、无文字）
+        img_lang = "zh-CN,zh-TW,zh,en,null,ja,ko" 
+        
+        if item_type == "Movie":
+            data = tmdb.get_movie_details(int(tmdb_id), api_key, append_to_response="images", include_image_language=img_lang)
+        elif item_type == "Series":
+            data = tmdb.get_tv_details(int(tmdb_id), api_key, append_to_response="images", include_image_language=img_lang)
+        else:
+            return jsonify({"error": "不支持的媒体类型"}), 400
+
+        if not data or "images" not in data:
+            return jsonify({"error": "未在 TMDb 找到图片数据"}), 404
+
+        images = data["images"]
+        
+        # 3. 格式化返回数据 (提供预览小图和下载原图)
+        base_preview_url = "https://image.tmdb.org/t/p/w500"
+        base_original_url = "https://image.tmdb.org/t/p/original"
+        
+        def format_images(img_list):
+            return [{
+                "preview": f"{base_preview_url}{img['file_path']}",
+                "original": f"{base_original_url}{img['file_path']}",
+                "aspect_ratio": img.get("aspect_ratio", 1),
+                "width": img.get("width"),    # ★★★ 新增：把宽度传给前端
+                "height": img.get("height")   # ★★★ 新增：把高度传给前端
+            } for img in img_list]
+
+        result = {
+            "posters": format_images(images.get("posters", [])),
+            "backdrops": format_images(images.get("backdrops", [])),
+            "logos": format_images(images.get("logos", []))
+        }
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"API /tmdb_images 发生错误: {e}", exc_info=True)
+        return jsonify({"error": "获取 TMDb 图片失败"}), 500
