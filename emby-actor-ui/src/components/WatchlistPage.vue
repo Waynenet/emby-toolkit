@@ -480,7 +480,7 @@
                 </n-switch>
               </div>
               <div class="setting-desc">
-                开启后，待订阅剧集不再提交给MP。
+                开启后，订阅及洗版将不再提交给MP。
               </div>
             </div>
           </div>  
@@ -523,7 +523,7 @@
                   </n-switch>
                 </div>
                 <div class="setting-desc">
-                  剧集完结后，自动删除旧订阅并提交“洗版订阅”，以获取整季合集。
+                  剧集完结后，一致性检查未通过将触发洗版。
                 </div>
                 <!-- 子选项展开区域 -->
                 <n-collapse-transition :show="watchlistConfig.auto_resub_ended">
