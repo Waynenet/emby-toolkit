@@ -449,9 +449,12 @@ const openHDHiveModal = (item) => {
 };
 
 const handleHDHiveDownloadSuccess = () => {
-  // 当在统一订阅页面通过影巢成功转存后，乐观地将状态更新为“已订阅”
   if (currentHDHiveMedia.value) {
-    updateItemStatus(currentHDHiveMedia.value, 'SUBSCRIBED');
+    // ★ 核心逻辑：将状态置为 NONE
+    // 1. 后端收到 NONE 状态，会自动去 MoviePilot 取消对应的订阅（如果有的话）。
+    // 2. 前端卡片会从当前列表中移除，保持列表清爽。
+    // 3. 115 后台默默下载整理，完成后 Emby 扫描自动入库。
+    updateItemStatus(currentHDHiveMedia.value, 'NONE');
   }
 };
 
