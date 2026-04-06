@@ -13,9 +13,16 @@
             <n-space>
               <n-checkbox value="movie" label="电影" />
               <n-checkbox value="tv" label="电视剧" />
+              <n-checkbox value="all" label="无脑转存" />
             </n-space>
           </n-checkbox-group>
         </n-form-item>
+        
+        <!-- 当勾选无脑转存时显示警告提示 -->
+        <n-alert v-if="config.monitor_types && config.monitor_types.includes('all')" type="warning" style="margin-bottom: 24px;" :show-icon="true">
+          <b>警告：</b>开启“无脑转存”后，将无视您的订阅列表、追剧状态和本地去重逻辑，全盘接收频道发布的所有 115 资源！<br/>
+          这可能会快速消耗您的 115 空间配额和影巢积分，请谨慎使用。
+        </n-alert>
 
         <n-form-item label="API ID" path="api_id">
           <n-input v-model:value="config.api_id" placeholder="例如: 1234567" />
@@ -35,6 +42,10 @@
         
         <n-form-item label="白名单频道" path="channels">
           <n-select v-model:value="config.channels" multiple filterable tag placeholder="输入频道 Username 或 ID 并回车 (如 hdtv115)" :options="[]" />
+        </n-form-item>
+
+        <n-form-item label="拦截关键词" path="block_keywords">
+          <n-select v-model:value="config.block_keywords" multiple filterable tag placeholder="输入关键词并回车 (如: 合集, 原盘, 大包)" :options="[]" />
         </n-form-item>
 
         <n-divider title-placement="left">登录授权</n-divider>
@@ -97,7 +108,8 @@ const config = ref({
   phone: '',
   password: '',
   channels: [],
-  monitor_types: ['movie', 'tv']
+  monitor_types: ['movie', 'tv'],
+  block_keywords: []
 });
 
 // 授权状态
