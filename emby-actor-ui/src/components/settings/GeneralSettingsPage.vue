@@ -942,6 +942,11 @@
                               辅助识别
                             </n-checkbox>
                           </n-gi>
+                          <n-gi>
+                            <n-checkbox v-model:checked="configModel.ai_joke_fallback">
+                              无简介小笑话占位
+                            </n-checkbox>
+                          </n-gi>
                         </n-grid>
                       </n-form-item>
 
@@ -1713,6 +1718,15 @@
             style="font-family: monospace;"
           />
         </n-tab-pane>
+        <n-tab-pane name="batch_joke_fallback" tab="占位简介">
+          <n-input
+            v-model:value="promptsModel.batch_joke_fallback"
+            type="textarea"
+            :autosize="{ minRows: 10, maxRows: 20 }"
+            placeholder="输入提示词..."
+            style="font-family: monospace;"
+          />
+        </n-tab-pane>
       </n-tabs>
     </n-spin>
 
@@ -1862,7 +1876,8 @@ const promptsModel = ref({
   overview_translation: '',
   title_translation: '',
   transliterate_mode: '',
-  filename_parsing: ''
+  filename_parsing: '',
+  batch_joke_fallback: ''
 });
 
 // ★★★ 批量替换 STRM 状态与逻辑 ★★★

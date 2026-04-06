@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.5.7"  # 更新版本号
+APP_VERSION = "8.5.9"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -167,6 +167,7 @@ CONFIG_OPTION_AI_TRANSLATE_TITLE = "ai_translate_title"         # 是否翻译�
 CONFIG_OPTION_AI_TRANSLATE_OVERVIEW = "ai_translate_overview"   # 是否翻译简介
 CONFIG_OPTION_AI_TRANSLATE_EPISODE_OVERVIEW = "ai_translate_episode_overview"   # 是否翻译集简介
 CONFIG_OPTION_AI_RECOGNITION = "ai_recognition"                 # 是否启用AI辅助识别
+CONFIG_OPTION_AI_JOKE_FALLBACK = "ai_joke_fallback"             # 剧集无简介生成小笑话
 
 
 # ==============================================================================
