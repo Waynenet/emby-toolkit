@@ -1710,7 +1710,8 @@ class MediaProcessor:
                 "file_sha1_json", "file_pickcode_json", 
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
-                "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
+                "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
+                "imdb_id", "tvdb_id"
             ]
             data_for_batch = []
             for record in records_to_upsert:
@@ -1730,7 +1731,9 @@ class MediaProcessor:
                 if not is_valid:
                     logger.warning(f"  ➜ [入库拦截] 发现无效的 TMDb ID: '{rec_id}' (类型: {rec_type})，已丢弃该条记录。")
                     continue
-
+                # 确保继承顶层的 IMDb/TVDb ID
+                if not record.get('imdb_id'): record['imdb_id'] = source_data_package.get('imdb_id')
+                if not record.get('tvdb_id'): record['tvdb_id'] = source_data_package.get('tvdb_id')
                 db_row_complete = {col: record.get(col) for col in all_possible_columns}
                 
                 if db_row_complete['in_library'] is None: db_row_complete['in_library'] = False
@@ -2434,6 +2437,53 @@ class MediaProcessor:
                     )
 
                 if final_processed_cast is None: raise ValueError("未能生成有效的最终演员列表。")
+
+                # ======================================================================
+                # ★★★ 老六专属：无简介笑话占位功能 (入库预处理) ★★★
+                # ======================================================================
+                if self.config.get("ai_joke_fallback", False) and self.ai_translator:
+                    jokes_to_generate = {}
+                    
+                    # 1. 检查主干 (电影/剧集主简介)
+                    if not formatted_metadata.get("overview"):
+                        jokes_to_generate["main"] = formatted_metadata.get("title") or formatted_metadata.get("name")
+                        
+                    # 2. 检查分集
+                    ep_list = []
+                    if item_type == "Series" and aggregated_tmdb_data and "episodes_details" in aggregated_tmdb_data:
+                        episodes = aggregated_tmdb_data["episodes_details"]
+                        ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
+                        
+                        # 尝试从数据库读取旧数据，继承已有笑话，省 Token！
+                        old_payload, _ = self._reconstruct_full_data_from_db(tmdb_id, item_type)
+                        old_episodes = {}
+                        if old_payload and "episodes_details" in old_payload:
+                            old_eps = old_payload["episodes_details"]
+                            old_episodes = old_eps if isinstance(old_eps, dict) else {f"S{e.get('season_number')}E{e.get('episode_number')}": e for e in old_eps}
+
+                        for ep in ep_list:
+                            if not ep.get("overview"):
+                                ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
+                                old_overview = old_episodes.get(ep_key, {}).get("overview") or ""
+                                if "【老六占位简介】" in old_overview:
+                                    ep["overview"] = old_overview # 继承老笑话，不花冤枉钱
+                                else:
+                                    jokes_to_generate[ep_key] = f"{formatted_metadata.get('name')} {ep_key}"
+
+                    # 3. 批量生成并回填
+                    if jokes_to_generate:
+                        logger.info(f"  ➜ [老六模式] 发现 {len(jokes_to_generate)} 处缺失简介，正在呼叫 AI 编段子...")
+                        generated_jokes = self.ai_translator.batch_generate_jokes(jokes_to_generate)
+                        
+                        if "main" in generated_jokes:
+                            formatted_metadata["overview"] = generated_jokes["main"]
+                            if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
+                                aggregated_tmdb_data["series_details"]["overview"] = generated_jokes["main"]
+                        
+                        for ep in ep_list:
+                            ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
+                            if ep_key in generated_jokes:
+                                ep["overview"] = generated_jokes[ep_key]
 
                 # 5. 生成 NFO 和 图片
                 logger.info(f"  ➜ 正在生成(NFO文件 & 图片)...")
