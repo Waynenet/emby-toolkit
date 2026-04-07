@@ -989,6 +989,17 @@
                         </n-form-item-grid-item>
                       </n-gi>
 
+                      <n-gi span="1 m:2">
+                        <n-form-item-grid-item label="辅助识别" path="moviepilot_recognition">
+                          <n-switch v-model:value="configModel.moviepilot_recognition" :disabled="!isMoviePilotConfigured" />
+                          <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">
+                              开启后，整理网盘资源时，当正则无法识别文件名时，将优先调用 MP 的接口进行识别，失败后再交由 AI 兜底。
+                            </n-text>
+                          </template>
+                        </n-form-item-grid-item>
+                      </n-gi>
+
                       <!-- 分割线 -->
                       <n-gi span="1 m:2">
                         <n-divider title-placement="left" style="margin: 10px 0 20px 0;">每日订阅额度</n-divider>
@@ -1160,6 +1171,7 @@
                           <n-checkbox value="library_new" label="入库通知" />
                           <n-checkbox value="transfer_success" label="转存通知" />
                           <n-checkbox value="playback" label="播放通知" />
+                          <n-checkbox value="recognize_fail" label="识别失败" />
                           <n-checkbox value="hdhive_checkin" label="影巢签到通知" />
                         </n-space>
                       </n-checkbox-group>

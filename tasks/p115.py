@@ -304,6 +304,9 @@ def task_scan_and_organize_115(processor=None):
             logger.info(f"  ➜ [阶段三] 正在批量移入未识别目录 ({len(unidentified_items)} 个文件)...")
             u_fids = [i.get('fid') or i.get('file_id') for i in unidentified_items]
             
+            # ★★★ 提前导入通知函数 ★★★
+            from handler.telegram import send_unrecognized_notification
+            
             chunk_size = 500
             for i in range(0, len(u_fids), chunk_size):
                 chunk_fids = u_fids[i:i+chunk_size]
@@ -317,7 +320,14 @@ def task_scan_and_organize_115(processor=None):
                         name = item.get('fn') or item.get('n') or item.get('file_name', '')
                         item_id = item.get('fid') or item.get('file_id')
                         ext = name.split('.')[-1].lower() if '.' in name else ''
+                        
+                        # ★★★ 核心修复：只有真正的视频文件识别失败，才发送通知并写入数据库供前端纠错 ★★★
                         if ext in ['mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg']:
+                            
+                            # 1. 触发 Telegram 识别失败通知
+                            send_unrecognized_notification(name, reason="正则、MP辅助与AI均无法匹配到有效的 TMDb 数据")
+                            
+                            # 2. 写入数据库，供前端手动纠错页面展示
                             pc = item.get('pc') or item.get('pick_code') 
                             P115RecordManager.add_or_update_record(
                                 item_id, name, 'unrecognized', 

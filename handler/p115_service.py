@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 _TMDB_METADATA_CACHE = {}
 _TMDB_SEARCH_CACHE = {}
 _AI_PARSE_CACHE = {}
+_MP_PARSE_CACHE = {}
 
 # 全局直链缓存池，供反向代理和Web路由共享 
 _DIRECT_URL_CACHE = {}
@@ -2137,6 +2138,7 @@ class SmartOrganizer:
             # ★ 新增：分组字典
             grouped_sub_items = {}
             unidentified_sub_fids = []
+            unidentified_video_names = []
             
             for sub_item in sub_items:
                 sub_name = sub_item.get('fn') or sub_item.get('n') or sub_item.get('file_name')
@@ -2204,6 +2206,10 @@ class SmartOrganizer:
                     grouped_sub_items[key].append(sub_item)
                 else:
                     unidentified_sub_fids.append(sub_id)
+                    # ★ 检查是否为真正的视频文件
+                    sub_ext = sub_name.split('.')[-1].lower() if '.' in sub_name else ''
+                    if sub_ext in ['mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg']:
+                        unidentified_video_names.append(sub_name)
             
             # ★ 核心修改：遍历分组，批量执行
             for (tmdb_id, sub_type, sub_title), items in grouped_sub_items.items():
@@ -2221,6 +2227,10 @@ class SmartOrganizer:
                 logger.warning(f"    ➜ 无法识别合集子项 {len(unidentified_sub_fids)} 个，批量移入未识别。")
                 try: 
                     self.client.fs_move(unidentified_sub_fids, unidentified_cid)
+                    # ★★★ 核心修复：只有当存在真正的视频文件时，才发送通知 ★★★
+                    if unidentified_video_names:
+                        from handler.telegram import send_unrecognized_notification
+                        send_unrecognized_notification(f"合集包 [{root_name}] 内的 {len(unidentified_video_names)} 个视频文件", reason="合集拆解时无法匹配到 TMDb 数据")
                 except Exception as e: 
                     logger.error(f"    ➜ 移入未识别失败: {e}")
             
@@ -3368,31 +3378,62 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
 
     # 优先级 2: 提取 Title (Year) 进行搜索 (仅限文件)
     def _search_by_title_year(text):
-        # 剔除 S01E01 等干扰字符
-        clean_text = re.sub(r'(?i)\s*s\d{1,4}(?:e\d{1,4})?\b.*$', '', text).strip()
-        clean_text = re.sub(r'(?i)\s*ep?\d{1,4}\b.*$', '', clean_text).strip()
-        clean_text = re.sub(r'(?i)\s*season\s*\d{1,4}\b.*$', '', clean_text).strip()
-        clean_text = re.sub(r'(?i)\s*第[一二三四五六七八九十\d]+季.*$', '', clean_text).strip()
+        # 剔除 S01E01 等干扰字符 (连同前面的点和下划线一起剔除，防止留下 "The.Crown.")
+        clean_text = re.sub(r'(?i)[\.\s\-_]*s\d{1,4}(?:e\d{1,4})?\b.*$', '', text).strip()
+        clean_text = re.sub(r'(?i)[\.\s\-_]*ep?\d{1,4}\b.*$', '', clean_text).strip()
+        clean_text = re.sub(r'(?i)[\.\s\-_]*season\s*\d{1,4}\b.*$', '', clean_text).strip()
+        clean_text = re.sub(r'(?i)[\.\s\-_]*第[一二三四五六七八九十\d]+季.*$', '', clean_text).strip()
 
-        match_std = re.match(r'^(.+?)(?:\s+[\(\[]|\.|\s+)(\d{4})(?:[\)\]]|\.|\s+|$)', clean_text)
+        # 尝试提取年份 (不再强制要求必须有年份)
+        name_part = clean_text
+        year_part = None
+        match_std = re.search(r'[\(\[\.\s_-](\d{4})(?:[\)\]\.\s_-]|$)', clean_text)
         if match_std:
-            name_part = match_std.group(1).replace('.', ' ').strip()
-            year_part = match_std.group(2)
-            try:
-                if api_key:
-                    search_key = f"{name_part}_{year_part}_{media_type}"
-                    if search_key in _TMDB_SEARCH_CACHE:
-                        results = _TMDB_SEARCH_CACHE[search_key]
-                    else:
-                        # 严格按照锁定的 media_type 搜索
-                        results = tmdb.search_media(query=name_part, api_key=api_key, item_type=media_type, year=year_part)
-                        _TMDB_SEARCH_CACHE[search_key] = results
+            year_part = match_std.group(1)
+            # 把年份从名字里剔除
+            name_part = clean_text[:match_std.start()].strip()
 
-                    if results and len(results) > 0:
-                        best = results[0]
-                        return str(best['id']), media_type, (best.get('title') or best.get('name'))
-            except Exception:
-                pass
+        # 清理名字里的点和下划线
+        name_part = name_part.replace('.', ' ').replace('_', ' ').strip()
+
+        if not name_part: return None
+
+        try:
+            if api_key:
+                search_key = f"{name_part}_{year_part}_{media_type}"
+                if search_key in _TMDB_SEARCH_CACHE:
+                    results = _TMDB_SEARCH_CACHE[search_key]
+                else:
+                    # 严格按照锁定的 media_type 搜索
+                    results = tmdb.search_media(query=name_part, api_key=api_key, item_type=media_type, year=year_part)
+                    _TMDB_SEARCH_CACHE[search_key] = results
+
+                if results and len(results) > 0:
+                    best = results[0]
+                    # ★★★ 核心修复：精准匹配，防止 TMDb 瞎给结果 ★★★
+                    name_lower = name_part.lower()
+                    name_parts = [p for p in name_lower.split() if p]
+                    
+                    for res in results:
+                        res_title = (res.get('title') or res.get('name') or '').lower()
+                        res_orig = (res.get('original_title') or res.get('original_name') or '').lower()
+                        
+                        if name_lower == res_title or name_lower == res_orig:
+                            best = res
+                            break
+                            
+                        part_match = False
+                        for part in name_parts:
+                            if part == res_title or part == res_orig:
+                                best = res
+                                part_match = True
+                                break
+                        if part_match:
+                            break
+                            
+                    return str(best['id']), media_type, (best.get('title') or best.get('name'))
+        except Exception:
+            pass
         return None
 
     # 2.1 优先从 filename 搜索
@@ -3405,7 +3446,39 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
         if res: return res
 
     # =================================================================
-    # ★ 第三步：AI 辅助识别 (终极兜底 + 记忆体优化)
+    # ★ 第三步：MoviePilot 辅助识别 (免费、快速、高准确率)
+    # =================================================================
+    use_mp_recognition = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MOVIEPILOT_RECOGNITION, False)
+    if use_mp_recognition:
+        import handler.moviepilot as mp
+        target_mp_name = main_dir_name if main_dir_name else filename
+        
+        def _do_mp_search(target_name):
+            if target_name in _MP_PARSE_CACHE:
+                return _MP_PARSE_CACHE[target_name]
+                
+            logger.debug(f"  ➜ 本地正则失败，尝试调用 MoviePilot 辅助识别: {target_name}")
+            mp_res = mp.recognize_media(target_name, config_manager.APP_CONFIG)
+            
+            if mp_res:
+                logger.info(f"  ➜ [MP辅助识别] 成功命中: {mp_res[2]} (ID:{mp_res[0]})")
+                _MP_PARSE_CACHE[target_name] = mp_res
+                return mp_res
+            
+            _MP_PARSE_CACHE[target_name] = None
+            return None
+
+        # 优先尝试主目录
+        res = _do_mp_search(target_mp_name)
+        if res: return res
+        
+        # 如果主目录失败，且当前是文件，尝试解析文件名
+        if main_dir_name and not is_same_name:
+            res_file = _do_mp_search(filename)
+            if res_file: return res_file
+
+    # =================================================================
+    # ★ 第四步：AI 辅助识别 (终极兜底 + 记忆体优化)
     # =================================================================
     if use_ai and ai_translator:
         target_ai_name = main_dir_name if main_dir_name else filename
@@ -3439,6 +3512,27 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
 
                     if results and len(results) > 0:
                         best = results[0]
+                        # ★★★ 核心修复：精准匹配 ★★★
+                        ai_title_lower = ai_title.lower()
+                        ai_title_parts = [p for p in ai_title_lower.split() if p]
+                        
+                        for res in results:
+                            res_title = (res.get('title') or res.get('name') or '').lower()
+                            res_orig = (res.get('original_title') or res.get('original_name') or '').lower()
+                            
+                            if ai_title_lower == res_title or ai_title_lower == res_orig:
+                                best = res
+                                break
+                                
+                            part_match = False
+                            for part in ai_title_parts:
+                                if part == res_title or part == res_orig:
+                                    best = res
+                                    part_match = True
+                                    break
+                            if part_match:
+                                break
+                                
                         return str(best['id']), ai_type, (best.get('title') or best.get('name'))
                     else:
                         logger.debug(f"  🤖 AI 提取了标题 '{ai_title}'，但在 TMDb 未搜索到结果。")
