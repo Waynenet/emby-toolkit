@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.6.1"  # 更新版本号
+APP_VERSION = "8.6.4"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -85,7 +85,7 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'system-auto-update',         # 系统自动更新
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
-DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success'] # ★ 默认开启入库和转存
+DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail']
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)
@@ -150,6 +150,7 @@ CONFIG_SECTION_MOVIEPILOT = "MoviePilot"
 CONFIG_OPTION_MOVIEPILOT_URL = "moviepilot_url"
 CONFIG_OPTION_MOVIEPILOT_USERNAME = "moviepilot_username"
 CONFIG_OPTION_MOVIEPILOT_PASSWORD = "moviepilot_password"
+CONFIG_OPTION_MOVIEPILOT_RECOGNITION = "moviepilot_recognition" # 是否启用 MoviePilot 辅助识别功能
 # --- 智能订阅相关配置 ---
 CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP = "resubscribe_daily_cap"
 CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS = "resubscribe_delay_seconds"

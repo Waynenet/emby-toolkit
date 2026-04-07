@@ -20,7 +20,7 @@ from database.connection import get_db_connection
 from database import media_db, settings_db
 import handler.emby as emby
 import handler.tmdb as tmdb
-from tasks.helpers import parse_full_asset_details, calculate_ancestor_ids, construct_metadata_payload, translate_tmdb_metadata_recursively
+from tasks.helpers import parse_full_asset_details, calculate_ancestor_ids, construct_metadata_payload, extract_top_directors, translate_tmdb_metadata_recursively
 import utils
 import constants
 import logging
@@ -649,6 +649,20 @@ class MediaProcessor:
                     tmdb_data=details,
                     aggregated_tmdb_data=aggregated_tmdb_data
                 )
+
+                # 将提取到的导演强行塞入 formatted_metadata 供 NFO 使用 
+                if item_type == "Series":
+                    top_directors = extract_top_directors(details, max_count=3)
+                    
+                    if 'credits' not in formatted_metadata:
+                        formatted_metadata['credits'] = {'crew': []}
+                    elif 'crew' not in formatted_metadata['credits']:
+                        formatted_metadata['credits']['crew'] = []
+                        
+                    existing_crew_ids = {c.get('id') for c in formatted_metadata['credits']['crew'] if c.get('job') in ['Director', 'Series Director']}
+                    for d in top_directors:
+                        if d['id'] not in existing_crew_ids:
+                            formatted_metadata['credits']['crew'].append(d)
 
                 # 3. 写入本地文件
                 logger.info(f"  ➜ [实时监控] 正在写入本地元数据文件...")
@@ -1407,7 +1421,9 @@ class MediaProcessor:
                 series_record['keywords_json'] = k_json
                 series_record['countries_json'] = c_json
                 
-                series_record['directors_json'] = json.dumps([{'id': c.get('id'), 'name': c.get('name')} for c in series_details.get('created_by', [])], ensure_ascii=False)
+                # ★★★ 综合提取剧集导演 (created_by + crew) ★★★
+                top_directors = extract_top_directors(series_details, max_count=3)
+                series_record['directors_json'] = json.dumps([{'id': d['id'], 'name': d['name']} for d in top_directors], ensure_ascii=False)
                 
                 languages_list = series_details.get('languages', [])
                 series_record['original_language'] = series_details.get('original_language') or (languages_list[0] if languages_list else None)
@@ -1523,6 +1539,10 @@ class MediaProcessor:
 
                     final_runtime = get_representative_runtime(versions_of_episode, episode.get('runtime'))
 
+                    # ★★★ 提取分集专属导演 ★★★
+                    ep_crew = episode.get('crew', [])
+                    ep_directors = [{'id': p.get('id'), 'name': p.get('name')} for p in ep_crew if p.get('job') == 'Director']
+
                     episode_record = {
                         "tmdb_id": e_tmdb_id_str, 
                         "item_type": "Episode", 
@@ -1532,7 +1552,8 @@ class MediaProcessor:
                         "season_number": s_num, "episode_number": e_num,
                         "runtime_minutes": final_runtime,
                         "poster_path": episode.get('still_path'),
-                        "backdrop_path": episode.get('still_path')
+                        "backdrop_path": episode.get('still_path'),
+                        "directors_json": json.dumps(ep_directors, ensure_ascii=False) # 新增写入
                     }
                     
                     # ★ 资产信息处理 (支持多版本)
@@ -1639,8 +1660,9 @@ class MediaProcessor:
                         "release_date": emby_ep.get('PremiereDate'), 
                         "season_number": s_num, "episode_number": e_num,
                         "runtime_minutes": final_runtime,
-                        "poster_path": None,    # ★★★ 新增
-                        "backdrop_path": None,   # ★★★ 新增
+                        "poster_path": None,
+                        "backdrop_path": None,
+                        "directors_json": "[]"   
                     }
 
                     all_assets = []
@@ -2490,6 +2512,21 @@ class MediaProcessor:
                             ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
                             if ep_key in generated_jokes:
                                 ep["overview"] = generated_jokes[ep_key]
+
+                # ★★★ 首次入库时，将提取到的导演强行塞入 formatted_metadata 供 NFO 使用 ★★★
+                if item_type == "Series":
+                    from tasks.helpers import extract_top_directors
+                    top_directors = extract_top_directors(fresh_data, max_count=3)
+                    
+                    if 'credits' not in formatted_metadata:
+                        formatted_metadata['credits'] = {'crew': []}
+                    elif 'crew' not in formatted_metadata['credits']:
+                        formatted_metadata['credits']['crew'] = []
+                        
+                    existing_crew_ids = {c.get('id') for c in formatted_metadata['credits']['crew'] if c.get('job') in ['Director', 'Series Director']}
+                    for d in top_directors:
+                        if d['id'] not in existing_crew_ids:
+                            formatted_metadata['credits']['crew'].append(d)
 
                 # 5. 生成 NFO 和 图片
                 logger.info(f"  ➜ 正在生成(NFO文件 & 图片)...")
