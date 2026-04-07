@@ -194,11 +194,11 @@ def init_db():
 
                         -- 核心与扩展元数据
                         imdb_id TEXT,
-                        tvdb_id TEXT,
                         title TEXT,
                         original_title TEXT,
                         original_language TEXT,
                         overview TEXT,
+                        tagline TEXT,
                         overview_embedding JSONB,
                         release_date DATE,
                         release_year INTEGER,
@@ -517,18 +517,8 @@ def init_db():
                             "best_version_json": "JSONB"
                         },
                         'media_metadata': {
-                            "original_language": "TEXT",
-                            "last_air_date": "DATE",
-                            "backdrop_path": "TEXT",  
-                            "homepage": "TEXT", 
-                            "production_companies_json": "JSONB",
-                            "networks_json": "JSONB",
-                            "file_sha1_json": "JSONB NOT NULL DEFAULT '[]'::jsonb",
-                            "file_pickcode_json": "JSONB NOT NULL DEFAULT '[]'::jsonb",
-                            "waiting_for_completed_pack": "BOOLEAN DEFAULT FALSE",
-                            "active_washing": "BOOLEAN DEFAULT FALSE",
                             "imdb_id": "TEXT",
-                            "tvdb_id": "TEXT"
+                            "tagline": "TEXT"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
@@ -690,7 +680,8 @@ def init_db():
                     # ★★★ 核心修复：使用字典来管理多个表的废弃列 ★★★
                     deprecated_columns_map = {
                         'media_metadata': [
-                            'emby_item_id'
+                            'emby_item_id',
+                            'tvdb_id'
                         ],
                         'cleanup_index': [
                             'best_version_id'

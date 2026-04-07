@@ -459,13 +459,15 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 无法聚合 '{item_name}' 的TMDb详情，元数据刷新中止。")
             return None
 
-        # 翻译简介
-        if self.ai_translator and self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_EPISODE_OVERVIEW, False):
+        # 翻译简介、标题、标语 (大一统引擎)
+        if self.ai_translator:
             helpers.translate_tmdb_metadata_recursively(
                 item_type='Series',
                 tmdb_data=aggregated_data,
                 ai_translator=self.ai_translator,
-                item_name=item_name
+                item_name=item_name,
+                tmdb_api_key=self.tmdb_api_key,
+                config=self.config
             )
 
         # ======================================================================
@@ -604,8 +606,7 @@ class WatchlistProcessor:
             "networks_json": json.dumps(networks_json) if networks_json else None,
             "countries_json": json.dumps(countries_json) if countries_json else None,
             "directors_json": json.dumps(directors, ensure_ascii=False),
-            "imdb_id": latest_series_data.get("external_ids", {}).get("imdb_id"),
-            "tvdb_id": latest_series_data.get("external_ids", {}).get("tvdb_id")
+            "imdb_id": latest_series_data.get("external_ids", {}).get("imdb_id")
         }
         
         watchlist_db.update_media_metadata_fields(tmdb_id, 'Series', series_updates)
