@@ -64,8 +64,6 @@ def api_get_config():
             custom_theme = config_manager.load_custom_theme()
             current_config['custom_theme'] = custom_theme
             
-            current_config['pro_license_key'] = settings_db.get_setting("pro_license_key") or ""
-            
             logger.trace(f"API /api/config (GET): 成功加载并返回配置。")
             return jsonify(current_config)
         else:
@@ -484,95 +482,3 @@ def api_reset_ai_prompts():
     except Exception as e:
         logger.error(f"  ➜ 重置 AI 提示词失败: {e}", exc_info=True)
         return jsonify({"error": "重置失败"}), 500
-
-@system_bp.route('/system/activate_pro', methods=['POST'])
-@admin_required
-def activate_pro():
-    """处理前端发来的 Pro 激活请求"""
-    data = request.json
-    license_key = data.get('license_key', '').strip()
-    
-    if not license_key:
-        return jsonify({"success": False, "message": "请输入激活码"}), 400
-        
-    server_id = extensions.EMBY_SERVER_ID
-    if not server_id:
-        return jsonify({"success": False, "message": "无法获取本机 Server ID，请确保 Emby 连接正常"}), 500
-
-    verify_url = "https://auth.55565576.xyz"  # 你的 CF Worker 域名
-    
-    try:
-        payload = {
-            "action": "activate",  # ★ 告诉 CF 这是在充值
-            "license_key": license_key,
-            "server_id": server_id
-        }
-        logger.info(f"  ➜ 正在向云端验证激活码: {license_key}")
-        
-        # 请求 CF Worker
-        resp = requests.post(verify_url, json=payload, timeout=10)
-        result = resp.json()
-        
-        if result.get("success") and result.get("is_pro"):
-            # 1. 验证通过，保存卡密和到期时间到本地数据库
-            settings_db.save_setting("pro_license_key", license_key)
-            expire_time = result.get("expire_time", "2099-12-31T23:59:59Z")
-            settings_db.save_setting("pro_expire_time", expire_time)
-            
-            # 2. 更新内存状态
-            config_manager.APP_CONFIG['is_pro_active'] = True
-            config_manager.APP_CONFIG['pro_expire_time'] = expire_time
-            
-            logger.info(f"  ➜ Pro 激活成功！到期时间: {expire_time}")
-            return jsonify({"success": True, "message": result.get("msg", "激活成功！")})
-        else:
-            # 验证失败
-            return jsonify({"success": False, "message": result.get("msg", "激活码无效或已被使用")}), 400
-            
-    except Exception as e:
-        logger.error(f"激活请求异常: {e}")
-        return jsonify({"success": False, "message": "连接验证服务器失败，请检查网络"}), 500
-
-@system_bp.route('/system/transfer_pro', methods=['POST'])
-@admin_required
-def transfer_pro():
-    """处理前端发来的 Pro 换绑请求"""
-    data = request.json
-    license_key = data.get('license_key', '').strip()
-    
-    if not license_key:
-        return jsonify({"success": False, "message": "请输入曾使用过的激活码"}), 400
-        
-    server_id = extensions.EMBY_SERVER_ID
-    if not server_id:
-        return jsonify({"success": False, "message": "无法获取本机 Server ID，请确保 Emby 连接正常"}), 500
-
-    verify_url = "https://auth.55565576.xyz"  # 你的 CF Worker 域名
-    
-    try:
-        payload = {
-            "action": "transfer",  # ★ 告诉 CF 这是在换绑
-            "license_key": license_key,
-            "server_id": server_id
-        }
-        logger.info(f"  ➜ 正在向云端请求设备换绑, 凭证: {license_key}")
-        
-        resp = requests.post(verify_url, json=payload, timeout=10)
-        result = resp.json()
-        
-        if result.get("success") and result.get("is_pro"):
-            settings_db.save_setting("pro_license_key", license_key)
-            expire_time = result.get("expire_time", "2099-12-31T23:59:59Z")
-            settings_db.save_setting("pro_expire_time", expire_time)
-            
-            config_manager.APP_CONFIG['is_pro_active'] = True
-            config_manager.APP_CONFIG['pro_expire_time'] = expire_time
-            
-            logger.info(f"  ➜ Pro 设备换绑成功！到期时间: {expire_time}")
-            return jsonify({"success": True, "message": result.get("msg", "换绑成功！")})
-        else:
-            return jsonify({"success": False, "message": result.get("msg", "换绑失败")}), 400
-            
-    except Exception as e:
-        logger.error(f"换绑请求异常: {e}")
-        return jsonify({"success": False, "message": "连接验证服务器失败，请检查网络"}), 500

@@ -140,20 +140,14 @@ def save_config_and_reload(new_config: Dict[str, Any]):
         LifeEventMonitorDaemon.start_or_update()
 
         # 动态刷新 TG UserBot 监听服务
-        if config_manager.APP_CONFIG.get('is_pro_active', False):
-            try:
-                from handler.tg_userbot import TGUserBotManager
+        try:
+            from handler.tg_userbot import TGUserBotManager
                 # ★ 去掉 force_restart，让它安全地调用 start()
                 # 如果它已经在运行，start() 会被安全锁拦截。
                 # 但不用担心，白名单的更新会在它下次收到消息时自动生效！
-                TGUserBotManager.get_instance().start()
-            except Exception as e:
-                logger.error(f"重启 TG订阅 失败: {e}")
-        else:
-            try:
-                from handler.tg_userbot import TGUserBotManager
-                TGUserBotManager.get_instance().stop()
-            except: pass
+            TGUserBotManager.get_instance().start()
+        except Exception as e:
+            logger.error(f"重启 TG订阅 失败: {e}")
         
         logger.info("  ➜ 新配置重新初始化完毕。")
         
@@ -244,29 +238,6 @@ def initialize_processors():
                 logger.warning(f"➜ 无法连接 Emby 服务器 (或超时)，已使用缓存的 Server ID: {server_id_local} 继续启动。")
             else:
                 logger.error("➜ 无法连接 Emby 且本地无缓存 Server ID，部分功能可能受限。")
-
-        # =========================================================
-        # ★★★ Pro 版本在线验证逻辑 ★★★
-        # =========================================================
-        config_manager.APP_CONFIG['is_pro_active'] = False 
-        
-        if server_id_local:
-            logger.debug("  ➜ 正在验证 Pro 授权状态...")
-            try:
-                import requests
-                verify_url = "https://auth.55565576.xyz" 
-                # ★ 启动时只查岗，不消耗卡密
-                payload = {"action": "check", "server_id": server_id_local}
-                resp = requests.post(verify_url, json=payload, timeout=10).json()
-                
-                if resp.get("success") and resp.get("is_pro"):
-                    config_manager.APP_CONFIG['is_pro_active'] = True
-                    config_manager.APP_CONFIG['pro_expire_time'] = resp.get("expire_time", "")
-                    logger.info("  ➜ Pro 验证通过！已解锁全部功能。")
-                else:
-                    logger.info("  ➜ 当前运行版本: 免费基础版 (升级 Pro 解锁 302 反代)")
-            except Exception as e:
-                logger.error(f"  ➜ Pro 验证服务器连接失败: {e}。已降级为免费基础版。")
 
     # 初始化 media_processor_instance_local
     try:
@@ -509,13 +480,10 @@ def main_app_start():
         logger.error(f"  ➜ 启动实时监控服务失败: {e}", exc_info=True)
 
     # 启动 Telegram 机器人交互监听
-    if config_manager.APP_CONFIG.get('is_pro_active', False):
-        telegram.start_telegram_bot()
-        # 启动 UserBot 频道监听 ★★★
-        from handler.tg_userbot import TGUserBotManager
-        TGUserBotManager.get_instance().start()
-    else:
-        logger.info("  ➜ [免费版限制] Telegram 机器人交互菜单与订阅功能为 Pro 专属！交互监听未启动。")
+    telegram.start_telegram_bot()
+    # 启动 UserBot 频道监听 ★★★
+    from handler.tg_userbot import TGUserBotManager
+    TGUserBotManager.get_instance().start()
 
     def warmup_vector_cache():
         try:
@@ -537,11 +505,6 @@ def main_app_start():
     
     def run_proxy_server():
         if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_ENABLED):
-            # ★★★ 不是 Pro 直接不启动反代服务 ★★★
-            if not config_manager.APP_CONFIG.get('is_pro_active', False):
-                logger.warning("  ➜ [免费版限制] 302 反向代理与虚拟库功能为 Pro 高级版专属！反代服务未启动。")
-                return
-
             try:
                 internal_proxy_port = 7758
                 external_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)

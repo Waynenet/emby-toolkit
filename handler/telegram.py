@@ -819,10 +819,6 @@ def send_hdhive_checkin_notification(checkin_res: dict, user_info: dict):
 def start_telegram_bot():
     """启动 Telegram 机器人监听"""
     global _tg_polling_thread, _tg_polling_active
-    
-    # Pro 权限拦截
-    if not APP_CONFIG.get('is_pro_active', False):
-        return
 
     if _tg_polling_active:
         return
