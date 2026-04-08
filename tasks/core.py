@@ -13,7 +13,7 @@ import task_manager
 from .actors import (task_sync_person_map, task_enrich_aliases, task_actor_translation, 
                      task_process_actor_subscriptions, task_purge_unregistered_actors, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_contribute_mediainfo_to_center
+from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_contribute_mediainfo_to_center, task_restore_nfo_and_images
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -196,7 +196,6 @@ def get_task_registry(context: str = 'all'):
         'purge-ghost-actors': (task_purge_ghost_actors, "删除幽灵演员", 'media', True),
         'check-expired-users': (task_check_expired_users, "检查过期用户", 'media', True),
         'refresh_completed_series': (task_refresh_completed_series, "全量刷新剧集", 'watchlist', True),
-        'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', True),
         'scan-monitor-folders': (task_scan_monitor_folders, "扫描监控目录", 'media', True),
         'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', True),
@@ -206,6 +205,7 @@ def get_task_registry(context: str = 'all'):
         'backup-mediainfo': (task_backup_mediainfo, "备份媒体信息", 'media', True),
         'restore_mediainfo': (task_restore_mediainfo, "还原媒体信息", 'media', True),
         'hdhive-auto-checkin': (task_hdhive_auto_checkin, "影巢自动签到", 'media', True),
+        'restore-nfo-and-images': (task_restore_nfo_and_images, "还原NFO和封面", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "扫描全库剧集", 'watchlist', False),
@@ -222,6 +222,7 @@ def get_task_registry(context: str = 'all'):
         'update-resubscribe-cache': (task_update_resubscribe_cache, "刷新媒体整理", 'media', False),
         'merge-duplicate-actors': (task_merge_duplicate_actors, "合并分身演员", 'media', False),
         'sync-all-user-data': (task_sync_all_user_data, "同步用户数据", 'media', False),
+        'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', False),
     }
 
     if context == 'chain':

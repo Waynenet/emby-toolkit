@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "8.6.6"  # 更新版本号
+APP_VERSION = "8.7.0"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -97,6 +97,7 @@ CONFIG_OPTION_PROXY_MERGE_NATIVE = "proxy_merge_native_libraries"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION = "proxy_native_view_selection"  # List[str]
 CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
 CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS = "proxy_show_missing_placeholders"
+CONFIG_OPTION_PROXY_302_REDIRECT_URL = "proxy_302_redirect_url"
 
 # ==============================================================================
 # ✨ Emby 服务器连接配置 (Emby Connection)
