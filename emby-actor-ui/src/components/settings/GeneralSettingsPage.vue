@@ -255,402 +255,6 @@
               </n-grid>
             </n-tab-pane>
 
-            <!-- ★★★ 115 网盘设置 ★★★ -->
-            <n-tab-pane name="115_drive" tab="115 网盘">
-              <n-grid cols="1 l:3" :x-gap="24" :y-gap="24" responsive="screen">
-                
-                <!-- 左侧：账户与连接 -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header>
-                      <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title">账户与连接</span>
-                        <n-tag v-if="p115Info" :type="p115Info.valid ? 'success' : 'error'" size="small" round>
-                          {{ p115Info.msg || (p115Info.valid ? '连接正常' : '连接异常') }}
-                        </n-tag>
-                        <n-tag v-else type="warning" size="small" round>未检查</n-tag>
-                      </div>
-                    </template>
-                    <template #header-extra>
-                      <n-space align="center" :size="12">
-                        <n-button size="small" secondary type="success" @click="check115Status" :loading="loading115Info">
-                          检查连通性
-                        </n-button>
-                      </n-space>
-                    </template>
-
-                    <!-- ★★★ 用户信息展示卡片 ★★★ -->
-                    <div v-if="p115Info && p115Info.user_info" style="margin-bottom: 16px; padding: 12px; background: var(--n-action-color); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
-                      <n-avatar :src="p115Info.user_info.user_face_m" round size="large" />
-                      <div style="flex: 1; overflow: hidden;">
-                        <div style="font-weight: bold; font-size: 14px; display: flex; align-items: center; gap: 6px;">
-                          {{ p115Info.user_info.user_name }}
-                          <n-tag size="tiny" type="warning" :bordered="false">{{ p115Info.user_info.vip_info?.level_name || '普通用户' }}</n-tag>
-                        </div>
-                        <div style="font-size: 12px; color: var(--n-text-color-3); margin-top: 4px;">
-                          剩余空间: {{ p115Info.user_info.rt_space_info?.all_remain?.size_format || '未知' }}
-                        </div>
-                      </div>
-                    </div>
-
-                    <!-- 授权方式选择 -->
-                    <n-form-item label="授权方式" path="p115_auth_method">
-                      <n-radio-group v-model:value="configModel.p115_auth_method" name="auth_method_group">
-                        <n-space>
-                          <n-radio value="web">网页登录授权 (推荐)</n-radio>
-                          <n-radio value="qrcode">自定义 AppID 扫码</n-radio>
-                        </n-space>
-                      </n-radio-group>
-                    </n-form-item>
-
-                    <!-- 方式一：网页登录授权 -->
-                    <n-form-item label="登录授权" v-if="configModel.p115_auth_method === 'web' || !configModel.p115_auth_method">
-                      <n-space vertical :size="8" style="width: 100%;">
-                        <n-space align="center" justify="space-between">
-                          <n-tag :type="p115Info?.has_token ? 'success' : 'default'" size="small">
-                            <template #icon>
-                              <n-icon :component="p115Info?.has_token ? CheckIcon : CloseIcon" />
-                            </template>
-                            {{ p115Info?.has_token ? '已授权' : '未授权 (请登录)' }}
-                          </n-tag>
-                          <n-button size="small" type="warning" @click="startWebAuth" :loading="isWebAuthing">
-                            {{ p115Info?.has_token ? '重新登录' : '登录授权' }}
-                          </n-button>
-                        </n-space>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          用于网盘整理和视频播放。请点击“登录授权”获取授权。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
-
-                    <!-- 方式二：自定义 AppID 扫码 -->
-                    <n-form-item label="扫码授权" path="p115_app_id" v-if="configModel.p115_auth_method === 'qrcode'">
-                      <n-space vertical :size="8" style="width: 100%;">
-                        <n-space align="center" justify="space-between">
-                          <n-tag :type="p115Info?.has_token ? 'success' : 'default'" size="small">
-                            <template #icon>
-                              <n-icon :component="p115Info?.has_token ? CheckIcon : CloseIcon" />
-                            </template>
-                            {{ p115Info?.has_token ? '已授权' : '未授权 (请扫码)' }}
-                          </n-tag>
-                          <n-button size="small" type="primary" @click="handleOpenQrcodeModal">
-                            {{ p115Info?.has_token ? '重新扫码' : '扫码授权' }}
-                          </n-button>
-                        </n-space>
-                        <n-input-group>
-                          <n-input v-model:value="configModel.p115_app_id" placeholder="先保存自定义AppID再扫码" />
-                        </n-input-group>
-                        <template #feedback>
-                          <n-text depth="3" style="font-size:0.8em;">
-                            请先填写 AppID 并点击底部保存设置，然后再扫码授权。
-                          </n-text>
-                        </template>
-                      </n-space>
-                    </n-form-item>
-
-                    <!--  Cookie  -->
-                    <n-form-item label="Cookie">
-                      <n-space vertical :size="8" style="width: 100%;">
-                        <n-space align="center" justify="space-between">
-                          <n-tag :type="p115Info?.has_cookie ? 'success' : 'default'" size="small">
-                            <template #icon>
-                              <n-icon :component="p115Info?.has_cookie ? CheckIcon : CloseIcon" />
-                            </template>
-                            {{ p115Info?.has_cookie ? '已配置' : '未配置' }}
-                          </n-tag>
-                          <n-button size="small" type="primary" @click="openCookieModal">
-                            {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
-                          </n-button>
-                        </n-space>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          用于TG、影巢转存和视频播放。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
-
-                    <n-form-item label="播放接口" path="p115_playback_api_priority">
-                      <n-radio-group v-model:value="configModel.p115_playback_api_priority" name="api_priority_group">
-                        <n-space>
-                          <n-radio value="openapi">优先 OpenAPI</n-radio>
-                          <n-radio value="cookie">优先 Cookie</n-radio>
-                        </n-space>
-                      </n-radio-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">获取直链时首次尝试的接口，失败会自动回退到另一个。</n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="API 请求间隔 (秒)" path="p115_request_interval">
-                      <n-input-number v-model:value="configModel.p115_request_interval" :min="0.1" :step="0.1" placeholder="0.5" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。
-                        </n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="API 并发线程数" path="p115_max_workers">
-                      <n-input-number v-model:value="configModel.p115_max_workers" :min="1" :max="20" :step="1" placeholder="3" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          控制扫描和整理时的并发数量。如果出现异常，调低此值。
-                        </n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="STRM 链接地址" path="etk_server_url">
-                        <n-input v-model:value="configModel.etk_server_url" placeholder="http://192.168.X.X:5257" />
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">支持http或挂载路径。</n-text>
-                        </template>
-                    </n-form-item>
-
-                    <n-form-item label="需要整理的扩展名" path="p115_extensions">
-                      <n-select
-                        v-model:value="configModel.p115_extensions"
-                        multiple
-                        filterable
-                        tag
-                        placeholder="输入扩展名并回车 (如 mkv)"
-                        :options="[]" 
-                      />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          只有包含在列表中的文件类型才会被整理。
-                        </n-text>
-                      </template>
-                    </n-form-item>
-                    <n-form-item label="批量替换 STRM" path="">
-                        <n-button @click="openReplaceStrmModal" type="warning" ghost>
-                            批量替换本地 STRM 链接
-                        </n-button>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">支持普通字符串替换和正则表达式替换。</n-text>
-                        </template>
-                    </n-form-item>
-                  </n-card>
-                </n-gi>
-
-                <!-- 中间：路径配置 -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">整理与路径</span></template>
-                    <n-form-item label="待整理目录" path="p115_save_path_cid">
-                      <n-input-group>
-                        <n-input 
-                          :value="configModel.p115_save_path_name || configModel.p115_save_path_cid" 
-                          placeholder="选择待整理目录" readonly 
-                          @click="openFolderSelector('save_path', configModel.p115_save_path_cid)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('save_path', configModel.p115_save_path_cid)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">MP下载或网盘转存的初始目录</n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="未识别目录" path="p115_unrecognized_cid">
-                      <n-input-group>
-                        <n-input 
-                          :value="configModel.p115_unrecognized_name || configModel.p115_unrecognized_cid" 
-                          placeholder="选择未识别目录" readonly 
-                          @click="openFolderSelector('unrecognized_path', configModel.p115_unrecognized_cid)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('unrecognized_path', configModel.p115_unrecognized_cid)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">无法识别或不符合规则的文件将被移入此固定目录</n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="网盘媒体库根目录" path="p115_media_root_cid">
-                      <n-input-group>
-                        <n-input 
-                          :value="configModel.p115_media_root_name || configModel.p115_media_root_cid" 
-                          placeholder="选择网盘媒体库主目录" readonly 
-                          @click="openFolderSelector('media_root', configModel.p115_media_root_cid)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('media_root', configModel.p115_media_root_cid)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">整理目标主目录，分类规则的目录都在它下面</n-text>
-                      </template>
-                    </n-form-item>
-
-                    <n-form-item label="本地 STRM 根目录" path="local_strm_root">
-                      <n-input-group>
-                        <n-input 
-                          v-model:value="configModel.local_strm_root" 
-                          placeholder="例如: /mnt/media" 
-                          @click="openLocalFolderSelector('local_strm_root', false)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_strm_root', false)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件</n-text>
-                      </template>
-                    </n-form-item>
-                    
-                    <n-form-item label="智能整理开关" path="p115_enable_organize">
-                        <n-switch v-model:value="configModel.p115_enable_organize">
-                            <template #checked>整理并生成STRM</template>
-                            <template #unchecked>仅转存</template>
-                        </n-switch>
-                    </n-form-item>
-                    <n-form-item label="忽略小视频" path="p115_min_video_size">
-                        <n-input-number 
-                            v-model:value="configModel.p115_min_video_size" 
-                            :min="0" 
-                            :step="10" 
-                            style="width: 150px;"
-                        >
-                            <template #suffix>MB</template>
-                        </n-input-number>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">小于此体积的视频将被判定为花絮/样本/广告，打入未识别目录 (设为0则不忽略)。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="生活事件监控" path="p115_life_monitor_enabled">
-                        <n-switch v-model:value="configModel.p115_life_monitor_enabled">
-                            <template #checked>开启监控</template>
-                            <template #unchecked>关闭监控</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">通过115操作记录实现增量生成STRM。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="事件检查间隔 (分钟)" path="p115_life_monitor_interval" v-if="configModel.p115_life_monitor_enabled">
-                        <n-input-number v-model:value="configModel.p115_life_monitor_interval" :min="5" :step="1" placeholder="5" style="width: 100%;" />
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">最短5分钟。过短可能触发风控。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="媒体信息中心化" path="p115_mediainfo_center">
-                        <n-switch v-model:value="configModel.p115_mediainfo_center">
-                            <template #checked>共享媒体信息</template>
-                            <template #unchecked>本地媒体信息</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">开启时，在线从中心服务器获取媒体信息数据。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="同步下载字幕" path="p115_download_subs">
-                        <n-switch v-model:value="configModel.p115_download_subs">
-                            <template #checked>下载到本地</template>
-                            <template #unchecked>跳过字幕</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">整理或全量生成 STRM 时会自动将 115 上的字幕文件下载到本地同级目录。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="全量同步时清理本地" path="p115_local_cleanup">
-                        <n-switch v-model:value="configModel.p115_local_cleanup">
-                            <template #checked>清理失效文件</template>
-                            <template #unchecked>保留本地文件</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">全量生成 STRM 时，会自动删除本地存在但网盘已不存在的 .strm 和字幕文件。</n-text>
-                        </template>
-                    </n-form-item>
-                    <n-form-item label="联动删除网盘文件" path="p115_enable_sync_delete">
-                        <n-switch v-model:value="configModel.p115_enable_sync_delete">
-                            <template #checked>删除网盘源文件</template>
-                            <template #unchecked>仅移除本地缓存</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">在 Emby 中删除媒体时，将同时删除 115 网盘上的文件。</n-text>
-                        </template>
-                    </n-form-item>
-                  </n-card>
-                </n-gi>
-                <!-- 右侧：分类规则与重命名 -->
-                <n-gi>
-                  <n-space vertical :size="24" style="height: 100%;">
-                    
-                    <!-- 卡片 1：分类规则 -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">智能分类规则</span>
-                          <n-button secondary type="primary" @click="ruleManagerRef?.open()">
-                            <template #icon><n-icon :component="ListIcon" /></template>
-                            管理分类规则
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="info" :show-icon="true">
-                        当开启“整理”时，系统将按顺序匹配规则。命中规则后，资源将被移动到指定的 115 目录中。
-                        <br>未命中的资源将移动到“未识别”目录。
-                      </n-alert>
-                    </n-card>
-
-                    <!-- ★ 卡片 2：自定义重命名 (移到这里) -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">自定义重命名</span>
-                          <n-button secondary type="primary" @click="renameModalRef?.open()">
-                            <template #icon>
-                              <n-icon :component="ColorWandIcon" />
-                            </template>
-                            配置命名规则
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="success" :show-icon="true">
-                        打造强迫症专属的完美媒体库命名格式。支持自定义主目录、季目录及文件的中英文、年份、TMDb标签等。
-                      </n-alert>
-                    </n-card>
-
-                    <!-- ★ 卡片 3：独立音乐库管理 -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">音乐库管理</span>
-                          <n-button secondary type="primary" @click="musicModalRef?.open()">
-                            <template #icon>
-                              <n-icon :component="FolderIcon" />
-                            </template>
-                            打开音乐库
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="success" :show-icon="true">
-                        简单音乐管理器，支持直接上传文件夹、自动创建 115 目录并同步生成本地 STRM 文件，全量生成音乐库STRM。
-                      </n-alert>
-                    </n-card>
-
-                    <!-- ★ 卡片 4：第三方 STRM 兼容 -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">第三方 STRM 兼容</span>
-                          <n-button secondary type="primary" @click="openCustomRegexModal">
-                            <template #icon>
-                              <n-icon :component="BuildIcon" />
-                            </template>
-                            配置提取正则
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="info" :show-icon="true">
-                        支持第三方工具生成的 STRM 文件，通过自定义正则表达式，让 ETK 实时拦截并提取 PC 码实现302播放。内置已支持CMS、MH、MP115strm。
-                      </n-alert>
-                    </n-card>
-
-                  </n-space>
-                </n-gi>
-              </n-grid>
-            </n-tab-pane>
-
             <!-- ================== 标签页 2: Emby (紧凑双列版) ================== -->
             <n-tab-pane name="emby" tab="Emby & 302反代">
               <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
@@ -1395,18 +999,6 @@
       </n-spin>
     </n-modal>
     
-    <!-- ★ 引入自定义重命名模态框 -->
-    <RenameConfigModal ref="renameModalRef" />
-    <!-- ★ 引入音乐库管理模态框 -->
-    <MusicManagerModal 
-      ref="musicModalRef" 
-      @open-folder-selector="(context, cid) => openFolderSelector(context, cid)" 
-    />
-    <!-- ★ 引入规则管理模态框 -->
-    <RuleManagerModal 
-      ref="ruleManagerRef" 
-      @open-folder-selector="(context, cid) => openFolderSelector(context, cid)" 
-    />
   </n-layout>
   
   <!-- 导出选项模态框 -->
@@ -1699,13 +1291,10 @@
       </n-space>
     </template>
   </n-modal>
-    <!-- ★ 引入频道监听模态框 -->
-    <TGMonitorModal ref="tgMonitorModalRef" />
 </template>
 
 <script setup>
-import { ref, watch, computed, onMounted, onUnmounted, nextTick, isShallow } from 'vue'; 
-import TGMonitorModal from './TGMonitorModal.vue';
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'; 
 import { 
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
@@ -1735,14 +1324,7 @@ import {
   RefreshOutline as RefreshIcon
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
-import RenameConfigModal from './RenameConfigModal.vue';
-import MusicManagerModal from './MusicManagerModal.vue';
-import RuleManagerModal from './RuleManagerModal.vue'; 
 import axios from 'axios';
-const tgMonitorModalRef = ref(null);
-const renameModalRef = ref(null);
-const musicModalRef = ref(null);
-const ruleManagerRef = ref(null);
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
 const savingPrompts = ref(false);
@@ -2645,26 +2227,11 @@ const confirmFolderSelection = () => {
   } else if (selectorContext.value === 'media_root') {
     configModel.value.p115_media_root_cid = cid;
     configModel.value.p115_media_root_name = name;
-  } else if (selectorContext.value === 'rule') {
-    ruleManagerRef.value?.updateFolder(cid, name);
-  } else if (selectorContext.value === 'share_transfer') {
-    shareMountModalRef.value?.updateTransferFolder(cid, name);
-  } else if (selectorContext.value === 'music_root') {
-    musicModalRef.value?.updateFolder(cid, name);
-  } else if (selectorContext.value === 'music_upload_target') { 
-    musicModalRef.value?.updateUploadTarget(cid, name);
   }
   
   message.success(`已选择: ${name}`);
   showFolderPopover.value = false;
 };
-
-// 辅助函数：获取规则摘要
-const genreOptions = computed(() => {
-  const map = new Map();
-  [...rawMovieGenres.value, ...rawTvGenres.value].forEach(g => { if (g && g.value) map.set(g.value, g); });
-  return Array.from(map.values());
-});
 
 const save = async () => {
   try {
@@ -2956,7 +2523,6 @@ onMounted(async () => {
       }
     }
   });
-  checkUserBotStatus();
 });
 onUnmounted(() => {
   componentIsMounted.value = false;

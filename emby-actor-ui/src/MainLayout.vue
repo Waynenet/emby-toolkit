@@ -232,7 +232,6 @@ import {
   AnalyticsOutline as StatsIcon,
   ListOutline as ReviewListIcon,
   TimerOutline as SchedulerIcon,
-  OptionsOutline as GeneralIcon,
   LogOutOutline as LogoutIcon,
   HeartOutline as WatchlistIcon,
   AlbumsOutline as CollectionsIcon,
@@ -260,8 +259,7 @@ import {
   MenuOutline, 
   Moon as MoonIcon,
   Sunny as SunnyIcon,
-  PieChartOutline as EmbyStatsIcon,
-  DocumentTextOutline as RecordsIcon
+  PieChartOutline as EmbyStatsIcon
 } from '@vicons/ionicons5';
 import axios from 'axios';
 import logo from './assets/logo.png'
@@ -463,7 +461,6 @@ const menuOptions = computed(() => {
           { label: '媒体去重', key: 'MediaCleanupPage', icon: renderIcon(CleanupIcon) },
           { label: '媒体整理', key: 'ResubscribePage', icon: renderIcon(ResubscribeIcon) },
           { label: '自动标签', key: 'AutoTaggingPage', icon: renderIcon(TagIcon) },
-          { label: '整理记录', key: 'OrganizeRecords', icon: renderIcon(RecordsIcon) },  
           { label: '手动处理', key: 'ReviewList', icon: renderIcon(ReviewListIcon) }, 
         ] 
       },
@@ -482,7 +479,6 @@ const menuOptions = computed(() => {
         key: 'group-system', 
         icon: renderIcon(SettingsOutline), 
         children: [ 
-          { label: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon) }, 
           { label: '用户管理', key: 'UserManagement', icon: renderIcon(UserManagementIcon) },
           { label: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon) },
           { label: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon) }, 

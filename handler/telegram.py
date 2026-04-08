@@ -470,7 +470,6 @@ def send_playback_notification(data: dict):
 import re
 import time
 import threading
-from handler.p115_service import P115Service
 
 # 全局变量控制轮询线程
 _tg_polling_thread = None
@@ -591,76 +590,8 @@ def _handle_incoming_message(message: dict):
                 _execute_task_from_tg(chat_id, key)
                 return
 
-    # 2. 识别链接类型
-    is_magnet = text.lower().startswith('magnet:?')
-    is_ed2k = text.lower().startswith('ed2k://')
-    is_115_share = re.search(r'115(?:cdn)?\.com/s/', text, re.IGNORECASE) is not None
-
-    if not (is_magnet or is_ed2k or is_115_share):
-        return
-
-    # =================================================================
-    # ★ 纯手动处理逻辑 (不再包含任何自动订阅和查库代码)
-    # =================================================================
-    logger.info(f"  ➜ [TG交互] 收到来自 {chat_id} 的手动资源链接，准备处理...")
-    send_telegram_message(chat_id, escape_markdown("⏳ *收到链接，正在提交至 115...*"), disable_notification=True)
-
-    client = P115Service.get_client()
-    if not client:
-        send_telegram_message(chat_id, "❌ *提交失败*：115 客户端未初始化，请检查配置。")
-        return
-        
-    target_cid = APP_CONFIG.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID, '0')
-
-    try:
-        # --- 处理 115 分享链接转存 ---
-        if is_115_share:
-            share_code_match = re.search(r'115(?:cdn)?\.com/s/([a-zA-Z0-9]+)', text, re.IGNORECASE)
-            share_code = share_code_match.group(1) if share_code_match else None
-            
-            receive_code = ""
-            pwd_match = re.search(r'(?:访问码|提取码|密码|password)[:：=\s]*([a-zA-Z0-9]{4})', text, re.IGNORECASE)
-            if pwd_match: receive_code = pwd_match.group(1)
-
-            if not share_code:
-                send_telegram_message(chat_id, escape_markdown("❌ *解析失败*：未找到有效的 115 分享码。"))
-                return
-
-            res = client.share_import(share_code, receive_code, target_cid)
-            
-            if res and res.get('state'):
-                send_telegram_message(chat_id, escape_markdown("✅ *分享链接转存成功！*\n系统已自动触发整理任务。"))
-                try:
-                    import task_manager
-                    threading.Timer(5.0, task_manager.trigger_115_organize_task).start()
-                except Exception as e:
-                    logger.error(f"  ➜ 唤醒整理任务失败: {e}")
-            else:
-                err = res.get('error_msg') or res.get('message') or str(res) or '未知错误'
-                send_telegram_message(chat_id, escape_markdown(f"❌ *转存失败*：{err}"))
-                logger.error(f"  ➜ [TG交互] 转存失败: {err}")
-
-        # --- 处理磁力/ED2K 离线下载 ---
-        if is_magnet or is_ed2k:
-            link_match = re.search(r'(magnet:\?xt=urn:btih:[a-zA-Z0-9]+.*?|ed2k://\|file\|.*?\|/)', text, re.IGNORECASE)
-            target_url = link_match.group(1) if link_match else text
-
-            payload = {"url[0]": target_url, "wp_path_id": target_cid}
-            res = client.offline_add_urls(payload)
-            
-            if res and res.get('state'):
-                send_telegram_message(chat_id, escape_markdown("✅ *离线任务提交成功！*\n系统将在后台自动监控并整理入库。"))
-                try:
-                    import task_manager
-                    threading.Timer(10.0, task_manager.trigger_115_organize_task).start()
-                except: pass
-            else:
-                err = res.get('error_msg') or res.get('message') or str(res) or '未知错误'
-                send_telegram_message(chat_id, escape_markdown(f"❌ *离线提交失败*：{err}"))
-
-    except Exception as e:
-        logger.error(f"  ➜ [TG交互] 处理链接失败: {e}", exc_info=True)
-        send_telegram_message(chat_id, f"❌ *系统异常*：处理链接时发生错误。")
+    # 已移除 115/磁力/ED2K 链接自动处理逻辑
+    return
 
 def _setup_bot_commands(bot_token: str):
     """

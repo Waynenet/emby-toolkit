@@ -42,7 +42,6 @@ from croniter import croniter
 from scheduler_manager import scheduler_manager
 from reverse_proxy import proxy_app
 from handler import telegram
-from tasks.p115 import LifeEventMonitorDaemon
 import logging
 from gevent import spawn_later # Added for debouncing
 # --- 导入蓝图 ---
@@ -64,9 +63,6 @@ from routes.webhook import webhook_bp
 from routes.unified_auth import unified_auth_bp
 from routes.user_portal import user_portal_bp
 from routes.discover import discover_bp
-from routes.p115 import p115_bp
-from routes.hdhive import hdhive_bp
-from routes.tg_userbot import tg_userbot_bp
 # --- 核心模块导入 ---
 import constants # 你的常量定义\
 from logger_setup import frontend_log_queue, add_file_handler # 日志记录器和前端日志队列
@@ -136,18 +132,6 @@ def save_config_and_reload(new_config: Dict[str, Any]):
             monitor_service_instance = MonitorService(config_manager.APP_CONFIG, extensions.media_processor_instance)
             monitor_service_instance.start()
 
-        # 动态刷新 115 生活事件守护进程
-        LifeEventMonitorDaemon.start_or_update()
-
-        # 动态刷新 TG UserBot 监听服务
-        try:
-            from handler.tg_userbot import TGUserBotManager
-                # ★ 去掉 force_restart，让它安全地调用 start()
-                # 如果它已经在运行，start() 会被安全锁拦截。
-                # 但不用担心，白名单的更新会在它下次收到消息时自动生效！
-            TGUserBotManager.get_instance().start()
-        except Exception as e:
-            logger.error(f"重启 TG订阅 失败: {e}")
         
         logger.info("  ➜ 新配置重新初始化完毕。")
         
@@ -435,9 +419,6 @@ app.register_blueprint(webhook_bp)
 app.register_blueprint(unified_auth_bp)
 app.register_blueprint(user_portal_bp)
 app.register_blueprint(discover_bp)
-app.register_blueprint(p115_bp)
-app.register_blueprint(hdhive_bp)
-app.register_blueprint(tg_userbot_bp)
 def main_app_start():
     """将主应用启动逻辑封装成一个函数"""
     global monitor_service_instance # 声明使用全局变量
@@ -465,12 +446,6 @@ def main_app_start():
     task_manager.start_task_worker_if_not_running()
     scheduler_manager.start()
 
-    # 启动时唤醒 115 生活事件守护进程
-    try:
-        LifeEventMonitorDaemon.start_or_update()
-    except Exception as e:
-        logger.error(f"  ➜ 启动 115 生活事件守护进程失败: {e}")
-
     # 启动实时监控服务
     try:
         if extensions.media_processor_instance:
@@ -481,9 +456,6 @@ def main_app_start():
 
     # 启动 Telegram 机器人交互监听
     telegram.start_telegram_bot()
-    # 启动 UserBot 频道监听 ★★★
-    from handler.tg_userbot import TGUserBotManager
-    TGUserBotManager.get_instance().start()
 
     def warmup_vector_cache():
         try:

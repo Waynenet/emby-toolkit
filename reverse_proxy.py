@@ -14,13 +14,11 @@ from flask import send_file
 from handler.poster_generator import get_missing_poster
 from gevent import spawn, joinall
 from websocket import create_connection
-from database import custom_collection_db, queries_db, media_db
+from database import custom_collection_db, queries_db
 from database.connection import get_db_connection
 from handler.custom_collection import RecommendationEngine
 import config_manager
 import constants
-from routes.p115 import _get_cached_115_url
-from utils import extract_pickcode_from_strm_url
 
 import extensions
 import handler.emby as emby
@@ -787,102 +785,33 @@ def proxy_all(path):
         
         # ====================================================================
         # ★★★ 拦截 H: 视频流请求 (stream, original, Download 等) ★★★
+        # 统一走透明转发，不再做 115 直链解析/重定向
         # ====================================================================
-        full_path_lower = full_path.lower() # ★ 核心修复 1：使用带前导斜杠的 full_path
-        
+        full_path_lower = full_path.lower()
+
         if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or ('/items/' in full_path_lower and '/download' in full_path_lower):
-            
-            # 检测浏览器客户端
-            user_agent = request.headers.get('User-Agent', '').lower()
-            client_name = request.headers.get('X-Emby-Client', '').lower()
-            is_browser = 'mozilla' in user_agent or 'chrome' in user_agent or 'safari' in user_agent
-            native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer', 'applecoremedia']
-            if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent or 'applecoremedia' in user_agent:
-                is_browser = False
-            
-            # 浏览器直接转发给 Emby 服务端，不做 302 重定向（115 直链存在跨域问题）
-            if is_browser:
-                base_url, api_key = _get_real_emby_url_and_key()
-                target_url = f"{base_url}/{path.lstrip('/')}"
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                forward_params = request.args.copy()
-                forward_params['api_key'] = api_key
-                resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=(10.0, 1800.0), stream=True)
-                excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-                response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-                return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
-            
-            # 客户端才做 302 重定向
-            # ★ 核心修复 2：使用正则精准提取 item_id，彻底无视路径前缀差异
-            match = re.search(r'/(?:videos|items)/(\d+)/', full_path_lower)
-            item_id = match.group(1) if match else ''
-            play_session_id = request.args.get('PlaySessionId', '')
-            
-            real_115_url = None
-            try:
-                base_url, api_key = _get_real_emby_url_and_key()
-                playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
-                params = {
-                    'api_key': api_key,
-                    'UserId': request.args.get('UserId', ''),
-                    'MaxStreamingBitrate': 140000000,
-                    'PlaySessionId': play_session_id,
-                }
-                
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                
-                resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for source in data.get('MediaSources', []):
-                        strm_url = source.get('Path', '')
-                        if isinstance(strm_url, str):
-                            pick_code = extract_pickcode_from_strm_url(strm_url)
-                            if not pick_code:
-                                pick_code = media_db.get_pickcode_by_emby_id(item_id)
-                            
-                            if pick_code:
-                                player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                                client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                                real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                                break 
-            except Exception as e:
-                logger.error(f"  ❌ [STREAM] 获取 115 直链失败: {e}")
-            
-            if real_115_url:
-                logger.info(f"  🚀 [302重定向] 已重定向至 115 直链！")
-                response = redirect(real_115_url, code=302)
-                response.headers['Access-Control-Allow-Origin'] = '*'
-                return response
-            
-            logger.warning(f"  ⚠️ 警告：获取 115 直链失败，回退到服务器中转模式！")
+            base_url, api_key = _get_real_emby_url_and_key()
             target_url = f"{base_url}/{path.lstrip('/')}"
+
             forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
             forward_headers['Host'] = urlparse(base_url).netloc
+
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
-            
-            resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=10, allow_redirects=False)
-            
-            if resp.status_code in [301, 302]:
-                redirect_url = resp.headers.get('Location', '')
-                if '/api/p115/play/' in redirect_url:
-                    pick_code = redirect_url.split('/play/')[-1].split('?')[0].strip()
-                    player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
-                    client_ip = request.headers.get('X-Real-IP', request.remote_addr)
-                    real_115_url = _get_cached_115_url(pick_code, player_ua, client_ip)
-                    if real_115_url:
-                        logger.info(f"  🚀 [302跳转] 视频流请求拦截成功，已重定向至 115 直链！")
-                        response = redirect(real_115_url, code=302)
-                        response.headers['Access-Control-Allow-Origin'] = '*'
-                        return response
-            
+
+            resp = requests.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                params=forward_params,
+                data=request.get_data(),
+                stream=True,
+                timeout=(10.0, 1800.0)
+            )
+
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-            response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_resp_headers]
-            return Response(resp.content, resp.status_code, response_headers)
+            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         
         # --- 拦截 A: 虚拟项目海报图片 ---
         if path.startswith('emby/Items/') and '/Images/Primary' in path:

@@ -7,7 +7,6 @@ import { useAuthStore } from '../stores/auth';
 import DatabaseStats from '../components/DatabaseStats.vue';
 import ReviewList from '../components/ReviewList.vue';
 import SchedulerSettingsPage from '../components/settings/SchedulerSettingsPage.vue';
-import GeneralSettingsPage from '../components/settings/GeneralSettingsPage.vue';
 import WatchlistPage from '../components/WatchlistPage.vue';
 import TmdbCollectionsPage from '../components/TmdbCollectionsPage.vue';
 import ActorSubscriptionPage from '../components/ActorSubscriptionPage.vue';
@@ -16,11 +15,9 @@ import Login from '../components/Login.vue';
 import RegisterPage from '../components/RegisterPage.vue';
 import CoverGeneratorConfig from '../components/CoverGeneratorConfig.vue';
 import UserManagementPage from '../components/UserManagementPage.vue';
-import DiscoverPage from '../components/DiscoverPage.vue';
 import UserCenterPage from '../components/UserCenterPage.vue'
 import SetupPage from '../components/Setup.vue';
 import EmbyStatsPage from '../components/EmbyStatsPage.vue';
-import OrganizeRecordsPage from '../components/OrganizeRecordsPage.vue';
 
 // --- 2. 定义路由规则 (带 meta.public 标签) ---
 const routes = [
@@ -64,12 +61,6 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    path: '/organize-records',
-    name: 'OrganizeRecords',
-    component: OrganizeRecordsPage,
-    meta: { requiresAuth: true },
-  },
-  {
     path: '/review',
     name: 'ReviewList',
     component: ReviewList,
@@ -79,12 +70,6 @@ const routes = [
     path: '/settings/scheduler',
     name: 'settings-scheduler',
     component: SchedulerSettingsPage,
-    meta: { requiresAuth: true },
-  },
-  {
-    path: '/settings/general',
-    name: 'settings-general',
-    component: GeneralSettingsPage,
     meta: { requiresAuth: true },
   },
   {
@@ -173,12 +158,6 @@ const routes = [
     name: 'EmbyStats',
     component: EmbyStatsPage,
     meta: { requiresAuth: true, requiresAdmin: true } // 建议只给管理员看
-  },
-  {
-    path: '/discover',
-    name: 'Discover',
-    component: DiscoverPage,
-    meta: { requiresAuth: true }, // 必须登录才能访问
   },
 ];
 

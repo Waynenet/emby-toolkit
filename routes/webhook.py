@@ -31,11 +31,6 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.connection import get_db_connection
 from database.log_db import LogDBManager
-from handler.p115_service import P115Service, SmartOrganizer, get_config
-try:
-    from p115client import P115Client
-except ImportError:
-    P115Client = None
 import logging
 logger = logging.getLogger(__name__)
 
@@ -70,10 +65,11 @@ def _flush_mp_batch(key):
         task = MP_BATCH_QUEUE.pop(key)
         
     files = task['files']
-    if not files: return
-    
-    client = P115Service.get_client()
-    if not client: return
+    if not files:
+        return
+
+    logger.warning("  ➜ [MP合并整理] 115 功能已移除，忽略本批次文件处理。")
+    return
     
     tmdb_id, media_type, season_num, episode_num = key
     title = files[0]['title']
@@ -834,50 +830,9 @@ def emby_webhook():
         series_id_from_webhook = item_from_webhook.get("SeriesId") if original_item_type == "Episode" else None
 
         # --------------------------------------------------------
-        # 任务 1: 联动删除 115 网盘文件 (所有层级均生效，且必须在清理数据库前执行！)
+        # 任务 1: 115 联动删除已移除（仅保留本地清理流程）
         # --------------------------------------------------------
-        nb_config = get_config()
-        if nb_config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
-            description = data.get("Description", "")
-            try:
-                import re
-                # 提取 Item Path (用于后续可能需要的目录清理)
-                path_match = re.search(r'Item Path:\n(.*?)\n\n', description)
-                item_path = path_match.group(1).strip() if path_match else ""
-
-                pickcodes = []
-                processor = extensions.media_processor_instance
-                
-                # ★★★ 核心重构：提取 Mount Paths，直接喂给万能提取器！★★★
-                if "Mount Paths:\n" in description:
-                    mount_paths_str = description.split("Mount Paths:\n")[-1]
-                    urls = [line.strip() for line in mount_paths_str.split('\n') if line.strip()]
-                    
-                    for url in urls:
-                        if processor:
-                            # 无论是 HTTP 直链 还是 挂载的物理路径，万能提取器通吃！
-                            pc, _ = processor._extract_115_fingerprints(url)
-                            if pc:
-                                pickcodes.append(pc)
-
-                # ★ 数据库兜底：如果万能提取器没拿到，查库 (此时数据库还没被删，完美拿到 PC！)
-                if not pickcodes and original_item_id:
-                    logger.debug(f"  ➜ [深度删除] 未从描述中提取到 PC 码，尝试通过 Emby ID ({original_item_id}) 查库...")
-                    db_pc = media_db.get_pickcode_by_emby_id(original_item_id)
-                    if db_pc:
-                        pickcodes.append(db_pc)
-                        logger.debug(f"  ➜ [深度删除] 成功从数据库查到 PC 码: {db_pc}")
-
-                if pickcodes and item_path:
-                    logger.info(f"  ➜ 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行联动删除。")
-                    from handler.p115_service import delete_115_files_by_webhook
-                    spawn(delete_115_files_by_webhook, item_path, pickcodes)
-                else:
-                    logger.warning("  ➜ 深度删除通知中未找到有效的 ETK 直链或 PC 码，跳过网盘清理。")
-            except Exception as e:
-                logger.error(f"  ➜ 解析深度删除通知失败: {e}", exc_info=True)
-        else:
-            logger.debug("  ➜ 联动删除未开启，跳过网盘清理。")
+        logger.debug("  ➜ 115 联动删除功能已移除，跳过网盘清理。")
 
         # --------------------------------------------------------
         # 任务 2: 清理本地数据库、日志与内存缓存 (网盘删完再删本地)
@@ -904,67 +859,8 @@ def emby_webhook():
     # ★★★ 处理 MoviePilot transfer.complete 事件 ★★★
     # ======================================================================
     if mp_event_type in ["transfer.complete", "transfer.subtitle.complete"]:
-        nb_config = get_config()
-        if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False):
-            logger.debug("  ➜ 智能整理未开启，忽略 MP 通知。")
-            return jsonify({"status": "ignored_smart_organize_disabled"}), 200
-
-        try:
-            transfer_info = data.get("data", {}).get("transferinfo", {})
-            media_info = data.get("data", {}).get("mediainfo", {})
-            meta_info = data.get("data", {}).get("meta", {}) # ★ 提取 meta 信息
-            
-            target_item = transfer_info.get("target_item", {})
-            target_dir = transfer_info.get("target_diritem", {})
-            
-            # 提取单文件信息
-            file_id = target_item.get("fileid")
-            file_name = target_item.get("name")
-            file_type = target_item.get("type") # 'file'
-            pickcode = target_item.get("pickcode")
-            dir_cid = target_dir.get("fileid")
-            
-            tmdb_id = media_info.get("tmdb_id")
-            media_type_cn = media_info.get("type") 
-            title = media_info.get("title")
-            
-            begin_season = meta_info.get("begin_season")
-            begin_episode = meta_info.get("begin_episode")
-            
-            if not tmdb_id or not file_id:
-                logger.warning("  ➜ MP 通知缺少 tmdb_id 或 file_id，无法处理。")
-                return jsonify({"status": "ignored_missing_data"}), 200
-
-            media_type = 'tv' if media_type_cn == '电视剧' else 'movie'
-            
-            # 极速单文件处理
-            if file_type == 'file':
-                file_info = {
-                    'file_id': file_id,
-                    'name': file_name,
-                    'parent_id': dir_cid,
-                    'pickcode': pickcode,
-                    'tmdb_id': tmdb_id,
-                    'media_type': media_type,
-                    'title': title,
-                    'season_num': begin_season,
-                    'episode_num': begin_episode
-                }
-                
-                # ★ 区分日志前缀，方便排错
-                log_prefix = "MP字幕上传" if mp_event_type == "transfer.subtitle.complete" else "MP视频上传"
-                logger.info(f"  ➜ [{log_prefix}] 收到文件: {file_name}，进入合并缓冲池...")
-                
-                # ★ 修改为调用缓冲池入队函数
-                _enqueue_mp_file(file_info)
-                return jsonify({"status": "processing_single_file"}), 200
-            else:
-                logger.debug(f"  ➜ [MP上传] 忽略非文件类型的通知: {file_name}")
-                return jsonify({"status": "ignored_not_file"}), 200
-
-        except Exception as e:
-            logger.error(f"  ➜ [MP上传] 处理失败: {e}", exc_info=True)
-            return jsonify({"status": "error", "message": str(e)}), 500
+        logger.debug("  ➜ 已移除 115 智能整理功能，忽略 MP transfer 通知。")
+        return jsonify({"status": "ignored_115_removed"}), 200
         
     logger.debug(f"  ➜ 收到Emby Webhook: {event_type}")
 
