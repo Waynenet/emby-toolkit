@@ -232,6 +232,7 @@ import {
   AnalyticsOutline as StatsIcon,
   ListOutline as ReviewListIcon,
   TimerOutline as SchedulerIcon,
+  OptionsOutline as GeneralIcon,
   LogOutOutline as LogoutIcon,
   HeartOutline as WatchlistIcon,
   AlbumsOutline as CollectionsIcon,
@@ -479,6 +480,7 @@ const menuOptions = computed(() => {
         key: 'group-system', 
         icon: renderIcon(SettingsOutline), 
         children: [ 
+          { label: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon) }, 
           { label: '用户管理', key: 'UserManagement', icon: renderIcon(UserManagementIcon) },
           { label: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon) },
           { label: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon) }, 
