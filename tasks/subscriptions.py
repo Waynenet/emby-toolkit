@@ -16,8 +16,6 @@ import task_manager
 from handler import telegram
 from database import settings_db, request_db, user_db, media_db, watchlist_db
 from .helpers import is_movie_subscribable, check_series_completion, parse_series_title_and_season, should_mark_as_pending
-from handler.hdhive_client import HDHiveClient
-from tasks.hdhive import task_download_from_hdhive
 
 logger = logging.getLogger(__name__)
 
@@ -885,131 +883,9 @@ def task_auto_subscribe(processor):
             subscription_priority = strategy_config.get('subscription_priority', 'mp')
 
             if item_type == 'Movie':
-                # ==========================================
-                # 电影逻辑：影巢优先 -> MP 兜底
-                # ==========================================
-                if subscription_priority == 'hdhive':
-                    logger.info(f"  ➜ [策略] 电影《{title}》启用影巢优先，正在检索并筛选资源...")
-                    hdhive_api_key = settings_db.get_setting('hdhive_api_key')
-                    
-                    if hdhive_api_key:
-                        hd_client = HDHiveClient(hdhive_api_key)
-                        resources = hd_client.get_resources(tmdb_id, 'movie')
-                        
-                        if resources:
-                            logger.info(f"  ➜ 影巢共返回 {len(resources)} 个资源，开始执行条件筛选：")
-                            # --- ★★★ 智能漏斗：开始过滤资源 ★★★ ---
-                            valid_resources = []
-                            
-                            # 读取过滤配置
-                            hd_free_only = strategy_config.get('hdhive_free_only', False)
-                            hd_max_points = strategy_config.get('hdhive_max_points', 10)
-                            hd_max_size = strategy_config.get('hdhive_max_size_gb', 120)
-                            hd_res = strategy_config.get('hdhive_resolution', 'All')
-                            hd_zh_sub_only = strategy_config.get('hdhive_zh_sub_only', True)
-                            hd_exclude_iso = strategy_config.get('hdhive_exclude_iso', False)
-                            
-                            for i, r in enumerate(resources, 1):
-                                r_title = r.get('title') or '未知标题'
-                                r_source = r.get('source') or []
-                                r_sub_lang = r.get('subtitle_language') or []
-                                r_remark = r.get('remark') or ''
-                                
-                                # 提前计算积分和体积，用于日志打印
-                                is_unlocked = r.get('is_unlocked', False)
-                                raw_points = r.get('unlock_points') or 0
-                                effective_points = 0 if is_unlocked else raw_points
-                                size_gb = _parse_size_to_gb(r.get('share_size'))
-                                
-                                logger.info(f"  ➜ [{i}/{len(resources)}] 检查: {r_title} (体积: {size_gb:.2f}GB, 需积分: {effective_points})")
-                                
-                                # 1. 积分过滤
-                                if hd_free_only and effective_points > 0:
-                                    logger.info(f"  ➜ 排除: 仅限免费资源 (该资源需 {effective_points} 积分)")
-                                    continue
-                                if effective_points > hd_max_points:
-                                    logger.info(f"  ➜ 排除: 超过最大积分限制 (限制 {hd_max_points} 积分)")
-                                    continue
-                                    
-                                # 2. 体积过滤 (核心逻辑：大于设定体积就丢弃)
-                                if size_gb > hd_max_size:
-                                    logger.info(f"  ➜ 排除: 超过最大体积限制 (限制 {hd_max_size}GB)")
-                                    continue
-                                
-                                # 安全策略：丢弃无法获取体积的资源，防止盲盒下载超大合集
-                                # 如果你想放行未知体积的资源，请在下面两行前面加上 # 注释掉
-                                if size_gb <= 0.0:
-                                    logger.info(f"  ➜ 排除: 无法获取有效体积信息，为防止超大文件自动拦截")
-                                    continue
-                                    
-                                # 3. 分辨率过滤
-                                if hd_res != 'All':
-                                    res_list = r.get('video_resolution', [])
-                                    if hd_res not in res_list:
-                                        logger.info(f"  ➜ 排除: 分辨率不匹配 (需要 {hd_res}，实际为 {res_list})")
-                                        continue
-
-                                # 4. 排除 ISO 原盘
-                                if hd_exclude_iso:
-                                    is_iso = False
-                                    if any('ISO' in s.upper() for s in r_source):
-                                        is_iso = True
-                                    if 'ISO' in r_title.upper() and 'REMUX' not in r_title.upper():
-                                        is_iso = True
-                                        
-                                    if is_iso:
-                                        logger.info(f"  ➜ 排除: 命中了排除 ISO 原盘规则")
-                                        continue
-
-                                # 5. 仅限中文字幕
-                                if hd_zh_sub_only:
-                                    has_zh_sub = False
-                                    if any(lang in ['简中', '繁中', '中文', '国语', '粤语', '中英'] for lang in r_sub_lang):
-                                        has_zh_sub = True
-                                    elif re.search(r'(中字|简中|繁中|特效字幕|国语|粤语|简繁|中英)', (r_title or "") + (r_remark or ""), re.IGNORECASE):
-                                        has_zh_sub = True
-                                    
-                                    if not has_zh_sub:
-                                        logger.info(f"  ➜ 排除: 未检测到中文字幕标识")
-                                        continue
-                                        
-                                # 如果代码能走到这里，说明所有条件都满足了
-                                logger.info(f"  ➜ 筛选通过，加入候选列表")
-                                r['_effective_points'] = effective_points
-                                r['_size_gb'] = size_gb
-                                valid_resources.append(r)
-                            
-                            # --- ★★★ 智能排序：选出最优解 ★★★ ---
-                            if valid_resources:
-                                logger.info(f"  ➜ 共有 {len(valid_resources)} 个资源通过筛选，正在根据 (积分最少 -> 体积最大) 排序...")
-                                # 排序规则：优先选积分最少的(白嫖优先) -> 积分相同时，选体积最大的(画质更好)
-                                valid_resources.sort(key=lambda x: (x['_effective_points'], -x['_size_gb']))
-                                
-                                target_resource = valid_resources[0]
-                                slug = target_resource.get('slug')
-                                
-                                logger.info(f"  ➜ 最终选定最优影巢资源: {target_resource.get('title')} "
-                                            f"(体积: {target_resource['_size_gb']:.2f}GB, 需积分: {target_resource['_effective_points']})")
-                                
-                                if slug:
-                                    success = task_download_from_hdhive(hdhive_api_key, slug, tmdb_id, 'movie', title)
-                                    if success:
-                                        action_type = "影巢" 
-                                        logger.info(f"  ➜ 影巢秒传成功！已跳过 MoviePilot 订阅。")
-                                    else:
-                                        logger.warning(f"  ➜ 影巢转存失败，准备降级到 MoviePilot 兜底...")
-                            else:
-                                logger.info(f"  ➜ 影巢有资源，但全部被过滤规则拦截，准备降级到 MoviePilot 兜底...")
-                        else:
-                            logger.info(f"  ➜ 影巢未找到电影《{title}》的资源，准备降级到 MoviePilot 兜底...")
-                    else:
-                        logger.warning(f"  ➜ 未配置影巢 API Key，自动降级到 MoviePilot...")
-
-                # 如果影巢没开、没找到资源、或者转存失败，统一交由 MP 兜底
-                if not success:
-                    logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
-                    mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
-                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
+                mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
+                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
             elif item_type == 'Series':
                 success = _subscribe_full_series_with_logic(int(tmdb_id), title, config, tmdb_api_key)
             elif item_type == 'Season' and parent_tmdb_id and season_number is not None:
