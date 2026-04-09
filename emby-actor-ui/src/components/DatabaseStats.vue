@@ -18,28 +18,10 @@
               <n-spin v-if="loading.core || loading.library || loading.system" size="small" style="float: right" />
             </template>
             <n-space vertical :size="20">
-              <!-- 顶部关键指标 (改为3列) -->
-              <n-grid :cols="3" :x-gap="12">
+              <n-grid :cols="2" :x-gap="12">
                 <n-gi>
                   <n-statistic label="已缓存媒体" class="centered-statistic">
                     <span class="stat-value">{{ stats.media_library.cached_total }}</span>
-                  </n-statistic>
-                </n-gi>
-                <n-gi>
-                  <n-statistic label="已备份媒体信息" class="centered-statistic">
-                    <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
-                      <span class="stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
-                      <n-tag 
-                        v-if="stats.media_library.mediainfo_hits_total > 0" 
-                        type="success" 
-                        size="small" 
-                        round 
-                        :bordered="false" 
-                        style="font-size: 12px; height: 20px; padding: 0 6px;"
-                      >
-                        命中 {{ stats.media_library.mediainfo_hits_total }} 次
-                      </n-tag>
-                    </div>
                   </n-statistic>
                 </n-gi>
                 <n-gi>
