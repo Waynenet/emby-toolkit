@@ -41,8 +41,7 @@ def _prepare_data_for_insert(table_name: str, table_data: List[Dict[str, Any]]) 
             'resubscribe_subtitle_missing_languages', 'resubscribe_quality_include',
             'resubscribe_effect_include', 'resubscribe_codec_include'
         },
-        'user_templates': {'emby_policy_json', 'emby_configuration_json'},
-        'p115_mediainfo_cache': {'mediainfo_json'}
+        'user_templates': {'emby_policy_json', 'emby_configuration_json'}
     }
 
     LIST_TO_STRING_COLUMNS = {
@@ -112,8 +111,7 @@ def _share_import_table_data(cursor, table_name: str, columns: List[str], data: 
         'person_identity_map': 'tmdb_person_id',
         'actor_metadata': 'tmdb_id',
         'translation_cache': 'original_text',
-        'media_metadata': 'tmdb_id, item_type', 
-        'p115_mediainfo_cache': 'sha1'  # ★★★ 修复：告诉数据库用 sha1 字段来防止重复插入 ★★★
+        'media_metadata': 'tmdb_id, item_type'
     }
     
     db_table_name = table_name.lower()
@@ -265,7 +263,7 @@ def task_import_database(processor, file_content: str, tables_to_import: List[st
     logger.info(f"  ➜ 后台任务开始：{task_name}，将恢复表: {tables_to_import}。")
     
     # ★★★ 共享白名单 ★★★
-    SHARABLE_TABLES = {'person_identity_map', 'actor_metadata', 'translation_cache', 'media_metadata', 'p115_mediainfo_cache'}
+    SHARABLE_TABLES = {'person_identity_map', 'actor_metadata', 'translation_cache', 'media_metadata'}
     
     # ★★★ 为新表添加中文名 ★★★
     TABLE_TRANSLATIONS = {

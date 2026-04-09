@@ -191,14 +191,6 @@
                         </n-text>
                       </template>
                     </n-form-item>
-                    <n-form-item label="SHA1检测" path="monitor_sha1_pc_search">
-                      <n-switch v-model:value="configModel.monitor_sha1_pc_search" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          文件SHA1查询，非115网盘勿启用。
-                        </n-text>
-                      </template>
-                    </n-form-item>
                   </n-card>
                 </n-gi>
                 <n-gi>
@@ -456,12 +448,10 @@
                         >
                           测试连接
                         </n-button>
-                        <!-- [移除] 总开关 n-switch -->
                         <a href="https://cloud.siliconflow.cn/i/GXIrubbL" target="_blank" style="font-size: 0.85em; color: var(--n-primary-color); text-decoration: underline;">注册硅基流动</a>
                       </n-space>
                     </template>
                     
-                    <!-- 移除 content-disabled 类，因为不再有总开关控制禁用 -->
                     <div class="ai-settings-wrapper">
                       
                       <!-- 1. 基础配置 (上移，因为它们是前提) -->
@@ -737,7 +727,6 @@
             </n-tab-pane>
           </n-tabs>
 
-
           <!-- 页面底部的统一保存按钮 -->
           <n-button type="primary" attr-type="submit" :loading="savingConfig" block size="large" style="margin-top: 24px;">
             保存所有设置
@@ -754,206 +743,6 @@
       </div>
 
     </n-space>
-    
-    <!-- ★★★ Cookie 扫码获取弹窗 ★★★ -->
-    <n-modal v-model:show="showCookieModal" preset="card" title="扫码获取 Cookie" style="width: 400px;" :mask-closable="false">
-      <n-space vertical>
-        <n-alert type="info" :show-icon="true" style="margin-bottom: 10px;">
-          请选择扫码的客户端类型。推荐使用 <b>支付宝小程序</b>，风控概率最低。
-        </n-alert>
-        
-        <n-space align="center">
-          <n-select 
-            v-model:value="cookieAppType" 
-            :options="cookieAppOptions" 
-            style="width: 220px;" 
-            @update:value="refreshCookieQrcode"
-          />
-          <n-button type="primary" @click="refreshCookieQrcode" :loading="cookieQrcodeLoading">
-            刷新二维码
-          </n-button>
-        </n-space>
-
-        <div style="text-align: center; padding: 20px 0; min-height: 250px;">
-          <n-spin v-if="cookieQrcodeStatus === 'loading'" size="large">
-            <template #description>正在获取二维码...</template>
-          </n-spin>
-          
-          <div v-else-if="cookieQrcodeStatus === 'waiting' || cookieQrcodeStatus === 'success'">
-            <n-qr-code 
-              v-if="cookieQrcodeUrl" 
-              :value="cookieQrcodeUrl" 
-              :size="200"
-              style="margin: 0 auto 20px;"
-            />
-            <n-alert v-if="cookieQrcodeStatus === 'waiting'" type="info" :show-icon="true">
-              请选择不常用客户端，然后使用115生活APP扫码
-            </n-alert>
-            <n-alert v-if="cookieQrcodeStatus === 'success'" type="success" :show-icon="true">
-              获取成功！Cookie 已自动保存到数据库
-            </n-alert>
-          </div>
-          
-          <div v-else-if="cookieQrcodeStatus === 'expired'">
-            <n-result status="warning" title="二维码已过期">
-              <template #footer>
-                <n-button type="primary" @click="refreshCookieQrcode">重新获取</n-button>
-              </template>
-            </n-result>
-          </div>
-        </div>
-        
-        <n-divider style="margin: 0;" />
-        <n-collapse>
-          <n-collapse-item title="手动粘贴 Cookie (备用方案)" name="manual">
-            <n-input 
-              v-model:value="tempCookieInput" 
-              type="textarea" 
-              placeholder="UID=...; CID=...; SEID=..." 
-              :rows="3" 
-            />
-            <n-button type="primary" size="small" style="margin-top: 8px;" @click="saveManualCookie">
-              保存手动输入的 Cookie
-            </n-button>
-          </n-collapse-item>
-        </n-collapse>
-      </n-space>
-      
-      <template #footer>
-        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'">关闭</n-button>
-      </template>
-    </n-modal>
-
-    <!-- ★★★ 115 扫码登录弹窗 ★★★ -->
-    <n-modal v-model:show="showQrcodeModal" preset="card" title="115 扫码登录" style="width: 350px;" :mask-closable="false">
-      <div style="text-align: center; padding: 20px 0;">
-        <!-- 加载中状态 -->
-        <n-spin v-if="qrcodeStatus === 'loading'" size="large">
-          <template #description>正在获取二维码...</template>
-        </n-spin>
-        
-        <!-- 二维码显示 -->
-        <div v-else-if="qrcodeStatus === 'waiting' || qrcodeStatus === 'success'">
-          <n-qr-code 
-            v-if="qrcodeUrl" 
-            :value="qrcodeUrl" 
-            :size="200"
-            style="margin: 0 auto 20px;"
-          />
-          <n-alert v-if="qrcodeStatus === 'waiting'" type="info" :show-icon="true">
-            请使用 115 APP 扫描二维码登录
-          </n-alert>
-          <n-alert v-if="qrcodeStatus === 'success'" type="success" :show-icon="true">
-            登录成功！ Cookies 已自动保存
-          </n-alert>
-        </div>
-        
-        <!-- 过期状态 -->
-        <div v-else-if="qrcodeStatus === 'expired'">
-          <n-result status="warning" title="二维码已过期">
-            <template #footer>
-              <n-button type="primary" @click="openQrcodeModal">重新获取二维码</n-button>
-            </template>
-          </n-result>
-        </div>
-        
-        <!-- 错误状态 -->
-        <div v-else-if="qrcodeStatus === 'error'">
-          <n-result status="error" title="获取二维码失败">
-            <template #footer>
-              <n-button type="primary" @click="openQrcodeModal">重试</n-button>
-            </template>
-          </n-result>
-        </div>
-      </div>
-      <template #footer>
-        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'">关闭</n-button>
-      </template>
-    </n-modal>
-    <!-- ★★★ 移植：115 目录选择器 Modal ★★★ -->
-    <n-modal v-model:show="showFolderPopover" preset="card" title="选择 115 目录" style="width: 450px;" :bordered="false">
-      <div class="folder-browser">
-        <!-- 顶部导航 -->
-        <div class="browser-header">
-          <div class="nav-left">
-            <n-button text size="small" @click="load115Folders('0')">
-              <template #icon><n-icon size="18"><HomeIcon /></n-icon></template>
-            </n-button>
-            <n-divider vertical />
-            <div class="breadcrumbs">
-              <span v-if="currentBrowserCid === '0'">根目录</span>
-              <template v-else>
-                <span class="crumb-item" @click="load115Folders('0')">...</span>
-                <span class="separator">/</span>
-                <span class="crumb-item current">{{ currentBrowserFolderName }}</span>
-              </template>
-            </div>
-          </div>
-          <!-- 新建文件夹 -->
-          <n-popover trigger="click" placement="bottom-end" :show="showCreateFolderInput" @update:show="v => showCreateFolderInput = v">
-            <template #trigger>
-              <n-button size="tiny" secondary type="primary">
-                <template #icon><n-icon><AddIcon /></n-icon></template>
-                新建
-              </n-button>
-            </template>
-            <div style="padding: 8px; width: 200px;">
-              <n-input v-model:value="newFolderName" placeholder="文件夹名称" size="small" @keyup.enter="handleCreateFolder" />
-              <n-button block type="primary" size="small" style="margin-top: 8px;" @click="handleCreateFolder">确定</n-button>
-            </div>
-          </n-popover>
-        </div>
-
-        <!-- 搜索栏 -->
-        <div style="padding: 8px 16px; border-bottom: 1px solid var(--n-divider-color); background-color: var(--n-color-modal);">
-          <n-input 
-            v-model:value="searchKeyword" 
-            placeholder="在当前目录下搜索文件夹 (回车搜索)" 
-            size="small" 
-            clearable 
-            @keyup.enter="handleSearchFolders"
-            @clear="handleClearSearch" 
-          >
-            <template #prefix><n-icon><SearchIcon /></n-icon></template>
-          </n-input>
-        </div>
-
-        <!-- 文件夹列表 -->
-        <div class="folder-list-container">
-          <n-spin :show="loadingFolders">
-            <div class="folder-list">
-              <n-empty v-if="folderList.length === 0 && !loadingFolders" description="空文件夹或未搜到结果" size="small" style="padding: 40px 0;" />
-              <div 
-                v-for="folder in folderList" 
-                :key="folder.id" 
-                class="folder-item"
-                @click="enterFolder(folder)" 
-              >
-                <!-- 注意上面改成了 @click="enterFolder(folder)" -->
-                <div class="folder-icon-wrapper">
-                  <n-icon size="22" color="#ffca28"><FolderIcon /></n-icon>
-                </div>
-                <span class="folder-name">{{ folder.name }}</span>
-                <n-icon size="16" color="#ccc"><ChevronRightIcon /></n-icon>
-              </div>
-            </div>
-          </n-spin>
-        </div>
-
-        <!-- 底部确认 -->
-        <div class="browser-footer">
-          <div class="current-info">
-            <span style="color: #666; font-size: 12px;">已选: {{ currentBrowserFolderName }}</span>
-          </div>
-          <n-space>
-            <n-button size="small" @click="showFolderPopover = false">取消</n-button>
-            <n-button type="primary" size="small" @click="confirmFolderSelection">
-              确定选择
-            </n-button>
-          </n-space>
-        </div>
-      </div>
-    </n-modal>
 
     <!-- ★★★ 本地物理目录选择器弹窗 ★★★ -->
     <n-modal v-model:show="showLocalFolderModal" preset="card" title="选择本地路径" style="width: 600px; max-width: 95vw;">
@@ -1010,6 +799,7 @@
       <n-button type="primary" @click="handleExport" :disabled="tablesToExport.length === 0">确认导出</n-button>
     </template>
   </n-modal>
+  
   <!-- 导入选项模态框 -->
   <n-modal v-model:show="importModalVisible" preset="dialog" title="恢复数据库备份">
     <n-space vertical>
@@ -1083,102 +873,6 @@
     </template>
   </n-modal>
 
-  <!-- ★★★ 自定义 STRM 正则模态框 ★★★ -->
-    <n-modal v-model:show="showCustomRegexModal" preset="card" title="配置自定义提取正则" style="width: 650px;">
-      <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px;">
-        <b>正则编写规则：</b><br/>
-        必须使用小括号 <code>()</code> 将 115 的 PC 码包裹起来作为<b>第一个捕获组</b>。<br/>
-        例如，链接为 <code>http://xxx/play?id=abcde123</code>，正则应写为：<code>id=([a-zA-Z0-9]+)</code>
-      </n-alert>
-
-      <n-dynamic-input 
-        v-model:value="customRegexRules" 
-        placeholder="输入正则表达式" 
-        :min="0"
-        style="margin-bottom: 24px;"
-      />
-
-      <n-divider title-placement="left" style="font-size: 12px; color: #999;">实时效果测试</n-divider>
-      
-      <n-form label-placement="left" label-width="100">
-        <n-form-item label="测试链接">
-          <n-input v-model:value="regexTestUrl" placeholder="输入一个未知的第三方 STRM 链接" />
-        </n-form-item>
-        <n-form-item label="提取结果">
-          <n-alert :type="regexTestResult.type" :show-icon="true" style="width: 100%;">
-            {{ regexTestResult.text }}
-          </n-alert>
-        </n-form-item>
-      </n-form>
-
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showCustomRegexModal = false">取消</n-button>
-          <n-button type="primary" @click="saveCustomRegex" :loading="isSavingRegex">保存配置</n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
-  <!-- ★★★ 批量替换 STRM 模态框 ★★★ -->
-    <n-modal v-model:show="showReplaceStrmModal" preset="card" title="批量替换本地 STRM 链接" style="width: 650px;">
-      
-      <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
-        <b>ETK 标准格式示例 (不带文件名后缀)：</b><br/>
-        <code>http://192.168.1.100:5257/api/p115/play/abcde12345</code><br/>
-        <span style="font-size: 0.85em; color: gray;">(注意：标准格式以 115 的 PC 码结尾，不带斜杠和 .mkv 等后缀)</span>
-      </n-alert>
-
-      <n-form label-placement="left" label-width="100">
-        <n-form-item label="替换模式">
-          <n-radio-group v-model:value="replaceStrmForm.mode">
-            <n-space>
-              <n-radio value="plain">普通替换</n-radio>
-              <n-radio value="regex">正则替换</n-radio>
-            </n-space>
-          </n-radio-group>
-        </n-form-item>
-        <n-form-item label="查找内容">
-          <n-input v-model:value="replaceStrmForm.search" placeholder="例如: 192.168.1.100:5257 或 http://(.*)/api" />
-        </n-form-item>
-        <n-form-item label="替换为">
-          <n-input v-model:value="replaceStrmForm.replace" placeholder="例如: 10.0.0.5:8080 或 https://new-domain.com/api" />
-        </n-form-item>
-        
-        <n-divider title-placement="left" style="font-size: 12px; color: #999;">实时效果预览</n-divider>
-        
-        <n-form-item label="测试原始链接">
-          <n-input v-model:value="replaceStrmForm.testUrl" placeholder="输入一个现有的 STRM 链接用于测试" />
-        </n-form-item>
-        <n-form-item label="替换后结果">
-          <n-space vertical style="width: 100%;">
-            <n-alert :type="previewResult.type" :show-icon="true" style="width: 100%; word-break: break-all;">
-              {{ previewResult.text }}
-            </n-alert>
-            <!-- 实时标准格式校验提示 -->
-            <n-text 
-              v-if="previewResult.type === 'success' || previewResult.type === 'warning'" 
-              :type="previewResult.isStandard ? 'success' : 'error'" 
-              style="font-size: 0.9em; font-weight: bold; display: flex; align-items: center; gap: 4px;"
-            >
-              <n-icon :component="previewResult.isStandard ? CheckIcon : CloseIcon" />
-              {{ previewResult.standardMsg }}
-            </n-text>
-          </n-space>
-        </n-form-item>
-      </n-form>
-      
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showReplaceStrmModal = false">取消</n-button>
-          <n-popconfirm @positive-click="submitReplaceStrm">
-            <template #trigger>
-              <n-button type="primary" :loading="isReplacingStrm" :disabled="!replaceStrmForm.search">确认执行替换</n-button>
-            </template>
-            确定要遍历本地所有 .strm 文件并执行替换吗？此操作不可逆！
-          </n-popconfirm>
-        </n-space>
-      </template>
-    </n-modal>
   <!-- 重置演员映射模态框 -->
   <n-modal 
     v-model:show="resetMappingsModalVisible" 
@@ -1195,6 +889,7 @@
       <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings">确认重置</n-button>
     </template>
   </n-modal>
+
   <!-- AI 提示词配置模态框 -->
   <n-modal v-model:show="promptModalVisible" preset="dialog" title="配置 AI 提示词" style="width: 800px; max-width: 90%;">
     <n-alert type="info" style="margin-bottom: 16px;">
@@ -1287,8 +982,7 @@ import {
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
   NFormItemGridItem, NCheckboxGroup, NCheckbox, NText, NRadioGroup, NRadio,
-  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip,
-  NQrCode, NResult
+  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip
 } from 'naive-ui';
 import { 
   DownloadOutline as ExportIcon, 
@@ -1313,6 +1007,7 @@ import {
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
+
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
 const savingPrompts = ref(false);
@@ -1324,81 +1019,6 @@ const promptsModel = ref({
   transliterate_mode: '',
   filename_parsing: ''
 });
-
-// ★★★ 批量替换 STRM 状态与逻辑 ★★★
-const showReplaceStrmModal = ref(false);
-const isReplacingStrm = ref(false);
-const replaceStrmForm = ref({
-  mode: 'plain',
-  search: '',
-  replace: '',
-  testUrl: 'http://192.168.1.100:5257/api/p115/play/abcde12345'
-});
-
-const openReplaceStrmModal = () => {
-  if (configModel.value?.etk_server_url) {
-    replaceStrmForm.value.testUrl = `${configModel.value.etk_server_url}/api/p115/play/abcde12345`;
-  }
-  showReplaceStrmModal.value = true;
-};
-
-const previewResult = computed(() => {
-  const { mode, search, replace, testUrl } = replaceStrmForm.value;
-  if (!search) return { type: 'default', text: '请输入查找内容以查看预览', isStandard: false };
-  if (!testUrl) return { type: 'default', text: '请输入测试原始链接', isStandard: false };
-
-  try {
-    let resultUrl = testUrl;
-    if (mode === 'plain') {
-      // 普通全局替换
-      resultUrl = testUrl.split(search).join(replace);
-    } else if (mode === 'regex') {
-      // 正则替换
-      const regex = new RegExp(search, 'g');
-      resultUrl = testUrl.replace(regex, replace);
-    }
-    
-    // ★ 校验是否符合 ETK 标准格式 (不带文件名后缀)
-    // 规则: http(s)://域名或IP:端口/api/p115/play/字母数字组合
-    const standardRegex = /^https?:\/\/[^\/]+\/api\/p115\/play\/[a-zA-Z0-9]+$/;
-    const isStandard = standardRegex.test(resultUrl);
-    const standardMsg = isStandard 
-      ? '校验通过：符合 ETK 标准格式' 
-      : '校验失败：不符合 ETK 标准格式 (可能带有文件名后缀、路径错误或非 http 协议)';
-
-    if (resultUrl === testUrl) {
-      return { type: 'warning', text: '未发生匹配，链接保持不变：\n' + resultUrl, isStandard, standardMsg };
-    }
-    return { type: 'success', text: resultUrl, isStandard, standardMsg };
-  } catch (e) {
-    return { type: 'error', text: '正则表达式语法错误: ' + e.message, isStandard: false };
-  }
-});
-
-const submitReplaceStrm = async () => {
-  if (!replaceStrmForm.value.search) {
-    message.warning('请输入查找内容');
-    return;
-  }
-  isReplacingStrm.value = true;
-  try {
-    const response = await axios.post('/api/p115/replace_strm', {
-      mode: replaceStrmForm.value.mode,
-      search: replaceStrmForm.value.search,
-      replace: replaceStrmForm.value.replace
-    });
-    if (response.data.success) {
-      message.success(response.data.message);
-      showReplaceStrmModal.value = false;
-    } else {
-      message.error(response.data.message);
-    }
-  } catch (error) {
-    message.error(error.response?.data?.message || '请求失败');
-  } finally {
-    isReplacingStrm.value = false;
-  }
-};
 
 const tableInfo = {
   'app_settings': { cn: '基础配置', isSharable: false },
@@ -1418,10 +1038,7 @@ const tableInfo = {
   'user_media_data': { cn: 'Emby用户数据', isSharable: false },
   'user_templates': { cn: '用户权限模板', isSharable: false },
   'invitations': { cn: '邀请链接', isSharable: false },
-  'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
-  'p115_filesystem_cache': { cn: '115目录缓存', isSharable: false },
-  'p115_mediainfo_cache': {cn: '媒体信息备份', isSharable: true },
-  'p115_organize_records': {cn: '115整理记录', isSharable: false }
+  'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false }
 };
 const tableDependencies = {
   'emby_users': ['user_media_data', 'emby_users_extended'],
@@ -1718,120 +1335,6 @@ const triggerRestart = async () => {
   }
 };
 
-// ★★★ 115 相关逻辑 ★★★
-const p115Info = ref(null);
-const loading115Info = ref(false);
-const showFolderPopover = ref(false);
-const loadingFolders = ref(false);
-const folderList = ref([]);
-const currentBrowserCid = ref('0');
-const currentBrowserFolderName = ref('根目录');
-const newFolderName = ref('');
-const showCreateFolderInput = ref(false);
-const selectorContext = ref(''); 
-const searchKeyword = ref('');
-
-// ★★★ Cookie 扫码获取逻辑 ★★★
-const showCookieModal = ref(false);
-const tempCookieInput = ref('');
-const cookieAppType = ref('alipaymini');
-const cookieAppOptions = [
-  { label: '115生活(支付宝小程序)', value: 'alipaymini' },
-  { label: '网页版', value: 'web' },
-  { label: '115生活(微信小程序)', value: 'wechatmini' },
-  { label: '115生活(Android端)', value: 'android' },
-  { label: '115生活(iOS端)', value: 'ios' },
-  { label: '115网盘(Android电视端)', value: 'tv' }
-];
-
-const cookieQrcodeUrl = ref('');
-const cookieQrcodeStatus = ref('idle'); 
-const cookieQrcodeLoading = ref(false);
-const cookieQrcodePolling = ref(null);
-
-const openCookieModal = () => {
-  showCookieModal.value = true;
-  tempCookieInput.value = '';
-  refreshCookieQrcode();
-};
-
-const refreshCookieQrcode = async () => {
-  stopCookiePolling();
-  cookieQrcodeStatus.value = 'loading';
-  cookieQrcodeLoading.value = true;
-  
-  try {
-    const res = await axios.get(`/api/p115/cookie_qrcode?app=${cookieAppType.value}`);
-    if (res.data && res.data.success) {
-      cookieQrcodeUrl.value = res.data.data.qrcode;
-      cookieQrcodeStatus.value = 'waiting';
-      startCookiePolling();
-    } else {
-      cookieQrcodeStatus.value = 'error';
-      message.error(res.data?.message || '获取二维码失败');
-    }
-  } catch (e) {
-    cookieQrcodeStatus.value = 'error';
-    message.error('获取二维码失败: ' + (e.response?.data?.message || e.message));
-  } finally {
-    cookieQrcodeLoading.value = false;
-  }
-};
-
-const startCookiePolling = () => {
-  cookieQrcodePolling.value = setInterval(async () => {
-    try {
-      const res = await axios.get(`/api/p115/cookie_qrcode/status?app=${cookieAppType.value}`);
-      const data = res.data;
-      
-      if (data.status === 'success') {
-        cookieQrcodeStatus.value = 'success';
-        message.success('Cookie 获取成功！');
-        stopCookiePolling();
-        setTimeout(() => {
-          showCookieModal.value = false;
-          check115Status(); // 刷新状态显示
-        }, 1500);
-      } else if (data.status === 'expired') {
-        cookieQrcodeStatus.value = 'expired';
-        stopCookiePolling();
-      }
-    } catch (e) {
-      console.error('检查 Cookie 二维码状态失败', e);
-    }
-  }, 2000);
-};
-
-const stopCookiePolling = () => {
-  if (cookieQrcodePolling.value) {
-    clearInterval(cookieQrcodePolling.value);
-    cookieQrcodePolling.value = null;
-  }
-};
-
-const closeCookieModal = () => {
-  stopCookiePolling();
-  showCookieModal.value = false;
-  cookieQrcodeStatus.value = 'idle';
-};
-
-const saveManualCookie = async () => {
-  if (!tempCookieInput.value.trim()) {
-    message.warning('请输入 Cookie');
-    return;
-  }
-  try {
-    const res = await axios.post('/api/p115/cookie', { cookie: tempCookieInput.value.trim() });
-    if (res.data.success) {
-      message.success('手动 Cookie 保存成功');
-      showCookieModal.value = false;
-      check115Status();
-    }
-  } catch (e) {
-    message.error('保存失败: ' + (e.response?.data?.message || e.message));
-  }
-};
-
 // --- 本地目录浏览器状态 ---
 const showLocalFolderModal = ref(false)
 const currentLocalPath = ref('')
@@ -1917,309 +1420,6 @@ const confirmLocalFolder = () => {
     showLocalFolderModal.value = false
 }
 
-// ★★★ 115 扫码授权 Modal 逻辑 ★★★
-const showQrcodeModal = ref(false);
-const qrcodeUrl = ref('');
-const qrcodeStatus = ref('idle'); // idle, waiting, success, expired, error
-const qrcodeLoading = ref(false);
-const qrcodePolling = ref(null);
-const handleOpenQrcodeModal = () => {
-  if (!configModel.value.p115_app_id || !configModel.value.p115_app_id.trim()) {
-    message.warning('请先填写自定义 AppID 并点击底部保存设置，然后再扫码授权！');
-    return;
-  }
-  openQrcodeModal();
-};
-const openQrcodeModal = async () => {
-  showQrcodeModal.value = true;
-  qrcodeStatus.value = 'loading';
-  qrcodeLoading.value = true;
-  
-  try {
-    const res = await axios.post('/api/p115/qrcode');
-    if (res.data && res.data.success) {
-      qrcodeUrl.value = res.data.data.qrcode;
-      qrcodeStatus.value = 'waiting';
-      startPolling();
-    } else {
-      qrcodeStatus.value = 'error';
-      message.error(res.data?.message || '获取二维码失败');
-    }
-  } catch (e) {
-    qrcodeStatus.value = 'error';
-    message.error('获取二维码失败: ' + (e.response?.data?.message || e.message));
-  } finally {
-    qrcodeLoading.value = false;
-  }
-};
-
-const startPolling = () => {
-  // 每2秒检查一次二维码状态
-  qrcodePolling.value = setInterval(async () => {
-    try {
-      const res = await axios.get('/api/p115/qrcode/status');
-      const data = res.data;
-      
-      if (data.status === 'success') {
-        qrcodeStatus.value = 'success';
-        message.success('登录成功！授权已自动保存');
-        stopPolling();
-        setTimeout(() => {
-          showQrcodeModal.value = false;
-          check115Status(); // 刷新状态显示
-        }, 1500);
-      } else if (data.status === 'expired') {
-        qrcodeStatus.value = 'expired';
-        message.warning('二维码已过期');
-        stopPolling();
-      }
-      // waiting 状态继续轮询
-    } catch (e) {
-      console.error('检查二维码状态失败', e);
-    }
-  }, 2000);
-};
-
-const stopPolling = () => {
-  if (qrcodePolling.value) {
-    clearInterval(qrcodePolling.value);
-    qrcodePolling.value = null;
-  }
-};
-
-const closeQrcodeModal = () => {
-  stopPolling();
-  showQrcodeModal.value = false;
-  qrcodeUrl.value = '';
-  qrcodeStatus.value = 'idle';
-};
-
-// ★★★ 全自动网页授权 (授权码模式) 逻辑 ★★★
-const isWebAuthing = ref(false);
-let webAuthPolling = null;
-
-const startWebAuth = () => {
-  // 1. 获取当前 ETK 的访问地址 (例如 http://192.168.1.100:5257)
-  const etkHost = window.location.origin; 
-  // 2. 拼接回调地址
-  const callbackUrl = `${etkHost}/api/p115/auto_save_auth`;
-  // 3. 拼接最终的 Worker 登录地址
-  const authUrl = `https://115.55565576.xyz/login?callback_url=${encodeURIComponent(callbackUrl)}`;
-  
-  // 4. 弹出一个居中的小窗口供用户登录
-  const width = 500;
-  const height = 600;
-  const left = (window.screen.width / 2) - (width / 2);
-  const top = (window.screen.height / 2) - (height / 2);
-  window.open(authUrl, '115AuthWindow', `width=${width},height=${height},top=${top},left=${left}`);
-  
-  isWebAuthing.value = true;
-  message.info('请在新弹出的窗口中完成 115 授权...', { duration: 5000 });
-  
-  // 5. 开始后台轮询，检查 Token 是否已经悄悄保存成功了
-  webAuthPolling = setInterval(async () => {
-    try {
-      const res = await axios.get('/api/p115/status');
-      if (res.data && res.data.data && res.data.data.has_token) {
-        // 发现 Token 已经有了！
-        clearInterval(webAuthPolling);
-        isWebAuthing.value = false;
-        message.success('🎉 网页授权成功！Token 已自动保存。');
-        check115Status(); // 刷新界面状态
-      }
-    } catch (e) {
-      // 轮询期间的错误静默忽略
-    }
-  }, 2000);
-  
-  // 6. 设置一个 3 分钟的超时，防止用户关了窗口导致一直转圈
-  setTimeout(() => {
-    if (isWebAuthing.value) {
-      clearInterval(webAuthPolling);
-      isWebAuthing.value = false;
-      message.warning('授权等待超时，请重试。');
-    }
-  }, 180000);
-};
-
-// ★★★ 自定义 STRM 正则状态与逻辑 ★★★
-const showCustomRegexModal = ref(false);
-const customRegexRules = ref([]);
-const regexTestUrl = ref('');
-const isSavingRegex = ref(false);
-
-const openCustomRegexModal = async () => {
-  try {
-    const res = await axios.get('/api/p115/custom_strm_regex');
-    if (res.data.success) {
-      customRegexRules.value = res.data.data || [];
-    }
-  } catch (e) {
-    message.error('加载正则配置失败');
-  }
-  showCustomRegexModal.value = true;
-};
-
-const saveCustomRegex = async () => {
-  isSavingRegex.value = true;
-  try {
-    const res = await axios.post('/api/p115/custom_strm_regex', {
-      rules: customRegexRules.value
-    });
-    if (res.data.success) {
-      message.success(res.data.message);
-      showCustomRegexModal.value = false;
-    }
-  } catch (e) {
-    message.error('保存失败');
-  } finally {
-    isSavingRegex.value = false;
-  }
-};
-
-// 实时测试计算属性
-const regexTestResult = computed(() => {
-  const url = regexTestUrl.value.trim();
-  if (!url) return { type: 'default', text: '请输入测试链接' };
-
-  // 1. 模拟内置规则测试
-  if (url.includes('/p115/play/')) {
-    const pc = url.split('/p115/play/').pop().split('/')[0].split('?')[0].trim();
-    return { type: 'success', text: `[内置 ETK 规则命中] 提取到 PC 码: ${pc}` };
-  }
-  let match = url.match(/pick_?code=([a-zA-Z0-9]+)/i);
-  if (match) return { type: 'success', text: `[内置 MP 规则命中] 提取到 PC 码: ${match[1]}` };
-  
-  match = url.match(/\/d\/([a-zA-Z0-9]+)[.?/]/) || url.match(/\/d\/([a-zA-Z0-9]+)$/);
-  if (match) return { type: 'success', text: `[内置 CMS 规则命中] 提取到 PC 码: ${match[1]}` };
-  
-  match = url.match(/fileid=([a-zA-Z0-9]+)/i);
-  if (match) return { type: 'success', text: `[内置 MH 规则命中] 提取到 PC 码: ${match[1]}` };
-
-  // 2. 模拟用户自定义规则测试
-  for (let i = 0; i < customRegexRules.value.length; i++) {
-    const rule = customRegexRules.value[i];
-    if (!rule) continue;
-    try {
-      const regex = new RegExp(rule, 'i');
-      const customMatch = url.match(regex);
-      if (customMatch && customMatch[1]) {
-        return { type: 'success', text: `[自定义规则 ${i + 1} 命中] 提取到 PC 码: ${customMatch[1]}` };
-      }
-    } catch (e) {
-      return { type: 'error', text: `规则 ${i + 1} 语法错误: ${e.message}` };
-    }
-  }
-
-  return { type: 'warning', text: '未命中任何规则，提取失败。请检查正则是否包含 () 捕获组。' };
-});
-
-// 检查 115 状态
-const check115Status = async () => {
-    loading115Info.value = true;
-    try {
-        // 纯粹查状态，不再触发 handleSaveConfig，彻底切断前端对后端的污染
-        const res = await axios.get('/api/p115/status');
-        if (res.data && res.data.data) {
-            p115Info.value = res.data.data;
-            message.success('115 状态刷新成功！');
-        } else {
-            p115Info.value = null;
-        }
-    } catch (e) { 
-        p115Info.value = null; 
-        message.error('状态获取失败: ' + (e.response?.data?.message || e.message));
-    } finally { 
-        loading115Info.value = false; 
-    }
-};
-
-const openFolderSelector = (context, initialCid = '0') => {
-  selectorContext.value = context;
-  showFolderPopover.value = true;
-  searchKeyword.value = ''; 
-  const targetCid = (initialCid && initialCid !== '0') ? initialCid : '0';
-  load115Folders(targetCid);
-};
-
-const enterFolder = (folder) => {
-  searchKeyword.value = ''; 
-  load115Folders(folder.id, folder.name);
-};
-
-const load115Folders = async (cid, folderName = null, isSearch = false) => {
-  loadingFolders.value = true;
-  try {
-    const params = { cid };
-    if (isSearch && searchKeyword.value) {
-      params.search = searchKeyword.value;
-    }
-    
-    const res = await axios.get('/api/p115/dirs', { params });
-    if (res.data && res.data.success) {
-      folderList.value = res.data.data;
-      currentBrowserCid.value = cid;
-      if (folderName) currentBrowserFolderName.value = folderName;
-      if (cid === '0') currentBrowserFolderName.value = '根目录';
-    }
-  } catch (e) {
-    message.error("加载目录失败: " + (e.response?.data?.message || e.message));
-  } finally {
-    loadingFolders.value = false;
-  }
-};
-
-const handleSearchFolders = () => {
-  if (!searchKeyword.value) {
-    load115Folders(currentBrowserCid.value, currentBrowserFolderName.value);
-  } else {
-    load115Folders(currentBrowserCid.value, currentBrowserFolderName.value, true);
-  }
-};
-
-const handleClearSearch = () => {
-  searchKeyword.value = '';
-  load115Folders(currentBrowserCid.value, currentBrowserFolderName.value);
-};
-
-const handleCreateFolder = async () => {
-  if (!newFolderName.value) return;
-  try {
-    const res = await axios.post('/api/p115/mkdir', {
-      pid: currentBrowserCid.value,
-      name: newFolderName.value
-    });
-    if (res.data && res.data.status === 'success') {
-      message.success('创建成功');
-      newFolderName.value = '';
-      showCreateFolderInput.value = false;
-      load115Folders(currentBrowserCid.value, currentBrowserFolderName.value);
-    } else {
-      message.error(res.data.message || '创建失败');
-    }
-  } catch (e) {
-    message.error("请求失败: " + e.message);
-  }
-};
-
-const confirmFolderSelection = () => {
-  const cid = currentBrowserCid.value;
-  const name = cid === '0' ? '/' : currentBrowserFolderName.value;
-  
-  if (selectorContext.value === 'save_path') {
-    configModel.value.p115_save_path_cid = cid;
-    configModel.value.p115_save_path_name = name;
-  } else if (selectorContext.value === 'unrecognized_path') {
-    configModel.value.p115_unrecognized_cid = cid;
-    configModel.value.p115_unrecognized_name = name;
-  } else if (selectorContext.value === 'media_root') {
-    configModel.value.p115_media_root_cid = cid;
-    configModel.value.p115_media_root_name = name;
-  }
-  
-  message.success(`已选择: ${name}`);
-  showFolderPopover.value = false;
-};
 
 const save = async () => {
   try {
@@ -2490,8 +1690,6 @@ onMounted(async () => {
   componentIsMounted.value = true;
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
-      check115Status();
-      if (!configModel.value.p115_auth_method) configModel.value.p115_auth_method = 'web';
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }
@@ -2574,50 +1772,7 @@ onUnmounted(() => {
   font-size: 16px;
   vertical-align: middle;
 }
-/* ★★★ 新增：文件夹浏览器样式 ★★★ */
-.folder-browser {
-  display: flex;
-  flex-direction: column;
-  height: 500px;
-  background-color: var(--n-color-modal); 
-  color: var(--n-text-color);
-  border-radius: 4px;
-  overflow: hidden;
-  border: 1px solid var(--n-divider-color);
-}
-.browser-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--n-divider-color);
-  background-color: var(--n-action-color); 
-  flex-shrink: 0;
-}
-.nav-left { display: flex; align-items: center; flex: 1; overflow: hidden; }
-.breadcrumbs {
-  flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  margin-left: 8px; display: flex; align-items: center; color: var(--n-text-color-3);
-}
-.crumb-item { cursor: pointer; transition: color 0.2s; }
-.crumb-item:hover { color: var(--n-primary-color); }
-.crumb-item.current { color: var(--n-text-color-1); font-weight: 600; cursor: default; }
-.separator { margin: 0 6px; color: var(--n-text-color-disabled); }
-.folder-list-container { flex: 1; overflow-y: auto; position: relative; }
-.folder-list { padding: 4px 0; }
-.folder-item {
-  display: flex; align-items: center; padding: 10px 16px; cursor: pointer;
-  transition: background-color 0.2s; border-bottom: 1px solid var(--n-divider-color);
-  color: var(--n-text-color-2);
-}
-.folder-item:hover { background-color: var(--n-hover-color); }
-.folder-icon-wrapper { display: flex; align-items: center; margin-right: 12px; }
-.folder-name { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--n-text-color-1); }
-.browser-footer {
-  padding: 12px 16px; border-top: 1px solid var(--n-divider-color);
-  display: flex; justify-content: space-between; align-items: center;
-  background-color: var(--n-color-modal); flex-shrink: 0;
-}
+
 .rules-container { background: transparent; border: none; padding: 0; }
 .rule-item {
   display: flex; align-items: center; background-color: var(--n-action-color); 

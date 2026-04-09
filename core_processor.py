@@ -32,12 +32,6 @@ from cachetools import TTLCache
 from ai_translator import AITranslator
 from watchlist_processor import WatchlistProcessor
 from handler.douban import DoubanApi
-# --- P115Center 依赖 ---
-try:
-    from p115center import P115Center
-    P115_AVAILABLE = True
-except ImportError:
-    P115_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 try:
@@ -154,27 +148,6 @@ class MediaProcessor:
         self.manual_edit_cache = TTLCache(maxsize=10, ttl=600)
         self._global_lib_guid_map = {}
         self._last_lib_map_update = 0
-        # =========================================================
-        # P115Center 初始化 (由 p115_mediainfo_center 开关控制)
-        # =========================================================
-        if P115_AVAILABLE and self.config.get("p115_mediainfo_center", True):
-            machine_id = self.config.get("p115_machine_id", "")
-            auth_file_path = str(Path(__file__).resolve().parent / "extensions.py")
-            license_key = "650ad55de8fc0a81868754d39a2390c498ace7625f4d88d653ba0827132a02b3"
-            
-            try:
-                self.p115_center = P115Center(
-                    machine_id=machine_id,
-                    license=license_key,
-                    file_path=auth_file_path
-                )
-                logger.info("  ➜ P115Center SDK 初始化成功，已启用神医媒体信息中心化同步功能。")
-            except Exception as e:
-                logger.error(f"P115Center SDK 初始化失败: {e}")
-                self.p115_center = None
-        else:
-            # ➜ 如果开关关闭或依赖缺失，直接设为 None
-            self.p115_center = None
             
         logger.trace("核心处理器初始化完成。")
 
@@ -839,163 +812,6 @@ class MediaProcessor:
 
         return id_to_parent_map, lib_guid
 
-    def _get_115_info_by_local_path(self, file_path: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        【挂载模式核心】通过 local_path 精准匹配 115 缓存表。
-        返回 (pick_code, sha1)。
-        """
-        if not self.config.get("monitor_sha1_pc_search", True):
-            return None, None
-        
-        if not file_path: return None, None
-        
-        # 统一路径分隔符
-        normalized_path = file_path.replace('\\', '/')
-        filename = os.path.basename(normalized_path)
-        
-        try:
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                
-                # 1. 终极绝杀：利用 local_path 进行后缀匹配
-                # 数据库存的是 "电影/科幻/阿凡达/阿凡达.mkv"
-                # Emby 传的是 "/mnt/115/电影/科幻/阿凡达/阿凡达.mkv"
-                cursor.execute("SELECT pick_code, sha1, local_path FROM p115_filesystem_cache WHERE name = %s AND local_path IS NOT NULL", (filename,))
-                rows = cursor.fetchall()
-                for row in rows:
-                    db_local_path = row['local_path']
-                    # 只要 Emby 的绝对路径以数据库的相对路径结尾，就是 100% 命中！
-                    if normalized_path.endswith(db_local_path):
-                        logger.debug(f"  ➜ [挂载模式] 路径命中: {db_local_path}")
-                        return row['pick_code'], row['sha1']
-                        
-                # 2. 降级方案：三级目录联合匹配 (兼容以前没有写入 local_path 的老数据)
-                path_parts = normalized_path.split('/')
-                if len(path_parts) >= 3:
-                    parent_name = path_parts[-2]
-                    grandparent_name = path_parts[-3]
-                    sql = """
-                        SELECT c.pick_code, c.sha1 
-                        FROM p115_filesystem_cache c
-                        JOIN p115_filesystem_cache p ON c.parent_id = p.id
-                        JOIN p115_filesystem_cache gp ON p.parent_id = gp.id
-                        WHERE c.name = %s AND p.name = %s AND gp.name = %s
-                        LIMIT 1
-                    """
-                    cursor.execute(sql, (filename, parent_name, grandparent_name))
-                    row = cursor.fetchone()
-                    if row: return row['pick_code'], row['sha1']
-                    
-        except Exception as e:
-            logger.warning(f"通过路径查询 115 信息失败: {e}")
-            
-        return None, None
-
-    # 直接从 STRM 文件、HTTP 链接 或 挂载路径中抠出 115 提取码 (PC) 和 SHA1
-    def _extract_115_fingerprints(self, file_path: str) -> Tuple[Optional[str], Optional[str]]:
-        if not self.config.get("monitor_sha1_pc_search", True):
-            return None, None
-        
-        if not file_path: return None, None
-        
-        pc = None
-        sha1 = None
-        target_path_for_db = file_path # 默认用传入的路径去查库
-
-        # =========================================================
-        # 🥇 优先级 1：嫡子 (STRM 模式) - 调用万能解析器
-        # =========================================================
-        try:
-            if file_path.startswith('http'):
-                pc = utils.extract_pickcode_from_strm_url(file_path)
-            elif file_path.lower().endswith('.strm') and os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    # 尝试按 HTTP 链接解析
-                    pc = utils.extract_pickcode_from_strm_url(content)
-                    
-                    # ★★★ 核心修复：如果 STRM 里面存的是挂载路径，把这个路径提取出来供后续查库 ★★★
-                    if not pc and content and not content.startswith('http'):
-                        target_path_for_db = content
-        except Exception as e:
-            logger.warning(f"读取 STRM 文件失败: {e}")
-            
-        # =========================================================
-        # 🥈 优先级 2：庶子 (挂载模式) - 调用 local_path 精准匹配
-        # =========================================================
-        # 拿着真实的视频路径 (可能是直接传进来的，也可能是从 STRM 里读出来的) 去查库
-        db_pc, db_sha1 = self._get_115_info_by_local_path(target_path_for_db)
-        
-        # 合并结果 (如果正则提取到了 PC 就用正则的，否则用数据库的)
-        pc = pc or db_pc
-        sha1 = db_sha1
-
-        return pc, sha1
-
-    # 通过 PC 码反查 SHA1 (自带 115 API 兜底)
-    def _get_sha1_by_pickcode(self, pick_code: str) -> Optional[str]:
-        if not self.config.get("monitor_sha1_pc_search", True):
-            return None
-        
-        if not pick_code: return None
-        
-        # 1. 优先查本地数据库
-        try:
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT sha1 FROM p115_filesystem_cache WHERE pick_code = %s AND sha1 IS NOT NULL LIMIT 1", (pick_code,))
-                row = cursor.fetchone()
-                if row and row['sha1']: 
-                    return row['sha1']
-        except Exception: pass
-
-        # 2. 查不到？现场算 FID 调 API 查！(专治第三方 STRM)
-        logger.trace(f"  ➜ 未在本地数据库找到 SHA1，尝试通过 115api 获取...")
-        try:
-            to_id_func = None
-            try:
-                from p115pickcode import to_id
-                to_id_func = to_id
-            except ImportError:
-                try:
-                    from p115client.tool.iterdir import to_id
-                    to_id_func = to_id
-                except ImportError:
-                    pass
-
-            if to_id_func:
-                fid = str(to_id_func(pick_code))
-                from handler.p115_service import P115Service
-                client = P115Service.get_client()
-                if client and fid:
-                    info_res = client.fs_get_info(fid)
-                    if info_res and info_res.get('state'):
-                        sha1 = info_res['data'].get('sha1')
-                        if sha1:
-                            logger.info(f"  ➜ 成功通过 115 API 实时获取到 SHA1: {sha1}")
-                            return sha1
-        except Exception as e:
-            logger.trace(f"  ➜ 实时获取 SHA1 失败: {e}")
-
-        return None
-
-    def _get_local_path_by_pickcode(self, pick_code: str) -> Optional[str]:
-        """
-        通过 pick_code 反查 115 缓存表获取 local_path (相对路径)
-        用于在 HTTP/STRM 模式下精准还原多版本文件的真实物理路径。
-        """
-        if not pick_code: return None
-        try:
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT local_path FROM p115_filesystem_cache WHERE pick_code = %s AND local_path IS NOT NULL LIMIT 1", (pick_code,))
-                row = cursor.fetchone()
-                if row and row['local_path']: 
-                    return row['local_path']
-        except Exception as e:
-            logger.warning(f"通过 pick_code 查询 local_path 失败: {e}")
-        return None
-
     # --- 更新媒体元数据缓存 ---
     def _upsert_media_metadata(
         self,
@@ -1136,78 +952,38 @@ class MediaProcessor:
                 if is_pending:
                     movie_record['asset_details_json'] = '[]'
                     movie_record['emby_item_ids_json'] = '[]'
-                    movie_record['file_sha1_json'] = '[]'
-                    movie_record['file_pickcode_json'] = '[]'
                     movie_record['in_library'] = False
                 else:
                     all_assets = []
-                    all_ids = []  # ★ 修复 1：初始化为空列表
-                    all_sha1s = []
-                    all_pcs = []
+                    all_ids = []  
                     
                     media_sources = item_details_from_emby.get('MediaSources', [])
                     
-                    # 如果有多个媒体源（多版本）
                     if media_sources and len(media_sources) > 0:
                         for source in media_sources:
                             raw_path = source.get('Path', '')
                             if not raw_path: continue
                             
-                            # 先提取 PC 码 (支持直接从 HTTP 链接提取)
-                            file_pc, file_sha1 = self._extract_115_fingerprints(raw_path)
-                            if not file_sha1 and file_pc:
-                                file_sha1 = self._get_sha1_by_pickcode(file_pc)
-                            
-                            # ★ 提取当前版本的真实 ID，并强制剥离 mediasource_ 前缀
                             raw_source_id = str(source.get('Id') or item_id)
                             source_id = raw_source_id.replace("mediasource_", "")
                             
-                            # ★★★ 终极修复：利用 local_strm_root + local_path 完美还原物理路径 ★★★
+                            # 简化路径逻辑：如果是 http strm，仅使用顶层 Path
                             emby_path = raw_path
                             if emby_path.startswith('http'):
-                                main_emby_path = item_details_from_emby.get('Path', '')
-                                if source_id == item_id:
-                                    # 主版本：直接使用顶层 Path
-                                    emby_path = main_emby_path
-                                else:
-                                    # 辅版本：查库获取相对路径，与 local_strm_root 拼接
-                                    db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                    if db_local_path:
-                                        local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                        if local_strm_root:
-                                            # 完美拼接：/strm/媒体库 + 电影/.../xxx.mkv
-                                            emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                        elif main_emby_path:
-                                            # 兜底：如果没配 root，用主版本的目录 + 真实文件名
-                                            real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                            base_dir = os.path.dirname(main_emby_path)
-                                            emby_path = os.path.join(base_dir, real_filename)
-                                        else:
-                                            emby_path = ''
-                                    else:
-                                        emby_path = ''
+                                emby_path = item_details_from_emby.get('Path', '')
                                 
                             mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
-                            # 构造临时 item 传递给 parse_full_asset_details，确保解析的是当前版本的属性
                             temp_item = item_details_from_emby.copy()
-                            
                             temp_item['Id'] = source_id 
                             temp_item['Path'] = emby_path
                             if 'Container' in source: temp_item['Container'] = source['Container']
                             if 'Size' in source: temp_item['Size'] = source['Size']
                             if 'RunTimeTicks' in source: temp_item['RunTimeTicks'] = source['RunTimeTicks']
-                            
-                            # ★ 清除顶层分辨率污染，防止主版本的 Width/Height 污染辅版本
                             temp_item.pop('Width', None)
                             temp_item.pop('Height', None)
-                            
-                            # ★ 将当前版本的专属流信息强行覆盖到顶层
                             if 'MediaStreams' in source:
                                 temp_item['MediaStreams'] = source['MediaStreams']
-                            
-                            # ★ 隔离污染，让底层函数只看到当前这一个 source
                             temp_item['MediaSources'] = [source]
                             
                             asset_details = parse_full_asset_details(
@@ -1220,16 +996,9 @@ class MediaProcessor:
 
                             all_assets.append(asset_details)
                             all_ids.append(source_id)
-                            if file_pc: all_pcs.append(file_pc)
-                            if file_sha1: all_sha1s.append(file_sha1)
                     else:
-                        # 兜底逻辑：如果没有 MediaSources，使用主 Path
                         emby_path = item_details_from_emby.get('Path', '')
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
-                        
-                        file_pc, file_sha1 = self._extract_115_fingerprints(raw_path)
-                        if not file_sha1 and file_pc:
-                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
 
                         asset_details = parse_full_asset_details(
                             item_details_from_emby, 
@@ -1240,15 +1009,10 @@ class MediaProcessor:
                         asset_details['source_library_id'] = source_lib_id
 
                         all_assets.append(asset_details)
-                        all_ids.append(item_id) # ★ 修复 4：兜底时收集主 ID
-                        if file_pc: all_pcs.append(file_pc)
-                        if file_sha1: all_sha1s.append(file_sha1)
+                        all_ids.append(item_id)
                     
-                    # 使用 dict.fromkeys 去重并保持顺序
                     movie_record['asset_details_json'] = json.dumps(all_assets, ensure_ascii=False)
                     movie_record['emby_item_ids_json'] = json.dumps(list(dict.fromkeys(all_ids)))
-                    movie_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
-                    movie_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                     movie_record['in_library'] = True
 
                 movie_record['actors_json'] = json.dumps([{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")], ensure_ascii=False)
@@ -1331,11 +1095,9 @@ class MediaProcessor:
                 if is_pending:
                     series_record['in_library'] = False
                     series_record['emby_item_ids_json'] = '[]'
-                    series_record['file_sha1_json'] = '[]'
                 else:
                     series_record['in_library'] = True
                     series_record['emby_item_ids_json'] = json.dumps([item_id])
-                    series_record['file_sha1_json'] = '[]'
 
                 actors_relation = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")]
                 series_record['actors_json'] = json.dumps(actors_relation, ensure_ascii=False)
@@ -1413,8 +1175,7 @@ class MediaProcessor:
                         "season_number": s_num,
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
-                        "emby_item_ids_json": json.dumps(season_ids),
-                        "file_sha1_json": '[]'
+                        "emby_item_ids_json": json.dumps(season_ids)
                     })
                 
                 # ★★★ 4. 处理分集 (Episode) ★★★
@@ -1489,70 +1250,30 @@ class MediaProcessor:
                     if not is_pending and versions_of_episode:
                         all_assets = []
                         all_ids = []
-                        all_sha1s = []
-                        all_pcs = []
                         
-                        # 遍历该集的所有版本
                         for version in versions_of_episode:
                             raw_path = version.get('Path', '')
-                            
-                            # ★ 强制剥离 mediasource_ 前缀
                             clean_v_id = str(version.get('Id')).replace("mediasource_", "")
                             
-                            file_pc, file_sha1 = self._extract_115_fingerprints(raw_path)
-                            if not file_sha1 and file_pc:
-                                file_sha1 = self._get_sha1_by_pickcode(file_pc)
-                            
-                            # ★★★ 终极修复：利用 local_strm_root + local_path 完美还原物理路径 ★★★
                             emby_path = raw_path
                             if emby_path.startswith('http'):
-                                main_emby_path = item_details_from_emby.get('Path', '')
-                                if clean_v_id == item_id:
-                                    # 主版本：直接使用顶层 Path
-                                    emby_path = main_emby_path
-                                else:
-                                    # 辅版本：查库获取相对路径，与 local_strm_root 拼接
-                                    db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                    if db_local_path:
-                                        local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                        if local_strm_root:
-                                            emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                        elif main_emby_path:
-                                            real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                            base_dir = os.path.dirname(main_emby_path)
-                                            emby_path = os.path.join(base_dir, real_filename)
-                                        else:
-                                            emby_path = ''
-                                    else:
-                                        emby_path = ''
+                                emby_path = item_details_from_emby.get('Path', '')
                                 
                             mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
-                            details = parse_full_asset_details(
-                                version,
-                                local_mediainfo_path=mediainfo_path
-                            )
+                            details = parse_full_asset_details(version, local_mediainfo_path=mediainfo_path)
                             details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                             all_assets.append(details)
                             all_ids.append(clean_v_id)
                             
-                            if file_sha1: all_sha1s.append(file_sha1)
-                            if file_pc: all_pcs.append(file_pc)
-                            
                         episode_record['asset_details_json'] = json.dumps(all_assets, ensure_ascii=False)
-                        # 使用 dict.fromkeys 去重并保持顺序
                         episode_record['emby_item_ids_json'] = json.dumps(list(dict.fromkeys(all_ids)))
-                        episode_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
-                        episode_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                         episode_record['in_library'] = True
                     else:
                         episode_record['in_library'] = False
                         episode_record['emby_item_ids_json'] = '[]'
                         episode_record['asset_details_json'] = '[]'
-                        episode_record['file_sha1_json'] = '[]'
-                        episode_record['file_pickcode_json'] = '[]'
                         
                     records_to_upsert.append(episode_record)
 
@@ -1592,56 +1313,25 @@ class MediaProcessor:
 
                     all_assets = []
                     all_ids = []
-                    all_sha1s = []
-                    all_pcs = []
                     
                     for version in versions:
                         raw_path = version.get('Path', '')
                         clean_v_id = str(version.get('Id')).replace("mediasource_", "")
                         
-                        file_pc, file_sha1 = self._extract_115_fingerprints(raw_path)
-                        if not file_sha1 and file_pc:
-                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
-                        
                         emby_path = raw_path
                         if emby_path.startswith('http'):
-                            main_emby_path = item_details_from_emby.get('Path', '')
-                            if clean_v_id == item_id:
-                                emby_path = main_emby_path
-                            else:
-                                db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                if db_local_path:
-                                    local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                    if local_strm_root:
-                                        emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                    elif main_emby_path:
-                                        real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                        base_dir = os.path.dirname(main_emby_path)
-                                        emby_path = os.path.join(base_dir, real_filename)
-                                    else:
-                                        emby_path = ''
-                                else:
-                                    emby_path = ''
+                            emby_path = item_details_from_emby.get('Path', '')
                             
                         mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                        file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
-                        details = parse_full_asset_details(
-                            version,
-                            local_mediainfo_path=mediainfo_path
-                        )
+                        details = parse_full_asset_details(version, local_mediainfo_path=mediainfo_path)
                         details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                         all_assets.append(details)
                         all_ids.append(clean_v_id)
                         
-                        if file_sha1: all_sha1s.append(file_sha1)
-                        if file_pc: all_pcs.append(file_pc)
-                        
                     episode_record['asset_details_json'] = json.dumps(all_assets, ensure_ascii=False)
                     episode_record['emby_item_ids_json'] = json.dumps(list(dict.fromkeys(all_ids)))
-                    episode_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
-                    episode_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                     episode_record['in_library'] = True
 
                     records_to_upsert.append(episode_record)
@@ -1657,7 +1347,6 @@ class MediaProcessor:
                 "last_air_date", "backdrop_path", "homepage", "original_language", "poster_path", "rating", 
                 "actors_json", "parent_series_tmdb_id", "season_number", "episode_number", "in_library", 
                 "subscription_status", "subscription_sources_json", "emby_item_ids_json", 
-                "file_sha1_json", "file_pickcode_json", 
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
@@ -1687,8 +1376,6 @@ class MediaProcessor:
                 if db_row_complete['subscription_status'] is None: db_row_complete['subscription_status'] = 'NONE'
                 if db_row_complete['subscription_sources_json'] is None: db_row_complete['subscription_sources_json'] = '[]'
                 if db_row_complete['emby_item_ids_json'] is None: db_row_complete['emby_item_ids_json'] = '[]'
-                if db_row_complete['file_sha1_json'] is None: db_row_complete['file_sha1_json'] = '[]'
-                if db_row_complete['file_pickcode_json'] is None: db_row_complete['file_pickcode_json'] = '[]'
 
                 r_date = db_row_complete.get('release_date')
                 if not r_date: db_row_complete['release_date'] = None

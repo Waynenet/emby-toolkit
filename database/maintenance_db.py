@@ -105,8 +105,6 @@ def get_stats_core() -> dict:
     sql = """
     SELECT
         (SELECT COUNT(*) FROM media_metadata WHERE item_type IN ('Movie', 'Series')) AS media_cached_total,
-        (SELECT COUNT(*) FROM p115_mediainfo_cache) AS mediainfo_backed_up_total,
-        (SELECT COALESCE(SUM(hit_count), 0) FROM p115_mediainfo_cache) AS mediainfo_hits_total,
         (SELECT COUNT(*) FROM person_identity_map) AS actor_mappings_total
     """
     return _execute_single_row_query(sql)
@@ -473,7 +471,7 @@ def prepare_for_library_rebuild() -> Dict[str, Dict]:
     """
     【高危 - 修复版】执行为 Emby 媒体库重建做准备的所有数据库操作。
     1. 清空 Emby 专属数据表 (用户、播放状态、缓存)。
-    2. 重置核心元数据表中的 Emby 关联字段 (ID、资产详情、在库状态、指纹信息)。
+    2. 重置核心元数据表中的 Emby 关联字段 (ID、资产详情、在库状态)。
     3. 重置追剧状态。
     """
     # 1. 需要被 TRUNCATE (清空) 的表
@@ -505,15 +503,13 @@ def prepare_for_library_rebuild() -> Dict[str, Dict]:
                         logger.warning(f"  ➜ 表 {table_name} 不存在，跳过清空。")
 
                 logger.info("第二步：重置 media_metadata 表中的 Emby 关联字段...")
-                # ★★★ 核心修复：将所有指纹和资产字段加入 WHERE 检查，彻底扫除幽灵数据 ★★★
+                # ★★★ 核心修复：将所有关联和资产字段加入 WHERE 检查，彻底扫除幽灵数据 ★★★
                 cursor.execute("""
                     UPDATE media_metadata
                     SET 
                         -- 1. 核心关联字段
                         in_library = FALSE,
                         emby_item_ids_json = '[]'::jsonb,  
-                        file_sha1_json = '[]'::jsonb,      
-                        file_pickcode_json = '[]'::jsonb,  
                         asset_details_json = NULL,         
                         date_added = NULL,
                         
@@ -530,8 +526,6 @@ def prepare_for_library_rebuild() -> Dict[str, Dict]:
                     WHERE 
                         in_library = TRUE 
                         OR emby_item_ids_json::text != '[]'
-                        OR file_sha1_json::text != '[]'
-                        OR file_pickcode_json::text != '[]'
                         OR asset_details_json IS NOT NULL
                         OR watching_status != 'NONE';
                 """)
@@ -592,13 +586,13 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
             logger.error(f"  ➜ 清理专属日志缓存失败: {e}")
         # ======================================================================
         # 辅助函数：执行外科手术式移除，并返回剩余的 ID 数量
-        # ★ 核心重构：在 Python 内存中精准定位索引并同步剔除四个数组的元素 ★
+        # ★ 核心重构：在 Python 内存中精准定位索引并同步剔除数组的元素 ★
         # ======================================================================
         def remove_id_from_metadata(cursor, target_emby_id):
             # 1. 查找包含该 ID 的记录 (锁定行)
             cursor.execute("""
                 SELECT tmdb_id, item_type, parent_series_tmdb_id, season_number,
-                       emby_item_ids_json, asset_details_json, file_sha1_json, file_pickcode_json
+                       emby_item_ids_json, asset_details_json
                 FROM media_metadata
                 WHERE emby_item_ids_json @> %s::jsonb
                 FOR UPDATE
@@ -615,32 +609,24 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                 return None, None, None, None, None
 
             assets = row['asset_details_json'] if isinstance(row['asset_details_json'], list) else json.loads(row['asset_details_json'] or '[]')
-            sha1s = row['file_sha1_json'] if isinstance(row['file_sha1_json'], list) else json.loads(row['file_sha1_json'] or '[]')
-            pcs = row['file_pickcode_json'] if isinstance(row['file_pickcode_json'], list) else json.loads(row['file_pickcode_json'] or '[]')
 
             # 3. 找到目标 ID 的索引并移除
             idx = emby_ids.index(target_emby_id)
             emby_ids.pop(idx)
             
-            # 安全移除其他三个数组的对应项 (防止越界报错)
+            # 安全移除其他一个数组的对应项 (防止越界报错)
             if isinstance(assets, list) and idx < len(assets): assets.pop(idx)
-            if isinstance(sha1s, list) and idx < len(sha1s): sha1s.pop(idx)
-            if isinstance(pcs, list) and idx < len(pcs): pcs.pop(idx)
 
             # 4. 更新回数据库
             cursor.execute("""
                 UPDATE media_metadata
                 SET emby_item_ids_json = %s::jsonb,
                     asset_details_json = %s::jsonb,
-                    file_sha1_json = %s::jsonb,
-                    file_pickcode_json = %s::jsonb,
                     last_updated_at = NOW()
                 WHERE tmdb_id = %s AND item_type = %s
             """, (
                 json.dumps(emby_ids, ensure_ascii=False),
                 json.dumps(assets, ensure_ascii=False) if assets else None, # asset_details_json 允许为 NULL
-                json.dumps(sha1s, ensure_ascii=False),
-                json.dumps(pcs, ensure_ascii=False),
                 row['tmdb_id'], row['item_type']
             ))
 
@@ -687,15 +673,13 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                 elif db_item_type == 'Season':
                     logger.info(f"  ➜ 第 {season_num} 季已完全删除，正在检查父剧集 (TMDB: {parent_tmdb_id})...")
                     
-                    # ★ 同步清空指纹数组
+                    # ★ 同步清空资产关联数组
                     cursor.execute(
                         """
                         UPDATE media_metadata 
                         SET in_library = FALSE, 
                             emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL,
-                            file_sha1_json = '[]'::jsonb,
-                            file_pickcode_json = '[]'::jsonb
+                            asset_details_json = NULL
                         WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Episode'
                         """,
                         (parent_tmdb_id, season_num)
@@ -732,14 +716,12 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
 
                     if not has_episodes_in_season:
                         logger.info(f"  ➜ 第 {season_num} 季已无任何在库分集，标记该季为离线。")
-                        # ★ 同步清空指纹数组
+                        # ★ 同步清空资产关联数组
                         cursor.execute(
                             """
                             UPDATE media_metadata 
                             SET in_library = FALSE, 
-                                asset_details_json = NULL,
-                                file_sha1_json = '[]'::jsonb,
-                                file_pickcode_json = '[]'::jsonb
+                                asset_details_json = NULL
                             WHERE parent_series_tmdb_id = %s 
                               AND season_number = %s 
                               AND item_type = 'Season'
@@ -808,30 +790,26 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                         'emby_ids': parent_emby_ids
                     }
 
-                    # ★ 同步清空指纹数组
+                    # ★ 同步清空资产关联数组
                     cursor.execute(
                         """
                         UPDATE media_metadata 
                         SET in_library = FALSE, 
                             emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL,
-                            file_sha1_json = '[]'::jsonb,
-                            file_pickcode_json = '[]'::jsonb
+                            asset_details_json = NULL
                         WHERE tmdb_id = %s AND item_type = %s
                         """,
                         (target_tmdb_id_for_full_cleanup, target_item_type_for_full_cleanup)
                     )
 
                     if target_item_type_for_full_cleanup == 'Series':
-                        # ★ 同步清空指纹数组
+                        # ★ 同步清空资产关联数组
                         cursor.execute(
                             """
                             UPDATE media_metadata 
                             SET in_library = FALSE, 
                                 emby_item_ids_json = '[]'::jsonb, 
-                                asset_details_json = NULL,
-                                file_sha1_json = '[]'::jsonb,
-                                file_pickcode_json = '[]'::jsonb
+                                asset_details_json = NULL
                             WHERE parent_series_tmdb_id = %s AND item_type IN ('Season', 'Episode')
                             """,
                             (target_tmdb_id_for_full_cleanup,)

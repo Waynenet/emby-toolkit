@@ -181,8 +181,6 @@ def init_db():
                         -- 媒体库状态
                         in_library BOOLEAN DEFAULT FALSE NOT NULL,
                         emby_item_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        file_sha1_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        file_pickcode_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                         date_added TIMESTAMP WITH TIME ZONE,
                         asset_details_json JSONB,
 
@@ -429,53 +427,6 @@ def init_db():
                     )
                 """)
 
-                logger.trace("  ➜ 正在创建 'p115_filesystem_cache' 表 (目录树缓存)...")
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS p115_filesystem_cache (
-                        id TEXT PRIMARY KEY,           -- 115 的 cid (文件夹) 或 fid (文件)
-                        parent_id TEXT NOT NULL,       -- 父目录 ID (根目录为 '0')
-                        name TEXT NOT NULL,            -- 文件/文件夹名称
-                        local_path TEXT,               -- 本地映射路径 (如果已同步到本地)
-                        sha1 TEXT,
-                        pick_code TEXT,
-                        size BIGINT DEFAULT 0,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), -- 最后同步时间
-                        
-                        -- 复合唯一约束：同一个父目录下不能有同名文件 (用于快速查找)
-                        -- 注意：115 实际上允许同名，但在我们的管理逻辑中通常假设唯一，或者只缓存最新的
-                        CONSTRAINT uniq_p115_parent_name UNIQUE (parent_id, name)
-                    )
-                """)
-
-                logger.trace("  ➜ 正在创建 'p115_mediainfo_cache' 表 (独立媒体信息指纹库)...")
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS p115_mediainfo_cache (
-                        sha1 TEXT PRIMARY KEY,
-                        mediainfo_json JSONB NOT NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        hit_count INTEGER DEFAULT 0
-                    )
-                """)
-
-                logger.trace("  ➜ 正在创建 'p115_organize_records' 表 (115整理记录)...")
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS p115_organize_records (
-                        id SERIAL PRIMARY KEY,
-                        file_id TEXT UNIQUE NOT NULL,  -- 115 原始文件/文件夹ID (使用UNIQUE防止重复记录)
-                        pick_code TEXT UNIQUE,
-                        original_name TEXT NOT NULL,   -- 原始名称
-                        renamed_name TEXT,             -- 整理后的名称
-                        status TEXT NOT NULL,          -- 'success' 或 'unrecognized'
-                        tmdb_id TEXT,
-                        media_type TEXT,
-                        target_cid TEXT,               -- 目标分类CID
-                        category_name TEXT,            -- 目标分类名称
-                        processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        is_center_cached BOOLEAN DEFAULT FALSE,
-                        season_number INTEGER
-                    )
-                """)
-
                 # ======================================================================
                 # ★★★ 数据库平滑升级 (START) ★★★
                 # 此处代码用于新增在新版本中添加的列。
@@ -495,17 +446,6 @@ def init_db():
                         all_existing_columns[table].add(row['column_name'])
 
                     schema_upgrades = {
-                        'p115_filesystem_cache': {
-                            "local_path": "TEXT",
-                            "sha1": "TEXT",
-                            "pick_code": "TEXT",
-                            "size": "BIGINT DEFAULT 0"
-                        },
-                        'p115_organize_records': {
-                            "is_center_cached": "BOOLEAN DEFAULT FALSE",
-                            "pick_code": "TEXT UNIQUE",
-                            "season_number": "INTEGER"
-                        },
                         'emby_users': {
                             "policy_json": "JSONB"  
                         },
@@ -518,9 +458,7 @@ def init_db():
                             "backdrop_path": "TEXT",  
                             "homepage": "TEXT", 
                             "production_companies_json": "JSONB",
-                            "networks_json": "JSONB",
-                            "file_sha1_json": "JSONB NOT NULL DEFAULT '[]'::jsonb",
-                            "file_pickcode_json": "JSONB NOT NULL DEFAULT '[]'::jsonb"
+                            "networks_json": "JSONB"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
@@ -562,39 +500,6 @@ def init_db():
 
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)
-
-                # ======================================================================
-                # ★★★ 存量数据清洗：为旧的 115 整理记录提取并写入季号 ★★★
-                # ======================================================================
-                try:
-                    cursor.execute("SELECT id, original_name, renamed_name FROM p115_organize_records WHERE media_type = 'tv' AND season_number IS NULL")
-                    records_to_upgrade = cursor.fetchall()
-                    
-                    if records_to_upgrade:
-                        logger.info(f"  ➜ [数据清洗] 发现 {len(records_to_upgrade)} 条旧的 115 整理记录缺少季号，正在执行正则提取与升级...")
-                        import re
-                        update_data = []
-                        for row in records_to_upgrade:
-                            name_to_check = row['renamed_name'] or row['original_name'] or ""
-                            s_num = None
-                            
-                            m1 = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', name_to_check)
-                            m2 = re.search(r'Season\s*(\d{1,4})\b', name_to_check, re.IGNORECASE)
-                            m3 = re.search(r'第(\d{1,4})季', name_to_check)
-
-                            if m1: s_num = int(m1.group(1))
-                            elif m2: s_num = int(m2.group(1))
-                            elif m3: s_num = int(m3.group(1))
-                            
-                            if s_num is not None:
-                                update_data.append((s_num, row['id']))
-                        
-                        if update_data:
-                            from psycopg2.extras import execute_batch
-                            execute_batch(cursor, "UPDATE p115_organize_records SET season_number = %s WHERE id = %s", update_data)
-                            logger.info(f"  ➜ [数据清洗] 成功为 {len(update_data)} 条记录补充了季号！")
-                except Exception as e_clean:
-                    logger.error(f"  ➜ [数据清洗] 提取季号时出错: {e_clean}")
                 
                 # ======================================================================
                 # ★★★ 统一创建验证所有索引 ★★★
@@ -652,12 +557,6 @@ def init_db():
 
                     # 11. 【跟播系统】加速“正在连载”剧集的筛选
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
-
-                    # 12. 【115 目录缓存】加速本地目录树查找
-                    # 加速 "列出某目录下的所有文件"
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_parent_id ON p115_filesystem_cache (parent_id);")
-                    # 加速 "全局搜索某个文件"
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_name ON p115_filesystem_cache (name);")
 
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)

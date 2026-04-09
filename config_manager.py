@@ -103,33 +103,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY: (constants.CONFIG_SECTION_MONITOR, 'int', constants.DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY),
     constants.CONFIG_OPTION_MONITOR_SHA1_PC_SEARCH: (constants.CONFIG_SECTION_MONITOR, 'boolean', True),
 
-    # [115] 
-    constants.CONFIG_OPTION_115_SAVE_PATH_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
-    constants.CONFIG_OPTION_115_SAVE_PATH_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
-    constants.CONFIG_OPTION_115_UNRECOGNIZED_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
-    constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME: (constants.CONFIG_SECTION_115, 'string', "未识别"),
-    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
-    constants.CONFIG_OPTION_115_INTERVAL: (constants.CONFIG_SECTION_115, 'float', 1.0),
-    constants.CONFIG_OPTION_115_MAX_WORKERS: (constants.CONFIG_SECTION_115, 'int', 3),
-    constants.CONFIG_OPTION_115_PLAYBACK_API_PRIORITY: (constants.CONFIG_SECTION_115, 'string', 'openapi'),
-    constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: (constants.CONFIG_SECTION_115, 'boolean', False),
-    constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE: (constants.CONFIG_SECTION_115, 'int', 10),
-    constants.CONFIG_OPTION_115_EXTENSIONS: (constants.CONFIG_SECTION_115, 'list', [
-        'mp4', 'mkv', 'avi', 'ts', 'iso', 'mov', 'm2ts', 
-        'srt', 'ass', 'ssa'
-    ]),
-    constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
-    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "媒体库"),
-    constants.CONFIG_OPTION_LOCAL_STRM_ROOT: (constants.CONFIG_SECTION_115, 'string', "/mnt/media"),
-    constants.CONFIG_OPTION_ETK_SERVER_URL: (constants.CONFIG_SECTION_115, 'string', "http://192.168.1.X:5257"),
-    constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE: (constants.CONFIG_SECTION_115, 'boolean', False),
-    constants.CONFIG_OPTION_115_DOWNLOAD_SUBS: (constants.CONFIG_SECTION_115, 'boolean', True),
-    constants.CONFIG_OPTION_115_LOCAL_CLEANUP: (constants.CONFIG_SECTION_115, 'boolean', False),
-    constants.CONFIG_OPTION_115_MEDIAINFO_CENTER: (constants.CONFIG_SECTION_115, "boolean", False),
-    constants.CONFIG_OPTION_115_APP_ID: (constants.CONFIG_SECTION_115, 'string', ""),
-    constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED: (constants.CONFIG_SECTION_115, "boolean", False),
-    constants.CONFIG_OPTION_115_LIFE_MONITOR_INTERVAL: (constants.CONFIG_SECTION_115, "int", 5),
-
     # [LocalDataSource]
     constants.CONFIG_OPTION_LOCAL_DATA_PATH: (constants.CONFIG_SECTION_LOCAL_DATA, 'string', ""),
 

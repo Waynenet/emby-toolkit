@@ -589,8 +589,6 @@ def _handle_incoming_message(message: dict):
             if cmd == expected_cmd:
                 _execute_task_from_tg(chat_id, key)
                 return
-
-    # 已移除 115/磁力/ED2K 链接自动处理逻辑
     return
 
 def _setup_bot_commands(bot_token: str):
