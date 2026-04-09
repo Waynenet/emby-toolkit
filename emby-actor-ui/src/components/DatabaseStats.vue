@@ -38,7 +38,7 @@
                 <div class="section-title">媒体库概览</div>
                 <n-grid :cols="2" :x-gap="24" style="margin-top: 12px; align-items: center;">
                   <n-gi>
-                    <v-chart class="chart" :option="resolutionChartOptions" autoresize style="height: 140px;" />
+                    <v-chart class="chart" :option="resolutionChartOptions" autoresize style="height: 180px;" />
                   </n-gi>
                   <n-gi>
                     <n-space vertical justify="center" style="height: 100%;">
