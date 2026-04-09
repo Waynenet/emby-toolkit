@@ -1,5 +1,5 @@
 # routes/system.py
-
+import os
 from flask import Blueprint, jsonify, request, Response, stream_with_context
 import logging
 import json
@@ -13,12 +13,13 @@ import config_manager
 import handler.emby as emby
 # 导入共享模块
 import extensions
-from extensions import admin_required, task_lock_required
+from extensions import admin_required, task_lock_required, processor_ready_required
 from tasks.system_update import _update_process_generator
 import constants
 import utils
 from database import settings_db
 import handler.github as github
+
 # 1. 创建蓝图
 system_bp = Blueprint('system', __name__, url_prefix='/api')
 logger = logging.getLogger(__name__)
@@ -71,6 +72,53 @@ def api_get_config():
     except Exception as e:
         logger.error(f"API /api/config (GET) 获取配置时发生错误: {e}", exc_info=True)
         return jsonify({"error": "获取配置信息时发生服务器内部错误"}), 500
+
+# --- 本地目录浏览器 ---
+@system_bp.route('/system/directories', methods=['GET'])
+@processor_ready_required
+def get_system_directories():
+    """
+    获取本地文件系统目录结构 (供前端路径选择器使用)。
+    原位于 /api/p115/system/directories，现迁移至此。
+    """
+    target_path = request.args.get('path', '/')
+    
+    # 防止路径不存在导致报错，回退到根目录
+    if not target_path or not os.path.exists(target_path):
+        target_path = '/'
+        
+    try:
+        items = []
+        # 添加返回上一级目录的选项
+        if target_path != '/':
+            parent_dir = os.path.dirname(target_path)
+            items.append({
+                "name": "..",
+                "path": parent_dir,
+                "is_parent": True
+            })
+            
+        # 遍历当前目录
+        for entry in os.scandir(target_path):
+            if entry.is_dir():
+                items.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "is_parent": False
+                })
+                
+        # 按名称排序，确保 ".." 在最前面
+        items.sort(key=lambda x: (not x['is_parent'], x['name'].lower()))
+        
+        return jsonify({
+            "code": 200,
+            "current_path": target_path,
+            "data": items
+        })
+    except PermissionError:
+        return jsonify({"code": 403, "message": "没有权限访问该目录"}), 403
+    except Exception as e:
+        return jsonify({"code": 500, "message": str(e)}), 500
 
 # --- AI 测试 ---
 @system_bp.route('/ai/test', methods=['POST'])
