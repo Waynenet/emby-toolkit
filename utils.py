@@ -655,3 +655,54 @@ def get_pinyin_initials(text: str) -> str:
         return result if result else text
     except Exception:
         return text
+    
+def is_spam_title(title: str) -> bool:
+    """
+    检测标题是否包含卖片、博彩等恶意广告信息。
+    """
+    if not title:
+        return False
+    
+    # 1. 恶意关键词黑名单 (可根据需要自行添加)
+    spam_keywords = [
+        '看黄', '片网', '色网', '澳门', '赌场', '真人发牌', 
+        '加微', '微信', '网址', '在线观看', '免费看', 'AV'
+    ]
+    for kw in spam_keywords:
+        if kw in title:
+            return True
+            
+    # 2. 正则匹配：检测是否包含域名后缀 (如 .com, .net, .xyz 等) 或连续的长串数字(QQ号)
+    # 匹配类似 4488469.com 或 www.xxx.vip
+    if re.search(r'[a-zA-Z0-9-]+\.(com|net|org|xyz|cc|tv|vip|top|me)\b', title, re.IGNORECASE):
+        return True
+        
+    # 匹配连续6位以上的数字 (正常电影名很少有连续6位数字，年份最多4位)
+    if re.search(r'\d{6,}', title):
+        return True
+        
+    return False
+
+def clean_invisible_chars(text: str) -> str:
+    """
+    终极字符串清洗：去除所有不可见的零宽字符、特殊排版符号，并将特殊空格转换为普通空格。
+    """
+    if not text:
+        return ""
+    
+    # 1. 替换特殊空格为普通空格
+    # \xa0: 不换行空格 (NBSP)
+    # \u3000: 全角空格 (中文输入法下的空格)
+    text = text.replace('\xa0', ' ').replace('\u3000', ' ')
+    
+    # 2. 使用正则剔除所有“零宽字符”和“排版控制字符”
+    # \u200b-\u200f: 零宽空格、零宽连字、从左至右标记等
+    # \u202a-\u202e: 文本方向控制符
+    # \u2060-\u206f: 词语连接符等不可见数学符号
+    # \ufeff: 字节顺序标记 (BOM)
+    text = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]', '', text)
+    
+    # 3. 将连续的多个空格压缩为一个，并去除首尾空格
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()

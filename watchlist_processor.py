@@ -355,21 +355,32 @@ class WatchlistProcessor:
                                     'overview': season_info.get('overview')
                                 }
 
-                                # 2. 提交订阅请求 (只做这一件事)
-                                request_db.set_media_status_pending_release(
-                                    tmdb_ids=season_tmdb_id,
-                                    item_type='Season',
-                                    source={"type": "watchlist", "reason": "revived_season", "item_id": tmdb_id},
-                                    media_info_list=[media_info]
-                                )
+                                # ★★★ 修改点：定义专属的 source type，并区分开播状态 ★★★
+                                source_data = {"type": "revived_season", "reason": "watchlist_revival", "item_id": tmdb_id}
 
+                                if days_diff <= 0:
+                                    # 已开播：直接设为 WANTED (想看/立即订阅)
+                                    request_db.set_media_status_wanted(
+                                        tmdb_ids=season_tmdb_id,
+                                        item_type='Season',
+                                        source=source_data,
+                                        media_info_list=[media_info]
+                                    )
+                                else:
+                                    # 未开播：设为 PENDING_RELEASE (待上映)
+                                    request_db.set_media_status_pending_release(
+                                        tmdb_ids=season_tmdb_id,
+                                        item_type='Season',
+                                        source=source_data,
+                                        media_info_list=[media_info]
+                                    )
                                 
                                 # 仅更新 TMDb 状态元数据，保持数据新鲜度 (可选，不影响逻辑)
                                 self._update_watchlist_entry(tmdb_id, series_name, {
                                     "watchlist_tmdb_status": "Returning Series"
                                 })
 
-                                logger.info(f"  ➜ 已为《{series_name}》S{new_season_num} 提交订阅请求。")
+                                logger.info(f"  ➜ 已为《{series_name}》S{new_season_num} 提交订阅请求 (状态: {'WANTED' if days_diff <= 0 else 'PENDING_RELEASE'})。")
                                 break 
                         except ValueError: pass
                 
@@ -1726,8 +1737,11 @@ class WatchlistProcessor:
                 # 判断是否发生了关键的状态流转
                 status_changed_to_watching = (old_status in [None, 'NONE'] and final_status in ['Watching', 'Paused', 'Pending'])
                 status_changed_to_completed = (old_status in ['Watching', 'Paused', 'Pending'] and final_status == 'Completed')
+                
+                # 新季复活流转 (完结 -> 追剧/待定/暂停)
+                status_revived = (old_status == 'Completed' and final_status in ['Watching', 'Paused', 'Pending'])
 
-                if status_changed_to_watching or status_changed_to_completed:
+                if status_changed_to_watching or status_changed_to_completed or status_revived:
                     logger.info(f"  ➜ [智能追剧] 检测到状态流转 ({old_status} -> {final_status})，准备重新评估 115 目录分类...")
                     
                     target_seasons_for_move = set(active_seasons)
