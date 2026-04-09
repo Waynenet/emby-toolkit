@@ -263,31 +263,12 @@
   <!-- ================================================================================== -->
   <n-layout v-else content-style="padding: 12px; background-color: transparent;">
     <div class="mobile-container">
-      <!-- 1. 核心数据概览 (改为3列) -->
-      <n-grid :cols="3" :x-gap="8" :y-gap="8">
+      <!-- 1. 核心数据概览 -->
+      <n-grid :cols="2" :x-gap="8" :y-gap="8">
         <n-gi>
           <n-card size="small" :bordered="false" class="mobile-stat-card">
             <n-statistic label="已缓存媒体">
               <span class="mobile-stat-value">{{ stats.media_library.cached_total }}</span>
-            </n-statistic>
-          </n-card>
-        </n-gi>
-        <n-gi>
-          <n-card size="small" :bordered="false" class="mobile-stat-card">
-            <n-statistic label="已备份信息">
-              <div style="display: flex; align-items: center; gap: 4px;">
-                <span class="mobile-stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
-                <n-tag 
-                  v-if="stats.media_library.mediainfo_hits_total > 0" 
-                  type="success" 
-                  size="small" 
-                  round 
-                  :bordered="false" 
-                  style="font-size: 10px; height: 16px; padding: 0 4px;"
-                >
-                  命中 {{ stats.media_library.mediainfo_hits_total }}
-                </n-tag>
-              </div>
             </n-statistic>
           </n-card>
         </n-gi>
