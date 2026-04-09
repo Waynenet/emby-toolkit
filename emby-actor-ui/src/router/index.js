@@ -7,6 +7,7 @@ import { useAuthStore } from '../stores/auth';
 import DatabaseStats from '../components/DatabaseStats.vue';
 import ReviewList from '../components/ReviewList.vue';
 import SchedulerSettingsPage from '../components/settings/SchedulerSettingsPage.vue';
+import GeneralSettingsPage from '../components/settings/GeneralSettingsPage.vue';
 import WatchlistPage from '../components/WatchlistPage.vue';
 import TmdbCollectionsPage from '../components/TmdbCollectionsPage.vue';
 import ActorSubscriptionPage from '../components/ActorSubscriptionPage.vue';
@@ -70,6 +71,12 @@ const routes = [
     path: '/settings/scheduler',
     name: 'settings-scheduler',
     component: SchedulerSettingsPage,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/settings/general',
+    name: 'settings-general',
+    component: GeneralSettingsPage,
     meta: { requiresAuth: true },
   },
   {
