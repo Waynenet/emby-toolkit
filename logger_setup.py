@@ -23,7 +23,7 @@ logging.Logger.trace = trace
 # ★★★ 新增部分结束 ★★★
 
 # --- 前端队列和 Handler ---
-frontend_log_queue = deque(maxlen=100)
+frontend_log_queue = deque(maxlen=1000)
 
 class FrontendQueueHandler(logging.Handler):
     def __init__(self, *args, **kwargs):
@@ -34,7 +34,7 @@ class FrontendQueueHandler(logging.Handler):
             log_entry = self.format(record)
             # ★★★ 新增部分 2: 确保 TRACE 级别的日志不会进入前端 ★★★
             # 前端只应显示 INFO 及以上级别，所以这里加一个判断
-            if record.levelno >= logging.INFO:
+            if record.levelno >= TRACE_LEVE:
                 frontend_log_queue.append(log_entry)
         except Exception:
             self.handleError(record)
@@ -82,7 +82,7 @@ logger.addHandler(stream_handler)
 # 2. 前端队列 Handler
 try:
     frontend_handler = FrontendQueueHandler()
-    frontend_handler.setLevel(logging.INFO)
+    frontend_handler.setLevel(TRACE_LEVE)
     frontend_formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
     frontend_handler.setFormatter(frontend_formatter)
     logger.addHandler(frontend_handler)
