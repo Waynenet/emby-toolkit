@@ -730,18 +730,6 @@
                         </n-space>
                       </n-checkbox-group>
                     </n-form-item-grid-item>
-
-                    <!-- ★ 修改点：移除原有的表单，换成呼出模态框的按钮 -->
-                    <n-divider title-placement="left" style="margin-top: 15px;">频道订阅监听 (Pro)</n-divider>
-                    <n-alert type="warning" :show-icon="true" style="margin-bottom: 12px;">
-                      自动监听频道消息，根据订阅选择性转存资源。为防止冲突，此功能已独立配置。
-                    </n-alert>
-                    
-                    <n-button block type="primary" secondary @click="tgMonitorModalRef?.open()">
-                      <template #icon><n-icon :component="ListIcon" /></template>
-                      配置频道订阅监听
-                    </n-button>
-
                   </n-card>
                 </n-gi>
 
