@@ -838,7 +838,7 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
                     target_id = items[0].get("Id")
                     target_name = items[0].get("Name", current_path)
                     
-                    #logger.info(f"  ➜ [定点扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
+                    #logger.info(f"  ➜ [精准扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
                     
                     # 对这个特定的父目录触发刷新
                     refresh_url = f"{base_url.rstrip('/')}/Items/{target_id}/Refresh"
@@ -851,7 +851,7 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
                         "ReplaceAllMetadata": "false"
                     }
                     emby_client.post(refresh_url, params=refresh_params)
-                    logger.info(f"  ➜ [定点扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
+                    logger.info(f"  ➜ [精准扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
                     return True
         except Exception as e:
             pass # 忽略查询错误，继续向上找
@@ -859,7 +859,7 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
         # 向上退一级 (例如从 /strm/电影/超级英雄/奇异博士 退到 /strm/电影/超级英雄)
         current_path = os.path.dirname(current_path)
         
-    logger.warning(f"  ➜ [定点扫描] 未能在 Emby 中找到 {target_dir} 的有效父目录，将等待 90 秒后自动扫描。")
+    logger.warning(f"  ➜ [精准扫描] 未能在 Emby 中找到 {target_dir} 的有效父目录，将等待 90 秒后自动扫描。")
     return False
 
 # --- 极速轻量级文件变更通知 ---
@@ -1850,6 +1850,52 @@ def delete_item(item_id: str, emby_server_url: str, emby_api_key: str, user_id: 
     except Exception as e:
         logger.error(f"  ➜ 使用临时令牌删除 Emby 媒体项 ID: {item_id} 时发生未知错误: {e}")
         return False    
+    
+# --- 删除媒体项神医接口 (带自动回退) ---    
+def delete_item_sy(item_id: str, emby_server_url: str, emby_api_key: str, user_id: str) -> bool:
+    """
+    删除媒体项神医接口
+    逻辑：优先尝试神医专用接口 /DeleteVersion，如果失败（如未安装插件或报错），
+    则自动降级调用官方接口 /Delete 进行重试。
+    """
+    wait_for_server_idle(emby_server_url, emby_api_key)
+    logger.warning(f"  ➜ 检测到删除请求，优先尝试使用 [神医Pro接口] 执行...")
+
+    # 1. 登录获取临时令牌
+    access_token, logged_in_user_id = get_admin_access_token()
+    
+    if not access_token:
+        logger.error("  ➜ 无法获取临时 AccessToken，删除操作中止。请检查管理员账号密码是否正确。")
+        return False
+
+    # 2. 使用临时令牌执行删除
+    # 使用神医Pro专用的 POST /Items/{Id}/DeleteVersion 接口
+    api_url = f"{emby_server_url.rstrip('/')}/Items/{item_id}/DeleteVersion"
+    
+    headers = {
+        'X-Emby-Token': access_token  # ★ 使用临时的 AccessToken
+    }
+    
+    params = {
+        'UserId': logged_in_user_id # ★ 使用登录后返回的 UserId
+    }
+    
+    try:
+        response = emby_client.post(api_url, headers=headers, params=params)
+        response.raise_for_status()
+        logger.info(f"  ➜ [神医接口] 成功删除 Emby 媒体项 ID: {item_id}。")
+        return True
+    except Exception as e:
+        # 区分一下错误类型，方便排查，但处理逻辑是一样的：都去试官方接口
+        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 404:
+            logger.warning(f"  ➜ [神医接口] 调用失败 (404): 服务端未安装神医Pro插件或接口不匹配。")
+        else:
+            logger.warning(f"  ➜ [神医接口] 调用异常: {e}")
+            
+        logger.info(f"  ➜ 正在自动切换至 [官方接口] 重试删除 ID: {item_id} ...")
+        
+        # ★★★ 核心修改：失败后直接调用官方接口函数 ★★★
+        return delete_item(item_id, emby_server_url, emby_api_key, user_id)
 
 # --- 清理幽灵演员 ---
 def delete_person_custom_api(base_url: str, api_key: str, person_id: str) -> bool:
