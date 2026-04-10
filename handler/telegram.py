@@ -74,6 +74,17 @@ def escape_markdown(text: str) -> str:
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
+def _format_ticks_to_time(ticks: int) -> str:
+    """辅助函数：将 Emby 的 Ticks (1 tick = 100 ns) 转换为 HH:MM:SS 或 MM:SS 格式"""
+    if not ticks or ticks <= 0:
+        return "00:00"
+    seconds = int(ticks / 10000000)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
 # --- 通用的 Telegram 文本消息发送函数 ---
 def send_telegram_message(chat_id: str, text: str, disable_notification: bool = False, reply_markup: dict = None):
     """通用的 Telegram 文本消息发送函数，支持内联键盘。"""
@@ -284,26 +295,54 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         logger.error(f"  ➜ 发送媒体通知时发生严重错误: {e}", exc_info=True)
 
 def send_playback_notification(data: dict):
-    """发送图文并茂的播放状态通知 (附带剧集或电影海报，注入灵魂版)"""
+    """发送图文并茂的播放状态通知 (增强版：带进度、集数、IP)"""
     try:
         event_type = data.get("Event")
         user_name = data.get("User", {}).get("Name", "未知用户")
-        device_name = data.get("Session", {}).get("DeviceName", "未知设备")
-        client_name = data.get("Session", {}).get("Client", "未知客户端")
+        
+        # 提取会话与客户端信息
+        session_info = data.get("Session", {})
+        device_name = session_info.get("DeviceName", "未知设备")
+        client_name = session_info.get("Client", "未知客户端")
+        ip_address = session_info.get("RemoteEndPoint", "未知 IP")
         
         item = data.get("Item", {})
         original_item_name = item.get("Name", "未知项目")
         original_item_type = item.get("Type", "Unknown")
         item_id = item.get("Id")
         
+        # --- 提取 SxxExx 季集号 ---
+        sxe_string = ""
+        if original_item_type == "Episode":
+            season_num = item.get("ParentIndexNumber")
+            episode_num = item.get("IndexNumber")
+            if season_num is not None and episode_num is not None:
+                sxe_string = f" S{int(season_num):02d}E{int(episode_num):02d}"
+
+        # 格式化标题：剧名 S01E01 - 分集名
+        display_item_name = original_item_name
+        if original_item_type == "Episode" and item.get("SeriesName"):
+            display_item_name = f"{item.get('SeriesName')}{sxe_string} - {original_item_name}"
+            
+        # --- 提取播放进度 ---
+        progress_text = ""
+        playback_info = data.get("PlaybackInfo", {})
+        if playback_info:
+            position_ticks = playback_info.get("PositionTicks", 0)
+            runtime_ticks = item.get("RunTimeTicks", 0)
+            
+            if runtime_ticks > 0:
+                pos_str = _format_ticks_to_time(position_ticks)
+                total_str = _format_ticks_to_time(runtime_ticks)
+                percentage = (position_ticks / runtime_ticks) * 100
+                # 限制百分比不超过 100
+                percentage = min(percentage, 100.0)
+                progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)`\n"
+        
         # 优先从 Emby Webhook 数据中提取剧情
         raw_overview = item.get("Overview", "")
         
-        display_item_name = original_item_name
-        if original_item_type == "Episode" and item.get("SeriesName"):
-            display_item_name = f"{item.get('SeriesName')} - {original_item_name}"
-            
-        # --- 本地数据库提取图片和剧情兜底 (极速，无网络请求依赖) ---
+        # --- 本地数据库提取图片和剧情兜底 ---
         photo_url = None
         if item_id:
             db_info = media_db.get_notification_media_info_by_emby_id(item_id)
@@ -315,7 +354,7 @@ def send_playback_notification(data: dict):
                 if path:
                     photo_url = f"https://image.tmdb.org/t/p/w780{path}"
                 
-                # ★ 新增：如果 Emby 没传剧情，从本地数据库兜底获取
+                # 如果 Emby 没传剧情，从本地数据库兜底获取
                 if not raw_overview:
                     raw_overview = db_info.get('overview', '')
         
@@ -334,12 +373,14 @@ def send_playback_notification(data: dict):
         action_str = action_map.get(event_type, "🎬 播放状态改变")
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # ★ 修改：将剧情变量追加到卡片末尾
+        # ★ 最终组装 Caption (包含进度、IP、客户端等增强信息)
         caption = (
             f"{action_str}\n\n"
             f"👤 *用户*: `{escape_markdown(user_name)}`\n"
             f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
+            f"{progress_text}"
             f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
+            f"🌐 *IP地址*: `{escape_markdown(ip_address)}`\n"
             f"🕒 *时间*: `{escape_markdown(current_time)}`"
             f"{overview_text}" 
         )
@@ -359,7 +400,7 @@ def send_playback_notification(data: dict):
             logger.debug("  ➜ [播放通知] 未配置接收人 (频道或管理员均为空)，跳过发送。")
             return
 
-        # --- 遍历发送 (移除所有静音参数，让通知发出清脆的叮咚声！) ---
+        # --- 遍历发送 ---
         for target in targets:
             if photo_url:
                 send_telegram_photo(target, photo_url, caption)
@@ -367,7 +408,7 @@ def send_playback_notification(data: dict):
                 send_telegram_message(target, caption)
                 
     except Exception as e:
-        logger.error(f"  ➜ 组装/发送播放图文通知时发生异常: {e}")
+        logger.error(f"  ➜ 组装/发送播放图文通知时发生异常: {e}", exc_info=True)
 
 # ======================================================================
 # ★★★ Telegram 机器人交互监听 (长轮询) ★★★
