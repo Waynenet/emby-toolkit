@@ -86,50 +86,56 @@ def _format_ticks_to_time(ticks: int) -> str:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
-def _get_ip_location(ip_with_port: str) -> str:
-    """辅助函数：请求外部接口获取 IP 的地理位置"""
-    if not ip_with_port or ip_with_port == "未知 IP":
+def _get_ip_location(clean_ip: str) -> str:
+    """请求外部接口获取纯净 IP 的物理地理位置 (国内精准版)"""
+    if not clean_ip:
         return ""
 
-    # 尝试剥离端口号 (兼容 IPv4: 1.1.1.1:1234, 和 IPv6: [2001::1]:1234)
-    ip = ip_with_port
-    if ']' in ip: 
-        ip = ip.split(']')[0].replace('[', '')
-    elif ':' in ip and ip.count(':') == 1: 
-        ip = ip.split(':')[0]
-        
     try:
-        # 检查是否为局域网/回环 IP
-        ip_obj = ipaddress.ip_address(ip)
+        # 优先判断是否为内网 IP，节省 API 请求
+        ip_obj = ipaddress.ip_address(clean_ip)
         if ip_obj.is_private or ip_obj.is_loopback:
-            return "内网 / 局域网"
+            return "本地局域网"
     except ValueError:
-        pass # 格式不合法则继续往下走尝试查询
+        pass 
 
+    # 1. 优先使用国内最准的“太平洋网络”接口
     try:
-        # 请求免费的 IP 查询接口 (自带中文支持)
-        url = f"http://ip-api.com/json/{ip}?lang=zh-CN"
+        url_pc = f"https://whois.pconline.com.cn/ipJson.jsp?ip={clean_ip}&json=true"
+        # 注意：查国内接口最好不走代理，所以这里直接 requests.get
+        response_pc = requests.get(url_pc, timeout=3)
+        if response_pc.status_code == 200:
+            # 太平洋网络返回的是 GBK 编码，必须手动指定否则中文会乱码
+            response_pc.encoding = 'GBK'
+            data_pc = response_pc.json()
+            addr = data_pc.get('addr', '').strip()
+            if addr:
+                return addr
+    except Exception as e:
+        logger.debug(f"  ➜ 太平洋网络 IP 查询失败，准备降级兜底: {e}")
+
+    # 2. 如果太平洋网络挂了，降级使用 ip-api 作为兜底 (对海外IP也有效)
+    try:
+        url_api = f"http://ip-api.com/json/{clean_ip}?lang=zh-CN"
         proxies = get_proxies_for_requests()
-        # 设定较短的超时时间，防止卡死
-        response = requests.get(url, timeout=3, proxies=proxies)
+        response_api = requests.get(url_api, timeout=3, proxies=proxies)
         
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('status') == 'success':
-                country = data.get('country', '')
-                region = data.get('regionName', '')
-                city = data.get('city', '')
+        if response_api.status_code == 200:
+            data_api = response_api.json()
+            if data_api.get('status') == 'success':
+                country = data_api.get('country', '')
+                region = data_api.get('regionName', '')
+                city = data_api.get('city', '')
                 
-                # 组装并去重 (例如有些直辖市省市同名: "中国 上海 上海" 变为 "中国 上海")
+                # 组装并去重 (例如 "中国 上海 上海" 变为 "中国 上海")
                 parts = []
                 for loc in [country, region, city]:
                     if loc and loc not in parts:
                         parts.append(loc)
-                        
                 if parts:
                     return " ".join(parts)
     except Exception as e:
-        logger.debug(f"  ➜ 获取 IP 归属地失败 ({ip}): {e}")
+        logger.debug(f"  ➜ 备用 IP 归属地查询也失败了 ({clean_ip}): {e}")
         
     return ""
 
