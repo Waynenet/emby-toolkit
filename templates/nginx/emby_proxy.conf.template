@@ -37,7 +37,7 @@ server {
     # ====================================================================
 
     # --- 以下是虚拟库路由规则 ---
-    location /api/p115 {
+    location /api/system {
         proxy_pass http://virtual_library_proxy;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
