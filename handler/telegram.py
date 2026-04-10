@@ -4,6 +4,7 @@ import threading
 import extensions
 import requests
 import logging
+import ipaddress
 from datetime import datetime
 from config_manager import APP_CONFIG, get_proxies_for_requests
 from database import media_db
@@ -84,6 +85,53 @@ def _format_ticks_to_time(ticks: int) -> str:
     if h > 0:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+def _get_ip_location(ip_with_port: str) -> str:
+    """辅助函数：请求外部接口获取 IP 的地理位置"""
+    if not ip_with_port or ip_with_port == "未知 IP":
+        return ""
+
+    # 尝试剥离端口号 (兼容 IPv4: 1.1.1.1:1234, 和 IPv6: [2001::1]:1234)
+    ip = ip_with_port
+    if ']' in ip: 
+        ip = ip.split(']')[0].replace('[', '')
+    elif ':' in ip and ip.count(':') == 1: 
+        ip = ip.split(':')[0]
+        
+    try:
+        # 检查是否为局域网/回环 IP
+        ip_obj = ipaddress.ip_address(ip)
+        if ip_obj.is_private or ip_obj.is_loopback:
+            return "内网 / 局域网"
+    except ValueError:
+        pass # 格式不合法则继续往下走尝试查询
+
+    try:
+        # 请求免费的 IP 查询接口 (自带中文支持)
+        url = f"http://ip-api.com/json/{ip}?lang=zh-CN"
+        proxies = get_proxies_for_requests()
+        # 设定较短的超时时间，防止卡死
+        response = requests.get(url, timeout=3, proxies=proxies)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'success':
+                country = data.get('country', '')
+                region = data.get('regionName', '')
+                city = data.get('city', '')
+                
+                # 组装并去重 (例如有些直辖市省市同名: "中国 上海 上海" 变为 "中国 上海")
+                parts = []
+                for loc in [country, region, city]:
+                    if loc and loc not in parts:
+                        parts.append(loc)
+                        
+                if parts:
+                    return " ".join(parts)
+    except Exception as e:
+        logger.debug(f"  ➜ 获取 IP 归属地失败 ({ip}): {e}")
+        
+    return ""
 
 # --- 通用的 Telegram 文本消息发送函数 ---
 def send_telegram_message(chat_id: str, text: str, disable_notification: bool = False, reply_markup: dict = None):
@@ -189,17 +237,15 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             api_key = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY)
             user_id = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID)
 
-            # ★★★ 修改开始：收集原始数据而不是直接格式化字符串 ★★★
+            # 收集原始数据而不是直接格式化字符串
             raw_episodes = [] 
             for ep_id in new_episode_ids:
                 detail = get_emby_item_details(ep_id, emby_url, api_key, user_id, fields="IndexNumber,ParentIndexNumber")
                 if detail:
                     season_num = detail.get("ParentIndexNumber", 0)
                     episode_num = detail.get("IndexNumber", 0)
-                    # 收集元组 (季号, 集号)
                     raw_episodes.append((season_num, episode_num))
             
-            # 调用辅助函数生成合并后的字符串
             if raw_episodes:
                 formatted_episodes = _format_episode_ranges(raw_episodes)
                 episode_info_text = f"🎞️ *集数*: `{formatted_episodes}`\n"
@@ -209,7 +255,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         try:
             db_info = media_db.get_notification_media_info_by_emby_id(item_id)
             if db_info:
-                # 优先横幅，其次竖图，如果是分集没图，找它爹(剧集)要横幅
                 path = db_info.get('backdrop_path') or db_info.get('poster_path')
                 if not path and db_info.get('item_type') == 'Episode':
                     path = db_info.get('parent_backdrop_path') or db_info.get('parent_poster_path')
@@ -227,7 +272,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         media_icon = "🎬" if item_type == "Movie" else "📺"
         
-        # 使用转义后的变量来构建消息，同时保留我们自己的格式化符号
         caption = (
             f"{media_icon} *{escaped_title}* {notification_title}\n\n"
             f"{episode_info_text}"
@@ -248,9 +292,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         notify_types = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
         
-        # ★ 严格判定：只有勾选了“入库通知”，才允许向频道和管理员发送非订阅类的公播消息
         if 'library_new' in notify_types:
-            # A. 发送给频道
             if global_channel_id:
                 logger.info(f"  ➜ 正在向全局频道 {global_channel_id} 发送通知...")
                 if photo_url:
@@ -258,12 +300,10 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                 else:
                     send_telegram_message(global_channel_id, caption)
 
-            # B. 发送给管理员
             all_admin_chat_ids = set(user_db.get_admin_telegram_chat_ids())
             if all_admin_chat_ids:
                 subscriber_id_set = {str(sid) for sid in subscriber_chat_ids}
                 for admin_chat_id in all_admin_chat_ids:
-                    # 去重：不发给频道，也不发给已经是订阅者的管理员
                     if str(admin_chat_id) == str(global_channel_id) or str(admin_chat_id) in subscriber_id_set:
                         continue
                     
@@ -295,7 +335,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         logger.error(f"  ➜ 发送媒体通知时发生严重错误: {e}", exc_info=True)
 
 def send_playback_notification(data: dict):
-    """发送图文并茂的播放状态通知 (增强版：带进度、集数、IP)"""
+    """发送图文并茂的播放状态通知 (增强版：带进度、集数、IP、归属地)"""
     try:
         event_type = data.get("Event")
         user_name = data.get("User", {}).get("Name", "未知用户")
@@ -304,7 +344,7 @@ def send_playback_notification(data: dict):
         session_info = data.get("Session", {})
         device_name = session_info.get("DeviceName", "未知设备")
         client_name = session_info.get("Client", "未知客户端")
-        ip_address = session_info.get("RemoteEndPoint", "未知 IP")
+        ip_address_raw = session_info.get("RemoteEndPoint", "未知 IP")
         
         item = data.get("Item", {})
         original_item_name = item.get("Name", "未知项目")
@@ -335,10 +375,17 @@ def send_playback_notification(data: dict):
                 pos_str = _format_ticks_to_time(position_ticks)
                 total_str = _format_ticks_to_time(runtime_ticks)
                 percentage = (position_ticks / runtime_ticks) * 100
-                # 限制百分比不超过 100
-                percentage = min(percentage, 100.0)
+                percentage = min(percentage, 100.0) # 限制不超过100%
                 progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)`\n"
         
+        # --- 获取 IP 地理位置 ---
+        ip_location = _get_ip_location(ip_address_raw)
+        
+        # 组装最终展示的 IP (等宽显示 IP，非等宽显示位置信息并带个图钉图标)
+        display_ip = f"`{escape_markdown(ip_address_raw)}`"
+        if ip_location:
+            display_ip += f" 📍 {escape_markdown(ip_location)}"
+
         # 优先从 Emby Webhook 数据中提取剧情
         raw_overview = item.get("Overview", "")
         
@@ -347,18 +394,16 @@ def send_playback_notification(data: dict):
         if item_id:
             db_info = media_db.get_notification_media_info_by_emby_id(item_id)
             if db_info:
-                # 优先横幅，如果没有再用竖图。如果是分集没图，自动用父剧集的横幅图
                 path = db_info.get('backdrop_path') or db_info.get('poster_path')
                 if not path and db_info.get('item_type') == 'Episode':
                     path = db_info.get('parent_backdrop_path') or db_info.get('parent_poster_path')
                 if path:
                     photo_url = f"https://image.tmdb.org/t/p/w780{path}"
                 
-                # 如果 Emby 没传剧情，从本地数据库兜底获取
                 if not raw_overview:
                     raw_overview = db_info.get('overview', '')
         
-        # 格式化剧情文本 (限制长度防刷屏)
+        # 格式化剧情文本 (限制长度)
         overview_text = ""
         if raw_overview:
             if len(raw_overview) > 150:
@@ -373,19 +418,19 @@ def send_playback_notification(data: dict):
         action_str = action_map.get(event_type, "🎬 播放状态改变")
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # ★ 最终组装 Caption (包含进度、IP、客户端等增强信息)
+        # ★ 最终组装 Caption
         caption = (
             f"{action_str}\n\n"
             f"👤 *用户*: `{escape_markdown(user_name)}`\n"
             f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
             f"{progress_text}"
             f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
-            f"🌐 *IP地址*: `{escape_markdown(ip_address)}`\n"
+            f"🌐 *地址*: {display_ip}\n"
             f"🕒 *时间*: `{escape_markdown(current_time)}`"
             f"{overview_text}" 
         )
         
-        # --- 收集发送目标 (频道 + 所有管理员) ---
+        # --- 收集发送目标 ---
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
 
@@ -400,7 +445,6 @@ def send_playback_notification(data: dict):
             logger.debug("  ➜ [播放通知] 未配置接收人 (频道或管理员均为空)，跳过发送。")
             return
 
-        # --- 遍历发送 ---
         for target in targets:
             if photo_url:
                 send_telegram_photo(target, photo_url, caption)
@@ -545,16 +589,11 @@ def _setup_bot_commands(bot_token: str):
     from tasks.core import get_task_registry
     registry = get_task_registry(context='all')
 
-    # ==========================================
-    # ★★★ 修改：使用常量读取 TG 菜单任务列表 ★★★
-    # ==========================================
-    # 从 APP_CONFIG 中获取前端保存的配置，如果没有则使用 constants 中的默认值
     allowed_tasks = APP_CONFIG.get(
         constants.CONFIG_OPTION_TELEGRAM_MENU_TASKS, 
         constants.DEFAULT_TELEGRAM_MENU_TASKS
     )
     
-    # 如果前端传过来的是空列表（用户清空了菜单），为了防止菜单为空报错，回退到默认值
     if not allowed_tasks:
         allowed_tasks = constants.DEFAULT_TELEGRAM_MENU_TASKS
 
@@ -562,11 +601,9 @@ def _setup_bot_commands(bot_token: str):
     for key in allowed_tasks:
         if key in registry:
             desc = registry[key][1]
-            # Telegram 命令只允许小写字母、数字和下划线，所以把横杠替换为下划线
             cmd_name = key.replace('-', '_').lower()
             commands.append({"command": cmd_name, "description": f"🚀 {desc}"})
 
-    # 在菜单最下方追加“查看所有任务”的备选命令
     commands.append({"command": "all_tasks", "description": "📋 查看所有可用任务"})
 
     api_url = f"https://api.telegram.org/bot{bot_token}/setMyCommands"
@@ -590,10 +627,7 @@ def _telegram_polling_worker():
         logger.info("  ➜ 未配置 Telegram Bot Token，交互功能未启动。")
         return
 
-    # ==========================================
-    # ★★★ 新增：启动时自动向 TG 注册菜单按钮 ★★★
     _setup_bot_commands(bot_token)
-    # ==========================================
 
     api_url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
     offset = None
@@ -602,7 +636,6 @@ def _telegram_polling_worker():
     
     while _tg_polling_active:
         try:
-            # ★★★ 修改：允许接收 message 和 callback_query ★★★
             params = {'timeout': 30, 'allowed_updates': ['message', 'callback_query']}
             if offset:
                 params['offset'] = offset
@@ -616,7 +649,6 @@ def _telegram_polling_worker():
                     for update in data.get('result', []):
                         offset = update['update_id'] + 1
                         
-                        # ★★★ 修改：分发不同类型的更新 ★★★
                         if 'message' in update:
                             _handle_incoming_message(update['message'])
                         elif 'callback_query' in update:
