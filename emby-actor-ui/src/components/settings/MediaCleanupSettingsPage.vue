@@ -111,6 +111,21 @@
                 </div>
                 <n-switch v-model:value="keepOnePerRes" />
               </div>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <div class="setting-title">删除模式</div>
+                  <div class="setting-desc">
+                    <strong>物理删除：</strong>删除本地文件、并通知Emby刷新。<br>
+                    <strong>API 删除：</strong>调用 Emby 接口让服务端自行处理删除。
+                  </div>
+                </div>
+                <n-radio-group v-model:value="deleteMode" size="small">
+                  <n-radio-button value="physical">物理删除</n-radio-button>
+                  <n-radio-button value="api">API 删除</n-radio-button>
+                </n-radio-group>
+              </div>
+
             </n-space>
           </n-card>
         </n-gi>
@@ -187,6 +202,7 @@ const emit = defineEmits(['on-close']);
 const saving = ref(false);
 const showEditModal = ref(false);
 const keepOnePerRes = ref(false);
+const deleteMode = ref('physical');
 const draggableRules = ref([]);
 const fallbackRule = ref(null);
 const currentEditingRule = ref({ priority: [] });
@@ -266,6 +282,7 @@ const fetchSettings = async () => {
 
     let loadedRules = settingsRes.data.rules || [];
     keepOnePerRes.value = settingsRes.data.keep_one_per_res || false;
+    deleteMode.value = settingsRes.data.delete_mode || 'physical';
     
     loadedRules = loadedRules.map(rule => {
         if (rule.id === 'effect' && Array.isArray(rule.priority)) {
@@ -317,6 +334,7 @@ const saveSettings = async () => {
       rules: rulesToSave,
       library_ids: selectedLibraryIds.value,
       keep_one_per_res: keepOnePerRes.value,
+      delete_mode: deleteMode.value
     };
 
     await axios.post('/api/cleanup/settings', payload);
