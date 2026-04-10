@@ -251,7 +251,6 @@ import {
   BookmarksOutline, 
   SettingsOutline,
   ArchiveOutline,
-  BookOutline as HelpIcon,
   MenuOutline, 
   Moon as MoonIcon,
   Sunny as SunnyIcon,
@@ -346,13 +345,6 @@ watch([() => props.taskStatus?.logs, isRealtimeLogVisible], async ([, isVisible]
 const userOptions = computed(() => {
   const options = [];
 
-  // 帮助文档
-  options.push({
-    label: '帮助文档',
-    key: 'help-docs',
-    icon: renderIcon(HelpIcon)
-  });
-
   // 如果有任何管理项，就加一个分割线
   if (options.length > 0) {
     options.push({ type: 'divider', key: 'd1' });
@@ -369,9 +361,7 @@ const userOptions = computed(() => {
 });
 
 const handleUserSelect = async (key) => {
-  if (key === 'help-docs') {
-    window.open('https://hbq0405.github.io/emby-toolkit/zh/', '_blank');
-  } else if (key === 'logout') {
+  if (key === 'logout') {
     await authStore.logout();
     router.push({ name: 'Login' }); 
   }
