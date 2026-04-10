@@ -23,7 +23,6 @@ services:
       - /path/emby-toolkit:/config
       - /path/media:/media
       - /path/tmdb:/tmdb
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - APP_DATA_DIR=/config
       - TZ=Asia/Shanghai
@@ -35,8 +34,6 @@ services:
       - DB_USER=embytoolkit
       - DB_PASSWORD=embytoolkit
       - DB_NAME=embytoolkit
-      - CONTAINER_NAME=emby-toolkit
-      - DOCKER_IMAGE_NAME=hbq0405/emby-toolkit:latest
     restart: unless-stopped
     depends_on:
       db:

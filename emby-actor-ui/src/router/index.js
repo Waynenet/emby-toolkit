@@ -11,7 +11,6 @@ import GeneralSettingsPage from '../components/settings/GeneralSettingsPage.vue'
 import WatchlistPage from '../components/WatchlistPage.vue';
 import TmdbCollectionsPage from '../components/TmdbCollectionsPage.vue';
 import ActorSubscriptionPage from '../components/ActorSubscriptionPage.vue';
-import ReleasesPage from '../components/ReleasesPage.vue';
 import Login from '../components/Login.vue'; 
 import RegisterPage from '../components/RegisterPage.vue';
 import CoverGeneratorConfig from '../components/CoverGeneratorConfig.vue';
@@ -114,12 +113,6 @@ const routes = [
     path: '/actor-subscriptions',
     name: 'ActorSubscriptions',
     component: ActorSubscriptionPage,
-    meta: { requiresAuth: true },
-  },
-  {
-    path: '/releases',
-    name: 'Releases',
-    component: ReleasesPage,
     meta: { requiresAuth: true },
   },
   {

@@ -24,7 +24,6 @@ from .users import task_sync_all_user_data, task_check_expired_users
 from .discover import task_update_daily_theme
 from .resubscribe import task_update_resubscribe_cache, task_resubscribe_library
 from .vector_tasks import task_generate_embeddings
-from .system_update import task_check_and_update_container
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +200,6 @@ def get_task_registry(context: str = 'all'):
         'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', True),
         'scan-monitor-folders': (task_scan_monitor_folders, "扫描监控目录", 'media', True),
         'restore-cache-from-db': (task_restore_local_cache_from_db, "恢复覆盖缓存", 'media', True),
-        'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "扫描全库剧集", 'watchlist', False),

@@ -315,8 +315,7 @@ const DEFAULT_TG_TASKS = [
   'scan-organize-115',
   'populate-metadata',
   'process-watchlist',
-  'scan-cleanup-issues',
-  'system-auto-update'
+  'scan-cleanup-issues'
 ];
 
 // --- Composable Hooks ---

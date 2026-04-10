@@ -55,7 +55,6 @@
           - /path/emby-toolkit:/config                # 将宿主机的数据目录挂载到容器的 /config 目录
           - /path/media:/media                        # 映射Emby媒体目录，用以实时监控，替代Emby刮削。
           - /path/tmdb:/tmdb                          # 映射神医本地TMDB目录，非神医Pro用户可以留空
-          - /var/run/docker.sock:/var/run/docker.sock # 一键更新用，不需要可以不配置
         environment:
           - APP_DATA_DIR=/config                      # 持久化目录
           - TZ=Asia/Shanghai                          # 设置容器时区
@@ -67,8 +66,6 @@
           - DB_USER=embytoolkit                       # !!! (可选) 修改为你自己的数据库用户名
           - DB_PASSWORD=embytoolkit                   # !!! (必填) 请修改为一个强密码 !!!
           - DB_NAME=embytoolkit                       # !!! (可选) 修改为你自己的数据库名
-          - CONTAINER_NAME=emby-toolkit               # 以下两项都是一键更新用，不需要可以不配置
-          - DOCKER_IMAGE_NAME=hbq0405/emby-toolkit:latest
         restart: unless-stopped
         depends_on:                                   # 确保主程序只在数据库健康检查通过后才启动 
           db:
@@ -121,7 +118,7 @@
 ### 环境变量说明
 
 *   **PUID**：用户ID，建议设置为宿主机上拥有媒体文件访问权限的用户ID
-*   **PGID**：组ID，建议设置为宿主机上拥有媒体文件访问权限的组ID，如需一键更新容器需配置成docker组ID。
+*   **PGID**：组ID，建议设置为宿主机上拥有媒体文件访问权限的组ID。
 *   **UMASK**：文件权限掩码，控制新创建文件的权限，建议022表示新文件权限为755(目录)和644(文件)
 *   **APP_DATA_DIR**：应用数据目录，已在镜像中默认设置为`/config`，无需在运行时重复指定
 

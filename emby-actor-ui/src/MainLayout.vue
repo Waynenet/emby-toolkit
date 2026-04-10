@@ -234,12 +234,10 @@ import {
   HeartOutline as WatchlistIcon,
   AlbumsOutline as CollectionsIcon,
   PeopleOutline as ActorSubIcon,
-  InformationCircleOutline as AboutIcon,
   CreateOutline as CustomCollectionsIcon,
   ColorPaletteOutline as PaletteIcon,
   Stop as StopIcon,
   ShuffleOutline as ShuffleIcon,
-  SyncOutline as RestartIcon,
   SparklesOutline as ResubscribeIcon,
   TrashBinOutline as CleanupIcon,
   PeopleCircleOutline as UserManagementIcon,
@@ -348,15 +346,6 @@ watch([() => props.taskStatus?.logs, isRealtimeLogVisible], async ([, isVisible]
 const userOptions = computed(() => {
   const options = [];
 
-  // 规则1: 只要是管理员，就能看到“重启容器”
-  if (authStore.isAdmin) {
-    options.push({
-      label: '重启容器',
-      key: 'restart-container',
-      icon: renderIcon(RestartIcon)
-    });
-  }
-
   // 帮助文档
   options.push({
     label: '帮助文档',
@@ -379,30 +368,8 @@ const userOptions = computed(() => {
   return options;
 });
 
-const triggerRestart = async () => {
-  message.info('正在发送重启指令...');
-  try {
-    await axios.post('/api/system/restart');
-    message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-  } catch (error) {
-    if (error.response) {
-      message.error(error.response.data.error || '发送重启请求失败，请查看日志。');
-    } else {
-      message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-    }
-  }
-};
-
 const handleUserSelect = async (key) => {
-  if (key === 'restart-container') {
-    dialog.warning({
-      title: '确认重启容器',
-      content: '确定要重启容器吗？应用将在短时间内无法访问，重启后需要手动刷新页面。',
-      positiveText: '确定重启',
-      negativeText: '取消',
-      onPositiveClick: triggerRestart, 
-    });
-  } else if (key === 'help-docs') {
+  if (key === 'help-docs') {
     window.open('https://hbq0405.github.io/emby-toolkit/zh/', '_blank');
   } else if (key === 'logout') {
     await authStore.logout();
@@ -481,7 +448,6 @@ const menuOptions = computed(() => {
           { label: '用户管理', key: 'UserManagement', icon: renderIcon(UserManagementIcon) },
           { label: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon) },
           { label: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon) }, 
-          { label: '查看更新', key: 'Releases', icon: renderIcon(AboutIcon) }, 
         ] 
       }
     );

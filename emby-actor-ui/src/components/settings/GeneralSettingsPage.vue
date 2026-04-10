@@ -1318,20 +1318,6 @@ const handleClearTables = async () => {
 };
 const selectAllForClear = () => tablesToClear.value = [...allDbTables.value];
 const deselectAllForClear = () => tablesToClear.value = [];
-const initialRestartableConfig = ref(null);
-const triggerRestart = async () => {
-  message.info('正在发送重启指令...');
-  try {
-    await axios.post('/api/system/restart');
-    message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-  } catch (error) {
-    if (error.response) {
-      message.error(error.response.data.error || '发送重启请求失败，请查看日志。');
-    } else {
-      message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-    }
-  }
-};
 
 // --- 本地目录浏览器状态 ---
 const showLocalFolderModal = ref(false)
@@ -1427,36 +1413,11 @@ const save = async () => {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
     }
-    const restartNeeded = initialRestartableConfig.value && (cleanConfigPayload.proxy_port !== initialRestartableConfig.value.proxy_port || cleanConfigPayload.log_rotation_size_mb !== initialRestartableConfig.value.log_rotation_size_mb || cleanConfigPayload.log_rotation_backup_count !== initialRestartableConfig.value.log_rotation_backup_count || cleanConfigPayload.emby_server_url !== initialRestartableConfig.value.emby_server_url);
-    const performSaveAndUpdateState = async () => {
-      const success = await handleSaveConfig(cleanConfigPayload);
-      if (success) {
-        message.success('所有设置已成功保存！');
-        initialRestartableConfig.value = {
-          proxy_port: cleanConfigPayload.proxy_port,
-          log_rotation_size_mb: cleanConfigPayload.log_rotation_size_mb,
-          log_rotation_backup_count: cleanConfigPayload.log_rotation_backup_count,
-          emby_server_url: cleanConfigPayload.emby_server_url,
-        };
-      } else {
-        message.error(configError.value || '配置保存失败，请检查后端日志。');
-      }
-      return success;
-    };
-    if (restartNeeded) {
-      dialog.warning({
-        title: '需要重启容器',
-        content: '您修改了需要重启容器才能生效的设置（如Emby URL、虚拟库端口、日志配置等）。请选择如何操作：',
-        positiveText: '保存并重启',
-        negativeText: '仅保存',
-        onPositiveClick: async () => {
-          const saved = await performSaveAndUpdateState();
-          if (saved) { await triggerRestart(); }
-        },
-        onNegativeClick: async () => { await performSaveAndUpdateState(); }
-      });
+    const success = await handleSaveConfig(cleanConfigPayload);
+    if (success) {
+      message.success('所有设置已成功保存！');
     } else {
-      await performSaveAndUpdateState();
+      message.error(configError.value || '配置保存失败，请检查后端日志。');
     }
   } catch (errors) {
     message.error('请检查表单中的必填项或错误项！');
@@ -1691,12 +1652,6 @@ onMounted(async () => {
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }
-      initialRestartableConfig.value = {
-        proxy_port: configModel.value.proxy_port,
-        log_rotation_size_mb: configModel.value.log_rotation_size_mb,
-        log_rotation_backup_count: configModel.value.log_rotation_backup_count,
-        emby_server_url: configModel.value.emby_server_url,
-      };
       if (unwatchGlobal) { unwatchGlobal(); }
     }
   }, { immediate: true });
@@ -1770,7 +1725,6 @@ onUnmounted(() => {
   font-size: 16px;
   vertical-align: middle;
 }
-
 .rules-container { background: transparent; border: none; padding: 0; }
 .rule-item {
   display: flex; align-items: center; background-color: var(--n-action-color); 

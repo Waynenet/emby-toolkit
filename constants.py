@@ -55,7 +55,6 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'populate-metadata',          # 同步媒体数据
     'process-watchlist',          # 刷新智能追剧
     'scan-cleanup-issues',        # 扫描重复媒体
-    'system-auto-update',         # 系统自动更新
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
 DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success'] # ★ 默认开启入库和转存

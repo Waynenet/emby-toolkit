@@ -1,11 +1,9 @@
 # routes/system.py
 import os
-from flask import Blueprint, jsonify, request, Response, stream_with_context
+from flask import Blueprint, jsonify, request
 import logging
-import json
 import re
 import requests
-import docker
 # 导入底层模块
 import task_manager
 from logger_setup import frontend_log_queue
@@ -14,11 +12,9 @@ import handler.emby as emby
 # 导入共享模块
 import extensions
 from extensions import admin_required, task_lock_required, processor_ready_required
-from tasks.system_update import _update_process_generator
 import constants
 import utils
 from database import settings_db
-import handler.github as github
 
 # 1. 创建蓝图
 system_bp = Blueprint('system', __name__, url_prefix='/api')
@@ -387,97 +383,6 @@ def api_delete_custom_theme():
         logger.error(f"删除自定义主题时发生未知错误: {e}", exc_info=True)
         return jsonify({"error": "删除自定义主题时发生服务器内部错误。"}), 500
 
-# +++ 关于页面的信息接口 +++
-@system_bp.route('/system/about_info', methods=['GET'])
-def get_about_info():
-    """
-    【V2 - 支持认证版】获取关于页面的所有信息，包括当前版本和 GitHub releases。
-    会从配置中读取 GitHub Token 用于认证，以提高 API 速率限制。
-    """
-    try:
-        # ★★★ 1. 从全局配置中获取 GitHub Token ★★★
-        github_token = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_GITHUB_TOKEN)
-
-        proxies = config_manager.get_proxies_for_requests()
-        # ★★★ 2. 将 Token 传递给 get_github_releases 函数 ★★★
-        releases = github.get_github_releases(
-            owner=constants.GITHUB_REPO_OWNER,
-            repo=constants.GITHUB_REPO_NAME,
-            token=github_token,  # <--- 将令牌作为参数传入
-            proxies=proxies
-        )
-
-        if releases is None:
-            # 即使获取失败，也返回一个正常的结构，只是 releases 列表为空
-            releases = []
-            logger.warning("API /system/about_info: 从 GitHub 获取 releases 失败，将返回空列表。")
-
-        response_data = {
-            "current_version": constants.APP_VERSION,
-            "releases": releases
-        }
-        return jsonify(response_data)
-
-    except Exception as e:
-        logger.error(f"API /system/about_info 发生错误: {e}", exc_info=True)
-        return jsonify({"error": "获取版本信息时发生服务器内部错误"}), 500
-
-# --- 一键更新 ---
-@system_bp.route('/system/update/stream', methods=['GET'])
-@admin_required
-@task_lock_required
-def stream_update_progress():
-    """
-    【V11 - 简化UI版】
-    通过启动一个临时的“更新器容器”来执行更新操作，并向前端提供简化的状态文本流。
-    """
-    def generate_progress():
-        def send_event(data):
-            # 确保发送的是 JSON 格式的字符串
-            yield f"data: {json.dumps(data)}\n\n"
-
-        container_name = config_manager.APP_CONFIG.get('container_name', 'emby-toolkit')
-        image_name_tag = config_manager.APP_CONFIG.get('docker_image_name', 'hbq0405/emby-toolkit:latest')
-
-        # 调用共享的生成器
-        generator = _update_process_generator(container_name, image_name_tag)
-        
-        for event in generator:
-            yield from send_event(event)
-
-    return Response(stream_with_context(generate_progress()), mimetype='text/event-stream')
-
-# +++ 重启容器 +++
-@system_bp.route('/system/restart', methods=['POST'])
-@admin_required
-def restart_container():
-    """
-    重启运行此应用的 Docker 容器。
-    """
-    try:
-        client = docker.from_env()
-        # 从配置中获取容器名，如果未配置则使用默认值
-        container_name = config_manager.APP_CONFIG.get('container_name', 'emby-toolkit')
-        
-        if not container_name:
-            logger.error("  ➜ API: 尝试重启容器，但配置中未找到 'container_name'。")
-            return jsonify({"error": "未在配置中指定容器名称。"}), 500
-
-        logger.info(f"  ➜ API: 收到重启容器 '{container_name}' 的请求。")
-        container = client.containers.get(container_name)
-        container.restart()
-        
-        return jsonify({"message": f"已向容器 '{container_name}' 发送重启指令。应用将在片刻后恢复。"}), 200
-
-    except docker.errors.NotFound:
-        error_msg = f"API: 尝试重启容器，但名为 '{container_name}' 的容器未找到。"
-        logger.error(error_msg)
-        return jsonify({"error": error_msg}), 404
-    except Exception as e:
-        error_msg = f"API: 重启容器时发生未知错误: {e}"
-        logger.error(error_msg, exc_info=True)
-        return jsonify({"error": f"发生意外错误: {str(e)}"}), 500
-    
 @system_bp.route('/ai/prompts', methods=['GET'])
 @admin_required
 def api_get_ai_prompts():
