@@ -15,6 +15,7 @@ import Login from '../components/Login.vue';
 import RegisterPage from '../components/RegisterPage.vue';
 import CoverGeneratorConfig from '../components/CoverGeneratorConfig.vue';
 import UserManagementPage from '../components/UserManagementPage.vue';
+import DiscoverPage from '../components/DiscoverPage.vue';
 import UserCenterPage from '../components/UserCenterPage.vue'
 import SetupPage from '../components/Setup.vue';
 import EmbyStatsPage from '../components/EmbyStatsPage.vue';
@@ -158,6 +159,12 @@ const routes = [
     name: 'EmbyStats',
     component: EmbyStatsPage,
     meta: { requiresAuth: true, requiresAdmin: true } // 建议只给管理员看
+  },
+  {
+    path: '/discover',
+    name: 'Discover',
+    component: DiscoverPage,
+    meta: { requiresAuth: true }, // 必须登录才能访问
   },
 ];
 
