@@ -20,8 +20,7 @@ def _format_dateadded(date_str):
 
 def _add_common_elements(root, data):
     """添加所有 NFO 共用的基础标签"""
-    _add_element(root, 'outline', data.get('overview'))
-    _add_element(root, 'lockdata', 'false')
+    _add_element(root, 'lockdata', 'true')
     date_added = data.get('date_added')
     if date_added:
         _add_element(root, 'dateadded', _format_dateadded(date_added))
@@ -109,6 +108,8 @@ def build_movie_nfo(data: dict, cast: list) -> str:
             _add_element(set_elem, 'overview', collection.get('overview'))
 
     _add_genres_and_tags(root, data)
+    for studio in data.get('production_companies', []):
+        _add_element(root, 'studio', studio.get('name') if isinstance(studio, dict) else studio)    
     _add_actors(root, cast) 
     extended_cast = list(cast)
     top_directors = extract_top_directors(data, max_count=3)
@@ -118,13 +119,6 @@ def build_movie_nfo(data: dict, cast: list) -> str:
         if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
         dir_elem.text = d.get('name')
         
-        # 2. 伪装成 Actor 塞进列表 (让 Emby 能读取头像)
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
 
 def build_tvshow_nfo(data: dict, cast: list) -> str:
@@ -183,12 +177,6 @@ def build_tvshow_nfo(data: dict, cast: list) -> str:
         if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
         dir_elem.text = d.get('name')
         
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
 
 def build_season_nfo(data: dict) -> str:
@@ -217,7 +205,6 @@ def build_episode_nfo(data: dict, cast: list) -> str:
     
     title = data.get('name') or data.get('title')
     _add_element(root, 'title', title)
-    # ★★★ 集也加上拼音排序 ★★★
     _add_element(root, 'sorttitle', get_pinyin_initials(title))
     
     _add_element(root, 'season', data.get('season_number'))
@@ -242,10 +229,4 @@ def build_episode_nfo(data: dict, cast: list) -> str:
         if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
         dir_elem.text = d.get('name')
         
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")

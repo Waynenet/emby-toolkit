@@ -361,7 +361,7 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
     if fields:
         fields_to_request = fields
     else:
-        fields_to_request = "Type,ProviderIds,People,Path,OriginalTitle,DateCreated,PremiereDate,ProductionYear,ChildCount,RecursiveItemCount,Overview,CommunityRating,OfficialRating,Genres,Studios,Taglines,MediaStreams,TagItems,Tags"
+        fields_to_request = "Type,ProviderIds,People,Path,OriginalTitle,DateCreated,PremiereDate,ProductionYear,ChildCount,RecursiveItemCount,Overview,CommunityRating,OfficialRating,Genres,Studios,Taglines,MediaStreams,TagItems,Tags,Path"
 
     params = {
         "api_key": emby_api_key,
@@ -734,102 +734,6 @@ def get_emby_library_items(
     
     return all_items_from_selected_libraries
 
-# ✨✨✨ 刷新Emby元数据 ✨✨✨
-def refresh_emby_item_metadata(item_emby_id: str,
-                               emby_server_url: str,
-                               emby_api_key: str,
-                               user_id_for_ops: str,
-                               replace_all_metadata_param: bool = False,
-                               replace_all_images_param: bool = False,
-                               item_name_for_log: Optional[str] = None,
-                               lock_cast: bool = False # ★ 新增参数：是否在刷新后锁定演员表
-                               ) -> bool:
-    if not all([item_emby_id, emby_server_url, emby_api_key, user_id_for_ops]):
-        logger.error("刷新Emby元数据参数不足：缺少ItemID、服务器URL、API Key或UserID。")
-        return False
-    wait_for_server_idle(emby_server_url, emby_api_key)
-    log_identifier = f"'{item_name_for_log}'" if item_name_for_log else f"ItemID: {item_emby_id}"
-    
-    try:
-        logger.trace(f"  ➜ 正在为 {log_identifier} 获取当前详情...")
-        item_data = get_emby_item_details(item_emby_id, emby_server_url, emby_api_key, user_id_for_ops)
-        if not item_data:
-            logger.error(f"  ➜ 无法获取 {log_identifier} 的详情，所有操作中止。")
-            return False
-
-        item_needs_update = False
-        
-        if replace_all_metadata_param:
-            logger.trace(f"  ➜ 检测到 ReplaceAllMetadata=True，执行解锁...")
-            if item_data.get("LockData") is True:
-                item_data["LockData"] = False
-                item_needs_update = True
-            if item_data.get("LockedFields"):
-                item_data["LockedFields"] = [] # ★ 刷新前全量解锁，确保能读入最新的 NFO
-                item_needs_update = True
-        
-        if item_needs_update:
-            logger.trace(f"  ➜ 正在为 {log_identifier} 提交锁状态更新...")
-            update_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}"
-            update_params = {"api_key": emby_api_key}
-            headers = {'Content-Type': 'application/json'}
-            update_response = emby_client.post(update_url, json=item_data, headers=headers, params=update_params)
-            update_response.raise_for_status()
-            logger.trace(f"  ➜ 成功更新 {log_identifier} 的锁状态。")
-
-    except Exception as e:
-        logger.warning(f"  ➜ 在刷新前更新锁状态时失败: {e}。刷新将继续，但可能受影响。")
-
-    logger.debug(f"  ➜ 正在为 {log_identifier} 发送最终的刷新请求...")
-    refresh_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}/Refresh"
-    params = {
-        "api_key": emby_api_key,
-        "Recursive": str(item_data.get("Type") == "Series").lower(),
-        "MetadataRefreshMode": "Default",
-        "ImageRefreshMode": "Default",
-        "ReplaceAllMetadata": str(replace_all_metadata_param).lower(),
-        "ReplaceAllImages": str(replace_all_images_param).lower()
-    }
-    
-    try:
-        response = emby_client.post(refresh_url, params=params)
-        if response.status_code == 204:
-            logger.info(f"  ➜ 已成功为 {log_identifier} 触发刷新。")
-            
-            # =================================================================
-            # ★★★ 核心修复：延迟锁定演员表 (Cast) ★★★
-            # 因为 Emby 的 Refresh 是异步的，我们需要等它读完 NFO 后再上锁
-            # =================================================================
-            if lock_cast:
-                def _delayed_lock():
-                    time.sleep(5) # 等待 5 秒，让 Emby 充分读取本地 NFO
-                    try:
-                        latest_data = get_emby_item_details(item_emby_id, emby_server_url, emby_api_key, user_id_for_ops)
-                        if latest_data:
-                            locked_fields = latest_data.get("LockedFields", [])
-                            if "Cast" not in locked_fields:
-                                locked_fields.append("Cast")
-                                latest_data["LockedFields"] = locked_fields
-                                
-                                update_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}"
-                                update_params = {"api_key": emby_api_key}
-                                headers = {'Content-Type': 'application/json'}
-                                emby_client.post(update_url, json=latest_data, headers=headers, params=update_params)
-                                logger.info(f"  ➜ [锁定保护] 已成功锁定 {log_identifier} 的演员表(Cast)，防止被刮削器覆盖。")
-                    except Exception as e:
-                        logger.error(f"  ➜ 延迟锁定演员表失败: {e}")
-                
-                # 开启后台线程执行延迟锁定，不阻塞主流程
-                threading.Thread(target=_delayed_lock, daemon=True).start()
-
-            return True
-        else:
-            logger.error(f"  - 刷新请求失败: HTTP状态码 {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"  - 刷新请求时发生网络错误: {e}")
-        return False
-
 def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
     """
     【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。
@@ -909,7 +813,7 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
         # 直接提取所有文件所在的目录，去重 (防止批量入库时重复刷新同一个父目录)
         dirs_to_refresh = set(os.path.dirname(p) for p in file_paths if p)
         
-        #logger.info(f"  ➜ [极速通知] 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
+        # logger.info(f"  ➜ 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
         
         # 直接拿鞭子抽，让 Emby 扫目录
         for d in dirs_to_refresh:
@@ -2162,10 +2066,6 @@ def set_user_disabled_status(
 
     except Exception as e:
         logger.error(f"{action_text}用户 '{user_name_for_log}' 时发生严重错误: {e}", exc_info=True)
-        return False
-
-    except Exception as e:
-        logger.error(f"{action_text}用户 {user_id} 时发生严重错误: {e}", exc_info=True)
         return False
 
 # --- 获取用户完整详情 (含 Policy 和 Configuration) ---

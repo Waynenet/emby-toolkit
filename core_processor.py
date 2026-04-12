@@ -601,29 +601,6 @@ class MediaProcessor:
 
                 logger.info(f"  ➜ [实时监控] 正在按照骨架模板格式化元数据...")
 
-                # =================================================================
-                # ★★★ 大一统 AI 翻译引擎 (必须在构建骨架前，直接作用于原始数据) ★★★
-                # =================================================================
-                if self.ai_translator and details:
-                    from tasks.helpers import translate_tmdb_metadata_recursively
-                    # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
-                    target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
-                    
-                    translate_tmdb_metadata_recursively(
-                        item_type=item_type,
-                        tmdb_data=target_tmdb_data,
-                        ai_translator=self.ai_translator,
-                        item_name=search_query or filename, # ★ 修正：使用搜索标题或文件名
-                        tmdb_api_key=self.tmdb_api_key,
-                        config=self.config
-                    )
-                    
-                    # 合集翻译 (电影专属)
-                    if item_type == "Movie" and self.config.get(constants.CONFIG_OPTION_GENERATE_COLLECTION_NFO, False):
-                        collection_info = details.get("belongs_to_collection") # ★ 修正：使用 details
-                        if collection_info and isinstance(collection_info, dict) and collection_info.get("id"):
-                            details["belongs_to_collection"] = self._enrich_collection_info(collection_info)
-
                 # 2. 初始化骨架
                 formatted_metadata = construct_metadata_payload(
                     item_type=item_type,
@@ -2314,12 +2291,43 @@ class MediaProcessor:
                             if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
                                 aggregated_tmdb_data["series_details"]["name"] = original_title
 
+                # =================================================================
+                # ★★★ 核心修复：大一统 AI 翻译引擎 (必须在构建骨架前，直接作用于原始数据) ★★★
+                # =================================================================
+                if self.ai_translator:
+                    from tasks.helpers import translate_tmdb_metadata_recursively
+                    # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
+                    target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
+                    
+                    translate_tmdb_metadata_recursively(
+                        item_type=item_type,
+                        tmdb_data=target_tmdb_data,
+                        ai_translator=self.ai_translator,
+                        item_name=item_name_for_log,
+                        tmdb_api_key=self.tmdb_api_key,
+                        config=self.config
+                    )
+                    
+                    # 合集翻译 (电影专属)
+                    if item_type == "Movie" and self.config.get(constants.CONFIG_OPTION_GENERATE_COLLECTION_NFO, False):
+                        collection_info = fresh_data.get("belongs_to_collection")
+                        if collection_info and isinstance(collection_info, dict) and collection_info.get("id"):
+                            fresh_data["belongs_to_collection"] = self._enrich_collection_info(collection_info)
+
                 # 2. 填充骨架
                 formatted_metadata = construct_metadata_payload(
                     item_type=item_type,
                     tmdb_data=fresh_data or {},
                     aggregated_tmdb_data=aggregated_tmdb_data,
                     emby_data_fallback=item_details_from_emby
+                )
+
+                # 3. 尝试从数据库中恢复缺失的字段
+                formatted_metadata = self._restore_fields_from_db_if_missing(
+                    tmdb_id=tmdb_id,
+                    item_type=item_type,
+                    metadata=formatted_metadata,
+                    fields=["tagline"]
                 )
 
                 if not item_details_from_emby.get("Genres") and fresh_data.get("genres"):
@@ -2443,8 +2451,8 @@ class MediaProcessor:
                     item_details=item_details_from_emby,
                     tmdb_id=tmdb_id,
                     final_cast_override=final_processed_cast,
-                    episode_ids_to_sync=specific_episode_ids,
-                    metadata_override=formatted_metadata
+                    metadata_override=formatted_metadata,
+                    force_write=True
                 )
                 self.download_images_from_tmdb(
                     tmdb_id=tmdb_id,
@@ -2453,22 +2461,12 @@ class MediaProcessor:
                     item_details=item_details_from_emby
                 )
 
-                # 6. 更新 Emby 演员名
+                # 6. 更新 Emby 演员名以及扫描目录
                 self._update_emby_person_names_from_final_cast(final_processed_cast, item_name_for_log)
-                
-            # ======================================================================
-            # ★★★ 统一刷新与锁定流程 (无论是完整处理还是 Webhook 回流) ★★★
-            # ======================================================================
-            logger.info(f"  ➜ 正在通知 Emby 刷新并锁定演员表...")
-            emby.refresh_emby_item_metadata(
-                item_emby_id=item_id,
-                emby_server_url=self.emby_url,
-                emby_api_key=self.emby_api_key,
-                user_id_for_ops=self.emby_user_id,
-                replace_all_metadata_param=not is_webhook_feedback, # 回流时不需要完全替换元数据
-                item_name_for_log=item_name_for_log,
-                lock_cast=True # ★ 核心：触发延迟锁定
-            )
+                media_path = item_details_from_emby.get("Path")
+                if media_path:
+                    logger.info(f"  ➜ 正在通知 Emby 扫描本地目录以读取最新 NFO...")
+                    emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
 
             if is_webhook_feedback:
                 logger.debug(f"  ➜ [webhook回流] 开始质检...")
@@ -2601,7 +2599,6 @@ class MediaProcessor:
                     logger.debug(f"  ➜ [智能推荐] 已触发向量缓存刷新，'{item_name_for_log}' 将即刻加入推荐池。")
                 except Exception as e:
                     logger.warning(f"  ➜ [智能推荐] 触发缓存刷新失败: {e}")
-
             logger.trace(f"--- 处理完成 '{item_name_for_log}' ---")
             return True
 
@@ -3277,6 +3274,53 @@ class MediaProcessor:
         logger.info("手动编辑-翻译完成。")
         return translated_cast
     
+    # --- 数据库保底 ---
+    def _restore_fields_from_db_if_missing(self, tmdb_id: str, item_type: str, metadata: dict, fields: list):
+        """从数据库补回缺失的字段"""
+        try:
+            if not fields:
+                return metadata
+
+            need_restore = [f for f in fields if not metadata.get(f)]
+            if not need_restore:
+                return metadata
+
+            sql_fields = ", ".join(need_restore)
+            with get_central_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT {sql_fields}
+                    FROM media_metadata
+                    WHERE tmdb_id = %s AND item_type = %s
+                    LIMIT 1
+                    """,
+                    (str(tmdb_id), item_type)
+                )
+                row = cursor.fetchone()
+
+            if not row:
+                return metadata
+
+            for field in need_restore:
+                value = None
+                if isinstance(row, dict):
+                    value = row.get(field)
+                else:
+                    try:
+                        value = row[field]
+                    except Exception:
+                        pass
+
+                if value:
+                    metadata[field] = value
+                    logger.info(f"  ➜ [数据库保底] 已补回字段: {field}")
+
+        except Exception as e:
+            logger.warning(f"  ➜ [数据库保底] 补回字段失败: {e}")
+
+        return metadata
+    
     # --- 手动处理 ---
     def process_item_with_manual_cast(self, item_id: str, manual_cast_list: List[Dict[str, Any]], item_name: str) -> bool:
         """
@@ -3494,42 +3538,31 @@ class MediaProcessor:
                 item_details=item_details,
                 tmdb_id=tmdb_id,
                 final_cast_override=final_formatted_cast,
-                metadata_override=payload
+                metadata_override=payload,
+                force_write=True
             )
 
             # ======================================================================
-            # 步骤 6: 触发刷新并更新日志
+            # 步骤 6: 触发扫描并更新日志
             # ======================================================================
-            logger.info("  ➜ 手动处理：步骤 6/6: 触发 Emby 刷新并更新内部日志...")
+            logger.info("  ➜ 手动处理：步骤 6/6: 触发 Emby 目录扫描并更新内部日志...")
             
-            emby.refresh_emby_item_metadata(
-                item_emby_id=item_id,
-                emby_server_url=self.emby_url,
-                emby_api_key=self.emby_api_key,
-                user_id_for_ops=self.emby_user_id,
-                replace_all_metadata_param=True,
-                item_name_for_log=item_name,
-                lock_cast=True # ★ 核心：手动编辑后也必须锁定
-            )
-
+            media_path = item_details.get("Path")
+            if media_path:
+                emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
+                
             # 更新我们自己的数据库日志和缓存
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
-                formatted_manual_metadata = None
-                if tmdb_details_for_manual_extra:
-                    formatted_manual_metadata = construct_metadata_payload(
-                        item_type=item_type,
-                        tmdb_data=tmdb_details_for_manual_extra,
-                        aggregated_tmdb_data=aggregated_tmdb_data_manual,
-                        emby_data_fallback=item_details
-                    )
-                # 写入数据库
+                
+                # ★★★ 核心修复：不要去 TMDb 重新拉取未翻译的数据！直接用第 4 步从数据库重建的 payload ★★★
+                # 这样宣传语、翻译好的简介等就全部保留下来了！
                 self._upsert_media_metadata(
                     cursor=cursor,
                     item_type=item_type,
                     item_details_from_emby=item_details,
                     final_processed_cast=final_formatted_cast, 
-                    source_data_package=formatted_manual_metadata, 
+                    source_data_package=payload, # <--- 直接用 payload
                 )
                 
                 logger.info(f"  ➜ 正在将手动处理完成的《{item_name}》写入已处理日志...")
@@ -3842,15 +3875,8 @@ class MediaProcessor:
             else:
                 return False, "未提供图片 URL 或文件数据。"
 
-            # 4. 通知 Emby 刷新 (局部刷新，仅让 Emby 重新读取本地文件)
-            emby.refresh_emby_item_metadata(
-                item_emby_id=item_id,
-                emby_server_url=self.emby_url,
-                emby_api_key=self.emby_api_key,
-                user_id_for_ops=self.emby_user_id,
-                replace_all_metadata_param=False, # ★ 设为 False，防止覆盖其他元数据，只扫本地图
-                item_name_for_log=item_details.get("Name", "未知项目")
-            )
+            # 4. 通知 Emby 扫描新图片
+            emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
             
             return True, f"{image_type} 替换成功！"
 
@@ -3858,12 +3884,12 @@ class MediaProcessor:
             logger.error(f"  ➜ [手动换图] 失败: {e}", exc_info=True)
             return False, f"替换失败: {str(e)}"
 
-    # --- 备份元数据 ---
+    # --- 生成NFO元数据 ---
     def sync_item_metadata(self, item_details: Dict[str, Any], tmdb_id: str,
                        final_cast_override: Optional[List[Dict[str, Any]]] = None,
-                       episode_ids_to_sync: Optional[List[str]] = None,
                        metadata_override: Optional[Dict[str, Any]] = None,
-                       is_series_refresh: bool = False):
+                       is_series_refresh: bool = False,
+                       force_write: bool = False):
         """
         【纯净 NFO 模式】基于模板和现有数据构建元数据文件，生成 XML 写入物理目录。
         """
@@ -3975,31 +4001,30 @@ class MediaProcessor:
         if re.match(r'^(Season|S)\s*\d+|Specials', os.path.basename(episode_dir), re.IGNORECASE):
             series_root_dir = os.path.dirname(episode_dir)
 
-        # --- 智能比对写入函数 ---
+        # --- 智能比稳写入函数 ---
         def _write_nfo_if_changed(file_path: str, content: str) -> bool:
-            if os.path.exists(file_path):
+            # ★ 核心修复：如果开启了强制写入，直接跳过比对！
+            if not force_write and os.path.exists(file_path):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         old_content = f.read()
                     
                     import re
                     def _get_tag_text(xml_str, tag):
-                        # 提取指定标签的内容，忽略大小写和换行
                         match = re.search(f'<{tag}[^>]*>(.*?)</{tag}>', xml_str, re.IGNORECASE | re.DOTALL)
                         return match.group(1).strip() if match else ""
 
-                    # 只比对最核心的两个字段：标题和简介
                     old_title = _get_tag_text(old_content, 'title')
                     old_plot = _get_tag_text(old_content, 'plot')
-                    
                     new_title = _get_tag_text(content, 'title')
                     new_plot = _get_tag_text(content, 'plot')
 
-                    # 只要标题和简介都没变，就认为核心数据没变，坚决不写硬盘！
                     if old_title == new_title and old_plot == new_plot:
                         return False 
                 except Exception:
-                    pass # 读取或解析失败则走正常覆盖流程
+                    pass 
+            
+            # 执行写入
             try:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
