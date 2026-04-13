@@ -493,7 +493,7 @@ const resolutionChartOptions = computed(() => {
     return {
       series: [{
         type: 'pie',
-        radius: ['50%', '65%'],
+        radius: ['35%', '65%'],
         center: ['50%', '50%'],
         data: [{ value: 0, name: '暂无数据' }],
         itemStyle: { color: '#333' },
@@ -513,24 +513,24 @@ const resolutionChartOptions = computed(() => {
     },
     legend: {
       show: true,
-      type: 'plain',         // 使用普通模式，不显示左右箭头
-      orient: 'horizontal',  // 水平排列，会自动换行
-      bottom: '0',           // 贴紧容器底部
-      left: 'center',        // 居中
-      width: '90%',          // 限制宽度以触发自动换行
-      itemWidth: 8,          // 调小图标尺寸
+      type: 'plain',
+      orient: 'horizontal',
+      bottom: '0',
+      left: 'center',
+      width: '90%',
+      itemWidth: 8,
       itemHeight: 8,
-      itemGap: 10,           // 调小间距，让换行更紧凑
+      itemGap: 10,
       icon: 'circle',
       textStyle: { color: '#aaa', fontSize: 11 }
     },
     series: [{
       name: '分辨率',
       type: 'pie',
-      // 修改半径: [内圆半径, 外圆半径]。增加内圆，减小外圆，使圆环变细、图表变小。
-      radius: isMobile.value ? ['50%', '65%'] : ['55%', '70%'],
-      // 稍微下移一点点中心，保持整体留白平衡
-      center: ['50%', '40%'], 
+      // 大幅缩小内圈半径，适当扩大差值：内径 35%/40%，外径 65%/75% 
+      // 这样能让中间空心变小，四周的环变得更加丰满厚实。
+      radius: isMobile.value ? ['35%', '65%'] : ['40%', '75%'],
+      center: ['50%', '40%'],
       avoidLabelOverlap: true,
       itemStyle: {
         borderRadius: 4,
