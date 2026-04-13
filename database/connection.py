@@ -571,7 +571,11 @@ def init_db():
                     # --- 3.1 清理废弃的表 ---
                     deprecated_tables = [
                         'watchlist',
-                        'tracked_actor_media'
+                        'tracked_actor_media',
+                        'p115_filesystem_cache',     # 新增废弃表 1
+                        'p115_mediainfo_cache',      # 新增废弃表 2
+                        'p115_organize_records',     # 新增废弃表 3
+                        'user_recommendation_cache'  # 新增废弃表 4
                     ]
                     for table in deprecated_tables:
                         logger.trace(f"    ➜ [数据库清理] 正在尝试移除废弃的表: '{table}'...")

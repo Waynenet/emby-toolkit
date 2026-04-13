@@ -28,7 +28,7 @@ def _prepare_data_for_insert(table_name: str, table_data: List[Dict[str, Any]]) 
         'custom_collections': {'definition_json', 'allowed_user_ids', 'generated_media_info_json'},
         'emby_users': {'policy_json'},
         'media_metadata': {
-            'emby_item_ids_json', 'file_sha1_json', 'file_pickcode_json', 'subscription_sources_json', 
+            'emby_item_ids_json', 'subscription_sources_json', 
             'tags_json', 'genres_json', 'official_rating_json', 
             'actors_json', 'directors_json', 'production_companies_json', 'networks_json', 'countries_json', 
             'keywords_json', 'last_episode_to_air_json',
@@ -333,6 +333,16 @@ def task_import_database(processor, file_content: str, tables_to_import: List[st
                         continue
 
                     logger.info(f"  ➜ 正在处理表: '{cn_name}'，共 {len(table_data)} 行。")
+
+                    # ==========================================
+                    # ★★★ 新增：全局清理废弃字段 ★★★
+                    # 无论后续是 share 还是 overwrite，都提前移除已废弃列，防止数据库报错
+                    # ==========================================
+                    if table_name.lower() == 'media_metadata':
+                        for row in table_data:
+                            row.pop('file_sha1_json', None)
+                            row.pop('file_pickcode_json', None)
+                    # ==========================================
 
                     if import_strategy == 'share':
                         if table_name.lower() not in SHARABLE_TABLES:

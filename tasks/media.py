@@ -675,7 +675,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 # 1. 查出包含这些消失 ID 的所有记录
                 cursor.execute("""
                     SELECT tmdb_id, item_type, parent_series_tmdb_id, 
-                           emby_item_ids_json, asset_details_json, file_sha1_json, file_pickcode_json
+                           emby_item_ids_json, asset_details_json
                     FROM media_metadata 
                     WHERE in_library = TRUE 
                       AND EXISTS (
@@ -709,17 +709,13 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
 
                     emby_ids = _safe_parse(row['emby_item_ids_json'])
                     assets = _safe_parse(row['asset_details_json'])
-                    sha1s = _safe_parse(row['file_sha1_json'])
-                    pcs = _safe_parse(row['file_pickcode_json'])
                     
                     # 倒序遍历，方便安全地 pop 元素
                     for i in range(len(emby_ids) - 1, -1, -1):
                         if emby_ids[i] in missing_ids_set:
-                            # 发现消失的 ID，从四个数组中同步剔除
+                            # 发现消失的 ID，从两个数组中同步剔除
                             emby_ids.pop(i)
                             if i < len(assets): assets.pop(i)
-                            if i < len(sha1s): sha1s.pop(i)
-                            if i < len(pcs): pcs.pop(i)
                     
                     # 判断生死
                     if len(emby_ids) > 0:
@@ -727,8 +723,6 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         partial_update_records.append((
                             json.dumps(emby_ids, ensure_ascii=False),
                             json.dumps(assets, ensure_ascii=False) if assets else None,
-                            json.dumps(sha1s, ensure_ascii=False),
-                            json.dumps(pcs, ensure_ascii=False),
                             r_tmdb, r_type
                         ))
                     else:
@@ -750,10 +744,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         UPDATE media_metadata AS m
                         SET emby_item_ids_json = v.emby_ids::jsonb,
                             asset_details_json = v.assets::jsonb,
-                            file_sha1_json = v.sha1s::jsonb,
-                            file_pickcode_json = v.pcs::jsonb,
                             last_updated_at = NOW()
-                        FROM (VALUES %s) AS v(emby_ids, assets, sha1s, pcs, tmdb_id, item_type)
+                        FROM (VALUES %s) AS v(emby_ids, assets, tmdb_id, item_type)
                         WHERE m.tmdb_id = v.tmdb_id AND m.item_type = v.item_type
                     """
                     execute_values(cursor, update_sql, partial_update_records)
@@ -765,9 +757,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         UPDATE media_metadata
                         SET in_library = FALSE, 
                             emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL,
-                            file_sha1_json = '[]'::jsonb,
-                            file_pickcode_json = '[]'::jsonb
+                            asset_details_json = NULL
                         WHERE tmdb_id = ANY(%s) AND item_type IN ('Movie', 'Series')
                     """, (dead_movies_and_series,))
                     total_offline_count += cursor.rowcount
@@ -777,9 +767,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         UPDATE media_metadata
                         SET in_library = FALSE, 
                             emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL,
-                            file_sha1_json = '[]'::jsonb,
-                            file_pickcode_json = '[]'::jsonb
+                            asset_details_json = NULL
                         WHERE parent_series_tmdb_id = ANY(%s) AND item_type IN ('Season', 'Episode')
                     """, (dead_movies_and_series,))
                     total_offline_count += cursor.rowcount
@@ -791,9 +779,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         UPDATE media_metadata
                         SET in_library = FALSE, 
                             emby_item_ids_json = '[]'::jsonb, 
-                            asset_details_json = NULL,
-                            file_sha1_json = '[]'::jsonb,
-                            file_pickcode_json = '[]'::jsonb
+                            asset_details_json = NULL
                         WHERE tmdb_id = ANY(%s) AND item_type IN ('Season', 'Episode')
                     """, (dead_seasons_and_episodes,))
                     total_offline_count += cursor.rowcount
@@ -1351,9 +1337,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                                 UPDATE media_metadata
                                 SET in_library = FALSE, 
                                     emby_item_ids_json = '[]'::jsonb, 
-                                    asset_details_json = NULL,
-                                    file_sha1_json = '[]'::jsonb,
-                                    file_pickcode_json = '[]'::jsonb
+                                    asset_details_json = NULL
                                 WHERE parent_series_tmdb_id = ANY(%s)
                                   AND item_type IN ('Season', 'Episode')
                                   AND in_library = TRUE
@@ -1365,9 +1349,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                                 UPDATE media_metadata
                                 SET in_library = FALSE, 
                                     emby_item_ids_json = '[]'::jsonb, 
-                                    asset_details_json = NULL,
-                                    file_sha1_json = '[]'::jsonb,
-                                    file_pickcode_json = '[]'::jsonb
+                                    asset_details_json = NULL
                                 WHERE parent_series_tmdb_id = ANY(%s)
                                   AND item_type IN ('Season', 'Episode')
                                   AND in_library = TRUE
