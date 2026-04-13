@@ -16,6 +16,7 @@ upstream redirect_service {
 
 server {
     listen {{ NGINX_LISTEN_PORT }};
+    listen [::]:{{ NGINX_LISTEN_PORT }} ipv6only=on;
     server_name _;
 
     # --- 基础代理参数 ---
