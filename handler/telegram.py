@@ -390,7 +390,7 @@ def send_playback_notification(data: dict):
         # 组装最终展示的 IP (等宽显示 IP，非等宽显示位置信息并带个图钉图标)
         display_ip = f"`{escape_markdown(ip_address_raw)}`"
         if ip_location:
-            display_ip += f" 📍 {escape_markdown(ip_location)}"
+            display_ip += f" {escape_markdown(ip_location)}"
 
         # 优先从 Emby Webhook 数据中提取剧情
         raw_overview = item.get("Overview", "")
