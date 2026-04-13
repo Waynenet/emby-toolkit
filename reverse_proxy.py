@@ -1,4 +1,4 @@
-# reverse_proxy.py (集成 HTTPStrm 纯净直链 302 重定向版)
+# reverse_proxy.py (最终完美版 V5 - 实时架构适配)
 
 import logging
 import requests
@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timedelta
 import time
 import uuid 
+from flask import send_file 
 from handler.poster_generator import get_missing_poster
 from gevent import spawn, joinall
 from websocket import create_connection
@@ -779,71 +780,33 @@ def proxy_all(path):
     # --- 2. HTTP 代理逻辑 ---
     try:
         full_path = f'/{path}'
+        # ===== 调试日志：打印所有请求路径 =====
+        # logger.info(f"[PROXY] 请求路径: {full_path}")
         
         # ====================================================================
-        # ★★★ 拦截 H: 视频流请求 (纯净 HTTPStrm 302直链重定向) ★★★
-        # 仅针对 `.strm` 及已为直链的情况执行 302 重定向
-        # 否则直接走透明转发/原生直接播放模式
+        # ★★★ 拦截 H: 视频流请求 (stream, original, Download 等) ★★★
+        # 统一走透明转发
         # ====================================================================
         full_path_lower = full_path.lower()
-        is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)
-        is_download = '/items/' in full_path_lower and '/download' in full_path_lower
 
-        if is_video_stream or is_download:
-            # 排除转码流（包含 hls 和 m3u8）
-            if 'master.m3u8' not in full_path_lower and 'hls' not in full_path_lower:
-                try:
-                    # 1. 提取请求中的 Item ID
-                    item_id_match = re.search(r'/(?:videos|items)/([a-zA-Z0-9_-]+)/', full_path_lower)
-                    if item_id_match:
-                        item_id = item_id_match.group(1)
-                        base_url, api_key = _get_real_emby_url_and_key()
-                        media_source_id = request.args.get('MediaSourceId')
-
-                        # 2. 向 Emby 请求 PlaybackInfo 获取真实的物理路径/媒体流路径
-                        pb_url = f"{base_url}/Items/{item_id}/PlaybackInfo"
-                        pb_params = {
-                            'api_key': api_key, 
-                            'UserId': request.args.get('UserId') or request.args.get('userId', '')
-                        }
-                        
-                        pb_resp = requests.get(pb_url, params=pb_params, timeout=10)
-                        if pb_resp.status_code == 200:
-                            media_sources = pb_resp.json().get('MediaSources', [])
-                            target_source = None
-                            
-                            # 匹配对应的 MediaSourceId
-                            if media_source_id:
-                                target_source = next((s for s in media_sources if s.get('Id') == media_source_id), None)
-                            if not target_source and media_sources:
-                                target_source = media_sources[0]
-
-                            if target_source:
-                                file_path = target_source.get('Path', '')
-
-                                # 3. 判断是否为 strm 直链，如果是，直接 302 抛出
-                                if file_path.startswith('http://') or file_path.startswith('https://'):
-                                    logger.info(f"[HTTPStrm 302重定向] 拦截直链播放/下载，目标直链: {file_path}")
-                                    return redirect(file_path, code=302)
-                                else:
-                                    # 本地文件直接跳过拦截，向下走原版透明转发/本地直接播放逻辑
-                                    logger.debug(f"[HTTPStrm] 媒体路径为本地文件 {file_path}，跳过拦截，回退到原生播放模式。")
-                except Exception as e:
-                    logger.error(f"[HTTPStrm] 处理 302 重定向拦截视频流时出错: {e}，将回退到原版代理流。", exc_info=True)
-
-            # === 回退到原版透明代理逻辑 ===
-            # (处理 HLS/M3U8 转码请求，或者媒体源是本地文件的情况)
+        if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or ('/items/' in full_path_lower and '/download' in full_path_lower):
             base_url, api_key = _get_real_emby_url_and_key()
             target_url = f"{base_url}/{path.lstrip('/')}"
 
             forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
             forward_headers['Host'] = urlparse(base_url).netloc
+
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
 
             resp = requests.request(
-                method=request.method, url=target_url, headers=forward_headers,
-                params=forward_params, data=request.get_data(), stream=True, timeout=(10.0, 1800.0)
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                params=forward_params,
+                data=request.get_data(),
+                stream=True,
+                timeout=(10.0, 1800.0)
             )
 
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
