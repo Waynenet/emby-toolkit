@@ -1,4 +1,4 @@
-# /etc/nginx/conf.d/emby_proxy.conf (V5 - HTTPStrm 自动解包优化版)
+# /etc/nginx/conf.d/emby_proxy.conf (V4 - .strm 精准捕获最终版)
 
 upstream emby_server {
     server {{ EMBY_UPSTREAM }};
@@ -33,7 +33,7 @@ server {
     proxy_pass_request_headers on;
 
     # ====================================================================
-    #  核心路由规则 (V5)
+    #  核心路由规则 (V4)
     # ====================================================================
 
     # --- 以下是虚拟库路由规则 ---
@@ -49,7 +49,8 @@ server {
         proxy_pass http://virtual_library_proxy;
     }
 
-    # 规则 2：拦截“获取库内容”的请求
+    # ★★★ 规则 2：【新增的关键规则】拦截“获取库内容”的请求 ★★★
+    # 这是我们之前一直缺失的规则！
     location ~ /emby/Users/([a-f0-9]+)/Items$ {
         # 检查 URL 参数中是否包含 ParentId=-xxxxx
         if ($arg_ParentId ~ ^-\d+$) {
@@ -76,30 +77,14 @@ server {
         proxy_pass http://emby_server;
     }
 
-    # ★★★ 规则 5：拦截视频播放和嗅探请求，交由 Python 代理处理自动解包 302 直链 ★★★
+    # 规则 5：拦截视频播放和嗅探请求，交由 Python 代理处理 302 直链 
     location ~* /(videos/.*(?:stream|original)|Items/.*/(?:PlaybackInfo|Download)) {
         proxy_pass http://virtual_library_proxy;
-        
-        # 客户端信息透传
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # 1. 必须关闭重定向改写，防止 Nginx 吞掉 Python 发出的 302 Location
-        proxy_redirect off;
-
-        # 2. 必须关闭缓冲，确保视频流或 302 响应瞬间送达客户端
-        proxy_buffering off;
-
-        # 3. 必须透传 Range 请求头，这对视频拖拽和回退透明转发非常关键
-        proxy_set_header Range $http_range;
-        proxy_set_header If-Range $http_if_range;
-        
-        # 4. 延长超时时间，给 Python 代理向内网 AList 请求解包直链留出时间
-        proxy_read_timeout 60s;
-        
-        # 5. 透传客户端所有的 Headers (包含 Token/设备信息等)
+        # 确保跨域和客户端信息透传给 Python
         proxy_pass_request_headers on;
     }
 
