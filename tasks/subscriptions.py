@@ -40,6 +40,7 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "sub_kor": ["KOR", "韩字", "韩文", "Korean"],   
     "sub_yue": ["CHT", "繁中", "繁体", "Cantonese"], 
 }
+
 # 解析影巢返回的体积字符串
 def _parse_size_to_gb(size_str):
     """将影巢返回的体积字符串 (如 '58.3 GB', '1.77TB', '50G') 转换为 GB 浮点数"""
@@ -80,9 +81,6 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
     5. 检查是否完结/配置开启 -> 决定 best_version。
     6. 逐季提交订阅并更新本地数据库。
     """
-    watchlist_config = settings_db.get_setting('watchlist_config') or {}
-    tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
-
     try:
         # 1. 获取剧集详情
         series_details = tmdb.get_tv_details(tmdb_id, tmdb_api_key)
@@ -181,7 +179,6 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
                     item_type='Season',
                     source=source,
                     media_info_list=[media_info]
-                    
                 )
                 any_success = True
                 continue 
@@ -226,13 +223,7 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             # ==============================================================
             # 逻辑 E: 提交订阅 & 后置状态修正
             # ==============================================================
-            # ★★★ 修改开始：拦截 TG 频道追更 ★★★
-            if tg_channel_tracking and not is_completed:
-                logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{s_num} 的订阅。")
-                mp_submit_success = True # 模拟成功，以便更新本地数据库状态为已订阅
-                is_pending_logic = False # 既然没提交给MP，就不需要去MP改待定状态了
-            else:
-                mp_submit_success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+            mp_submit_success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
             if mp_submit_success:
                 any_success = True
@@ -297,8 +288,6 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
     try:
         config = config_manager.APP_CONFIG
         tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
-        watchlist_config = settings_db.get_setting('watchlist_config') or {}
-        tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
         
         processed_count = 0
 
@@ -379,12 +368,7 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                     else:
                         logger.info(f"  ➜ [手动交互] S{season_number} 尚未完结 (连载中)，使用普通追更模式。")
                     
-                    # ★★★ 拦截 TG 频道追更 ★★★
-                    if tg_channel_tracking and not is_completed:
-                        logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{season_number} 的订阅。")
-                        success = True # 模拟成功
-                    else:
-                        success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
                 # 3. 处理整剧订阅 (Series)
                 elif item_type == 'Series':
@@ -878,9 +862,6 @@ def task_auto_subscribe(processor):
             # 提交 MP 订阅
             success = False
             action_type = "MP" 
-            watchlist_config = settings_db.get_setting('watchlist_config') or {}
-            tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
-            subscription_priority = strategy_config.get('subscription_priority', 'mp')
 
             if item_type == 'Movie':
                 logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
@@ -893,20 +874,13 @@ def task_auto_subscribe(processor):
                 
                 # 判定洗版/追更
                 is_pending, fake_eps = should_mark_as_pending(int(parent_tmdb_id), int(season_number), tmdb_api_key)
-                is_completed = False # ★★★ 新增标志位
                 
                 if not is_pending and check_series_completion(int(parent_tmdb_id), tmdb_api_key, season_number=int(season_number), series_name=title):
                     mp_payload["best_version"] = 1
-                    is_completed = True # ★★★ 标记为已完结
                 
-                # ★★★ 拦截 TG 频道追更 ★★★
-                if tg_channel_tracking and not is_completed:
-                    logger.info(f"  ➜ [策略] TG频道追更已开启，跳过向 MoviePilot 提交未完结季 S{season_number} 的订阅。")
-                    success = True # 模拟成功
-                else:
-                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
-                    if success and is_pending:
-                        moviepilot.update_subscription_status(int(parent_tmdb_id), int(season_number), 'P', config, total_episodes=fake_eps)
+                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                if success and is_pending:
+                    moviepilot.update_subscription_status(int(parent_tmdb_id), int(season_number), 'P', config, total_episodes=fake_eps)
 
             # 处理订阅结果
             if success:

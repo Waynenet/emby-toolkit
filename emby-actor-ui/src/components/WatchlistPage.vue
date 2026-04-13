@@ -467,24 +467,6 @@
               </div>
             </div>
           <n-divider style="margin: 0" />
-
-          <!-- 3.TG频道追更 -->
-          <div class="setting-item">
-            <div class="setting-icon"><n-icon :component="PaperPlaneIcon" /></div>
-            <div class="setting-content">
-              <div class="setting-header">
-                <div class="setting-label">TG 频道追更</div>
-                <n-switch v-model:value="watchlistConfig.tg_channel_tracking" size="small">
-                  <template #checked>开启</template>
-                  <template #unchecked>关闭</template>
-                </n-switch>
-              </div>
-              <div class="setting-desc">
-                开启后，未完结的剧集将跳过 MoviePilot 订阅，已完结剧集仍会通过 MP 洗版订阅。
-              </div>
-            </div>
-          </div>  
-          <n-divider style="margin: 0" />
           <!-- 4. 豆瓣辅助修正 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
@@ -693,11 +675,9 @@ const watchlistConfig = ref({
   douban_count_correction: false,
   auto_resub_ended: false,
   auto_delete_mp_history: false,
-  auto_delete_mp_history: false,     
   auto_delete_download_tasks: false,
   sync_mp_subscription: false,
-  revival_check_days: 365,
-  tg_channel_tracking: false
+  revival_check_days: 365
 });
 
 const openConfigModal = async () => {
@@ -720,8 +700,7 @@ const openConfigModal = async () => {
          auto_delete_download_tasks: data.auto_delete_download_tasks ?? false,
          enable_backfill: data.enable_backfill ?? false,
          sync_mp_subscription: data.sync_mp_subscription ?? false,
-         revival_check_days: data.revival_check_days ?? 365,
-         tg_channel_tracking: data.tg_channel_tracking ?? false
+         revival_check_days: data.revival_check_days ?? 365
        };
     }
   } catch (e) {

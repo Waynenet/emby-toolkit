@@ -254,60 +254,48 @@
         </div>
       </div>
     </transition>
-    <!-- 订阅策略配置模态框 -->
-    <n-modal v-model:show="showStrategyModal" preset="card" title="订阅策略配置" style="width: 600px;" :auto-focus="false">
+<!-- 订阅策略配置模态框 -->
+    <n-modal v-model:show="showStrategyModal" preset="card" title="自动订阅与清理策略" style="width: 500px;" :auto-focus="false">
+      <n-alert type="info" :show-icon="false" style="margin-bottom: 20px;">
+        提示：以下策略主要用于控制电影的间歇性搜索。剧集的连载追更由「智能追剧」模块独立管理。
+      </n-alert>
+
       <n-form label-placement="left" label-width="auto" require-mark-placement="right-hanging">
+        <n-form-item label="新片保护期 (天)">
+          <n-input-number v-model:value="strategyConfig.movie_protection_days" :min="0" style="width: 100%" />
+          <template #feedback>发布时间在此天数内的电影启用间歇性搜索机制。超过此天数则视为老片，不再暂停，直接取消订阅。</template>
+        </n-form-item>
         
-        <n-divider title-placement="left">电影订阅策略 (剧集由智能追剧策略管理)</n-divider>
-        <n-form-item label="电影订阅优先通道">
-          <n-radio-group v-model:value="strategyConfig.subscription_priority">
-            <n-radio-button value="mp">MoviePilot</n-radio-button>
-          </n-radio-group>
+        <n-form-item label="搜索窗口期 (天)">
+          <n-input-number v-model:value="strategyConfig.movie_search_window_days" :min="1" style="width: 100%" />
+          <template #feedback>新增订阅以及每次复活后，连续搜索的天数 (建议 1 天)。</template>
+        </n-form-item>
+        
+        <n-form-item label="暂停周期 (天)">
+          <n-input-number v-model:value="strategyConfig.movie_pause_days" :min="1" style="width: 100%" />
+          <template #feedback>搜索无果后，暂停搜索的天数 (建议 7 天)。</template>
         </n-form-item>
 
-        <n-card 
-          title="MP订阅策略" 
-          size="small" 
-          embedded 
-          :bordered="false" 
-          style="background: rgba(128,128,128,0.05); margin-top: 12px;"
-        >
-            <n-form-item label="新片保护期 (天)">
-              <n-input-number v-model:value="strategyConfig.movie_protection_days" :min="0" />
-              <template #feedback>发布时间在此天数内的电影启用间歇性搜索机制。超过此天数则视为老片，不再暂停，直接取消订阅。</template>
-            </n-form-item>
-            
-            <n-form-item label="搜索窗口期 (天)">
-              <n-input-number v-model:value="strategyConfig.movie_search_window_days" :min="1" />
-              <template #feedback>新增订阅以及每次复活后，连续搜索的天数 (建议 1 天)。</template>
-            </n-form-item>
-            
-            <n-form-item label="暂停周期 (天)">
-              <n-input-number v-model:value="strategyConfig.movie_pause_days" :min="1" />
-              <template #feedback>搜索无果后，暂停搜索的天数 (建议 7 天)。</template>
-            </n-form-item>
+        <n-form-item label="延迟订阅 (天)">
+          <n-input-number v-model:value="strategyConfig.delay_subscription_days" :min="0" style="width: 100%" />
+          <template #feedback>电影上映后 N 天才允许订阅 (0 表示不延迟)。</template>
+        </n-form-item>
 
-            <n-form-item label="延迟订阅 (天)">
-              <n-input-number v-model:value="strategyConfig.delay_subscription_days" :min="0" />
-              <template #feedback>电影上映后 N 天才允许订阅 (0 表示不延迟)。</template>
-            </n-form-item>
+        <n-form-item label="超时复活 (天)">
+          <n-input-number v-model:value="strategyConfig.timeout_revive_days" :min="0" style="width: 100%" />
+          <template #feedback>
+            因“订阅超时”被移除的项目，在 N 天后自动复活并重新尝试。<br/>
+            <b>0 表示不复活 (默认)</b>。适用于给老片第二次机会。
+          </template>
+        </n-form-item>
 
-            <n-form-item label="超时复活 (天)">
-              <n-input-number v-model:value="strategyConfig.timeout_revive_days" :min="0" />
-              <template #feedback>
-                因“订阅超时”被移除的项目，在 N 天后自动复活并重新尝试订阅。<br/>
-                <b>0 表示不复活 (默认)</b>。适用于给老片或冷门资源第二次机会。
-              </template>
-            </n-form-item>
-
-            <n-form-item label="下载超时重订 (小时)">
-              <n-input-number v-model:value="strategyConfig.download_timeout_hours" :min="0" />
-              <template #feedback>
-                下载队列中超过 N 小时未完成的任务，将自动删除并重新订阅。<br/>
-                <b>同时会尝试排除原超时种子</b>。0 表示关闭此功能。
-              </template>
-            </n-form-item>
-        </n-card>
+        <n-form-item label="下载超时重订 (小时)">
+          <n-input-number v-model:value="strategyConfig.download_timeout_hours" :min="0" style="width: 100%" />
+          <template #feedback>
+            下载队列中超过 N 小时未完成的任务，将自动删除并重新订阅。<br/>
+            <b>同时会尝试排除原超时种子</b>。0 表示关闭此功能。
+          </template>
+        </n-form-item>
       </n-form>
       
       <template #footer>
@@ -360,14 +348,7 @@ const strategyConfig = ref({
   movie_pause_days: 7,
   delay_subscription_days: 0,
   timeout_revive_days: 0,
-  download_timeout_hours: 0,
-  subscription_priority: 'mp',
-  hdhive_free_only: false,
-  hdhive_max_points: 10,
-  hdhive_max_size_gb: 120,
-  hdhive_resolution: 'All',
-  hdhive_zh_sub_only: true,
-  hdhive_exclude_iso: false
+  download_timeout_hours: 0
 });
 
 const loadStrategyConfig = async () => {
@@ -381,7 +362,6 @@ const loadStrategyConfig = async () => {
       delay_subscription_days: 0,
       timeout_revive_days: 0,
       download_timeout_hours: 0,
-      subscription_priority: res.data.subscription_priority || 'mp',
       ...res.data 
     };
   } catch (e) {
