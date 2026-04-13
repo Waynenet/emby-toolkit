@@ -585,7 +585,9 @@ def init_db():
                     # ★★★ 核心修复：使用字典来管理多个表的废弃列 ★★★
                     deprecated_columns_map = {
                         'media_metadata': [
-                            'emby_item_id'
+                            'emby_item_id',
+                            'file_sha1_json',
+                            'file_pickcode_json'
                         ],
                         'cleanup_index': [
                             'best_version_id'
