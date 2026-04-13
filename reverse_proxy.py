@@ -1,11 +1,10 @@
-# reverse_proxy.py (集成 HTTPStrm - 手动逐层扒皮极速稳定版)
+# reverse_proxy.py (集成 HTTPStrm 短效缓存防重复穿透版)
 
 import logging
 import requests
 import re
 import os
 import json
-import ipaddress
 from flask import Flask, request, Response, redirect, send_file
 from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timedelta
@@ -26,9 +25,12 @@ logger = logging.getLogger(__name__)
 
 MISSING_ID_PREFIX = "-800000_"
 
-# 缓存字典，防止播放器嗅探导致的瞬间重复请求
+# ==========================================
+# 缓存字典，用于防止播放器嗅探导致的重复请求
+# 格式: { "原始strm链接": ("终极CDN链接", 缓存过期时间戳) }
+# ==========================================
 _strm_cdn_cache = {}
-CACHE_TTL_SECONDS = 15  
+CACHE_TTL_SECONDS = 15  # 缓存存活时间：15秒足够应付播放器的连续探测
 
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
@@ -37,7 +39,6 @@ def is_missing_item_id(item_id):
     return isinstance(item_id, str) and item_id.startswith(MISSING_ID_PREFIX)
 
 def parse_missing_item_id(item_id):
-    # 从 -800000_12345 中提取出 12345
     return item_id.replace(MISSING_ID_PREFIX, "")
 MIMICKED_ID_BASE = 900000
 def to_mimicked_id(db_id): return str(-(MIMICKED_ID_BASE + db_id))
@@ -55,21 +56,12 @@ def _get_real_emby_url_and_key():
     return base_url, api_key
 
 def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
-    """
-    并发分块获取 Emby 项目详情。
-    """
     if not item_ids: return []
-    
-    # 去重
     unique_ids = list(dict.fromkeys(item_ids))
-    
     def chunk_list(lst, n):
         for i in range(0, len(lst), n): yield lst[i:i + n]
-    
-    # 适当增大分块大小以减少请求数
     id_chunks = list(chunk_list(unique_ids, 200))
     target_url = f"{base_url}/emby/Users/{user_id}/Items"
-    
     def fetch_chunk(chunk):
         params = {'api_key': api_key, 'Ids': ",".join(chunk), 'Fields': fields}
         try:
@@ -79,32 +71,19 @@ def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
         except Exception as e:
             logger.error(f"并发获取某分块数据时失败: {e}")
             return None
-            
     greenlets = [spawn(fetch_chunk, chunk) for chunk in id_chunks]
     joinall(greenlets)
-    
     all_items = []
     for g in greenlets:
         if g.value: all_items.extend(g.value)
-        
     return all_items
 
 def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, limit, offset, fields, total_record_count):
-    """
-    [榜单类专用] 
-    当我们需要对一组固定的 ID (来自榜单) 进行排序和分页时使用。
-    利用 Emby 的 GET 请求能力，让 Emby 帮我们过滤权限并排序。
-    如果 ID 太多，回退到内存排序。
-    """
     base_url, api_key = _get_real_emby_url_and_key()
-    
-    # 估算 URL 长度
-    estimated_ids_length = len(item_ids) * 33 # GUID 长度 + 逗号
-    URL_LENGTH_THRESHOLD = 1800 # 保守阈值
-
+    estimated_ids_length = len(item_ids) * 33 
+    URL_LENGTH_THRESHOLD = 1800 
     try:
         if estimated_ids_length < URL_LENGTH_THRESHOLD:
-            # --- 路径 A: ID列表较短，直接请求 Emby (最快，且自动处理权限) ---
             logger.trace(f"  ➜ [Emby 代理排序] ID列表较短 ({len(item_ids)}个)，使用 GET 方法。")
             target_url = f"{base_url}/emby/Users/{user_id}/Items"
             emby_params = {
@@ -518,6 +497,7 @@ proxy_app = Flask(__name__)
 @proxy_app.route('/', defaults={'path': ''})
 @proxy_app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'])
 def proxy_all(path):
+    # --- 1. WebSocket 代理逻辑 ---
     if 'Upgrade' in request.headers and request.headers.get('Upgrade', '').lower() == 'websocket':
         ws_client = request.environ.get('wsgi.websocket')
         if not ws_client: return "WebSocket upgrade failed", 400
@@ -557,15 +537,15 @@ def proxy_all(path):
             logger.error(f"WebSocket 代理错误: {e}")
             return Response(status=500)
 
+    # --- 2. HTTP 代理逻辑 ---
     try:
         full_path = f'/{path}'
         
         # ====================================================================
-        # ★★★ 拦截 H: 手工逐层解包 302 防死机完美版 ★★★
-        # 完全摒弃 allow_redirects=True 的耗时操作！
-        # 仅手动拿取头部 Location。遇到外网 CDN 瞬间刹车，永不断联。
+        # ★★★ 拦截 H: 视频流请求 (集成 HTTPStrm 缓存优化版) ★★★
         # ====================================================================
         full_path_lower = full_path.lower()
+        
         is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)
         is_download = '/items/' in full_path_lower and '/download' in full_path_lower
 
@@ -601,74 +581,47 @@ def proxy_all(path):
                                     global _strm_cdn_cache
                                     current_time = time.time()
                                     
-                                    # 清理过期缓存
+                                    # 定期清理过期的缓存，防止内存泄漏
                                     keys_to_delete = [k for k, v in _strm_cdn_cache.items() if current_time > v[1]]
-                                    for k in keys_to_delete: 
-                                        _strm_cdn_cache.pop(k, None)
+                                    for k in keys_to_delete: del _strm_cdn_cache[k]
                                     
+                                    # 核心：检查短效缓存！
                                     if file_path in _strm_cdn_cache and current_time <= _strm_cdn_cache[file_path][1]:
                                         cached_cdn_url = _strm_cdn_cache[file_path][0]
-                                        logger.info(f"[HTTPStrm 缓存命中] 拦截并发请求，瞬间返回 CDN: {cached_cdn_url}")
+                                        logger.info(f"[HTTPStrm 缓存命中] 拦截到重复请求，直接返回已知 CDN 直链: {cached_cdn_url}")
                                         return redirect(cached_cdn_url, code=302)
                                         
-                                    logger.info(f"[HTTPStrm] 开始极其轻量级的逐层追溯: {file_path}")
-                                    req_headers = {"User-Agent": request.headers.get("User-Agent", "EmbyProxy/1.0")}
-                                    
-                                    current_url = file_path
-                                    final_cdn_url = file_path
+                                    # 缓存未命中，执行穿透请求
+                                    logger.info(f"[HTTPStrm] 捕获 STRM 链接，首次执行后台链路穿透: {file_path}")
+                                    req_headers = {
+                                        "User-Agent": request.headers.get("User-Agent", "EmbyProxy/1.0"),
+                                        "Accept": "*/*"
+                                    }
                                     
                                     try:
-                                        # 手动最多追溯 3 层跳转，绝不让 Python 连接外网
-                                        for _ in range(3):
-                                            # ★ 核心修复：绝对不自动跳转！只收表头秒退 ★
-                                            strm_resp = requests.get(
-                                                current_url, 
-                                                headers=req_headers, 
-                                                allow_redirects=False, 
-                                                stream=True, 
-                                                timeout=5
-                                            )
-                                            status_code = strm_resp.status_code
-                                            location = strm_resp.headers.get('Location')
-                                            strm_resp.close() 
-                                            
-                                            if status_code in (301, 302, 303, 307, 308) and location:
-                                                if location.startswith('/'):
-                                                    parsed_current = urlparse(current_url)
-                                                    location = f"{parsed_current.scheme}://{parsed_current.netloc}{location}"
-                                                
-                                                parsed_loc = urlparse(location)
-                                                hostname = parsed_loc.hostname
-                                                
-                                                is_local = False
-                                                if hostname:
-                                                    try:
-                                                        ip_obj = ipaddress.ip_address(hostname)
-                                                        is_local = ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
-                                                    except ValueError:
-                                                        is_local = False
-                                                        
-                                                if not is_local:
-                                                    # 找到外网夸克 CDN！立即停止，绝不主动连接夸克
-                                                    final_cdn_url = location
-                                                    break
-                                                else:
-                                                    # 还是内网地址(AList/CD2的二次跳转)，继续秒拿
-                                                    current_url = location
-                                            else:
-                                                break
-
-                                        if final_cdn_url != file_path:
-                                            logger.info(f"[HTTPStrm 成功] 瞬间扒出底层公网 CDN: {final_cdn_url}")
+                                        strm_resp = requests.get(
+                                            file_path, 
+                                            headers=req_headers, 
+                                            allow_redirects=True, 
+                                            stream=True, 
+                                            timeout=8
+                                        )
+                                        final_cdn_url = strm_resp.url
+                                        strm_resp.close() 
+                                        
+                                        if final_cdn_url and final_cdn_url != file_path:
+                                            logger.info(f"[HTTPStrm 网络优化] 成功穿透中间跳转链，单次直达底层 CDN: {final_cdn_url}")
+                                            # 写入缓存
                                             _strm_cdn_cache[file_path] = (final_cdn_url, current_time + CACHE_TTL_SECONDS)
                                             return redirect(final_cdn_url, code=302)
                                         else:
-                                            logger.info(f"[HTTPStrm 放弃] 未找到外网直链，返回原始链接: {file_path}")
+                                            # 如果没有跳转，也加入缓存
+                                            logger.info(f"[HTTPStrm] 链接已是直链，无中间跳转: {file_path}")
                                             _strm_cdn_cache[file_path] = (file_path, current_time + CACHE_TTL_SECONDS)
                                             return redirect(file_path, code=302)
                                             
                                     except Exception as fetch_e:
-                                        logger.warning(f"[HTTPStrm] 轻量解包失败，退回原始链接。原因: {fetch_e}")
+                                        logger.warning(f"[HTTPStrm] 链路穿透失败，将直接 302 原始链接交给客户端处理。原因: {fetch_e}")
                                         return redirect(file_path, code=302)
                                 else:
                                     logger.debug(f"[HTTPStrm] 媒体源不是 http(s) 链接 ({file_path})，跳过拦截。")
