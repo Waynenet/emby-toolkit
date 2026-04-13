@@ -1,7 +1,7 @@
 <!-- src/components/settings/GeneralSettingsPage.vue -->
 <template>
-  <n-layout content-style="padding: 16px; max-width: 1600px; margin: 0 auto;">
-    <n-space vertical :size="16" style="margin-top: 5px;">
+  <n-layout content-style="padding: 12px; max-width: 1600px; margin: 0 auto;">
+    <n-space vertical :size="12" style="margin-top: 2px;">
       
       <div v-if="configModel">
         <n-form
@@ -11,17 +11,17 @@
           label-placement="top"
           :model="configModel"
         >
-          <n-tabs type="line" animated pane-style="padding: 16px 0 0 0; box-sizing: border-box;">
+          <n-tabs type="line" animated pane-style="padding: 12px 0 0 0; box-sizing: border-box;">
             
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general" tab="通用设置">
-              <n-grid cols="1 l:3" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid cols="1 l:3" :x-gap="12" :y-gap="12" responsive="screen">
                 
                 <!-- 第一列: 基础设置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">基础设置</span></template>
-                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 s:2" label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
                         <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5" style="width: 100%;" />
                       </n-form-item-grid-item>
@@ -59,7 +59,7 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">实时监控</span></template>
-                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item label="启用文件监控" path="monitor_enabled">
                         <n-switch v-model:value="configModel.monitor_enabled">
                           <template #checked>开启</template>
@@ -71,7 +71,7 @@
                         <n-radio-group v-model:value="configModel.tmdb_image_language_preference" name="image_lang_group">
                           <n-space :size="8">
                             <n-radio value="zh">中文</n-radio>
-                            <n-radio value="original">原语言</n-radio>
+                            <n-radio value="original">原语</n-radio>
                           </n-space>
                         </n-radio-group>
                       </n-form-item-grid-item>
@@ -110,7 +110,7 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">数据源与API</span></template>
-                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 s:2" label="本地数据源路径" path="local_data_path">
                         <n-input-group>
                           <n-input v-model:value="configModel.local_data_path" placeholder="缓存目录路径" @click="openLocalFolderSelector('local_data_path', false)"><template #prefix><n-icon :component="FolderIcon" /></template></n-input>
@@ -149,13 +149,13 @@
 
             <!-- ================== 标签页 2: Emby ================== -->
             <n-tab-pane name="emby" tab="Emby & 302反代">
-              <n-grid cols="1 l:2" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
 
                 <!-- 左侧卡片: Emby 连接设置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">Emby 连接设置</span></template>
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 m:2">
                         <template #label>
                           <div style="display: flex; align-items: center; gap: 4px;">
@@ -207,7 +207,7 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">302反代</span></template>
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item label="启用反代" path="proxy_enabled">
                         <n-switch v-model:value="configModel.proxy_enabled" />
                       </n-form-item-grid-item>
@@ -221,11 +221,12 @@
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
                       
-                      <n-form-item-grid-item label="显示缺失海报" path="proxy_show_missing_placeholders">
-                         <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
-                      </n-form-item-grid-item>
+                      <!-- ★ 修改：合并原生库放在前面，显示缺失海报放在后面 -->
                       <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries">
                         <n-switch v-model:value="configModel.proxy_merge_native_libraries" :disabled="!configModel.proxy_enabled"/>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item label="显示缺失海报" path="proxy_show_missing_placeholders">
+                         <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
 
                       <n-form-item-grid-item span="1 m:2" label="合并显示位置" path="proxy_native_view_order">
@@ -253,7 +254,7 @@
 
             <!-- ================== 标签页 3: 智能服务  ================== -->
             <n-tab-pane name="services" tab="智能服务">
-              <n-grid cols="1 l:2" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
                 
                 <!-- 左侧: AI增强 -->
                 <n-gi>
@@ -269,21 +270,29 @@
                     </template>
                     
                     <div class="ai-settings-wrapper">
-                      <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
-                        <n-form-item-grid-item span="1 m:2" label="AI 服务商" path="ai_provider">
+                      <!-- ★ 修改：AI服务商和翻译模式并排，且都是下拉框 -->
+                      <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
+                        <n-form-item-grid-item span="1" label="AI 服务商" path="ai_provider">
                           <n-select v-model:value="configModel.ai_provider" :options="aiProviderOptions" />
                         </n-form-item-grid-item>
-                        <n-form-item-grid-item span="1 m:2" label="模型名称" path="ai_model_name">
+                        
+                        <n-form-item-grid-item span="1" label="翻译模式" path="ai_translation_mode">
+                          <n-select v-model:value="configModel.ai_translation_mode" :options="aiTranslationModeOptions" />
+                        </n-form-item-grid-item>
+
+                        <n-form-item-grid-item span="1" label="模型名称" path="ai_model_name">
                           <n-input v-model:value="configModel.ai_model_name" placeholder="gpt-3.5-turbo等" />
                         </n-form-item-grid-item>
-                        <n-form-item-grid-item span="1 m:2" label="API Key" path="ai_api_key">
+                        
+                        <n-form-item-grid-item span="1" label="API Key" path="ai_api_key">
                           <n-input type="password" show-password-on="mousedown" v-model:value="configModel.ai_api_key" placeholder="输入 API Key" />
                         </n-form-item-grid-item>
+                        
                         <n-form-item-grid-item span="1 m:2" label="API Base URL (可选)" path="ai_base_url">
                           <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或兼容服务" />
                         </n-form-item-grid-item>
 
-                        <n-gi span="1 m:2"><n-divider style="margin: 4px 0; font-size: 0.9em; color: gray;">功能与模式</n-divider></n-gi>
+                        <!-- ★ 修改：删除了“功能与模式”这行字样 -->
 
                         <n-form-item-grid-item span="1 m:2" label="启用功能">
                           <n-grid cols="2 sm:3" :y-gap="8" :x-gap="8" style="width: 100%">
@@ -295,15 +304,6 @@
                             <n-gi><n-checkbox v-model:checked="configModel.ai_recognition">辅助识别</n-checkbox></n-gi>
                           </n-grid>
                         </n-form-item-grid-item>
-
-                        <n-form-item-grid-item span="1 m:2" label="翻译模式" path="ai_translation_mode" v-if="configModel.ai_translate_actor_role || configModel.ai_translate_title_overview">
-                          <n-radio-group v-model:value="configModel.ai_translation_mode" name="ai_translation_mode">
-                            <n-space :size="16">
-                              <n-radio value="fast">快速模式 (仅翻译)</n-radio>
-                              <n-radio value="quality">顾问模式 (带上下文)</n-radio>
-                            </n-space>
-                          </n-radio-group>
-                        </n-form-item-grid-item>
                       </n-grid>
                     </div>
                   </n-card>
@@ -311,13 +311,12 @@
 
                 <!-- 右侧: MoviePilot & Telegram -->
                 <n-gi>
-                  <n-space vertical :size="16" style="height: 100%;">
+                  <n-space vertical :size="12" style="height: 100%;">
                     
                     <!-- 卡片 A: MoviePilot 订阅 -->
                     <n-card :bordered="false" class="dashboard-card">
                       <template #header><span class="card-title">MoviePilot 订阅</span></template>
-                      <!-- ★ 优化：合并排版，去掉多余分割线，全部紧凑双列显示 -->
-                      <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
                         <n-form-item-grid-item span="1 m:2" label="MoviePilot URL" path="moviepilot_url">
                           <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
                         </n-form-item-grid-item>
@@ -343,8 +342,7 @@
                       <template #header-extra>
                         <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">测试</n-button>
                       </template>
-                      <!-- ★ 优化：内部双列，ID和通知事件在同一行 -->
-                      <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                         <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
                           <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
                         </n-form-item-grid-item>
@@ -369,30 +367,36 @@
 
             <!-- ================== 标签页 4: 高级 ================== -->
             <n-tab-pane name="advanced" tab="高级">
-              <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
                 
                 <!-- 左侧: 网络代理与日志配置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">网络与系统日志</span></template>
-                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       
                       <!-- 网络代理 -->
                       <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 0; font-size: 0.9em; color: gray;">网络代理</n-divider></n-gi>
-                      <n-form-item-grid-item span="1 s:2" label="启用网络代理" path="network_proxy_enabled">
+                      
+                      <!-- ★ 修改：网络代理启用和输入框放在同一行 -->
+                      <n-form-item-grid-item span="1" label="启用网络代理" path="network_proxy_enabled">
                         <n-switch v-model:value="configModel.network_proxy_enabled" />
-                        <template #feedback><n-text depth="3" style="font-size:0.8em;">为外部API请求启用 HTTP/HTTPS 代理。</n-text></template>
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 s:2" label="HTTP 代理地址" path="network_http_proxy_url">
+                      
+                      <n-form-item-grid-item span="1" label="HTTP 代理地址" path="network_http_proxy_url">
                         <n-input-group>
                           <n-input v-model:value="configModel.network_http_proxy_url" placeholder="http://127.0.0.1:7890" :disabled="!configModel.network_proxy_enabled"/>
                           <n-button type="primary" ghost @click="testProxy" :loading="isTestingProxy" :disabled="!configModel.network_proxy_enabled || !configModel.network_http_proxy_url">测试</n-button>
                         </n-input-group>
                       </n-form-item-grid-item>
 
+                      <n-gi span="1 s:2">
+                        <n-text depth="3" style="font-size:0.8em; margin-top: -6px; display: block;">为外部API请求启用 HTTP/HTTPS 代理。</n-text>
+                      </n-gi>
+
                       <!-- 日志配置 -->
                       <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 8px 0 0 0; font-size: 0.9em; color: gray;">日志配置</n-divider></n-gi>
-                      <n-form-item-grid-item>
+                      <n-form-item-grid-item span="1">
                         <template #label>
                           <n-space align="center" :size="4" :wrap="false">
                             <span>单文件大小 (MB)</span>
@@ -401,7 +405,8 @@
                         </template>
                         <n-input-number v-model:value="configModel.log_rotation_size_mb" :min="1" :step="1" placeholder="5" style="width: 100%;" />
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1">
                         <template #label>
                           <n-space align="center" :size="4" :wrap="false">
                             <span>日志备份数量</span>
@@ -454,7 +459,7 @@
           </n-tabs>
 
           <!-- 页面底部的统一保存按钮 -->
-          <n-button type="primary" attr-type="submit" :loading="savingConfig" block size="large" style="margin-top: 24px;">
+          <n-button type="primary" attr-type="submit" :loading="savingConfig" block size="large" style="margin-top: 16px;">
             保存所有设置
           </n-button>
         </n-form>
@@ -905,11 +910,18 @@ watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_na
     nativeAvailableLibraries.value = [];
   }
 }, { immediate: true });
+
+// ★ 新增：AI 翻译模式选项
 const aiProviderOptions = ref([
   { label: 'OpenAI (及兼容服务)', value: 'openai' },
   { label: '智谱AI (ZhipuAI)', value: 'zhipuai' },
   { label: 'Google Gemini', value: 'gemini' },
 ]);
+const aiTranslationModeOptions = ref([
+  { label: '快速模式 (仅翻译)', value: 'fast' },
+  { label: '顾问模式 (带上下文)', value: 'quality' }
+]);
+
 const isExporting = ref(false);
 const exportModalVisible = ref(false);
 const allDbTables = ref([]);
@@ -1301,7 +1313,7 @@ onUnmounted(() => {
 <style scoped>
 /* 极力减小底部边距，让排布更加紧凑 */
 :deep(.n-form-item) {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 /* 标签底部留白去除，提升空间利用率 */
