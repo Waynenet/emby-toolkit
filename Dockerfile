@@ -43,7 +43,10 @@ RUN apt-get update && \
         curl \
         dumb-init && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    rm -f /etc/nginx/sites-enabled/default && \
+    rm -f /etc/nginx/sites-available/default && \
+    rm -f /etc/nginx/conf.d/default.conf
 
 # ★★★ 核心优化点 1：把最稳定、最耗时的依赖安装提前 ★★★
 # 只要 requirements.txt 文件内容不变，下面这两层就会被永久缓存！
