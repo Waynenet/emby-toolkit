@@ -481,7 +481,7 @@ def main_app_start():
                 internal_proxy_port = 7758
                 external_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)
                 logger.info(f"  ➜ [302反代] 服务已启动 (容器监听端口: {external_port})")
-                proxy_server = WSGIServer(('0.0.0.0', internal_proxy_port), proxy_app, handler_class=WebSocketHandler)
+                proxy_server = WSGIServer(('::', internal_proxy_port), proxy_app, handler_class=WebSocketHandler)
                 proxy_server.serve_forever()
             except Exception as e:
                 logger.error(f"  ➜ 启动虚拟库服务失败: {e}", exc_info=True)
@@ -497,7 +497,7 @@ def main_app_start():
         def write(self, data): pass
         def flush(self): pass
 
-    main_server = WSGIServer(('0.0.0.0', main_app_port), app, log=NullLogger())
+    main_server = WSGIServer(('::', main_app_port), app, log=NullLogger())
     main_server.serve_forever()
 
 # ★★★ 核心修改 2: 新增的启动逻辑，用于处理命令行参数 ★★★
