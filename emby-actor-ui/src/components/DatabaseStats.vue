@@ -493,7 +493,7 @@ const resolutionChartOptions = computed(() => {
     return {
       series: [{
         type: 'pie',
-        radius: ['50%', '70%'],
+        radius: ['50%', '65%'],
         center: ['50%', '50%'],
         data: [{ value: 0, name: '暂无数据' }],
         itemStyle: { color: '#333' },
@@ -513,7 +513,7 @@ const resolutionChartOptions = computed(() => {
     },
     legend: {
       show: true,
-      type: 'plain',         // 使用普通模式，不显示那个左右箭头
+      type: 'plain',         // 使用普通模式，不显示左右箭头
       orient: 'horizontal',  // 水平排列，会自动换行
       bottom: '0',           // 贴紧容器底部
       left: 'center',        // 居中
@@ -527,8 +527,10 @@ const resolutionChartOptions = computed(() => {
     series: [{
       name: '分辨率',
       type: 'pie',
-      radius: isMobile.value ? ['45%', '65%'] : ['50%', '75%'],
-      center: ['50%', '38%'], // 显著抬高圆心，为底部多行 Legend 腾位子
+      // 修改半径: [内圆半径, 外圆半径]。增加内圆，减小外圆，使圆环变细、图表变小。
+      radius: isMobile.value ? ['50%', '65%'] : ['55%', '70%'],
+      // 稍微下移一点点中心，保持整体留白平衡
+      center: ['50%', '40%'], 
       avoidLabelOverlap: true,
       itemStyle: {
         borderRadius: 4,
