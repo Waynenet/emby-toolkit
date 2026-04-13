@@ -37,13 +37,19 @@
               <div>
                 <div class="section-title">媒体库概览</div>
                 <n-grid :cols="2" :x-gap="24" style="margin-top: 12px; align-items: center;">
-                  <n-gi>
-                    <v-chart class="chart" :option="resolutionChartOptions" autoresize style="height: 180px;" />
+                  <!-- 饼图区域 -->
+                  <n-gi style="display: flex; justify-content: center; align-items: center;">
+                    <v-chart 
+                      class="chart-container" 
+                      :option="resolutionChartOptions" 
+                      autoresize 
+                      style="height: 260px; width: 100%;" 
+                    />
                   </n-gi>
+                  <!-- 详情统计 -->
                   <n-gi>
                     <n-space vertical justify="center" style="height: 100%;">
                       <n-grid :cols="2" :x-gap="12" :y-gap="16">
-                        <!-- 电影 -->
                         <n-gi>
                           <n-statistic label="电影">
                             <template #prefix>
@@ -54,7 +60,6 @@
                             {{ stats.media_library.movies_in_library }}
                           </n-statistic>
                         </n-gi>
-                        <!-- 剧集 -->
                         <n-gi>
                           <n-statistic label="剧集">
                             <template #prefix>
@@ -65,7 +70,6 @@
                             {{ stats.media_library.series_in_library }}
                           </n-statistic>
                         </n-gi>
-                        <!-- 总集数 -->
                         <n-gi>
                           <n-statistic label="总集数">
                             <template #prefix>
@@ -76,7 +80,6 @@
                             {{ stats.media_library.episodes_in_library }}
                           </n-statistic>
                         </n-gi>
-                        <!-- 演员 -->
                         <n-gi>
                           <n-statistic label="演员">
                             <template #prefix>
@@ -283,7 +286,12 @@
 
       <!-- 2. 媒体库分布 (图表 + 统计) -->
       <n-card size="small" :bordered="false" title="媒体库分布" style="margin-top: 12px;">
-        <v-chart class="chart" :option="resolutionChartOptions" autoresize style="height: 200px;" />
+        <v-chart 
+          class="chart-container" 
+          :option="resolutionChartOptions" 
+          autoresize 
+          style="height: 280px; width: 100%;" 
+        />
         <n-grid :cols="2" :x-gap="12" :y-gap="12" style="text-align: center; margin-top: 10px;">
           <n-gi>
             <n-statistic label="电影">
@@ -480,33 +488,67 @@ const fetchRankings = async () => {
 // --- 计算属性 ---
 const resolutionChartOptions = computed(() => {
   const chartData = stats.media_library.resolution_stats || [];
+  
   if (!chartData.length) {
-    return { series: [{ type: 'pie', data: [{ value: 1, name: '无数据' }] }] };
-  }
-  return {
-    color: [ '#5470C6', '#91CC75', '#FAC858', '#73C0DE' ],
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: {
-      show: !isMobile.value,
-      orient: 'vertical',
-      left: 'left',
-      top: 'center',
-      textStyle: { color: '#ccc' },
-      data: chartData.map(item => item.resolution || '未知')
-    },
-    series: [
-      {
-        name: '分辨率',
+    return {
+      series: [{
         type: 'pie',
-        radius: isMobile.value ? ['40%', '60%'] : ['50%', '70%'],
-        center: isMobile.value ? ['50%', '50%'] : ['70%', '50%'],
-        avoidLabelOverlap: false,
-        itemStyle: { borderRadius: 8, borderColor: '#18181c', borderWidth: 2 },
-        label: { show: false },
-        labelLine: { show: false },
-        data: chartData.map(item => ({ value: item.count, name: item.resolution || '未知' }))
-      }
-    ]
+        radius: ['50%', '70%'],
+        center: ['50%', '50%'],
+        data: [{ value: 0, name: '暂无数据' }],
+        itemStyle: { color: '#333' },
+        label: { show: true, position: 'center', formatter: '暂无数据', color: '#666' }
+      }]
+    };
+  }
+
+  return {
+    color: ['#2080f0', '#18a058', '#f0a020', '#d03050', '#999', '#73C0DE'],
+    tooltip: {
+      trigger: 'item',
+      formatter: '{b}: {c}部 ({d}%)',
+      backgroundColor: 'rgba(24, 24, 28, 0.9)',
+      borderColor: '#444',
+      textStyle: { color: '#ccc' }
+    },
+    legend: {
+      show: true,
+      type: 'plain',         // 使用普通模式，不显示那个左右箭头
+      orient: 'horizontal',  // 水平排列，会自动换行
+      bottom: '0',           // 贴紧容器底部
+      left: 'center',        // 居中
+      width: '90%',          // 限制宽度以触发自动换行
+      itemWidth: 8,          // 调小图标尺寸
+      itemHeight: 8,
+      itemGap: 10,           // 调小间距，让换行更紧凑
+      icon: 'circle',
+      textStyle: { color: '#aaa', fontSize: 11 }
+    },
+    series: [{
+      name: '分辨率',
+      type: 'pie',
+      radius: isMobile.value ? ['45%', '65%'] : ['50%', '75%'],
+      center: ['50%', '38%'], // 显著抬高圆心，为底部多行 Legend 腾位子
+      avoidLabelOverlap: true,
+      itemStyle: {
+        borderRadius: 4,
+        borderColor: '#18181c',
+        borderWidth: 2
+      },
+      label: { show: false },
+      emphasis: {
+        label: {
+          show: true,
+          fontSize: '12',
+          fontWeight: 'bold',
+          formatter: '{b}'
+        }
+      },
+      data: chartData.map(item => ({
+        value: item.count,
+        name: item.resolution || '未知'
+      }))
+    }]
   };
 });
 
@@ -564,4 +606,9 @@ onUnmounted(() => {
 .mobile-value { font-size: 18px; font-weight: 600; }
 .mobile-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }
 .mobile-ranking-name { font-weight: 500; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 图表居中优化 */
+.chart-container {
+  margin: 0 auto;
+}
 </style>

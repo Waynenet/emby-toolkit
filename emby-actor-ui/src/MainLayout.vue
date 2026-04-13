@@ -334,13 +334,44 @@ const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(ic
 // 计算实时日志内容
 const logContent = computed(() => props.taskStatus?.logs?.join('\n') || '等待任务日志...');
 
-// 监听日志变化，自动滚动到底部
-watch([() => props.taskStatus?.logs, isRealtimeLogVisible], async ([, isVisible]) => {
-  if (isVisible) {
-    await nextTick();
-    logRef.value?.scrollTo({ position: 'bottom', slient: true });
-  }
-}, { deep: true });
+// 监听日志变化，智能自动滚动到底部
+watch(
+  [() => props.taskStatus?.logs, isRealtimeLogVisible], 
+  async ([newLogs, isVisible], [oldLogs, wasVisible]) => {
+    if (!isVisible) return; // 面板关闭时不处理
+
+    // 1. 判断是否为“刚打开面板”
+    const isJustOpened = isVisible && !wasVisible;
+
+    if (isJustOpened) {
+      // 刚打开时，因为 Modal 有过渡动画，直接 nextTick 抓不到高度
+      // 给予 150ms 延迟，等弹窗完全展开后再滚到底部
+      setTimeout(() => {
+        logRef.value?.scrollTo({ position: 'bottom', silent: true });
+      }, 150);
+      return;
+    }
+
+    // 2. 如果面板已经处于打开状态，并且有新日志进来
+    if (logRef.value) {
+      // 寻找 Naive UI 的内部滚动容器
+      const scrollEl = logRef.value.$el?.querySelector('.n-scrollbar-container') || logRef.value.$el;
+      
+      let isAtBottom = false;
+      if (scrollEl && scrollEl.scrollHeight !== undefined) {
+        const offset = 100; // 100px 缓冲容错
+        isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop <= scrollEl.clientHeight + offset;
+      }
+
+      // 如果用户当前就在最底部，才跟随滚动
+      if (isAtBottom) {
+        await nextTick();
+        logRef.value?.scrollTo({ position: 'bottom', silent: true });
+      }
+    }
+  }, 
+  { deep: true }
+);
 
 const userOptions = computed(() => {
   const options = [];

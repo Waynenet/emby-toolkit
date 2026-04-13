@@ -1,321 +1,193 @@
 <!-- src/components/settings/GeneralSettingsPage.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
-    <n-space vertical :size="24" style="margin-top: 15px;">
+  <n-layout content-style="padding: 16px; max-width: 1600px; margin: 0 auto;">
+    <n-space vertical :size="16" style="margin-top: 5px;">
       
-      <!-- ★★★ 最终修正: v-if, v-else-if, v-else 现在是正确的同级兄弟关系 ★★★ -->
       <div v-if="configModel">
         <n-form
           ref="formRef"
           :rules="formRules"
           @submit.prevent="save"
-          label-placement="left"
-          label-width="200"
-          label-align="right"
+          label-placement="top"
           :model="configModel"
         >
-          <n-tabs type="line" animated size="large" pane-style="padding: 20px; box-sizing: border-box;">
+          <n-tabs type="line" animated pane-style="padding: 16px 0 0 0; box-sizing: border-box;">
+            
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general" tab="通用设置">
-              <n-grid cols="1 l:3" :x-gap="24" :y-gap="24" responsive="screen">
-                <!-- 左侧列 -->
+              <n-grid cols="1 l:3" :x-gap="16" :y-gap="16" responsive="screen">
+                
+                <!-- 第一列: 基础设置 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">基础设置</span></template>
-                    <n-form-item-grid-item label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
-                      <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5"/>
-                    </n-form-item-grid-item>
-                    
-                    <n-form-item-grid-item label="需手动处理的最低评分阈值" path="min_score_for_review">
-                      <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">处理质量评分低于此值的项目将进入待复核列表。</n-text></template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="最大演员数" path="max_actors_to_process">
-                      <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">处理后最终演员表数量，超过会截断，优先保留有头像演员。</n-text></template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="为角色名添加前缀" path="actor_role_add_prefix">
-                      <n-switch v-model:value="configModel.actor_role_add_prefix" />
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">角色名前加上“饰 ”或“配 ”。</n-text></template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="移除无头像的演员" path="remove_actors_without_avatars">
-                      <n-switch v-model:value="configModel.remove_actors_without_avatars" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          在最终演员表移除那些找不到任何可用头像的演员。
-                        </n-text>
-                      </template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
-                      <n-switch v-model:value="configModel.keyword_to_tags" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          将映射后的中文关键词写入标签。
-                        </n-text>
-                      </template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="工作室中文化" path="studio_to_chinese">
-                      <n-switch v-model:value="configModel.studio_to_chinese" />
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          将工作室名称转换为中文。
-                        </n-text>
-                      </template>
-                    </n-form-item-grid-item>
+                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
+                        <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5" style="width: 100%;" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="需手动处理的最低评分阈值" path="min_score_for_review">
+                        <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0" style="width: 100%;" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">评分低于此值的项目将进入待复核。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="最大演员数" path="max_actors_to_process">
+                        <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100" style="width: 100%;" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">最终演员表数量，超过截断，优先保留有头像。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="角色名加前缀" path="actor_role_add_prefix">
+                        <n-switch v-model:value="configModel.actor_role_add_prefix" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="移除无头像演员" path="remove_actors_without_avatars">
+                        <n-switch v-model:value="configModel.remove_actors_without_avatars" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
+                        <n-switch v-model:value="configModel.keyword_to_tags" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="工作室中文化" path="studio_to_chinese">
+                        <n-switch v-model:value="configModel.studio_to_chinese" />
+                      </n-form-item-grid-item>
+                    </n-grid>
                   </n-card>
                 </n-gi>
+
                 <!-- 第二列：实时监控 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header>
-                      <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title">实时监控</span>
-                      </div>
-                    </template>
-                    
-                    <n-form-item label="启用文件系统监控" path="monitor_enabled">
-                      <n-switch v-model:value="configModel.monitor_enabled">
-                        <template #checked>开启</template>
-                        <template #unchecked>关闭</template>
-                      </n-switch>
-                    </n-form-item>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">实时监控</span></template>
+                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-form-item-grid-item label="启用文件监控" path="monitor_enabled">
+                        <n-switch v-model:value="configModel.monitor_enabled">
+                          <template #checked>开启</template>
+                          <template #unchecked>关闭</template>
+                        </n-switch>
+                      </n-form-item-grid-item>
 
-                    <n-form-item label="监控路径" path="monitor_paths">
-                      <n-input-group>
-                        <n-select
-                          v-model:value="configModel.monitor_paths"
-                          multiple
-                          filterable
-                          tag
-                          :show-arrow="false"
-                          placeholder="输入路径并回车，或点击右侧选择"
-                          :options="[]" 
-                          style="flex: 1;"
-                        />
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_paths', true)">
-                          <template #icon><n-icon :component="FolderIcon" /></template>
-                        </n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          请保持和 Emby 媒体库路径映射一致。
-                        </n-text>
-                      </template>
-                    </n-form-item>
+                      <n-form-item-grid-item label="图片语言偏好" path="tmdb_image_language_preference">
+                        <n-radio-group v-model:value="configModel.tmdb_image_language_preference" name="image_lang_group">
+                          <n-space :size="8">
+                            <n-radio value="zh">中文</n-radio>
+                            <n-radio value="original">原语言</n-radio>
+                          </n-space>
+                        </n-radio-group>
+                      </n-form-item-grid-item>
 
-                    <n-form-item label="排除路径" path="monitor_exclude_dirs">
-                      <n-input-group>
-                        <n-select
-                          v-model:value="configModel.monitor_exclude_dirs"
-                          multiple
-                          filterable
-                          tag
-                          :show-arrow="false"
-                          placeholder="输入路径并回车，或点击右侧选择"
-                          :options="[]" 
-                          style="flex: 1;"
-                        />
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_exclude_dirs', true)">
-                          <template #icon><n-icon :component="FolderIcon" /></template>
-                        </n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          命中这些路径的文件将<b>跳过刮削流程</b>，仅刷新。<br/>
-                        </n-text>
-                      </template>
-                    </n-form-item>
-                    
-                    <!-- 排除刷新延迟 -->
-                    <n-form-item label="排除刷新延迟" path="monitor_exclude_refresh_delay">
-                      <n-input-number 
-                        v-model:value="configModel.monitor_exclude_refresh_delay" 
-                        :min="0" 
-                        :step="10"
-                        placeholder="0" 
-                        style="width: 100%" 
-                      >
-                        <template #suffix>秒</template>
-                      </n-input-number>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          仅对<b>排除路径</b>生效。设为 0 则立即刷新。<br/>
-                        </n-text>
-                      </template>
-                    </n-form-item>
+                      <n-form-item-grid-item span="1 s:2" label="监控路径" path="monitor_paths">
+                        <n-input-group>
+                          <n-select v-model:value="configModel.monitor_paths" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_paths', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
+                        </n-input-group>
+                      </n-form-item-grid-item>
 
-                    <!-- 定时扫描回溯天数 -->
-                    <n-form-item label="定时扫描回溯" path="monitor_scan_lookback_days">
-                      <n-input-number 
-                        v-model:value="configModel.monitor_scan_lookback_days" 
-                        :min="0" 
-                        :max="365" 
-                        placeholder="1" 
-                        style="width: 100%" 
-                      >
-                        <template #suffix>天</template>
-                      </n-input-number>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          仅检查最近 N 天内创建或修改过的文件，设为 0 则全量扫描。
-                        </n-text>
-                      </template>
-                    </n-form-item>
+                      <n-form-item-grid-item span="1 s:2" label="排除路径" path="monitor_exclude_dirs">
+                        <n-input-group>
+                          <n-select v-model:value="configModel.monitor_exclude_dirs" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_exclude_dirs', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
+                        </n-input-group>
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">命中路径将跳过刮削，仅刷新。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="排除刷新延迟" path="monitor_exclude_refresh_delay">
+                        <n-input-number v-model:value="configModel.monitor_exclude_refresh_delay" :min="0" :step="10" placeholder="0" style="width: 100%"><template #suffix>秒</template></n-input-number>
+                      </n-form-item-grid-item>
 
-                    <n-form-item label="监控扩展名" path="monitor_extensions">
-                      <n-select
-                        v-model:value="configModel.monitor_extensions"
-                        multiple
-                        filterable
-                        tag
-                        placeholder="输入扩展名并回车"
-                        :options="[]" 
-                      />
-                      <!-- 注意：options 设为空数组配合 tag 模式允许用户自由输入 -->
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          仅处理这些后缀的文件，输入扩展名并回车添加新的监控文件类型。
-                        </n-text>
-                      </template>
-                    </n-form-item>
-                    <n-form-item label="图片语言偏好" path="tmdb_image_language_preference">
-                      <n-radio-group v-model:value="configModel.tmdb_image_language_preference" name="image_lang_group">
-                        <n-space>
-                          <n-radio value="zh">简体中文优先</n-radio>
-                          <n-radio value="original">原语言优先</n-radio>
-                        </n-space>
-                      </n-radio-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          控制下载 海报 等图片时的语言优先级。
-                        </n-text>
-                      </template>
-                    </n-form-item>
+                      <n-form-item-grid-item label="定时扫描回溯" path="monitor_scan_lookback_days">
+                        <n-input-number v-model:value="configModel.monitor_scan_lookback_days" :min="0" :max="365" placeholder="1" style="width: 100%"><template #suffix>天</template></n-input-number>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="监控扩展名" path="monitor_extensions">
+                        <n-select v-model:value="configModel.monitor_extensions" multiple filterable tag placeholder="输入扩展名并回车" :options="[]" />
+                      </n-form-item-grid-item>
+                    </n-grid>
                   </n-card>
                 </n-gi>
+                
+                <!-- 第三列：数据源与API -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">数据源与API</span></template>
-                    <n-form-item label="本地数据源路径" path="local_data_path">
-                      <n-input-group>
-                        <n-input 
-                          v-model:value="configModel.local_data_path" 
-                          placeholder="神医TMDB缓存目录 (cache和override的上层)" 
-                          @click="openLocalFolderSelector('local_data_path', false)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
-                      </n-input-group>
-                    </n-form-item>
-                    <n-form-item label="TMDB API Key" path="tmdb_api_key">
-                      <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />
-                    </n-form-item>
-                    <n-form-item label="TMDB API Base URL" path="tmdb_api_base_url">
-                      <n-input v-model:value="configModel.tmdb_api_base_url" placeholder="https://api.themoviedb.org/3" />
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">TMDb API的基础URL，通常不需要修改。</n-text></template>
-                    </n-form-item>
-                    <n-form-item label="成人内容探索" path="tmdb_include_adult">
-                      <n-space align="center">
+                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="本地数据源路径" path="local_data_path">
+                        <n-input-group>
+                          <n-input v-model:value="configModel.local_data_path" placeholder="缓存目录路径" @click="openLocalFolderSelector('local_data_path', false)"><template #prefix><n-icon :component="FolderIcon" /></template></n-input>
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
+                        </n-input-group>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="TMDB API Key" path="tmdb_api_key">
+                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入 TMDB API Key" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="TMDB API Base URL" path="tmdb_api_base_url">
+                        <n-input v-model:value="configModel.tmdb_api_base_url" placeholder="https://api.themoviedb.org/3" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="成人内容探索" path="tmdb_include_adult">
                         <n-switch v-model:value="configModel.tmdb_include_adult" />
-                        <n-text depth="3" style="font-size: 0.9em; margin-left: 8px;">
-                          控制影视探索是否返回成人内容。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
-                    <n-form-item label="启用在线豆瓣API" path="douban_enable_online_api">
-                      <n-space align="center">
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="启用在线豆瓣" path="douban_enable_online_api">
                         <n-switch v-model:value="configModel.douban_enable_online_api" />
-                        <n-text depth="3" style="font-size: 0.9em; margin-left: 8px;">
-                          关闭后仅使用本地缓存。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
-                    <n-form-item-grid-item label="豆瓣API冷却时间 (秒)" path="api_douban_default_cooldown_seconds">
-                      <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="例如: 1.0"/>
-                    </n-form-item-grid-item>
-                    <n-form-item label="豆瓣登录 Cookie" path="douban_cookie">
-                      <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="从浏览器开发者工具中获取"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">非必要不用配置，作用有限。</n-text></template>
-                    </n-form-item>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="豆瓣冷却(秒)" path="api_douban_default_cooldown_seconds">
+                        <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="1.0" style="width: 100%;" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="豆瓣登录 Cookie" path="douban_cookie">
+                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取"/>
+                      </n-form-item-grid-item>
+                    </n-grid>
                   </n-card>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
 
-            <!-- ================== 标签页 2: Emby (紧凑双列版) ================== -->
+            <!-- ================== 标签页 2: Emby ================== -->
             <n-tab-pane name="emby" tab="Emby & 302反代">
-              <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
+              <n-grid cols="1 l:2" :x-gap="16" :y-gap="16" responsive="screen">
 
-                <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
+                <!-- 左侧卡片: Emby 连接设置 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">Emby 连接设置</span></template>
-                    
-                    <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
-                      
-                      <!-- 1. Emby URL (左) -->
-                      <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                      <n-form-item-grid-item label-width="100">
+                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-form-item-grid-item span="1 m:2">
                         <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
+                          <div style="display: flex; align-items: center; gap: 4px;">
                             <span>Emby URL</span>
                             <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" />
-                              </template>
-                              此项修改需要重启容器才能生效。
+                              <template #trigger><n-icon :component="AlertIcon" class="info-icon" /></template>需要重启容器
                             </n-tooltip>
                           </div>
                         </template>
                         <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
                       </n-form-item-grid-item>
 
-                      <!-- 2. 外网访问 URL (右) -->
-                      <n-form-item-grid-item label="外网URL" path="emby_public_url" label-width="100">
-                        <n-input v-model:value="configModel.emby_public_url" placeholder="留空则不开启" />
+                      <n-form-item-grid-item label="外网URL" path="emby_public_url">
+                        <n-input v-model:value="configModel.emby_public_url" placeholder="留空不开启" />
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item label="APIKey" path="emby_api_key">
+                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="API Key" />
                       </n-form-item-grid-item>
 
-                      <!-- 3. API Key (左) -->
-                      <n-form-item-grid-item label="APIKey" path="emby_api_key" label-width="100">
-                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="输入 API Key" />
+                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id">
+                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位" />
+                        <template #feedback><div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！</div></template>
                       </n-form-item-grid-item>
-
-                      <!-- 4. 用户 ID (右) -->
-                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id" label-width="100">
-                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位用户ID" />
-                        <template #feedback>
-                          <div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位。</div>
-                        </template>
-                      </n-form-item-grid-item>
-
-                      <!-- 分割线 (占满一行) -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin: 8px 0; font-size: 0.9em; color: gray;">管理员凭证 (选填)</n-divider>
-                      </n-gi>
-
-                      <!-- 5. 管理员用户 (左) -->
-                      <n-form-item-grid-item label="用户名" path="emby_admin_user" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" />
-                      </n-form-item-grid-item>
-
-                      <!-- 6. 管理员密码 (右) -->
-                      <n-form-item-grid-item label="密码" path="emby_admin_pass" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" />
-                      </n-form-item-grid-item>
-
-                      <!-- 7. 超时时间 (占满一行，保持长标签) -->
-                      <n-form-item-grid-item label="Emby API 超时时间 (秒)" path="emby_api_timeout" span="1 m:2" label-width="200">
+                      <n-form-item-grid-item label="超时时间 (秒)" path="emby_api_timeout">
                         <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
                       </n-form-item-grid-item>
 
-                      <!-- 分割线 -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin-top: 10px;">选择要处理的媒体库</n-divider>
-                      </n-gi>
+                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em; color: gray;">管理员凭证 (选填)</n-divider></n-gi>
+                      <n-form-item-grid-item label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
+                      <n-form-item-grid-item label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
 
-                      <!-- 8. 媒体库选择 -->
+                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择处理的媒体库</n-divider></n-gi>
                       <n-form-item-grid-item label-placement="top" span="1 m:2">
                         <n-spin :show="loadingLibraries">
                           <n-checkbox-group v-model:value="configModel.libraries_to_process">
@@ -323,92 +195,56 @@
                               <n-checkbox v-for="lib in availableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name" />
                             </n-space>
                           </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key)">
-                            未找到媒体库。请检查 Emby URL 和 API Key。
-                          </n-text>
+                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key)">未找到库。请检查 URL 和 API Key。</n-text>
                           <div v-if="libraryError" style="color: red; margin-top: 5px;">{{ libraryError }}</div>
                         </n-spin>
                       </n-form-item-grid-item>
-
                     </n-grid>
                   </n-card>
                 </n-gi>
 
-                <!-- ########## 右侧卡片: 虚拟库 (反向代理) ########## -->
+                <!-- 右侧卡片: 虚拟库 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">302反代</span></template>
-                    
-                    <!-- 同样使用紧凑双列 -->
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
-
-                      <!-- 1. 启用开关 -->
-                      <n-form-item-grid-item label="启用" path="proxy_enabled" label-width="100">
+                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      <n-form-item-grid-item label="启用反代" path="proxy_enabled">
                         <n-switch v-model:value="configModel.proxy_enabled" />
                       </n-form-item-grid-item>
-
-                      <!-- 2. 端口 -->
-                      <n-form-item-grid-item label-width="100">
+                      <n-form-item-grid-item>
                         <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
+                          <div style="display: flex; align-items: center; gap: 4px;">
                             <span>端口</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" style="margin-left: 4px;" />
-                              </template>
-                              需重启容器生效
-                            </n-tooltip>
+                            <n-tooltip trigger="hover"><template #trigger><n-icon :component="AlertIcon" class="info-icon" /></template>需重启容器</n-tooltip>
                           </div>
                         </template>
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
                       
-                      <!-- 3. 缺失占位符 (占满一行，因为说明文字较长) -->
-                      <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" span="1 m:2" label-width="100">
-                         <n-space align="center">
-                            <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
-                            <n-text depth="3" style="font-size: 0.8em;">在榜单中显示未入库海报</n-text>
-                         </n-space>
+                      <n-form-item-grid-item label="显示缺失海报" path="proxy_show_missing_placeholders">
+                         <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
-
-                      <!-- 5. 合并原生库 -->
-                      <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries" label-width="100">
+                      <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries">
                         <n-switch v-model:value="configModel.proxy_merge_native_libraries" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
 
-                      <!-- 6. 显示位置 -->
-                      <n-form-item-grid-item label="显示位置" path="proxy_native_view_order" label-width="100">
+                      <n-form-item-grid-item span="1 m:2" label="合并显示位置" path="proxy_native_view_order">
                         <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
-                          <n-radio value="before">在前</n-radio>
-                          <n-radio value="after">在后</n-radio>
+                          <n-radio value="before">原生在前</n-radio>
+                          <n-radio value="after">原生在后</n-radio>
                         </n-radio-group>
                       </n-form-item-grid-item>
 
-                      <!-- 分割线 -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin-top: 10px;">选择合并显示的原生媒体库</n-divider>
-                      </n-gi>
-
-                      <!-- 7. 原生库选择 -->
-                      <n-form-item-grid-item 
-                        v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" 
-                        path="proxy_native_view_selection" 
-                        label-placement="top"
-                        span="1 m:2"
-                      >
+                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择合并原生库</n-divider></n-gi>
+                      <n-form-item-grid-item span="1 m:2" v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" path="proxy_native_view_selection">
                         <n-spin :show="loadingNativeLibraries">
                           <n-checkbox-group v-model:value="configModel.proxy_native_view_selection">
                             <n-space item-style="display: flex; flex-wrap: wrap;">
                               <n-checkbox v-for="lib in nativeAvailableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name"/>
                             </n-space>
                           </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingNativeLibraries && nativeAvailableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key && configModel.emby_user_id)">
-                            未找到原生媒体库。请检查 Emby URL、API Key 和 用户ID。
-                          </n-text>
-                          <div v-if="nativeLibraryError" style="color: red; margin-top: 5px;">{{ nativeLibraryError }}</div>
                         </n-spin>
                       </n-form-item-grid-item>
-
                     </n-grid>
                   </n-card>
                 </n-gi>
@@ -417,303 +253,199 @@
 
             <!-- ================== 标签页 3: 智能服务  ================== -->
             <n-tab-pane name="services" tab="智能服务">
-              <!-- ★★★ 修改点1: cols 改为 "1 l:3"，总共3列 ★★★ -->
-              <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
+              <n-grid cols="1 l:2" :x-gap="16" :y-gap="16" responsive="screen">
                 
-                <!-- 左侧: AI翻译 -->
+                <!-- 左侧: AI增强 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">AI 增强</span></template>
+                    <template #header>
+                      <span class="card-title" style="white-space: nowrap; flex-shrink: 0; margin-right: 8px;">AI 增强</span>
+                    </template>
                     <template #header-extra>
-                      <n-space align="center">
-                        <n-button 
-                          size="tiny" 
-                          type="info" 
-                          ghost 
-                          @click="openPromptModal"
-                        >
-                          配置提示词
-                        </n-button>
-                        <n-button 
-                          size="tiny" 
-                          type="primary" 
-                          ghost 
-                          @click="testAI" 
-                          :loading="isTestingAI"
-                          :disabled="!configModel.ai_api_key"
-                        >
-                          测试连接
-                        </n-button>
-                        <a href="https://cloud.siliconflow.cn/i/GXIrubbL" target="_blank" style="font-size: 0.85em; color: var(--n-primary-color); text-decoration: underline;">注册硅基流动</a>
+                      <n-space align="center" justify="end" :size="8">
+                        <n-button size="tiny" type="info" ghost @click="openPromptModal">配置提示词</n-button>
+                        <n-button size="tiny" type="primary" ghost @click="testAI" :loading="isTestingAI" :disabled="!configModel.ai_api_key">测试</n-button>
                       </n-space>
                     </template>
                     
                     <div class="ai-settings-wrapper">
-                      
-                      <!-- 1. 基础配置 (上移，因为它们是前提) -->
-                      <n-form-item label="AI 服务商" path="ai_provider">
-                        <n-select v-model:value="configModel.ai_provider" :options="aiProviderOptions" />
-                      </n-form-item>
-                      <n-form-item label="API Key" path="ai_api_key">
-                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.ai_api_key" placeholder="输入你的 API Key" />
-                      </n-form-item>
-                      <n-form-item label="模型名称" path="ai_model_name">
-                        <n-input v-model:value="configModel.ai_model_name" placeholder="例如: gpt-3.5-turbo, glm-4" />
-                      </n-form-item>
-                      <n-form-item label="API Base URL (可选)" path="ai_base_url">
-                        <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或第三方兼容服务" />
-                      </n-form-item>
+                      <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                        <n-form-item-grid-item span="1 m:2" label="AI 服务商" path="ai_provider">
+                          <n-select v-model:value="configModel.ai_provider" :options="aiProviderOptions" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item span="1 m:2" label="模型名称" path="ai_model_name">
+                          <n-input v-model:value="configModel.ai_model_name" placeholder="gpt-3.5-turbo等" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item span="1 m:2" label="API Key" path="ai_api_key">
+                          <n-input type="password" show-password-on="mousedown" v-model:value="configModel.ai_api_key" placeholder="输入 API Key" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item span="1 m:2" label="API Base URL (可选)" path="ai_base_url">
+                          <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或兼容服务" />
+                        </n-form-item-grid-item>
 
-                      <n-divider style="margin: 10px 0; font-size: 0.9em; color: gray;">功能开关</n-divider>
+                        <n-gi span="1 m:2"><n-divider style="margin: 4px 0; font-size: 0.9em; color: gray;">功能与模式</n-divider></n-gi>
 
-                      <!-- 2. 功能细分开关 -->
-                      <n-form-item label="启用功能">
-                        <n-grid :cols="2" :y-gap="8">
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_translate_actor_role">
-                              翻译演员与角色
-                            </n-checkbox>
-                          </n-gi>
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_translate_title">
-                              翻译片名
-                            </n-checkbox>
-                          </n-gi>
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_translate_overview">
-                              翻译简介
-                            </n-checkbox>
-                          </n-gi>
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_translate_episode_overview">
-                              翻译分集简介
-                            </n-checkbox>
-                          </n-gi>
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_vector">
-                              生成媒体向量
-                            </n-checkbox>
-                          </n-gi>
-                          <n-gi>
-                            <n-checkbox v-model:checked="configModel.ai_recognition">
-                              辅助识别
-                            </n-checkbox>
-                          </n-gi>
-                        </n-grid>
-                      </n-form-item>
+                        <n-form-item-grid-item span="1 m:2" label="启用功能">
+                          <n-grid cols="2 sm:3" :y-gap="8" :x-gap="8" style="width: 100%">
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_actor_role">演员角色翻译</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_title">片名翻译</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_overview">简介翻译</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_episode_overview">分集简介</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_vector">生成媒体向量</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_recognition">辅助识别</n-checkbox></n-gi>
+                          </n-grid>
+                        </n-form-item-grid-item>
 
-                      <!-- 3. 高级选项 -->
-                      <n-form-item label="翻译模式" path="ai_translation_mode" v-if="configModel.ai_translate_actor_role || configModel.ai_translate_title_overview">
-                        <n-radio-group v-model:value="configModel.ai_translation_mode" name="ai_translation_mode">
-                          <n-space vertical>
-                            <n-radio value="fast">快速模式 (仅翻译)</n-radio>
-                            <n-radio value="quality">顾问模式 (结合剧情上下文)</n-radio>
-                          </n-space>
-                        </n-radio-group>
-                      </n-form-item>
-                      
+                        <n-form-item-grid-item span="1 m:2" label="翻译模式" path="ai_translation_mode" v-if="configModel.ai_translate_actor_role || configModel.ai_translate_title_overview">
+                          <n-radio-group v-model:value="configModel.ai_translation_mode" name="ai_translation_mode">
+                            <n-space :size="16">
+                              <n-radio value="fast">快速模式 (仅翻译)</n-radio>
+                              <n-radio value="quality">顾问模式 (带上下文)</n-radio>
+                            </n-space>
+                          </n-radio-group>
+                        </n-form-item-grid-item>
+                      </n-grid>
                     </div>
                   </n-card>
                 </n-gi>
 
-                <!-- 右侧: MoviePilot订阅 -->
+                <!-- 右侧: MoviePilot & Telegram -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">MoviePilot订阅</span></template>
+                  <n-space vertical :size="16" style="height: 100%;">
                     
-                    <!-- ★★★ 修改点3: 内部使用 Grid 布局实现双列内容，压缩高度 ★★★ -->
-                    <n-grid cols="1 m:2" :x-gap="24" responsive="screen">
-                      
-                      <!-- 1. 连接设置区域 -->
-                      <n-gi span="1 m:2">
-                        <n-form-item-grid-item label="MoviePilot URL" path="moviepilot_url">
-                          <n-input v-model:value="configModel.moviepilot_url" placeholder="例如: http://192.168.1.100:3000"/>
+                    <!-- 卡片 A: MoviePilot 订阅 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header><span class="card-title">MoviePilot 订阅</span></template>
+                      <!-- ★ 优化：合并排版，去掉多余分割线，全部紧凑双列显示 -->
+                      <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                        <n-form-item-grid-item span="1 m:2" label="MoviePilot URL" path="moviepilot_url">
+                          <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
                         </n-form-item-grid-item>
-                      </n-gi>
-                      <n-gi span="1 m:2">
                         <n-form-item-grid-item label="用户名" path="moviepilot_username">
                           <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
                         </n-form-item-grid-item>
-                      </n-gi>
-                      <n-gi span="1 m:2">
                         <n-form-item-grid-item label="密码" path="moviepilot_password">
                           <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
                         </n-form-item-grid-item>
-                      </n-gi>
 
-                      <!-- 分割线 -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin: 10px 0 20px 0;">每日订阅额度</n-divider>
-                      </n-gi>
-
-                      <!-- 3. 额度区域 (左右并排) -->
-                      <n-gi>
-                        <n-form-item-grid-item label="每日订阅上限" path="resubscribe_daily_cap">
+                        <n-form-item-grid-item label="每日上限 (订阅规则)" path="resubscribe_daily_cap">
                           <n-input-number v-model:value="configModel.resubscribe_daily_cap" :min="1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">超过数量停止任务，0点重置。</n-text></template>
                         </n-form-item-grid-item>
-                      </n-gi>
-                      <n-gi>
-                        <n-form-item-grid-item label="订阅请求间隔 (秒)" path="resubscribe_delay_seconds">
+                        <n-form-item-grid-item label="请求间隔(秒)" path="resubscribe_delay_seconds">
                           <n-input-number v-model:value="configModel.resubscribe_delay_seconds" :min="0.1" :step="0.1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">避免请求过快冲击服务器。</n-text></template>
                         </n-form-item-grid-item>
-                      </n-gi>
-                    </n-grid>
-                  </n-card>
+                      </n-grid>
+                    </n-card>
+
+                    <!-- 卡片 B: Telegram 设置 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header><span class="card-title">Telegram 设置</span></template>
+                      <template #header-extra>
+                        <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">测试</n-button>
+                      </template>
+                      <!-- ★ 优化：内部双列，ID和通知事件在同一行 -->
+                      <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                        <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
+                          <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item label="频道/群组 ID" path="telegram_channel_id">
+                          <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item label="通知事件" path="telegram_notify_types">
+                          <n-checkbox-group v-model:value="configModel.telegram_notify_types">
+                            <n-space :size="16">
+                              <n-checkbox value="library_new" label="入库" />
+                              <n-checkbox value="playback" label="播放" />
+                            </n-space>
+                          </n-checkbox-group>
+                        </n-form-item-grid-item>
+                      </n-grid>
+                    </n-card>
+
+                  </n-space>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
 
-            <!-- ================== 标签页 4: 高级 (核心修改区域) ================== -->
+            <!-- ================== 标签页 4: 高级 ================== -->
             <n-tab-pane name="advanced" tab="高级">
-              <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
+              <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen">
                 
-                <!-- 卡片 1: 网络代理 (左上) -->
+                <!-- 左侧: 网络代理与日志配置 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">网络代理</span></template>
-                    <template #header-extra><a href="https://api-flowercloud.com/aff.php?aff=8652" target="_blank" style="font-size: 0.85em; color: var(--n-primary-color); text-decoration: underline;">推荐机场</a></template>
-                    <n-form-item-grid-item label="启用网络代理" path="network_proxy_enabled">
-                      <n-switch v-model:value="configModel.network_proxy_enabled" />
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">为 TMDb 等外部API请求启用 HTTP/HTTPS 代理。</n-text></template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item label="HTTP 代理地址" path="network_http_proxy_url">
-                      <n-input-group>
-                        <n-input v-model:value="configModel.network_http_proxy_url" placeholder="例如: http://127.0.0.1:7890" :disabled="!configModel.network_proxy_enabled"/>
-                        <n-button type="primary" ghost @click="testProxy" :loading="isTestingProxy" :disabled="!configModel.network_proxy_enabled || !configModel.network_http_proxy_url">测试连接</n-button>
-                      </n-input-group>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">请填写完整的代理 URL，支持 http 和 https。</n-text></template>
-                    </n-form-item-grid-item>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">网络与系统日志</span></template>
+                    <n-grid cols="1 s:2" :x-gap="12" :y-gap="8" responsive="screen">
+                      
+                      <!-- 网络代理 -->
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 0; font-size: 0.9em; color: gray;">网络代理</n-divider></n-gi>
+                      <n-form-item-grid-item span="1 s:2" label="启用网络代理" path="network_proxy_enabled">
+                        <n-switch v-model:value="configModel.network_proxy_enabled" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">为外部API请求启用 HTTP/HTTPS 代理。</n-text></template>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="HTTP 代理地址" path="network_http_proxy_url">
+                        <n-input-group>
+                          <n-input v-model:value="configModel.network_http_proxy_url" placeholder="http://127.0.0.1:7890" :disabled="!configModel.network_proxy_enabled"/>
+                          <n-button type="primary" ghost @click="testProxy" :loading="isTestingProxy" :disabled="!configModel.network_proxy_enabled || !configModel.network_http_proxy_url">测试</n-button>
+                        </n-input-group>
+                      </n-form-item-grid-item>
+
+                      <!-- 日志配置 -->
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 8px 0 0 0; font-size: 0.9em; color: gray;">日志配置</n-divider></n-gi>
+                      <n-form-item-grid-item>
+                        <template #label>
+                          <n-space align="center" :size="4" :wrap="false">
+                            <span>单文件大小 (MB)</span>
+                            <n-tooltip trigger="hover"><template #trigger><n-icon :component="AlertIcon" class="info-icon" /></template>需重启生效</n-tooltip>
+                          </n-space>
+                        </template>
+                        <n-input-number v-model:value="configModel.log_rotation_size_mb" :min="1" :step="1" placeholder="5" style="width: 100%;" />
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item>
+                        <template #label>
+                          <n-space align="center" :size="4" :wrap="false">
+                            <span>日志备份数量</span>
+                            <n-tooltip trigger="hover"><template #trigger><n-icon :component="AlertIcon" class="info-icon" /></template>需重启生效</n-tooltip>
+                          </n-space>
+                        </template>
+                        <n-input-number v-model:value="configModel.log_rotation_backup_count" :min="1" :step="1" placeholder="10" style="width: 100%;" />
+                      </n-form-item-grid-item>
+
+                    </n-grid>
                   </n-card>
                 </n-gi>
 
-                <!-- 卡片 2: 日志配置 (右上) -->
+                <!-- 右侧: 数据管理 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">日志配置</span></template>
-                    <n-form-item-grid-item>
-                      <template #label>
-                        <n-space align="center">
-                          <span>单个日志文件大小 (MB)</span>
-                          <n-tooltip trigger="hover">
-                            <template #trigger>
-                              <n-icon :component="AlertIcon" class="info-icon" />
-                            </template>
-                            此项修改需要重启容器才能生效。
-                          </n-tooltip>
-                        </n-space>
-                      </template>
-                      <n-input-number v-model:value="configModel.log_rotation_size_mb" :min="1" :step="1" placeholder="例如: 5"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">设置 app.log 文件的最大体积，超限后会轮转。</n-text></template>
-                    </n-form-item-grid-item>
-                    <n-form-item-grid-item>
-                      <template #label>
-                        <n-space align="center">
-                          <span>日志备份数量</span>
-                          <n-tooltip trigger="hover">
-                            <template #trigger>
-                              <n-icon :component="AlertIcon" class="info-icon" />
-                            </template>
-                            此项修改需要重启容器才能生效。
-                          </n-tooltip>
-                        </n-space>
-                      </template>
-                      <n-input-number v-model:value="configModel.log_rotation_backup_count" :min="1" :step="1" placeholder="例如: 10"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">保留最近的日志文件数量 (app.log.1, app.log.2 ...)。</n-text></template>
-                    </n-form-item-grid-item>
-                  </n-card>
-                </n-gi>
-
-                <!-- 卡片 3: 数据管理 (左下) -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">数据管理</span></template>
-                    <n-space vertical>
-                      <n-space align="center">
-                        <n-button @click="showExportModal" :loading="isExporting" class="action-button"><template #icon><n-icon :component="ExportIcon" /></template>导出数据</n-button>
-                        <n-upload :custom-request="handleCustomImportRequest" :show-file-list="false" accept=".json.gz"><n-button :loading="isImporting" class="action-button"><template #icon><n-icon :component="ImportIcon" /></template>导入数据</n-button></n-upload>
-                        <n-button @click="showClearTablesModal" :loading="isClearing" class="action-button" type="error" ghost><template #icon><n-icon :component="ClearIcon" /></template>清空指定表</n-button>
+                    <n-space vertical :size="8">
+                      <n-space wrap :size="8">
+                        <n-button @click="showExportModal" :loading="isExporting" size="small"><template #icon><n-icon :component="ExportIcon" /></template>导出</n-button>
+                        <n-upload :custom-request="handleCustomImportRequest" :show-file-list="false" accept=".json.gz"><n-button :loading="isImporting" size="small"><template #icon><n-icon :component="ImportIcon" /></template>导入</n-button></n-upload>
+                        <n-button @click="showClearTablesModal" :loading="isClearing" type="error" ghost size="small"><template #icon><n-icon :component="ClearIcon" /></template>清空表</n-button>
                         <n-popconfirm @positive-click="handleCleanupOfflineMedia">
                           <template #trigger>
-                            <n-button type="warning" ghost :loading="isCleaningOffline" class="action-button">
-                              <template #icon><n-icon :component="OfflineIcon" /></template>
-                              清理离线媒体
-                            </n-button>
+                            <n-button type="warning" ghost :loading="isCleaningOffline" size="small"><template #icon><n-icon :component="OfflineIcon" /></template>清理离线</n-button>
                           </template>
-                          <div style="max-width: 300px">
-                            <p style="margin: 0 0 4px 0">确定要清理离线媒体数据吗？</p>
-                            <p style="margin: 0 0 4px 0">这将删除所有 <b>不在库</b> 的元数据缓存。</p>
-                            <span style="font-size: 0.9em; color: gray;">此操作用于数据库瘦身，不会影响已入库媒体项。</span>
-                          </div>
+                          确定清理不在库的离线元数据缓存吗？
                         </n-popconfirm>
                         <n-popconfirm @positive-click="handleClearVectors">
                           <template #trigger>
-                            <n-button type="warning" ghost :loading="isClearingVectors" class="action-button">
-                              <template #icon><n-icon :component="FlashIcon" /></template>
-                              清空向量数据
-                            </n-button>
+                            <n-button type="warning" ghost :loading="isClearingVectors" size="small"><template #icon><n-icon :component="FlashIcon" /></template>清空向量</n-button>
                           </template>
-                          <div style="max-width: 300px">
-                            <p style="margin: 0 0 4px 0; font-weight: bold;">确定要清空所有 AI 向量数据吗？</p>
-                            <p style="margin: 0 0 4px 0;">如果您更换了 <b>Embedding 模型</b>（例如从 OpenAI 更换为本地模型），<span style="color: #d03050;">必须执行此操作</span>。</p>
-                            <span style="font-size: 0.9em; color: gray;">不同模型生成的向量不兼容，混用会导致推荐结果完全错误。清空后需重新扫描生成。</span>
-                          </div>
+                          更换Embedding模型必须执行此操作，确定吗？
                         </n-popconfirm>
                         <n-popconfirm @positive-click="handleCorrectSequences">
                           <template #trigger>
-                            <n-button type="warning" ghost :loading="isCorrecting" class="action-button">
-                              <template #icon><n-icon :component="BuildIcon" /></template>
-                              校准ID计数器
-                            </n-button>
+                            <n-button type="warning" ghost :loading="isCorrecting" size="small"><template #icon><n-icon :component="BuildIcon" /></template>校准自增</n-button>
                           </template>
-                          确定要校准所有表的ID自增计数器吗？<br />
-                          这是一个安全的操作，用于修复导入数据后无法新增条目的问题。
+                          校准所有表的ID自增计数器？
                         </n-popconfirm>
-                        <!-- ### 重置演员映射表 ### -->
-                        <n-button 
-                          type="warning" 
-                          ghost 
-                          :loading="isResettingMappings" 
-                          class="action-button"
-                          @click="showResetMappingsModal"
-                        >
-                          <template #icon><n-icon :component="SyncIcon" /></template>
-                          重置Emby数据
-                        </n-button>
+                        <n-button type="warning" ghost :loading="isResettingMappings" size="small" @click="showResetMappingsModal"><template #icon><n-icon :component="SyncIcon" /></template>重置Emby</n-button>
                       </n-space>
                       <p class="description-text"><b>导出：</b>将数据库中的一个或多个表备份为 JSON.GZ 文件。<br><b>导入：</b>从 JSON.GZ 备份文件中恢复数据。<br><b>清空：</b>删除指定表中的所有数据，此操作不可逆。<br><b>清空向量：</b>更换ai后，必须执行此操作。不同模型生成的向量不兼容，混用会导致推荐结果完全错误。清空后需重新扫描生成。<br><b>清理离线：</b>移除已删除且无订阅状态的残留记录，给数据库瘦身。<br><b>校准：</b>修复导入数据可能引起的自增序号错乱的问题。<br><b>重置：</b>在重建 Emby 媒体库后，使用此功能清空所有旧的 Emby 关联数据（用户、合集、播放状态等），并保留核心元数据，以便后续重新扫描和关联。</p>
                     </n-space>
-                  </n-card>
-                </n-gi>
-
-                <!-- 卡片 4: Telegram 设置 (右下) -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">Telegram 设置</span></template>
-                    
-                    <template #header-extra>
-                      <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
-                        发送测试
-                      </n-button>
-                    </template>
-
-                    <n-form-item-grid-item label="Telegram Bot Token" path="telegram_bot_token">
-                      <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="从 @BotFather 获取" />
-                    </n-form-item-grid-item>
-                    
-                    <n-form-item-grid-item label="全局通知频道 ID" path="telegram_channel_id">
-                      <n-input v-model:value="configModel.telegram_channel_id" placeholder="例如: -100123456789" />
-                    </n-form-item-grid-item>
-
-                    <n-form-item-grid-item label="通知类型" path="telegram_notify_types">
-                      <n-checkbox-group v-model:value="configModel.telegram_notify_types">
-                        <n-space>
-                          <n-checkbox value="library_new" label="入库通知" />
-                          <n-checkbox value="playback" label="播放通知" />
-                        </n-space>
-                      </n-checkbox-group>
-                    </n-form-item-grid-item>
                   </n-card>
                 </n-gi>
 
@@ -742,7 +474,6 @@
     <n-modal v-model:show="showLocalFolderModal" preset="card" title="选择本地路径" style="width: 600px; max-width: 95vw;">
       <n-spin :show="loadingLocalFolders">
         <n-space vertical>
-          <!-- 顶部路径输入与刷新 -->
           <n-input-group>
             <n-input v-model:value="currentLocalPath" placeholder="当前路径" @keyup.enter="fetchLocalFolders(currentLocalPath)" />
             <n-button type="primary" @click="fetchLocalFolders(currentLocalPath)">
@@ -750,7 +481,6 @@
             </n-button>
           </n-input-group>
           
-          <!-- 目录列表 -->
           <n-list hoverable clickable bordered style="max-height: 400px; overflow-y: auto; border-radius: 6px;">
             <n-list-item v-for="folder in localFolders" :key="folder.path" @click="selectLocalFolder(folder)">
               <template #prefix>
@@ -761,10 +491,9 @@
             <n-empty v-if="localFolders.length === 0" description="空目录或无权限访问" style="margin-top: 30px; margin-bottom: 30px;" />
           </n-list>
           
-          <!-- 底部按钮 -->
           <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
             <n-button @click="showLocalFolderModal = false">取消</n-button>
-            <n-button type="primary" @click="confirmLocalFolder">确定选择此目录</n-button>
+            <n-button type="primary" @click="confirmLocalFolder">确定</n-button>
           </div>
         </n-space>
       </n-spin>
@@ -773,17 +502,17 @@
   </n-layout>
   
   <!-- 导出选项模态框 -->
-  <n-modal v-model:show="exportModalVisible" preset="dialog" title="选择要导出的数据表">
+  <n-modal v-model:show="exportModalVisible" preset="dialog" title="选择要导出的数据表" style="width: 600px; max-width: 95vw;">
     <n-space justify="end" style="margin-bottom: 10px;">
       <n-button text type="primary" @click="selectAllForExport">全选</n-button>
       <n-button text type="primary" @click="deselectAllForExport">全不选</n-button>
     </n-space>
     <n-checkbox-group v-model:value="tablesToExport" vertical>
-      <n-grid :y-gap="8" :cols="2">
+      <n-grid :y-gap="8" :x-gap="16" cols="1 s:2" responsive="screen">
         <n-gi v-for="table in allDbTables" :key="table">
           <n-checkbox :value="table">
             {{ tableInfo[table]?.cn || table }}
-            <span v-if="tableInfo[table]?.isSharable" class="sharable-label"> [可共享数据]</span>
+            <span v-if="tableInfo[table]?.isSharable" class="sharable-label"> [可共享]</span>
           </n-checkbox>
         </n-gi>
       </n-grid>
@@ -795,39 +524,30 @@
   </n-modal>
   
   <!-- 导入选项模态框 -->
-  <n-modal v-model:show="importModalVisible" preset="dialog" title="恢复数据库备份">
+  <n-modal v-model:show="importModalVisible" preset="dialog" title="恢复数据库备份" style="width: 600px; max-width: 95vw;">
     <n-space vertical>
-      <div><p><strong>文件名:</strong> {{ fileToImport?.name }}</p></div>
+      <div><p style="word-break: break-all;"><strong>文件名:</strong> {{ fileToImport?.name }}</p></div>
       
-      <!-- ★★★ 核心修改：动态显示警告信息 ★★★ -->
       <n-alert v-if="importMode === 'overwrite'" title="高危操作警告" type="warning">
-        此操作将使用备份文件中的数据 <strong class="warning-text">覆盖</strong> 数据库中对应的表。这是一个 <strong class="warning-text">不可逆</strong> 的过程！<br>
-        <strong>请确保您正在使用自己导出的备份文件</strong>，否则可能因服务器ID不匹配而被拒绝，或导致数据错乱。
+        将使用备份数据 <strong class="warning-text">覆盖</strong> 数据库。此操作 <strong class="warning-text">不可逆</strong>！
       </n-alert>
       <n-alert v-else-if="importMode === 'share'" title="共享模式导入" type="info">
-        检测到备份文件来自不同的服务器。为保护您的数据安全，将以 <strong>共享模式</strong> 进行恢复。<br>
-        此模式只会导入 <strong>可共享的数据</strong> (如演员元数据、翻译缓存等)，不会覆盖您现有的用户、订阅、日志等个性化配置。
+        检测到异机备份，将仅导入 <strong>可共享数据</strong>。
       </n-alert>
       
       <div>
-        <n-text strong>选择要恢复的表 (从文件中自动读取)</n-text>
-        <n-space style="margin-left: 20px; display: inline-flex; vertical-align: middle;">
+        <n-text strong>选择要恢复的表</n-text>
+        <n-space style="margin-left: 12px; display: inline-flex; vertical-align: middle;">
           <n-button size="tiny" text type="primary" @click="selectAllForImport">全选</n-button>
           <n-button size="tiny" text type="primary" @click="deselectAllForImport">全不选</n-button>
         </n-space>
       </div>
-      <n-checkbox-group 
-        v-model:value="tablesToImport" 
-        @update:value="handleImportSelectionChange" 
-        vertical 
-        style="margin-top: 8px;"
-      >
-        <n-grid :y-gap="8" :cols="2">
+      <n-checkbox-group v-model:value="tablesToImport" @update:value="handleImportSelectionChange" vertical style="margin-top: 8px;">
+        <n-grid :y-gap="8" :x-gap="16" cols="1 s:2" responsive="screen">
           <n-gi v-for="table in tablesInBackupFile" :key="table">
-            <!-- ★★★ 核心修改：根据模式禁用不可共享的表 ★★★ -->
             <n-checkbox :value="table" :disabled="isTableDisabledForImport(table)">
               {{ tableInfo[table]?.cn || table }}
-              <span v-if="tableInfo[table]?.isSharable" class="sharable-label"> [可共享数据]</span>
+              <span v-if="tableInfo[table]?.isSharable" class="sharable-label"> [可共享]</span>
             </n-checkbox>
           </n-gi>
         </n-grid>
@@ -835,29 +555,21 @@
     </n-space>
     <template #action>
       <n-button @click="cancelImport">取消</n-button>
-      <n-button type="primary" @click="confirmImport" :disabled="tablesToImport.length === 0">确认并开始恢复</n-button>
+      <n-button type="primary" @click="confirmImport" :disabled="tablesToImport.length === 0">确认恢复</n-button>
     </template>
   </n-modal>
 
   <!-- 清空指定表模态框 -->
-  <n-modal v-model:show="clearTablesModalVisible" preset="dialog" title="清空指定数据表">
+  <n-modal v-model:show="clearTablesModalVisible" preset="dialog" title="清空指定数据表" style="width: 600px; max-width: 95vw;">
     <n-space justify="end" style="margin-bottom: 10px;">
       <n-button text type="primary" @click="selectAllForClear">全选</n-button>
       <n-button text type="primary" @click="deselectAllForClear">全不选</n-button>
     </n-space>
-    <n-alert title="高危操作警告" type="error" style="margin-bottom: 15px;">
-      此操作将 <strong class="warning-text">永久删除</strong> 所选表中的所有数据，且 <strong class="warning-text">不可恢复</strong>！请务必谨慎操作。
-    </n-alert>
-    <n-checkbox-group 
-        v-model:value="tablesToClear" 
-        @update:value="handleClearSelectionChange" 
-        vertical
-      >
-      <n-grid :y-gap="8" :cols="2">
+    <n-alert title="高危警告" type="error" style="margin-bottom: 15px;">永久删除，不可恢复！</n-alert>
+    <n-checkbox-group v-model:value="tablesToClear" @update:value="handleClearSelectionChange" vertical>
+      <n-grid :y-gap="8" :x-gap="16" cols="1 s:2" responsive="screen">
         <n-gi v-for="table in allDbTables" :key="table">
-          <n-checkbox :value="table">
-            {{ tableInfo[table]?.cn || table }}
-          </n-checkbox>
+          <n-checkbox :value="table">{{ tableInfo[table]?.cn || table }}</n-checkbox>
         </n-gi>
       </n-grid>
     </n-checkbox-group>
@@ -868,103 +580,36 @@
   </n-modal>
 
   <!-- 重置演员映射模态框 -->
-  <n-modal 
-    v-model:show="resetMappingsModalVisible" 
-    preset="dialog" 
-    title="确认重置Emby数据"
-  >
-    <n-alert title="高危操作警告" type="warning" style="margin-bottom: 15px;">
-      <p style="margin: 0 0 8px 0;">此操作将 <strong>清空所有Emby相关数据</strong>。</p>
-      <p style="margin: 0 0 8px 0;">它会保留宝贵的 元数据以及演员映射，以便在全量扫描后自动重新关联。</p>
-      <p class="warning-text" style="margin: 0;"><strong>请仅在您已经或将要重建 Emby 媒体库时执行此操作。</strong></p>
+  <n-modal v-model:show="resetMappingsModalVisible" preset="dialog" title="确认重置Emby数据">
+    <n-alert title="高危警告" type="warning" style="margin-bottom: 15px;">
+      <p style="margin: 0 0 8px 0;">清空所有Emby相关数据。保留元数据和映射，以便全量扫描后关联。</p>
+      <p class="warning-text" style="margin: 0;"><strong>仅在重建 Emby 库时执行！</strong></p>
     </n-alert>
     <template #action>
       <n-button @click="resetMappingsModalVisible = false">取消</n-button>
-      <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings">确认重置</n-button>
+      <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings">确认</n-button>
     </template>
   </n-modal>
 
   <!-- AI 提示词配置模态框 -->
-  <n-modal v-model:show="promptModalVisible" preset="dialog" title="配置 AI 提示词" style="width: 800px; max-width: 90%;">
+  <n-modal v-model:show="promptModalVisible" preset="dialog" title="配置 AI 提示词" style="width: 800px; max-width: 95vw;">
     <n-alert type="info" style="margin-bottom: 16px;">
-      您可以自定义发送给 AI 的系统指令（System Prompt）。<br>
-      <b>注意：</b> 请保留关键的 JSON 输出格式要求，否则会导致解析失败。支持使用 <code>{title}</code> 等占位符。
+      自定义指令。<b>注意：</b>保留关键JSON输出格式要求。支持 <code>{title}</code> 占位符。
     </n-alert>
-    
     <n-spin :show="loadingPrompts">
-      <n-tabs type="segment" animated>
-        <n-tab-pane name="fast_mode" tab="快速模式 (人名)">
-          <n-input
-            v-model:value="promptsModel.fast_mode"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-        </n-tab-pane>
-        <n-tab-pane name="quality_mode" tab="顾问模式 (人名)">
-          <n-input
-            v-model:value="promptsModel.quality_mode"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-        </n-tab-pane>
-        <n-tab-pane name="overview_translation" tab="简介翻译">
-          <n-input
-            v-model:value="promptsModel.overview_translation"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-          <n-text depth="3" style="font-size: 12px;">可用变量: {title}, {overview}</n-text>
-        </n-tab-pane>
-        <n-tab-pane name="title_translation" tab="标题翻译">
-          <n-input
-            v-model:value="promptsModel.title_translation"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-          <n-text depth="3" style="font-size: 12px;">可用变量: {media_type}, {title}, {year}</n-text>
-        </n-tab-pane>
-        <n-tab-pane name="transliterate_mode" tab="音译模式">
-          <n-input
-            v-model:value="promptsModel.transliterate_mode"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-        </n-tab-pane>
-        <n-tab-pane name="filename_parsing" tab="辅助识别">
-          <n-input
-            v-model:value="promptsModel.filename_parsing"
-            type="textarea"
-            :autosize="{ minRows: 10, maxRows: 20 }"
-            placeholder="输入提示词..."
-            style="font-family: monospace;"
-          />
-        </n-tab-pane>
+      <n-tabs type="segment" animated size="small">
+        <n-tab-pane name="fast_mode" tab="快速"><n-input v-model:value="promptsModel.fast_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="quality_mode" tab="顾问"><n-input v-model:value="promptsModel.quality_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="overview_translation" tab="简介"><n-input v-model:value="promptsModel.overview_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {title}, {overview}</n-text></n-tab-pane>
+        <n-tab-pane name="title_translation" tab="标题"><n-input v-model:value="promptsModel.title_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {media_type}, {title}, {year}</n-text></n-tab-pane>
+        <n-tab-pane name="transliterate_mode" tab="音译"><n-input v-model:value="promptsModel.transliterate_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="filename_parsing" tab="识别"><n-input v-model:value="promptsModel.filename_parsing" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
       </n-tabs>
     </n-spin>
-
     <template #action>
       <n-space justify="space-between" style="width: 100%">
-        <n-popconfirm @positive-click="resetPrompts">
-          <template #trigger>
-            <n-button type="warning" ghost :loading="savingPrompts">恢复默认</n-button>
-          </template>
-          确定要丢弃所有自定义修改，恢复到系统默认提示词吗？
-        </n-popconfirm>
-        
-        <n-space>
-          <n-button @click="promptModalVisible = false">取消</n-button>
-          <n-button type="primary" @click="savePrompts" :loading="savingPrompts">保存配置</n-button>
-        </n-space>
+        <n-popconfirm @positive-click="resetPrompts"><template #trigger><n-button type="warning" ghost :loading="savingPrompts">重置</n-button></template>确定恢复默认？</n-popconfirm>
+        <n-space><n-button @click="promptModalVisible = false">取消</n-button><n-button type="primary" @click="savePrompts" :loading="savingPrompts">保存</n-button></n-space>
       </n-space>
     </template>
   </n-modal>
@@ -1168,11 +813,9 @@ const testAI = async () => {
 
   isTestingAI.value = true;
   try {
-    // 将当前的 configModel 传给后端进行即时测试
     const response = await axios.post('/api/ai/test', configModel.value);
     
     if (response.data.success) {
-      // 使用 dialog 弹出详细结果，看起来更专业
       dialog.success({
         title: 'AI 测试成功',
         content: response.data.message,
@@ -1323,7 +966,7 @@ const loadingLocalFolders = ref(false)
 const currentLocalTargetField = ref('')
 const isCurrentLocalTargetArray = ref(false)
 
-// 打开本地目录浏览器 (增强版)
+// 打开本地目录浏览器
 const openLocalFolderSelector = (targetField, isArray = false) => {
     currentLocalTargetField.value = targetField
     isCurrentLocalTargetArray.value = isArray
@@ -1343,7 +986,7 @@ const openLocalFolderSelector = (targetField, isArray = false) => {
     fetchLocalFolders(currentLocalPath.value)
 }
 
-// 获取本地目录列表 (保持不变)
+// 获取本地目录列表
 const fetchLocalFolders = async (path) => {
     loadingLocalFolders.value = true
     try {
@@ -1369,22 +1012,20 @@ const fetchLocalFolders = async (path) => {
     }
 }
 
-// 点击列表中的文件夹 (保持不变)
+// 点击列表中的文件夹
 const selectLocalFolder = (folder) => {
     fetchLocalFolders(folder.path)
 }
 
-// 确认选择 (增强版)
+// 确认选择
 const confirmLocalFolder = () => {
     const field = currentLocalTargetField.value
     const path = currentLocalPath.value
     
     if (isCurrentLocalTargetArray.value) {
-        // 如果是多选数组 (如 monitor_paths)
         if (!configModel.value[field]) {
             configModel.value[field] = []
         }
-        // 防止重复添加
         if (!configModel.value[field].includes(path)) {
             configModel.value[field].push(path)
             message.success(`已追加路径: ${path}`)
@@ -1392,7 +1033,6 @@ const confirmLocalFolder = () => {
             message.warning('该路径已存在列表中')
         }
     } else {
-        // 如果是单选字符串 (如 local_strm_root)
         configModel.value[field] = path
         message.success(`已选择路径: ${path}`)
     }
@@ -1489,7 +1129,6 @@ const handleCustomImportRequest = async ({ file }) => {
   try {
     const formData = new FormData();
     formData.append('file', rawFile);
-    // ★★★ 调用我们刚刚修改过的后端预览接口 ★★★
     const response = await axios.post('/api/database/preview-backup', formData);
 
     msgReactive.destroy();
@@ -1500,17 +1139,14 @@ const handleCustomImportRequest = async ({ file }) => {
       return;
     }
 
-    // ★★★ 核心修改：保存从后端获取的导入模式，并根据模式筛选默认勾选的表 ★★★
     fileToImport.value = rawFile;
     tablesInBackupFile.value = tables;
-    importMode.value = response.data.import_mode || 'overwrite'; // 保存模式
+    importMode.value = response.data.import_mode || 'overwrite'; 
 
     if (importMode.value === 'share') {
-      // 如果是共享模式，默认只勾选可共享的表
       tablesToImport.value = tables.filter(t => tableInfo[t]?.isSharable);
       message.info("已进入共享导入模式，默认仅选择可共享的数据。");
     } else {
-      // 否则，默认全选
       tablesToImport.value = [...tables];
     }
     
@@ -1523,7 +1159,6 @@ const handleCustomImportRequest = async ({ file }) => {
   }
 };
 
-// ★★★ 新增：Telegram 测试状态和函数 ★★★
 const isTestingTelegram = ref(false);
 
 const testTelegram = async () => {
@@ -1534,7 +1169,6 @@ const testTelegram = async () => {
 
   isTestingTelegram.value = true;
   try {
-    // 发送当前输入框中的配置进行测试，无需先保存
     const response = await axios.post('/api/telegram/test', {
       token: configModel.value.telegram_bot_token,
       chat_id: configModel.value.telegram_channel_id
@@ -1593,7 +1227,6 @@ const startImportProcess = () => {
   });
 };
 
-// <--- 清理离线媒体
 const handleCleanupOfflineMedia = async () => {
   isCleaningOffline.value = true;
   try {
@@ -1613,7 +1246,6 @@ const handleCleanupOfflineMedia = async () => {
   }
 };
 
-// <--- 清理向量数据
 const handleClearVectors = async () => {
   isClearingVectors.value = true;
   try {
@@ -1667,7 +1299,16 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 禁用AI设置时的遮罩效果 */
+/* 极力减小底部边距，让排布更加紧凑 */
+:deep(.n-form-item) {
+  margin-bottom: 4px;
+}
+
+/* 标签底部留白去除，提升空间利用率 */
+:deep(.n-form-item-label) {
+  padding-bottom: 0px !important;
+}
+
 .ai-settings-wrapper {
   transition: opacity 0.3s ease;
 }
@@ -1675,7 +1316,6 @@ onUnmounted(() => {
   opacity: 0.6;
 }
 
-/* 翻译引擎标签样式 */
 .engine-list {
   display: flex;
   flex-wrap: wrap;
@@ -1692,7 +1332,6 @@ onUnmounted(() => {
   vertical-align: -0.15em;
 }
 
-/* ★★★ 新增的样式 ★★★ */
 .description-text {
   font-size: 0.85em;
   color: var(--n-text-color-3);
@@ -1700,7 +1339,7 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 .warning-text {
-  color: var(--n-warning-color-suppl); /* 使用 Naive UI 的警告色 */
+  color: var(--n-warning-color-suppl); 
   font-weight: bold;
 }
 .sharable-label {
@@ -1727,8 +1366,6 @@ onUnmounted(() => {
   border: 1px solid var(--n-divider-color); padding: 12px; margin-bottom: 8px; border-radius: 6px; transition: all 0.2s;
 }
 .rule-item:hover { border-color: var(--n-primary-color); background-color: var(--n-hover-color); }
-.drag-handle { cursor: grab; color: #999; margin-right: 12px; padding: 4px; }
-.drag-handle:active { cursor: grabbing; }
 .rule-info { flex: 1; }
 .rule-name { font-weight: bold; font-size: 13px; color: var(--n-text-color-1); }
 .rule-desc span { color: var(--n-text-color-3); }
