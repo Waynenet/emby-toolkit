@@ -16,7 +16,6 @@
     "axios": "^1.9.0",
     "dayjs": "^1.11.18",
     "echarts": "^5.6.0",
-    "emby-toolkit-wiki": "file:..",
     "js-yaml": "^4.1.0",
     "marked": "^16.1.1",
     "naive-ui": "^2.41.0",
