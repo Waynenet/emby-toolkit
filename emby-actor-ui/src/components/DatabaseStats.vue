@@ -159,16 +159,16 @@
                <div class="section-title">自动化订阅</div>
                 <n-grid :cols="3" :x-gap="12">
                   <n-gi class="stat-block">
-                    <div class="stat-block-title">洗版任务</div>
-                    <div class="stat-item"><div class="stat-item-label">待洗版</div><div class="stat-item-value">{{ stats.subscriptions_card.resubscribe.pending }}</div></div>
-                  </n-gi>
-                  <n-gi class="stat-block">
                     <div class="stat-block-title">原生合集</div>
                     <div class="stat-item-group">
                       <div class="stat-item"><div class="stat-item-label">总数</div><div class="stat-item-value">{{ stats.subscriptions_card.native_collections.total }}</div></div>
                       <div class="stat-item"><div class="stat-item-label">待补全</div><div class="stat-item-value">{{ stats.subscriptions_card.native_collections.count }}</div></div>
                       <div class="stat-item"><div class="stat-item-label">共缺失</div><div class="stat-item-value">{{ stats.subscriptions_card.native_collections.missing_items }}</div></div>
                     </div>
+                  </n-gi>
+                  <n-gi class="stat-block">
+                    <div class="stat-block-title">洗版任务</div>
+                    <div class="stat-item"><div class="stat-item-label">待洗版</div><div class="stat-item-value">{{ stats.subscriptions_card.resubscribe.pending }}</div></div>
                   </n-gi>
                   <n-gi class="stat-block">
                     <div class="stat-block-title">自建合集</div>
@@ -529,11 +529,11 @@ const resolutionChartOptions = computed(() => {
       type: 'pie',
       // 大幅缩小内圈半径，适当扩大差值：内径 35%/40%，外径 65%/75% 
       // 这样能让中间空心变小，四周的环变得更加丰满厚实。
-      radius: isMobile.value ? ['35%', '65%'] : ['40%', '75%'],
+      radius: isMobile.value ? ['40%', '60%'] : ['50%', '70%'],
       center: ['50%', '40%'],
       avoidLabelOverlap: true,
       itemStyle: {
-        borderRadius: 4,
+        borderRadius: 8,
         borderColor: '#18181c',
         borderWidth: 2
       },
