@@ -815,7 +815,8 @@ onUnmounted(() => {
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
   overflow: hidden;
   height: 100%;
-  background-color: #222; 
+  background-color: var(--card-bg-color); /* 替换原来的 #222 */
+  backdrop-filter: blur(10px); 
   display: flex;
   flex-direction: column;
 }
@@ -1033,7 +1034,7 @@ onUnmounted(() => {
   border-radius: 8px;
   object-fit: cover;
   margin-bottom: 8px;
-  background-color: #333;
+  background-color: var(--n-action-color); /* 替换原来的 #333 */
 }
 .actor-name {
   font-weight: bold;
