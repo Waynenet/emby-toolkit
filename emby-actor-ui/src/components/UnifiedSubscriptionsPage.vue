@@ -1183,8 +1183,8 @@ watch(loaderRef, (newEl, oldEl) => {
 }
 
 .fab-content {
-  background-color: rgba(30, 30, 30, 0.95); 
-  backdrop-filter: blur(10px);
+  background-color: var(--card-bg-color); 
+  backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 50px; 
   padding: 12px 24px;
@@ -1202,7 +1202,7 @@ watch(loaderRef, (newEl, oldEl) => {
 }
 
 .fab-text {
-  color: #fff;
+  color: var(--text-color); /* 替换原来的 #fff，适配白天模式 */
   font-size: 14px;
 }
 
