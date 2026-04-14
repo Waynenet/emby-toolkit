@@ -1,27 +1,47 @@
 // src/theme.js
 
 export const modernTheme = {
-  name: '现代极简',
+  name: '朦胧凝光',
   light: {
-    custom: { '--card-bg-color': '#ffffff', '--modal-solid-bg-color': '#ffffff', '--card-border-color': 'rgba(0, 0, 0, 0.08)', '--card-shadow-color': 'rgba(0, 0, 0, 0.04)', '--accent-color': '#2080f0', '--accent-glow-color': 'rgba(32, 128, 240, 0.2)', '--text-color': '#333639' },
+    custom: { 
+      '--global-bg': 'linear-gradient(135deg, #f5f7fa 0%, #e3eeff 100%)', 
+      '--sider-bg': 'rgba(255, 255, 255, 0.4)',
+      '--card-bg-color': 'rgba(255, 255, 255, 0.55)', 
+      '--modal-solid-bg-color': '#ffffff', 
+      '--card-border-color': 'rgba(255, 255, 255, 0.6)', 
+      '--card-shadow-color': 'rgba(0, 0, 0, 0.04)', 
+      '--accent-color': '#4776E6', 
+      '--accent-glow-color': 'rgba(71, 118, 230, 0.15)', 
+      '--text-color': '#333639' 
+    },
     naive: { 
-      common: { primaryColor: '#2080f0', bodyColor: '#f3f4f6' }, 
-      Card: { color: '#ffffff', borderColor: 'rgba(0, 0, 0, 0.08)' }, 
-      Layout: { siderColor: '#ffffff' }, 
-      Menu: { itemTextColor: '#333639', itemIconColor: '#333639', itemTextColorActive: 'var(--n-common-primary-color)', itemIconColorActive: 'var(--n-common-primary-color)' } 
+      common: { primaryColor: '#4776E6', primaryColorHover: '#5f8aff', primaryColorPressed: '#3660c9', bodyColor: 'transparent' }, 
+      Card: { color: 'rgba(255, 255, 255, 0.55)', borderColor: 'rgba(255, 255, 255, 0.6)' }, 
+      Layout: { siderColor: 'transparent', color: 'transparent', headerColor: 'transparent' }, 
+      Menu: { itemTextColor: '#555a5f', itemIconColor: '#555a5f', itemTextColorActive: 'var(--n-common-primary-color)', itemIconColorActive: 'var(--n-common-primary-color)' } 
     }
   },
   dark: {
-    custom: { '--card-bg-color': '#18181c', '--modal-solid-bg-color': '#18181c', '--card-border-color': 'rgba(255, 255, 255, 0.09)', '--card-shadow-color': 'rgba(0, 0, 0, 0.2)', '--accent-color': '#70c0e8', '--accent-glow-color': 'rgba(112, 192, 232, 0.3)', '--text-color': '#ffffff' },
+    custom: { 
+      '--global-bg': 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)', 
+      '--sider-bg': 'rgba(15, 23, 42, 0.4)',
+      '--card-bg-color': 'rgba(30, 41, 59, 0.5)', 
+      '--modal-solid-bg-color': '#1e293b', 
+      '--card-border-color': 'rgba(255, 255, 255, 0.06)', 
+      '--card-shadow-color': 'rgba(0, 0, 0, 0.25)', 
+      '--accent-color': '#8ca8f9', 
+      '--accent-glow-color': 'rgba(140, 168, 249, 0.2)', 
+      '--text-color': '#e2e8f0' 
+    },
     naive: {
-      common: { primaryColor: '#70c0e8', primaryColorHover: '#8acbec', primaryColorPressed: '#66afd3', primaryColorSuppl: '#70c0e8', bodyColor: '#101014', cardColor: '#18181c' },
-      Card: { color: '#18181c', borderColor: 'rgba(255, 255, 255, 0.09)' }, 
-      Layout: { siderColor: '#101014' }, 
-      Menu: { itemTextColor: '#a3a6ad', itemIconColor: '#a3a6ad', itemTextColorActive: 'var(--n-common-primary-color)', itemIconColorActive: 'var(--n-common-primary-color)' },
-      Switch: { railColorActive: '#70c0e8' }, 
-      Slider: { fillColor: '#70c0e8' }, 
-      Checkbox: { colorChecked: '#70c0e8', checkMarkColor: '#101014', borderChecked: '#70c0e8' }, 
-      Button: { textColorPrimary: '#101014' }
+      common: { primaryColor: '#8ca8f9', primaryColorHover: '#a3bdfc', primaryColorPressed: '#7090e8', primaryColorSuppl: '#8ca8f9', bodyColor: 'transparent', cardColor: 'rgba(30, 41, 59, 0.5)' },
+      Card: { color: 'rgba(30, 41, 59, 0.5)', borderColor: 'rgba(255, 255, 255, 0.06)' }, 
+      Layout: { siderColor: 'transparent', color: 'transparent', headerColor: 'transparent' }, 
+      Menu: { itemTextColor: '#94a3b8', itemIconColor: '#94a3b8', itemTextColorActive: 'var(--n-common-primary-color)', itemIconColorActive: 'var(--n-common-primary-color)' },
+      Switch: { railColorActive: '#8ca8f9' }, 
+      Slider: { fillColor: '#8ca8f9' }, 
+      Checkbox: { colorChecked: '#8ca8f9', checkMarkColor: '#0f172a', borderChecked: '#8ca8f9' }, 
+      Button: { textColorPrimary: '#0f172a' }
     }
   }
 };
