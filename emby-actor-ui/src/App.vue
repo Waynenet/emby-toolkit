@@ -29,22 +29,32 @@ onMounted(() => {
     app.addEventListener('update-dark-mode', (event) => {
         isDarkTheme.value = event.detail;
     });
-
-    // ★★★ 3. 新增：在这里初始化全局卡片缩放 ★★★
-    // 这样无论 AppContent 里的主题逻辑怎么变，这个缩放设置都会生效
-    const savedScale = localStorage.getItem('global_card_scale');
-    if (savedScale) {
-      document.documentElement.style.setProperty('--card-scale', savedScale);
-    } else {
-      document.documentElement.style.setProperty('--card-scale', '1');
-    }
 });
 </script>
 
 <style>
-/* 这里的样式是真正的“全局静态样式” */
-html, body { height: 100vh; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
-.fullscreen-container { display: flex; justify-content: center; align-items: center; height: 100vh; width: 100%; }
-html.light .fullscreen-container { background-color: #f0f2f5; }
-html.dark .fullscreen-container { background-color: #101014; }
+/* ==================== 全局静态样式与基础布局 ==================== */
+html, body { 
+  height: 100vh; 
+  margin: 0; 
+  padding: 0; 
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
+  overflow: hidden; 
+  
+  /* ★ 使用 CSS 变量接管全局渐变背景 ★ */
+  /* 如果变量还未注入，逗号后面的代码作为默认的容错兜底背景 */
+  background: var(--global-bg, linear-gradient(135deg, #f5f7fa 0%, #e3eeff 100%)); 
+  background-attachment: fixed;
+  transition: background 0.5s ease;
+}
+
+/* 确保登录页等纯内容容器透明，自然透出 body 的柔和渐变背景 */
+.fullscreen-container { 
+  display: flex; 
+  justify-content: center; 
+  align-items: center; 
+  height: 100vh; 
+  width: 100%; 
+  background: transparent; 
+}
 </style>
