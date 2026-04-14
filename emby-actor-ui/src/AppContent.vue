@@ -43,9 +43,17 @@ const applyTheme = (isDark) => {
   const themeConfig = modernTheme[themeMode];
 
   app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: themeConfig.naive }));
+  
   for (const key in themeConfig.custom) {
     root.style.setProperty(key, themeConfig.custom[key]);
   }
+  
+  // 注入全局柔和渐变背景
+  document.body.style.background = themeConfig.custom['--global-bg'];
+  document.body.style.backgroundAttachment = 'fixed';
+  document.body.style.minHeight = '100vh';
+  document.body.style.transition = 'background 0.5s ease';
+
   root.classList.remove('dark', 'light');
   root.classList.add(themeMode);
 };
@@ -88,3 +96,14 @@ onBeforeUnmount(() => {
   if (statusIntervalId) clearInterval(statusIntervalId);
 });
 </script>
+
+<style>
+/* 针对非 MainLayout (如登录界面) 的透明化处理 */
+.fullscreen-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+</style>
