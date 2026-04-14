@@ -75,7 +75,6 @@ def api_get_config():
 def get_system_directories():
     """
     获取本地文件系统目录结构 (供前端路径选择器使用)。
-    原位于 /api/p115/system/directories，现迁移至此。
     """
     target_path = request.args.get('path', '/')
     

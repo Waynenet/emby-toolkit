@@ -123,7 +123,7 @@ def add_item_to_watchlist(tmdb_id: str, item_name: str) -> bool:
             cursor = conn.cursor()
             
             # 1. 插入或更新 Series 本身
-            # ★★★ 核心修复：初始状态必须是 'NONE'，这样才能完美触发 NONE -> Watching 的 115 联动！
+            # ★★★ 核心修复：初始状态必须是 'NONE'，确保能正确触发 NONE -> Watching 状态联动。
             upsert_sql = """
                 INSERT INTO media_metadata (tmdb_id, item_type, title, watching_status, force_ended, paused_until)
                 VALUES (%s, 'Series', %s, 'NONE', FALSE, NULL)
