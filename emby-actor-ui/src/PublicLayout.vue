@@ -1,7 +1,7 @@
 <!-- src/PublicLayout.vue -->
 <template>
-  <n-layout style="height: 100vh;">
-    <n-layout-content style="display: flex; align-items: center; justify-content: center;">
+  <n-layout style="height: 100vh; background: transparent;">
+    <n-layout-content style="display: flex; align-items: center; justify-content: center; background: transparent;">
       <router-view />
     </n-layout-content>
   </n-layout>
