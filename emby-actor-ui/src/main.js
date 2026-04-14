@@ -7,9 +7,6 @@ import router from './router';
 import naive from 'naive-ui';
 import { useAuthStore } from './stores/auth'; // ★★★ 1. 导入你的 auth store ★★★
 
-// 全局样式
-import './assets/global.css';
-
 // --- 创建核心实例 ---
 const pinia = createPinia();
 const app = createApp(App);
