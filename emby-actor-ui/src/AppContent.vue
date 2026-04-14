@@ -11,7 +11,7 @@
     <router-view />
   </div>
   
-  <div v-if="!isReady" class="fullscreen-container">
+  <div v-if="!isReady" class="fullscreen-container loader-container">
     <n-spin size="large" />
   </div>
 </template>
@@ -28,6 +28,7 @@ import axios from 'axios';
 const route = useRoute();
 const authStore = useAuthStore();
 
+// 路由判断：如果是 public 页面（如登录），就不显示主框架
 const showMainLayout = computed(() => !route.meta.public);
 
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
@@ -42,17 +43,13 @@ const applyTheme = (isDark) => {
   const themeMode = isDark ? 'dark' : 'light';
   const themeConfig = modernTheme[themeMode];
 
+  // 1. 发送 Naive UI 的主题配置
   app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: themeConfig.naive }));
   
+  // 2. 仅仅向 :root 注入 CSS 变量，具体的渲染工作交给 App.vue 的 <style> 去完成
   for (const key in themeConfig.custom) {
     root.style.setProperty(key, themeConfig.custom[key]);
   }
-  
-  // 注入全局柔和渐变背景
-  document.body.style.background = themeConfig.custom['--global-bg'];
-  document.body.style.backgroundAttachment = 'fixed';
-  document.body.style.minHeight = '100vh';
-  document.body.style.transition = 'background 0.5s ease';
 
   root.classList.remove('dark', 'light');
   root.classList.add(themeMode);
@@ -69,7 +66,7 @@ watch(isDarkTheme, (isDark) => {
   applyTheme(isDark);
 }, { deep: true });
 
-// 监听任务状态
+// 监听任务状态 (登录后开始轮询)
 watch(() => authStore.isLoggedIn, (isLoggedIn) => {
   if (isLoggedIn) {
     if (!statusIntervalId) {
@@ -97,13 +94,13 @@ onBeforeUnmount(() => {
 });
 </script>
 
-<style>
-/* 针对非 MainLayout (如登录界面) 的透明化处理 */
-.fullscreen-container {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
+<style scoped>
+/* 保证初始化加载动画时的背景平滑 */
+.loader-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  background: var(--global-bg);
 }
 </style>
