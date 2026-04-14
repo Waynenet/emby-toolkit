@@ -1,6 +1,5 @@
 <!-- src/AppContent.vue -->
 <template>
-  <!-- 1. 如果需要后台布局，显示 MainLayout -->
   <MainLayout 
     v-if="showMainLayout"
     :is-dark="isDarkTheme" 
@@ -8,12 +7,10 @@
     @update:is-dark="handleModeChange"
   />
   
-  <!-- ★★★ 核心修复点 ★★★ -->
-  <!-- 2. 否则 (即公共页面)，用 .fullscreen-container 包裹 router-view -->
   <div v-else class="fullscreen-container">
     <router-view />
   </div>
-
+  
   <div v-if="!isReady" class="fullscreen-container">
     <n-spin size="large" />
   </div>
@@ -25,22 +22,16 @@ import { useRoute } from 'vue-router';
 import { NSpin } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import MainLayout from './MainLayout.vue';
-import { appTheme } from './theme.js';
+import { modernTheme } from './theme.js';
 import axios from 'axios';
 
-// --- 路由和认证 ---
 const route = useRoute();
 const authStore = useAuthStore();
 
-// --- 布局决策 ---
-const showMainLayout = computed(() => {
-  return !route.meta.public;
-});
+const showMainLayout = computed(() => !route.meta.public);
 
-// --- 下面的所有 script setup 内容都保持原样 ---
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
 const isReady = ref(false);
-
 const backgroundTaskStatus = ref({ is_running: false, current_action: '空闲' });
 let statusIntervalId = null;
 
@@ -49,14 +40,14 @@ const app = document.getElementById('app');
 const applyTheme = (isDark) => {
   const root = document.documentElement;
   const themeMode = isDark ? 'dark' : 'light';
-  const themeConfig = appTheme[themeMode];
+  const themeConfig = modernTheme[themeMode];
 
   app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: themeConfig.naive }));
   for (const key in themeConfig.custom) {
     root.style.setProperty(key, themeConfig.custom[key]);
   }
   root.classList.remove('dark', 'light');
-  root.classList.add(isDark ? 'dark' : 'light');
+  root.classList.add(themeMode);
 };
 
 const handleModeChange = (isDark) => {
@@ -65,10 +56,12 @@ const handleModeChange = (isDark) => {
   app.dispatchEvent(new CustomEvent('update-dark-mode', { detail: isDark }));
 };
 
+// 监听明暗模式变化
 watch(isDarkTheme, (isDark) => {
   applyTheme(isDark);
 }, { deep: true });
 
+// 监听任务状态
 watch(() => authStore.isLoggedIn, (isLoggedIn) => {
   if (isLoggedIn) {
     if (!statusIntervalId) {
@@ -86,16 +79,9 @@ watch(() => authStore.isLoggedIn, (isLoggedIn) => {
   }
 }, { immediate: true });
 
-onMounted(async () => {
-  try {
-    await axios.get('/api/config');
-  } catch (error) {
-    console.error("加载初始配置失败:", error);
-  } finally {
-    localStorage.removeItem('user-theme');
-    applyTheme(isDarkTheme.value);
-    isReady.value = true;
-  }
+onMounted(() => {
+  applyTheme(isDarkTheme.value);
+  isReady.value = true;
 });
 
 onBeforeUnmount(() => {

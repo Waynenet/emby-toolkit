@@ -6,7 +6,6 @@
         
         <!-- 左侧：Logo 与 菜单按钮 -->
         <div style="display: flex; align-items: center;">
-          <!-- 移动端显示的汉堡菜单按钮 -->
           <n-button 
             v-if="isMobile" 
             text 
@@ -26,7 +25,7 @@
           </span>
         </div>
 
-        <!-- 中间：任务状态 (仅桌面端显示) -->
+        <!-- 中间：任务状态 -->
         <div 
           v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'"
           class="header-task-status"
@@ -100,7 +99,7 @@
               </n-tooltip>
             </n-button-group>
 
-            <!-- 用户名下拉菜单 (移动端简化显示) -->
+            <!-- 用户名下拉菜单 -->
             <n-dropdown 
               v-if="authStore.isLoggedIn" 
               trigger="hover" 
@@ -111,18 +110,16 @@
                 <span style="font-size: 14px;">
                   {{ isMobile ? '' : `欢迎, ${authStore.username}` }}
                 </span>
-                <!-- 移动端只显示一个图标或头像占位 -->
                 <n-icon v-if="isMobile" size="20" :component="UserCenterIcon" />
                 <svg v-else xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><path fill="currentColor" d="m7 10l5 5l5-5z"></path></svg>
               </div>
             </n-dropdown>
 
-            <!-- 桌面端显示版本号 -->
             <template v-if="!isMobile">
               <span style="font-size: 12px; color: #999;">v{{ appVersion }}</span>
             </template>
 
-            <!-- 明暗模式切换器 (始终显示) -->
+            <!-- 明暗模式切换器 -->
             <n-switch 
               :value="props.isDark" 
               @update:value="newValue => emit('update:is-dark', newValue)"
@@ -136,7 +133,6 @@
     </n-layout-header>
     
     <n-layout has-sider style="height: calc(100vh - 60px); position: relative;">
-      <!-- 遮罩层：仅在移动端且侧边栏展开时显示，点击关闭侧边栏 -->
       <div 
         v-if="isMobile && !collapsed" 
         class="mobile-sider-mask"
@@ -177,12 +173,10 @@
       </n-layout-content>
     </n-layout>
     
-    <!-- 实时日志模态框 -->
     <n-modal v-model:show="isRealtimeLogVisible" preset="card" style="width: 95%; max-width: 900px;" title="实时任务日志" class="modal-card-lite">
        <n-log ref="logRef" :log="logContent" trim class="log-panel" style="height: 60vh; font-size: 13px; line-height: 1.6;"/>
     </n-modal>
 
-    <!-- 历史日志模态框 -->
     <LogViewer v-model:show="isHistoryLogVisible" />
   </n-layout>
 </template>
@@ -193,8 +187,8 @@ import { useRouter, useRoute } from 'vue-router';
 import {
   NLayout, NLayoutHeader, NLayoutSider, NLayoutContent,
   NMenu, NSwitch, NIcon, NModal, NDropdown, NButton,
-  NTooltip, NCard, NText, NProgress, NButtonGroup, NLog,
-  useMessage, useDialog
+  NTooltip, NText, NProgress, NButtonGroup, NLog,
+  useMessage
 } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import LogViewer from './components/LogViewer.vue';
@@ -208,6 +202,7 @@ import {
   AlbumsOutline as CollectionsIcon,
   PeopleOutline as ActorSubIcon,
   CreateOutline as CustomCollectionsIcon,
+  ColorPaletteOutline as PaletteIcon,
   Stop as StopIcon,
   SparklesOutline as ResubscribeIcon,
   TrashBinOutline as CleanupIcon,
@@ -231,13 +226,9 @@ import axios from 'axios';
 import logo from './assets/logo.png'
 
 const message = useMessage();
-const dialog = useDialog();
-
-// --- 修改开始：使用原生 JS 判断移动端 ---
 const isMobile = ref(false);
 
 const checkMobile = () => {
-  // 768px 通常是平板/手机的分界线
   isMobile.value = window.innerWidth < 768;
 };
 
@@ -259,71 +250,50 @@ const triggerStopTask = async () => {
   }
 };
 
-// 1. 定义 props 和 emits
 const props = defineProps({
   isDark: Boolean,
   taskStatus: Object
 });
 const emit = defineEmits(['update:is-dark']);
 
-// 2. 状态和路由
 const router = useRouter(); 
 const route = useRoute(); 
 const authStore = useAuthStore();
 
-// 侧边栏状态
 const collapsed = ref(true);
 const activeMenuKey = computed(() => route.name);
 const appVersion = ref(__APP_VERSION__);
 
-// 日志相关状态
 const isRealtimeLogVisible = ref(false);
 const isHistoryLogVisible = ref(false);
 const logRef = ref(null);
 
-// 监听路由变化，如果是移动端，跳转后自动收起侧边栏
 watch(() => route.path, () => {
   if (isMobile.value) {
     collapsed.value = true;
   }
 });
 
-// 3. 所有函数
 const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(iconComponent) });
 
-// 计算实时日志内容
 const logContent = computed(() => props.taskStatus?.logs?.join('\n') || '等待任务日志...');
 
-// 监听日志变化，智能自动滚动到底部
 watch(
   [() => props.taskStatus?.logs, isRealtimeLogVisible], 
   async ([newLogs, isVisible], [oldLogs, wasVisible]) => {
-    if (!isVisible) return; // 面板关闭时不处理
-
-    // 1. 判断是否为“刚打开面板”
+    if (!isVisible) return;
     const isJustOpened = isVisible && !wasVisible;
-
     if (isJustOpened) {
-      // 刚打开时，因为 Modal 有过渡动画，直接 nextTick 抓不到高度
-      // 给予 150ms 延迟，等弹窗完全展开后再滚到底部
-      setTimeout(() => {
-        logRef.value?.scrollTo({ position: 'bottom', silent: true });
-      }, 150);
+      setTimeout(() => { logRef.value?.scrollTo({ position: 'bottom', silent: true }); }, 150);
       return;
     }
-
-    // 2. 如果面板已经处于打开状态，并且有新日志进来
     if (logRef.value) {
-      // 寻找 Naive UI 的内部滚动容器
       const scrollEl = logRef.value.$el?.querySelector('.n-scrollbar-container') || logRef.value.$el;
-      
       let isAtBottom = false;
       if (scrollEl && scrollEl.scrollHeight !== undefined) {
-        const offset = 100; // 100px 缓冲容错
+        const offset = 100;
         isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop <= scrollEl.clientHeight + offset;
       }
-
-      // 如果用户当前就在最底部，才跟随滚动
       if (isAtBottom) {
         await nextTick();
         logRef.value?.scrollTo({ position: 'bottom', silent: true });
@@ -335,19 +305,14 @@ watch(
 
 const userOptions = computed(() => {
   const options = [];
-
-  // 如果有任何管理项，就加一个分割线
   if (options.length > 0) {
     options.push({ type: 'divider', key: 'd1' });
   }
-
-  // 规则2: 只要登录了，就能看到“退出登录”
   options.push({
     label: '退出登录',
     key: 'logout',
     icon: renderIcon(LogoutIcon)
   });
-
   return options;
 });
 
@@ -359,7 +324,6 @@ const handleUserSelect = async (key) => {
 };
 
 const menuOptions = computed(() => {
-  // 1. 先定义一个基础菜单组
   const discoveryGroup = { 
     label: '发现', 
     key: 'group-discovery', 
@@ -367,40 +331,26 @@ const menuOptions = computed(() => {
     children: [] 
   };
 
-  // 2. 根据用户类型，动态地往这个组里添加菜单项
   if (authStore.isAdmin) {
-    discoveryGroup.children.push({ 
-      label: '数据看板', 
-      key: 'DatabaseStats', 
-      icon: renderIcon(StatsIcon) 
-    });
+    discoveryGroup.children.push({ label: '数据看板', key: 'DatabaseStats', icon: renderIcon(StatsIcon) });
   }
 
   if (authStore.isLoggedIn) {
-    // --- 普通用户可见 ---
     discoveryGroup.children.push(
       { label: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon) },
       { label: '影视探索', key: 'Discover', icon: renderIcon(DiscoverIcon) }
     );
-    
-    // --- 管理员专属 ---
     if (authStore.isAdmin) {
-        discoveryGroup.children.push(
-            { label: '播放统计', key: 'EmbyStats', icon: renderIcon(EmbyStatsIcon) }
-        );
+        discoveryGroup.children.push({ label: '播放统计', key: 'EmbyStats', icon: renderIcon(EmbyStatsIcon) });
     }
   }
 
-  // 3. 构建最终的菜单列表
   const finalMenu = [discoveryGroup];
 
-  // 4. 如果是管理员，再把所有管理相关的菜单组加上去
   if (authStore.isAdmin) {
     finalMenu.push(
       { 
-        label: '整理', 
-        key: 'group-management', 
-        icon: renderIcon(LibraryOutline), 
+        label: '整理', key: 'group-management', icon: renderIcon(LibraryOutline), 
         children: [ 
           { label: '原生合集', key: 'Collections', icon: renderIcon(CollectionsIcon) }, 
           { label: '自建合集', key: 'CustomCollectionsManager', icon: renderIcon(CustomCollectionsIcon) }, 
@@ -411,9 +361,7 @@ const menuOptions = computed(() => {
         ] 
       },
       { 
-        label: '订阅', 
-        key: 'group-subscriptions', 
-        icon: renderIcon(BookmarksOutline), 
+        label: '订阅', key: 'group-subscriptions', icon: renderIcon(BookmarksOutline), 
         children: [ 
           { label: '智能追剧', key: 'Watchlist', icon: renderIcon(WatchlistIcon) }, 
           { label: '演员订阅', key: 'ActorSubscriptions', icon: renderIcon(ActorSubIcon) }, 
@@ -421,9 +369,7 @@ const menuOptions = computed(() => {
         ] 
       },
       { 
-        label: '系统', 
-        key: 'group-system', 
-        icon: renderIcon(SettingsOutline), 
+        label: '系统', key: 'group-system', icon: renderIcon(SettingsOutline), 
         children: [ 
           { label: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon) }, 
           { label: '用户管理', key: 'UserManagement', icon: renderIcon(UserManagementIcon) },
@@ -438,12 +384,12 @@ const menuOptions = computed(() => {
 });
 
 function handleMenuUpdate(key) {
-  emit('update:selected-theme', randomTheme.value);
-};
+  router.push({ name: key });
+}
 </script>
 
 <style>
-/* MainLayout 的样式 */
+/* 样式保留原样 */
 .app-header { padding: 0 16px; height: 60px; display: flex; align-items: center; font-size: 1.25em; font-weight: 600; flex-shrink: 0; }
 .app-main-content-wrapper { height: 100%; display: flex; flex-direction: column; }
 .page-content-inner-wrapper { flex-grow: 1; overflow-y: auto; }
@@ -451,99 +397,19 @@ function handleMenuUpdate(key) {
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 html.dark .n-menu .n-menu-item-group-title { color: #828287; }
 
-/* 任务状态条样式 */
-.header-task-status {
-  flex: 2;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  margin: 0 20px;
-  overflow: hidden;
-  min-width: 0;
-}
+.header-task-status { flex: 2; display: flex; justify-content: center; align-items: center; margin: 0 20px; overflow: hidden; min-width: 0; }
+.status-content { display: flex; align-items: center; background-color: rgba(0, 0, 0, 0.03); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(0, 0, 0, 0.05); max-width: 100%; }
+html.dark .status-content { background-color: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.05); }
+.status-text { font-size: 13px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.status-divider { margin: 0 8px; opacity: 0.5; flex-shrink: 0; }
+.status-message { opacity: 0.8; max-width: 600px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 
-.status-content {
-  display: flex;
-  align-items: center;
-  background-color: rgba(0, 0, 0, 0.03);
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  max-width: 100%;
-}
-
-html.dark .status-content {
-  background-color: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.status-text {
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  min-width: 0;
-}
-
-.status-divider {
-  margin: 0 8px;
-  opacity: 0.5;
-  flex-shrink: 0;
-}
-
-.status-message {
-  opacity: 0.8;
-  max-width: 600px; 
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: inline-block;
-  vertical-align: bottom;
-}
-
-/* 移动端适配样式 */
 @media (max-width: 768px) {
-  .app-header {
-    padding: 0 12px; /* 减小内边距 */
-  }
-  
-  .status-message {
-    max-width: 150px;
-  }
-  
-  .header-task-status {
-    margin: 0 8px;
-    flex: 1;
-  }
-
-  /* 移动端侧边栏样式：悬浮在内容之上 */
-  .mobile-sider {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    z-index: 1000;
-    height: 100%;
-    box-shadow: 2px 0 8px rgba(0,0,0,0.15);
-  }
-
-  /* 移动端侧边栏遮罩 */
-  .mobile-sider-mask {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(0,0,0,0.4);
-    z-index: 999;
-    backdrop-filter: blur(2px);
-  }
-  
-  /* 调整移动端内容区域内边距 */
-  .n-layout-content .page-content-inner-wrapper {
-    padding: 12px !important; /* 覆盖内联样式 */
-  }
+  .app-header { padding: 0 12px; }
+  .status-message { max-width: 150px; }
+  .header-task-status { margin: 0 8px; flex: 1; }
+  .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; height: 100%; box-shadow: 2px 0 8px rgba(0,0,0,0.15); }
+  .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.4); z-index: 999; backdrop-filter: blur(2px); }
+  .n-layout-content .page-content-inner-wrapper { padding: 12px !important; }
 }
 </style>
