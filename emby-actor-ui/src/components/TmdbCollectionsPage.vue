@@ -912,7 +912,7 @@ const extractYear = (dateStr) => {
   overflow: hidden;
   position: relative;
   aspect-ratio: 2 / 3; 
-  background-color: #202023;
+  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
   transition: transform 0.2s, box-shadow 0.2s;
   cursor: default;
 }
