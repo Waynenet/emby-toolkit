@@ -558,6 +558,10 @@ def init_db():
                     # 11. 【跟播系统】加速“正在连载”剧集的筛选
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
 
+                    # 12. 【海量数据优化】加速追剧列表的聚合查询
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, parent_series_tmdb_id);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watching_status ON media_metadata (watching_status) WHERE watching_status != 'NONE';")
+
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)
                 logger.trace("  ➜ 数据库升级检查完成。")
