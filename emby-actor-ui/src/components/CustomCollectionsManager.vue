@@ -2353,7 +2353,8 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
   cursor: grab;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   transition: transform 0.2s, box-shadow 0.2s, filter 0.3s;
-  background-color: #202023;
+  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
+  backdrop-filter: blur(10px); /* 增加毛玻璃效果 */
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -2517,7 +2518,8 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 .sortable-drag {
   cursor: grabbing;
   opacity: 1;
-  background: #202023; /* 保持背景色，防止透明 */
+  background: var(--card-bg-color); /* 替换原来的 #202023 */
+  backdrop-filter: blur(16px);
   box-shadow: 0 16px 32px rgba(0,0,0,0.5); /* 增加阴影，营造浮起感 */
   transform: scale(1.05); /* 稍微放大 */
   z-index: 9999; /* 确保在最上层 */
@@ -2538,7 +2540,7 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
   overflow: hidden;
   position: relative;
   aspect-ratio: 2 / 3; 
-  background-color: #202023;
+  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
   transition: transform 0.2s, box-shadow 0.2s;
   cursor: default;
 }
@@ -2651,7 +2653,7 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 .poster-placeholder {
   width: 100%;
   height: 100%;
-  background-color: #2d2d30;
+  background-color: var(--n-action-color); /* 替换原来的 #2d2d30 */
   display: flex;
   flex-direction: column;
   justify-content: center;
