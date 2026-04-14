@@ -30,7 +30,7 @@ MISSING_ID_PREFIX = "-800000_"
 # 格式: { "原始strm链接": ("终极CDN链接", 缓存过期时间戳) }
 # ==========================================
 _strm_cdn_cache = {}
-CACHE_TTL_SECONDS = 15  # 缓存存活时间：15秒足够应付播放器的连续探测
+CACHE_TTL_SECONDS = 7200  # 缓存存活时间
 
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
@@ -219,7 +219,7 @@ def handle_get_mimicked_library_image(path):
         resp = requests.get(image_url, headers=headers, stream=True, params=request.args)
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_headers]
-        return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+        return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
     except Exception as e:
         return "Internal Proxy Error", 500
 
@@ -481,7 +481,7 @@ def handle_get_latest_items(user_id, params):
             resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), stream=True, timeout=30.0)
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+            return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
 
         if not latest_ids: return Response(json.dumps([]), mimetype='application/json')
         items_from_emby = _fetch_items_in_chunks(base_url, api_key, user_id, latest_ids, fields)
@@ -594,7 +594,7 @@ def proxy_all(path):
                                     # 缓存未命中，执行穿透请求
                                     logger.info(f"[HTTPStrm] 捕获 STRM 链接，首次执行后台链路穿透: {file_path}")
                                     req_headers = {
-                                        "User-Agent": request.headers.get("User-Agent", "EmbyProxy/1.0"),
+                                        "User-Agent": request.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
                                         "Accept": "*/*"
                                     }
                                     
@@ -643,7 +643,7 @@ def proxy_all(path):
 
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+            return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
         
         # --- 拦截 A: 虚拟项目海报图片 ---
         if path.startswith('emby/Items/') and '/Images/Primary' in path:
@@ -715,7 +715,7 @@ def proxy_all(path):
         
         excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-        return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+        return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
         
     except Exception as e:
         logger.error(f"[PROXY] HTTP 代理时发生未知错误: {e}", exc_info=True)

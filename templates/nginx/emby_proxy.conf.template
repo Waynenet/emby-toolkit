@@ -97,8 +97,10 @@ server {
         proxy_set_header Range $http_range;
         proxy_set_header If-Range $http_if_range;
         
-        # 4. 延长超时时间，给 Python 代理向内网 AList 请求解包直链留出时间
-        proxy_read_timeout 60s;
+        # 4. 全面放宽视频流的超时策略，兼容解包耗时与客户端长时间暂停
+        proxy_read_timeout 600s;  # Nginx 读后端的超时 (防代理拉取断连)
+        proxy_send_timeout 600s;  # Nginx 写后端的超时 (写上保平安)
+        send_timeout 600s;        # Nginx 发给播放器的超时 (防用户长时间暂停被踢)
         
         # 5. 透传客户端所有的 Headers (包含 Token/设备信息等)
         proxy_pass_request_headers on;
