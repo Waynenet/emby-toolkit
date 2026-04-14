@@ -1,6 +1,6 @@
 <!-- components/EmbyStatsPage.vue -->
 <template>
-  <div style="padding: 24px; background-color: var(--n-color-modal);">
+  <div style="padding: 24px; background-color: transparent;">
     
     <!-- 顶部控制栏 -->
     <div class="header-bar">
