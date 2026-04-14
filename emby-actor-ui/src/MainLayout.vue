@@ -117,35 +117,9 @@
               </div>
             </n-dropdown>
 
-            <!-- 桌面端显示版本号和主题 -->
+            <!-- 桌面端显示版本号 -->
             <template v-if="!isMobile">
               <span style="font-size: 12px; color: #999;">v{{ appVersion }}</span>
-
-              <n-select
-                :value="props.selectedTheme"
-                @update:value="newValue => emit('update:selected-theme', newValue)"
-                :options="themeOptions"
-                size="small"
-                style="width: 120px;"
-              />
-              
-              <n-tooltip v-if="props.selectedTheme === 'custom'">
-                <template #trigger>
-                  <n-button @click="emit('edit-custom-theme')" circle size="small">
-                    <template #icon><n-icon :component="PaletteIcon" /></template>
-                  </n-button>
-                </template>
-                编辑我的专属主题
-              </n-tooltip>
-
-              <n-tooltip>
-                <template #trigger>
-                  <n-button @click="setRandomTheme" circle size="small">
-                    <template #icon><n-icon :component="ShuffleIcon" /></template>
-                  </n-button>
-                </template>
-                随机主题
-              </n-tooltip>
             </template>
 
             <!-- 明暗模式切换器 (始终显示) -->
@@ -219,11 +193,10 @@ import { useRouter, useRoute } from 'vue-router';
 import {
   NLayout, NLayoutHeader, NLayoutSider, NLayoutContent,
   NMenu, NSwitch, NIcon, NModal, NDropdown, NButton,
-  NSelect, NTooltip, NCard, NText, NProgress, NButtonGroup, NLog,
+  NTooltip, NCard, NText, NProgress, NButtonGroup, NLog,
   useMessage, useDialog
 } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
-import { themes } from './theme.js';
 import LogViewer from './components/LogViewer.vue';
 import {
   AnalyticsOutline as StatsIcon,
@@ -235,9 +208,7 @@ import {
   AlbumsOutline as CollectionsIcon,
   PeopleOutline as ActorSubIcon,
   CreateOutline as CustomCollectionsIcon,
-  ColorPaletteOutline as PaletteIcon,
   Stop as StopIcon,
-  ShuffleOutline as ShuffleIcon,
   SparklesOutline as ResubscribeIcon,
   TrashBinOutline as CleanupIcon,
   PeopleCircleOutline as UserManagementIcon,
@@ -291,10 +262,9 @@ const triggerStopTask = async () => {
 // 1. 定义 props 和 emits
 const props = defineProps({
   isDark: Boolean,
-  selectedTheme: String,
   taskStatus: Object
 });
-const emit = defineEmits(['update:is-dark', 'update:selected-theme', 'edit-custom-theme']);
+const emit = defineEmits(['update:is-dark']);
 
 // 2. 状态和路由
 const router = useRouter(); 
@@ -318,17 +288,7 @@ watch(() => route.path, () => {
   }
 });
 
-// 3. 从 theme.js 动态生成选项
-const themeOptions = [
-    ...Object.keys(themes).map(key => ({
-        label: themes[key].name,
-        value: key
-    })),
-    { type: 'divider', key: 'd1' },
-    { label: '自定义', value: 'custom' }
-];
-
-// 4. 所有函数
+// 3. 所有函数
 const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(iconComponent) });
 
 // 计算实时日志内容
@@ -478,14 +438,6 @@ const menuOptions = computed(() => {
 });
 
 function handleMenuUpdate(key) {
-  router.push({ name: key });
-}
-
-const setRandomTheme = () => {
-  const otherThemes = themeOptions.filter(t => t.type !== 'divider' && t.value !== props.selectedTheme);
-  if (otherThemes.length === 0) return;
-  const randomIndex = Math.floor(Math.random() * otherThemes.length);
-  const randomTheme = otherThemes[randomIndex];
   emit('update:selected-theme', randomTheme.value);
 };
 </script>
