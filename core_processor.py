@@ -88,38 +88,22 @@ def is_valid_tmdb_id(tmdb_id) -> bool:
         return False
     return True
 
-def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episodes_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _get_series_main_cast_from_tmdb(series_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    【新】从内存中的TMDB数据聚合一个剧集的所有演员。
+    只提取剧本身的主演，不把分集客串聚合进来。
     """
-    logger.debug(f"  ➜ 【演员聚合】开始为 '{series_data.get('name')}' 从内存中的TMDB数据聚合演员...")
-    aggregated_cast_map = {}
+    if not isinstance(series_data, dict):
+        return []
 
-    # 1. 优先处理主剧集的演员列表
-    main_cast = series_data.get("credits", {}).get("cast", [])
-    for actor in main_cast:
-        actor_id = actor.get("id")
-        if actor_id:
-            aggregated_cast_map[actor_id] = actor
-    logger.debug(f"  ➜ 从主剧集数据中加载了 {len(aggregated_cast_map)} 位主演员。")
+    credits_data = series_data.get("credits") or series_data.get("aggregate_credits") or {}
+    cast = credits_data.get("cast", []) or []
 
-    # 2. 聚合所有分集的演员和客串演员
-    for episode_data in all_episodes_data:
-        credits_data = episode_data.get("credits", {})
-        actors_to_process = credits_data.get("cast", []) + credits_data.get("guest_stars", [])
-        
-        for actor in actors_to_process:
-            actor_id = actor.get("id")
-            if actor_id and actor_id not in aggregated_cast_map:
-                if 'order' not in actor:
-                    actor['order'] = 999  # 为客串演员设置高order值
-                aggregated_cast_map[actor_id] = actor
+    # 保持 TMDb 原有排序
+    cast = [a for a in cast if isinstance(a, dict)]
 
-    full_aggregated_cast = list(aggregated_cast_map.values())
-    full_aggregated_cast.sort(key=lambda x: x.get('order', 999))
-    
-    logger.info(f"  ➜ 共为 '{series_data.get('name')}' 聚合了 {len(full_aggregated_cast)} 位独立演员。")
-    return full_aggregated_cast
+    # 兜底：没有 order 的排后面
+    cast.sort(key=lambda x: x.get("order", 999))
+    return cast
 
 class MediaProcessor:
     def __init__(self, config: Dict[str, Any], ai_translator=None, douban_api=None):
@@ -164,6 +148,136 @@ class MediaProcessor:
             self.p115_center = None
             
         logger.trace("核心处理器初始化完成。")
+
+    # -- [追更补洞专用] 从文件路径提取季集信息 (SxxEyy) --
+    def _extract_season_episode_from_path(self, file_path: str) -> Tuple[Optional[int], Optional[int]]:
+        """
+        从文件路径中提取 SxxEyy。
+        优先文件名，其次父目录名。
+        """
+        candidates = [
+            os.path.basename(file_path),
+            os.path.basename(os.path.dirname(file_path)),
+        ]
+
+        for text in candidates:
+            if not text:
+                continue
+            m = re.search(r'[sS](\d{1,2})[eE](\d{1,3})', text)
+            if m:
+                try:
+                    return int(m.group(1)), int(m.group(2))
+                except Exception:
+                    pass
+
+        return None, None
+
+    # -- [追更补洞专用] 从 TMDb 补齐连载季缓存 --
+    def _patch_ongoing_series_cache_from_tmdb(
+        self,
+        tmdb_id: str,
+        payload: Dict[str, Any],
+        file_path: str
+    ) -> Tuple[Dict[str, Any], bool]:
+        """
+        只为当前新入库分集补抓最新 credits / guest_stars。
+        不重扫整季已入库分集，不重聚合剧演员表。
+        """
+        if not self.tmdb_api_key or not tmdb_id or not payload:
+            return payload, False
+
+        season_num, episode_num = self._extract_season_episode_from_path(file_path)
+        if season_num is None or episode_num is None:
+            return payload, False
+
+        current_ep_key = f"S{season_num}E{episode_num}"
+
+        episodes_container = payload.get("episodes_details", {})
+        if isinstance(episodes_container, list):
+            normalized = {}
+            for ep in episodes_container:
+                try:
+                    s_num = int(ep.get("season_number"))
+                    e_num = int(ep.get("episode_number"))
+                    normalized[f"S{s_num}E{e_num}"] = ep
+                except Exception:
+                    continue
+            episodes_container = normalized
+            payload["episodes_details"] = episodes_container
+        elif not isinstance(episodes_container, dict):
+            episodes_container = {}
+            payload["episodes_details"] = episodes_container
+
+        # 已经有这一集，且 credits 也有了，就不补
+        existing_ep = episodes_container.get(current_ep_key)
+        if existing_ep and (existing_ep.get("credits", {}).get("cast") or existing_ep.get("credits", {}).get("guest_stars")):
+            return payload, False
+
+        logger.info(f"  ➜ [实时监控] 当前分集 {current_ep_key} 缓存缺少演员表，准备从 TMDb 补抓该集 credits...")
+
+        try:
+            season_details = tmdb.get_tv_season_details(int(tmdb_id), season_num, self.tmdb_api_key)
+        except Exception as e:
+            logger.warning(f"  ➜ [实时监控] 获取第 {season_num} 季详情失败: {e}")
+            return payload, False
+
+        if not season_details:
+            return payload, False
+
+        today = datetime.now(timezone.utc).date()
+        target_ep = None
+
+        for ep in season_details.get("episodes", []):
+            try:
+                if int(ep.get("episode_number")) != episode_num:
+                    continue
+            except Exception:
+                continue
+
+            air_date_str = ep.get("air_date")
+            if air_date_str:
+                try:
+                    air_date = datetime.strptime(air_date_str, "%Y-%m-%d").date()
+                    if air_date > today:
+                        logger.info(f"  ➜ [实时监控] {current_ep_key} 尚未播出，跳过补抓演员表。")
+                        return payload, False
+                except ValueError:
+                    pass
+
+            target_ep = ep
+            break
+
+        if not target_ep:
+            return payload, False
+
+        # 只对这一集补跑翻译
+        patch_package = {
+            "series_details": payload.get("series_details", payload),
+            "seasons_details": [],
+            "episodes_details": {current_ep_key: target_ep}
+        }
+
+        if self.ai_translator:
+            try:
+                translate_tmdb_metadata_recursively(
+                    item_type="Series",
+                    tmdb_data=patch_package,
+                    ai_translator=self.ai_translator,
+                    item_name=payload.get("name") or payload.get("title") or str(tmdb_id),
+                    tmdb_api_key=self.tmdb_api_key,
+                    config=self.config
+                )
+            except Exception as e:
+                logger.warning(f"  ➜ [实时监控] 当前分集演员表补丁翻译失败: {e}")
+
+        old_ep = episodes_container.get(current_ep_key, {})
+        merged_ep = old_ep.copy()
+        merged_ep.update(target_ep)
+        episodes_container[current_ep_key] = merged_ep
+        payload["episodes_details"] = episodes_container
+
+        logger.info(f"  ➜ [实时监控] 已为 {current_ep_key} 补齐最新 credits / guest_stars。")
+        return payload, True
 
     # --- [优化版] 实时监控文件逻辑 (增加缓存跳过 & 支持批量延迟刷新) ---
     def process_file_actively(self, file_path: str, skip_refresh: bool = False) -> Optional[str]:
@@ -424,6 +538,15 @@ class MediaProcessor:
                         )
                     # =========================================================
                     
+                    if item_type == "Series":
+                        payload, patched = self._patch_ongoing_series_cache_from_tmdb(
+                            tmdb_id=str(tmdb_id),
+                            payload=payload,
+                            file_path=file_path
+                        )
+                        if patched:
+                            logger.info("  ➜ [实时监控] 追更剧元数据补充完成，将使用最新分集演员表重新写入 NFO。")
+
                     # 3. 写入 NFO 文件 (传入 db_actors 确保演员表不丢失)
                     self.sync_item_metadata(
                         item_details=fake_item_details,
@@ -517,7 +640,6 @@ class MediaProcessor:
                 # ★★★ 大一统 AI 翻译引擎 (直接作用于原始数据) ★★★
                 # =================================================================
                 if self.ai_translator:
-                    from tasks.helpers import translate_tmdb_metadata_recursively
                     # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
                     
@@ -537,8 +659,7 @@ class MediaProcessor:
                     authoritative_cast_source = credits_source.get('cast', [])
                 elif item_type == "Series":
                     if aggregated_tmdb_data:
-                        all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                        authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(details, all_episodes)
+                        authoritative_cast_source = _get_series_main_cast_from_tmdb(details)
                     else:
                         credits_source = details.get('aggregate_credits') or details.get('credits') or {}
                         authoritative_cast_source = credits_source.get('cast', [])
@@ -1517,6 +1638,7 @@ class MediaProcessor:
                         if p.get("id") and p.get("character"):
                             translated_character_map[int(p["id"])] = p["character"]
 
+                formatted_season_casts_db_cache = {} # 季演员表格式化缓存，避免重复计算
                 for episode in episodes_details:
                     # 1. 必须有季号和集号 (提前解析，用于生成内部ID)
                     if episode.get('episode_number') is None: continue
@@ -1549,12 +1671,21 @@ class MediaProcessor:
                             continue # 不是本次入库的分集，直接跳过！
 
                     final_runtime = get_representative_runtime(versions_of_episode, episode.get('runtime'))
-
+                    # ★★★ 获取无头像过滤开关 ★★★
+                    remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
                     # ★★★ 提取季(Season)元数据作为第一兜底 ★★★
                     current_season_info = next((s for s in seasons_details if s.get('season_number') == s_num), {})
                     season_credits = current_season_info.get('credits') or current_season_info.get('aggregate_credits') or {}
                     season_cast = season_credits.get('cast', [])
                     season_crew = season_credits.get('crew', [])
+
+                    # ★ 缓存季演员表的格式化结果
+                    if s_num not in formatted_season_casts_db_cache:
+                        if season_cast:
+                            filtered_s_cast = [p for p in season_cast if p.get("id") and (not remove_no_avatar or p.get("profile_path"))]
+                            formatted_season_casts_db_cache[s_num] = self._format_episode_cast_for_nfo(filtered_s_cast, item_details_from_emby)
+                        else:
+                            formatted_season_casts_db_cache[s_num] = []
 
                     # ★★★ 提取分集专属导演 ★★★
                     ep_crew = episode.get('crew', [])
@@ -1565,27 +1696,27 @@ class MediaProcessor:
                         
                     ep_directors = [{'id': p.get('id'), 'name': p.get('name')} for p in ep_crew if p.get('job') == 'Director']
 
-                    # ★★★ 获取无头像过滤开关 ★★★
-                    remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
-
                     # ★★★ 提取分集专属演员表 (含客串) ★★★
                     ep_cast_raw = episode.get('credits', {}).get('cast', []) + episode.get('credits', {}).get('guest_stars', [])
                     ep_actors_json_list = []
                     
                     if ep_cast_raw:
-                        # 1. 优先使用分集专属演员 (过滤无头像 + 查字典)
+                        # 1. 优先使用分集专属演员
+                        filtered_ep_cast = [p for p in ep_cast_raw if p.get("id") and (not remove_no_avatar or p.get("profile_path"))]
+                        # 只有分集独有演员才调用格式化
+                        formatted_ep_cast = self._format_episode_cast_for_nfo(filtered_ep_cast, item_details_from_emby)
                         ep_actors_json_list = [
-                            {"tmdb_id": int(p.get("id")), "character": translated_character_map.get(int(p.get("id")), p.get("character")), "order": p.get("order", 999)} 
-                            for p in ep_cast_raw if p.get("id") and (not remove_no_avatar or p.get("profile_path"))
+                            {"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} 
+                            for p in formatted_ep_cast
                         ]
-                    elif season_cast:
-                        # 2. 其次使用季(Season)演员表兜底 (过滤无头像 + 查字典)
+                    elif formatted_season_casts_db_cache.get(s_num):
+                        # 2. 其次使用季(Season)演员表兜底 (直接拿缓存)
                         ep_actors_json_list = [
-                            {"tmdb_id": int(p.get("id")), "character": translated_character_map.get(int(p.get("id")), p.get("character")), "order": p.get("order", 999)} 
-                            for p in season_cast if p.get("id") and (not remove_no_avatar or p.get("profile_path"))
+                            {"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} 
+                            for p in formatted_season_casts_db_cache[s_num]
                         ]
                     else:
-                        # 3. 终极兜底：使用剧集(Series)总演员表 (主流程已过滤)
+                        # 3. 终极兜底：使用剧集(Series)总演员表 (直接拿已格式化好的 final_processed_cast)
                         ep_actors_json_list = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} for p in final_processed_cast if p.get("id")]
 
                     episode_record = {
@@ -1707,7 +1838,7 @@ class MediaProcessor:
                     fallback_directors = [{'id': p.get('id'), 'name': p.get('name')} for p in season_crew if p.get('job') == 'Director']
                     
                     if season_cast:
-                        fallback_actors = [{"tmdb_id": int(p.get("id")), "character": translated_character_map.get(int(p.get("id")), p.get("character")), "order": p.get("order", 999)} for p in season_cast if p.get("id")]
+                        fallback_actors = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} for p in season_cast if p.get("id") and (not remove_no_avatar or p.get("profile_path"))]
                     else:
                         fallback_actors = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} for p in final_processed_cast if p.get("id")]
 
@@ -2036,69 +2167,121 @@ class MediaProcessor:
         return cast_data.get("cast", []), None
     
     # --- 通过 API 更新 Emby 中人物(演员/导演)名字 ---
-    def _update_emby_person_names(self, final_cast: List[Dict[str, Any]], formatted_metadata: Dict[str, Any], item_details_from_emby: Dict[str, Any], item_name_for_log: str):
+    def _update_emby_person_names(
+        self,
+        final_cast: List[Dict[str, Any]],
+        formatted_metadata: Dict[str, Any],
+        item_details_from_emby: Dict[str, Any],
+        item_name_for_log: str
+    ):
         """
-        根据最终处理好的演员列表和翻译后的元数据，通过 API 更新 Emby 中人物（演员、导演）的名字。
+        根据最终处理好的翻译结果，通过 API 更新 Emby 中人物（演员/客串/导演/主创）的名字。
+        结合了白名单机制与精准的 Diff 比对，拒绝无脑更新。
         """
-        persons_to_update = {} # tmdb_id (str) -> new_name (str)
+        persons_to_update: Dict[str, str] = {}   # tmdb_id(str) -> new_name(str)
 
-        # 1. 收集演员 (Actors)
-        for actor in final_cast:
-            tmdb_id = str(actor.get("id") or actor.get("tmdb_id") or "")
-            new_name = actor.get("name")
-            if tmdb_id and new_name and utils.contains_chinese(new_name):
-                persons_to_update[tmdb_id] = new_name
+        # ------------------------------------------------------------------
+        # 阶段 0：建立白名单
+        # ------------------------------------------------------------------
+        # A. 演员白名单：只有 final_cast 里的演员，才算“最终保留”
+        allowed_actor_tmdb_ids = {
+            str(a.get("id") or a.get("tmdb_id")).strip()
+            for a in (final_cast or [])
+            if a.get("id") or a.get("tmdb_id")
+        }
 
-        # 2. 收集导演 (Directors) - 遍历整个 formatted_metadata 提取所有导演
+        # B. 当前 Emby 条目里已存在的人物（允许直接写回，不必再全局找）
+        current_emby_people_tmdb_ids = {
+            str(p.get("ProviderIds", {}).get("Tmdb") or "").strip()
+            for p in (item_details_from_emby.get("People", []) or [])
+            if p.get("ProviderIds", {}).get("Tmdb")
+        }
+
+        def _is_valid_chinese_name(name: Any) -> bool:
+            return bool(name) and utils.contains_chinese(str(name))
+
+        def _add_person(tmdb_id_raw: Any, new_name: Any):
+            tmdb_id = str(tmdb_id_raw or "").strip()
+            if not tmdb_id or not _is_valid_chinese_name(new_name):
+                return
+            persons_to_update[tmdb_id] = str(new_name).strip()
+
+        def _collect_people_from_one_node(data_dict: Dict[str, Any]):
+            if not isinstance(data_dict, dict):
+                return
+
+            credits_data = data_dict.get("credits") or data_dict.get("aggregate_credits") or data_dict.get("casts") or {}
+
+            # 1) 导演 / 主创：不受演员截断限制
+            for crew_member in credits_data.get("crew", []):
+                if crew_member.get("job") in ["Director", "Series Director"]:
+                    _add_person(crew_member.get("id") or crew_member.get("tmdb_id"), crew_member.get("name"))
+
+            for creator in data_dict.get("created_by", []):
+                _add_person(creator.get("id") or creator.get("tmdb_id"), creator.get("name"))
+
+            # 2) 演员 / 客串：必须命中白名单或当前 Emby 条目已存在
+            all_actors = credits_data.get("cast", []) + credits_data.get("guest_stars", [])
+            for actor in all_actors:
+                tmdb_id = str(actor.get("id") or actor.get("tmdb_id") or "").strip()
+                new_name = actor.get("name")
+
+                if not tmdb_id or not _is_valid_chinese_name(new_name):
+                    continue
+
+                if tmdb_id in allowed_actor_tmdb_ids or tmdb_id in current_emby_people_tmdb_ids:
+                    persons_to_update[tmdb_id] = str(new_name).strip()
+
+        # ------------------------------------------------------------------
+        # 阶段 1：收集所有需要更新的人物名
+        # ------------------------------------------------------------------
+        # 1.1 final_cast 本身（最终演员白名单）
+        for actor in final_cast or []:
+            _add_person(actor.get("id") or actor.get("tmdb_id"), actor.get("name"))
+
+        # 1.2 递归扫描 formatted_metadata (包含客串和分集导演)
         if formatted_metadata:
-            from tasks.helpers import extract_top_directors
-            # 提取主剧/电影导演
-            top_dirs = extract_top_directors(formatted_metadata, max_count=50)
-            for d in top_dirs:
-                if d.get('id') and utils.contains_chinese(d.get('name', '')):
-                    persons_to_update[str(d['id'])] = d['name']
-            
-            # 提取分季/分集导演
-            for season in formatted_metadata.get('seasons_details', []):
-                s_dirs = extract_top_directors(season, max_count=10)
-                for d in s_dirs:
-                    if d.get('id') and utils.contains_chinese(d.get('name', '')):
-                        persons_to_update[str(d['id'])] = d['name']
-                        
-            episodes = formatted_metadata.get('episodes_details', {})
+            _collect_people_from_one_node(formatted_metadata)
+
+            for season in formatted_metadata.get("seasons_details", []) or []:
+                _collect_people_from_one_node(season)
+
+            episodes = formatted_metadata.get("episodes_details", {})
             ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
             for ep in ep_list:
-                ep_dirs = extract_top_directors(ep, max_count=10)
-                for d in ep_dirs:
-                    if d.get('id') and utils.contains_chinese(d.get('name', '')):
-                        persons_to_update[str(d['id'])] = d['name']
+                _collect_people_from_one_node(ep)
 
         if not persons_to_update:
-            logger.info(f"  ➜ 无需通过 API 更新人物名字 (没有找到需要翻译的 Emby 人物)。")
+            logger.info("  ➜ 无需通过 API 更新人物名字 (没有命中白名单的人物)。")
             return
 
-        # 3. 将 TMDb ID 转换为 Emby Person ID
-        emby_id_to_new_name = {}
-        
-        # 3.1 优先从 Emby 当前媒体项的 People 列表中提取 (最准最快，完美解决导演问题)
-        for person in item_details_from_emby.get("People", []):
-            e_id = str(person.get("Id", ""))
-            t_id = str(person.get("ProviderIds", {}).get("Tmdb", ""))
+        # ------------------------------------------------------------------
+        # 阶段 2：TMDb ID -> Emby Person ID
+        # ------------------------------------------------------------------
+        emby_id_to_new_name: Dict[str, str] = {}
+        resolved_tmdb_ids = set()
+
+        # 2.1 当前条目自带 People：优先直接命中
+        for person in item_details_from_emby.get("People", []) or []:
+            e_id = str(person.get("Id") or "").strip()
+            t_id = str(person.get("ProviderIds", {}).get("Tmdb") or "").strip()
             if e_id and t_id and t_id in persons_to_update:
                 emby_id_to_new_name[e_id] = persons_to_update[t_id]
-                del persons_to_update[t_id]
+                resolved_tmdb_ids.add(t_id)
 
-        # 3.2 从 final_cast 中直接获取 (兜底演员)
-        for actor in final_cast:
-            tmdb_id = str(actor.get("id") or actor.get("tmdb_id") or "")
-            emby_id = str(actor.get("emby_person_id") or "")
-            if tmdb_id in persons_to_update and emby_id:
+        # 2.2 final_cast 里如果已带 emby_person_id，也直接命中
+        for actor in final_cast or []:
+            tmdb_id = str(actor.get("id") or actor.get("tmdb_id") or "").strip()
+            emby_id = str(actor.get("emby_person_id") or "").strip()
+            if tmdb_id and emby_id and tmdb_id in persons_to_update and tmdb_id not in resolved_tmdb_ids:
                 emby_id_to_new_name[emby_id] = persons_to_update[tmdb_id]
-                del persons_to_update[tmdb_id]
+                resolved_tmdb_ids.add(tmdb_id)
 
-        # 3.3 从 Emby API 实时查询剩余的 TMDb ID (逐个查询，确保准确)
-        if persons_to_update:
-            for t_id in list(persons_to_update.keys()):
+        # 2.3 剩余未解析的人物，再按 TMDb ID 去 Emby 全局查
+        unresolved_tmdb_ids = [t_id for t_id in persons_to_update.keys() if t_id not in resolved_tmdb_ids]
+
+        if unresolved_tmdb_ids:
+            for t_id in unresolved_tmdb_ids:
                 try:
                     api_url = f"{self.emby_url.rstrip('/')}/Items"
                     params = {
@@ -2106,26 +2289,33 @@ class MediaProcessor:
                         "IncludeItemTypes": "Person",
                         "Recursive": "true",
                         "AnyProviderIdEquals": f"tmdb.{t_id}",
-                        "Fields": "ProviderIds"
+                        "Fields": "ProviderIds",
+                        "Limit": 5
                     }
                     resp = emby.emby_client.get(api_url, params=params)
                     if resp.status_code == 200:
                         items = resp.json().get("Items", [])
                         if items:
-                            e_id = str(items[0].get("Id"))
-                            emby_id_to_new_name[e_id] = persons_to_update[t_id]
-                            del persons_to_update[t_id]
+                            for p in items:
+                                if str(p.get("ProviderIds", {}).get("Tmdb") or "").strip() == t_id:
+                                    e_id = str(p.get("Id") or "").strip()
+                                    if e_id:
+                                        emby_id_to_new_name[e_id] = persons_to_update[t_id]
+                                    break
                 except Exception:
                     pass
 
         if not emby_id_to_new_name:
-            logger.info(f"  ➜ 无需通过 API 更新人物名字 (待更新人物均为新入库，Emby将自动读取NFO)。")
             return
 
-        logger.info(f"  ➜ 开始为《{item_name_for_log}》的 {len(emby_id_to_new_name)} 位人物(演员/导演)通过 API 更新名字...")
+        # ------------------------------------------------------------------
+        # 阶段 3：批量获取 Emby 当前名字并比对更新 (恢复老版本的神级逻辑)
+        # ------------------------------------------------------------------
+        logger.info(f"  ➜ 准备为 {len(emby_id_to_new_name)} 位人物检查并更新名字...")
         
-        # 4. 批量获取这些人物在 Emby 中的当前信息，以减少 API 请求
         person_ids = list(emby_id_to_new_name.keys())
+        
+        # ★ 核心：一次性批量获取这些人物在 Emby 中的当前名字
         current_person_details = emby.get_emby_items_by_id(
             base_url=self.emby_url,
             api_key=self.emby_api_key,
@@ -2136,24 +2326,32 @@ class MediaProcessor:
         
         current_names_map = {str(p["Id"]): p.get("Name") for p in current_person_details} if current_person_details else {}
 
-        updated_count = 0
-        for person_id, new_name in emby_id_to_new_name.items():
-            current_name = current_names_map.get(person_id)
+        success_count = 0
+        skip_count = 0
 
-            # 只有当新名字和当前名字不同时，才执行更新
-            if new_name != current_name:
-                emby.update_person_details(
-                    person_id=person_id,
-                    new_data={"Name": new_name},
-                    emby_server_url=self.emby_url,
-                    emby_api_key=self.emby_api_key,
-                    user_id=self.emby_user_id
-                )
-                updated_count += 1
-                import time
-                time.sleep(0.2) 
+        for emby_person_id, new_name in emby_id_to_new_name.items():
+            current_name = current_names_map.get(emby_person_id)
+            
+            # ★ 只有当新名字和当前名字不同时，才执行更新
+            if current_name != new_name:
+                try:
+                    ok = emby.update_person_details(
+                        person_id=emby_person_id,
+                        new_data={"Name": new_name},
+                        emby_server_url=self.emby_url,
+                        emby_api_key=self.emby_api_key,
+                        user_id=self.emby_user_id
+                    )
+                    if ok:
+                        success_count += 1
+                        import time
+                        time.sleep(0.2) 
+                except Exception as e:
+                    logger.warning(f"    - 更新人物异常 ID {emby_person_id}: {e}")
+            else:
+                skip_count += 1
 
-        logger.info(f"  ➜ 成功通过 API 更新了 {updated_count} 位人物的名字。")
+        logger.info(f"  ➜ 人物名 API 更新完成：成功更新 {success_count} 位，跳过 {skip_count} 位(名字已是最新)。")
     
     # --- 全量处理的入口 ---
     def process_full_library(self, update_status_callback: Optional[callable] = None, force_full_update: bool = False):
@@ -2489,7 +2687,6 @@ class MediaProcessor:
                 # ★★★ 核心修复：大一统 AI 翻译引擎 (必须在构建骨架前，直接作用于原始数据) ★★★
                 # =================================================================
                 if self.ai_translator:
-                    from tasks.helpers import translate_tmdb_metadata_recursively
                     # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
                     
@@ -2533,8 +2730,7 @@ class MediaProcessor:
                     credits_source = fresh_data.get('credits') or fresh_data.get('casts') or {}
                     authoritative_cast_source = credits_source.get('cast', [])
                 elif item_type == "Series":
-                    all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values()) if aggregated_tmdb_data else []
-                    authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
+                    authoritative_cast_source = _get_series_main_cast_from_tmdb(fresh_data)
 
                 if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
                     authoritative_cast_source = [actor for actor in authoritative_cast_source if actor.get("profile_path")]
@@ -2640,7 +2836,6 @@ class MediaProcessor:
                             formatted_metadata['credits']['crew'].append(d)
 
                 # 5. 生成 NFO 和 图片
-                logger.info(f"  ➜ 正在生成(NFO文件 & 图片)...")
                 self.sync_item_metadata(
                     item_details=item_details_from_emby,
                     tmdb_id=tmdb_id,
@@ -2847,7 +3042,10 @@ class MediaProcessor:
         # 使用清洗后的列表进行后续所有操作
         tmdb_cast_people = cleaned_tmdb_cast
 
-        # ★★★ 在流程开始时，记录下来自TMDb的原始演员ID ★★★
+        for actor in tmdb_cast_people:
+            if actor.get("character"):
+                actor["character"] = utils.clean_character_name_static(actor["character"])
+
         original_tmdb_ids = {str(actor.get("id")) for actor in tmdb_cast_people if actor.get("id")}
         # ======================================================================
         # 步骤 1: ★★★ 数据适配 ★★★
@@ -2887,7 +3085,10 @@ class MediaProcessor:
                     merged_actor["name"] = emby_actor.get("Name")
                 else:
                     merged_actor["name"] = tmdb_match.get("name")
-                merged_actor["character"] = emby_actor.get("Role")
+                
+                raw_role = emby_actor.get("Role")
+                merged_actor["character"] = utils.clean_character_name_static(raw_role) if raw_role else None
+                
                 final_cast_list.append(merged_actor)
                 used_tmdb_ids.add(tmdb_id_str)
 
@@ -3145,157 +3346,46 @@ class MediaProcessor:
         # ======================================================================
         # 步骤 5: ★★★ 从演员表移除无头像演员 ★★★
         # ======================================================================
-        if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True):
-            actors_with_avatars = [actor for actor in current_cast_list if actor.get("profile_path")]
-            actors_without_avatars = [actor for actor in current_cast_list if not actor.get("profile_path")]
+        # if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True):
+        #     actors_with_avatars = [actor for actor in current_cast_list if actor.get("profile_path")]
+        #     actors_without_avatars = [actor for actor in current_cast_list if not actor.get("profile_path")]
 
-            if actors_without_avatars:
-                removed_names = [a.get('name', f"TMDbID:{a.get('id')}") for a in actors_without_avatars]
-                logger.info(f"  ➜ 将移除 {len(actors_without_avatars)} 位无头像的演员: {removed_names}")
-                current_cast_list = actors_with_avatars
-        else:
-            logger.info("  ➜ 未启用移除无头像演员。")
+        #     if actors_without_avatars:
+        #         removed_names = [a.get('name', f"TMDbID:{a.get('id')}") for a in actors_without_avatars]
+        #         logger.info(f"  ➜ 将移除 {len(actors_without_avatars)} 位无头像的演员: {removed_names}")
+        #         current_cast_list = actors_with_avatars
+        # else:
+        #     logger.info("  ➜ 未启用移除无头像演员。")
 
         # ======================================================================
         # 步骤 6：智能截断逻辑 (Smart Truncation) ★★★
         # ======================================================================
-        max_actors = self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
-        try:
-            limit = int(max_actors)
-            if limit <= 0: limit = 30
-        except (ValueError, TypeError):
-            limit = 30
+        # max_actors = self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
+        # try:
+        #     limit = int(max_actors)
+        #     if limit <= 0: limit = 30
+        # except (ValueError, TypeError):
+        #     limit = 30
 
-        original_count = len(current_cast_list)
+        # original_count = len(current_cast_list)
         
-        if original_count > limit:
-            logger.info(f"  ➜ 演员列表总数 ({original_count}) 超过上限 ({limit})，将优先保留有头像的演员后进行截断。")
-            sort_key = lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999
-            with_profile = [actor for actor in current_cast_list if actor.get("profile_path")]
-            without_profile = [actor for actor in current_cast_list if not actor.get("profile_path")]
-            with_profile.sort(key=sort_key)
-            without_profile.sort(key=sort_key)
-            prioritized_list = with_profile + without_profile
-            current_cast_list = prioritized_list[:limit]
-            logger.debug(f"  ➜ 截断后，保留了 {len(with_profile)} 位有头像演员中的 {len([a for a in current_cast_list if a.get('profile_path')])} 位。")
-        else:
-            # ▼▼▼ 核心修改：直接在 current_cast_list 上排序 ▼▼▼
-            current_cast_list.sort(key=lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999)
+        # if original_count > limit:
+        #     logger.info(f"  ➜ 演员列表总数 ({original_count}) 超过上限 ({limit})，将优先保留有头像的演员后进行截断。")
+        #     sort_key = lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999
+        #     with_profile = [actor for actor in current_cast_list if actor.get("profile_path")]
+        #     without_profile = [actor for actor in current_cast_list if not actor.get("profile_path")]
+        #     with_profile.sort(key=sort_key)
+        #     without_profile.sort(key=sort_key)
+        #     prioritized_list = with_profile + without_profile
+        #     current_cast_list = prioritized_list[:limit]
+        #     logger.debug(f"  ➜ 截断后，保留了 {len(with_profile)} 位有头像演员中的 {len([a for a in current_cast_list if a.get('profile_path')])} 位。")
+        # else:
+        #     # ▼▼▼ 核心修改：直接在 current_cast_list 上排序 ▼▼▼
+        #     current_cast_list.sort(key=lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999)
 
         # ======================================================================
-        # 步骤 7: ★★★ 翻译和格式化 ★★★
+        # 步骤 7: 格式化 ★★★
         # ======================================================================
-        logger.info(f"  ➜ 将对 {len(current_cast_list)} 位演员进行最终的翻译和格式化处理...")
-
-        if not (self.ai_translator and self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE, False)):
-            logger.info("  ➜ 翻译未启用，将保留演员和角色名原文。")
-        else:
-            final_translation_map = {}
-            terms_to_translate = set()
-            for actor in current_cast_list:
-                character = actor.get('character')
-                if character:
-                    cleaned_character = utils.clean_character_name_static(character)
-                    if cleaned_character and not utils.contains_chinese(cleaned_character):
-                        terms_to_translate.add(cleaned_character)
-                name = actor.get('name')
-                if name and not utils.contains_chinese(name):
-                    terms_to_translate.add(name)
-            
-            total_terms_count = len(terms_to_translate)
-            logger.info(f"  ➜ [翻译统计] 1. 任务概览: 共收集到 {total_terms_count} 个独立词条需要翻译。")
-            if total_terms_count > 0:
-                logger.debug(f"    ➜ 待处理词条列表: {list(terms_to_translate)}")
-
-            remaining_terms = list(terms_to_translate)
-            if remaining_terms:
-                cached_results = {}
-                terms_for_api = []
-                for term in remaining_terms:
-                    cached = self.actor_db_manager.get_translation_from_db(cursor, term)
-                    if cached and cached.get('translated_text'):
-                        cached_results[term] = cached['translated_text']
-                    else:
-                        terms_for_api.append(term)
-                
-                cached_count = len(cached_results)
-                logger.info(f"  ➜ [翻译统计] 2. 缓存检查: 命中数据库缓存 {cached_count} 条。")
-                if cached_count > 0:
-                    logger.debug("    ➜ 命中缓存的词条与译文:")
-                    for k, v in sorted(cached_results.items()):
-                        logger.debug(f"    ├─ {k} ➜ {v}")
-
-                if cached_results:
-                    final_translation_map.update(cached_results)
-                if terms_for_api:
-                    logger.info(f"  ➜ [翻译统计] 3. AI处理 (快速模式): 提交 {len(terms_for_api)} 条。")
-                    if terms_for_api:
-                        logger.debug(f"    ➜ 提交给[快速模式]的词条: {terms_for_api}")
-                    fast_api_results = self.ai_translator.batch_translate(terms_for_api, mode='fast')
-                    for term, translation in fast_api_results.items():
-                        final_translation_map[term] = translation
-                        self.actor_db_manager.save_translation_to_db(cursor, term, translation, self.ai_translator.provider)
-                failed_terms = []
-                for term in remaining_terms:
-                    if not utils.contains_chinese(final_translation_map.get(term, term)):
-                        failed_terms.append(term)
-                remaining_terms = failed_terms
-            if remaining_terms:
-                logger.info(f"  ➜ [翻译统计] 4. AI处理 (音译模式): 提交 {len(remaining_terms)} 条。")
-                if remaining_terms:
-                    logger.debug(f"    ➜ 提交给[音译模式]的词条: {remaining_terms}")
-                transliterate_results = self.ai_translator.batch_translate(remaining_terms, mode='transliterate')
-                
-                if isinstance(transliterate_results, dict):
-                    final_translation_map.update(transliterate_results)
-                elif isinstance(transliterate_results, list) and len(transliterate_results) == len(remaining_terms):
-                    for i, term in enumerate(remaining_terms):
-                        final_translation_map[term] = transliterate_results[i]
-                
-                still_failed_terms = []
-                for term in remaining_terms:
-                    if not utils.contains_chinese(final_translation_map.get(term, term)):
-                        still_failed_terms.append(term)
-                remaining_terms = still_failed_terms
-                
-            if remaining_terms:
-                item_title = item_details_from_emby.get("Name")
-                item_year = item_details_from_emby.get("ProductionYear")
-                logger.info(f"  ➜ [翻译统计] 5. AI处理 (顾问模式): 提交 {len(remaining_terms)} 条。")
-                if remaining_terms:
-                    logger.debug(f"  ➜ 提交给[顾问模式]的词条: {remaining_terms}")
-                quality_results = self.ai_translator.batch_translate(remaining_terms, mode='quality', title=item_title, year=item_year)
-                
-                # ★ 修复：防御 AI 翻译器返回非字典类型
-                if isinstance(quality_results, dict):
-                    final_translation_map.update(quality_results)
-                elif isinstance(quality_results, list) and len(quality_results) == len(remaining_terms):
-                    for i, term in enumerate(remaining_terms):
-                        final_translation_map[term] = quality_results[i]
-            
-            successfully_translated_terms = {term for term in terms_to_translate if utils.contains_chinese(final_translation_map.get(term, ''))}
-            failed_to_translate_terms = terms_to_translate - successfully_translated_terms
-            
-            logger.info(f"  ➜ [翻译统计] 6. 结果总结: 成功翻译 {len(successfully_translated_terms)}/{total_terms_count} 个词条。")
-            if successfully_translated_terms:
-                logger.debug("  ➜ 翻译成功列表 (原文 ➜ 译文):")
-                for term in sorted(list(successfully_translated_terms)):
-                    translation = final_translation_map.get(term)
-                    logger.debug(f"    ├─ {term} ➜ {translation}")
-            if failed_to_translate_terms:
-                logger.warning(f"  ➜ 翻译失败列表 ({len(failed_to_translate_terms)}条): {list(failed_to_translate_terms)}")
-
-            for actor in current_cast_list:
-                original_name = actor.get('name')
-                if original_name and original_name in final_translation_map:
-                    actor['name'] = final_translation_map[original_name]
-                original_character = actor.get('character')
-                if original_character:
-                    cleaned_character = utils.clean_character_name_static(original_character)
-                    actor['character'] = final_translation_map.get(cleaned_character, cleaned_character)
-                else:
-                    actor['character'] = ''
-
         tmdb_to_emby_id_map = {
             str(actor.get('id')): actor.get('emby_person_id')
             for actor in current_cast_list if actor.get('id') and actor.get('emby_person_id')
@@ -3688,7 +3778,8 @@ class MediaProcessor:
                     if tmdb_id_str in original_cast_map:
                         updated_actor_entry = original_cast_map[tmdb_id_str].copy()
                         updated_actor_entry['name'] = actor_from_frontend.get('name')
-                        updated_actor_entry['character'] = actor_from_frontend.get('role')
+                        raw_role = actor_from_frontend.get('role')
+                        updated_actor_entry['character'] = utils.clean_character_name_static(raw_role) if raw_role else ""
                         new_cast_built.append(updated_actor_entry)
                     
                     # --- B. 处理新增演员 ---
@@ -3706,7 +3797,7 @@ class MediaProcessor:
                         new_actor_entry = {
                             "id": int(tmdb_id_str),
                             "name": actor_from_frontend.get('name'),
-                            "character": actor_from_frontend.get('role'),
+                            "character": utils.clean_character_name_static(raw_role) if raw_role else "",
                             "original_name": person_details.get("original_name"),
                             "profile_path": person_details.get("profile_path"),
                             "adult": person_details.get("adult", False),
@@ -4078,6 +4169,44 @@ class MediaProcessor:
             logger.error(f"  ➜ [手动换图] 失败: {e}", exc_info=True)
             return False, f"替换失败: {str(e)}"
 
+    # --- 格式化演员列表用于 NFO 写入 ---
+    def _format_episode_cast_for_nfo(self, raw_cast_list: List[Dict[str, Any]], item_details: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        分集演员表专用格式化：
+        1. 先清洗角色名，去掉 AI 或原始数据里残留的“饰/配/as”前后缀
+        2. 再走和主演相同的 actor_utils.format_and_complete_cast_list 统一格式化逻辑
+        """
+        if not raw_cast_list:
+            return []
+
+        normalized = []
+        for actor in raw_cast_list:
+            if not isinstance(actor, dict):
+                continue
+
+            new_actor = actor.copy()
+            if new_actor.get("character"):
+                new_actor["character"] = utils.clean_character_name_static(new_actor["character"])
+            normalized.append(new_actor)
+
+        raw_genres = item_details.get("Genres", [])
+        if raw_genres and isinstance(raw_genres[0], dict):
+            genres = [g.get('name') for g in raw_genres if g.get('name')]
+        else:
+            genres = raw_genres
+
+        is_animation = (
+            "Animation" in genres or "动画" in genres or
+            "Documentary" in genres or "纪录" in genres or "记录" in genres
+        )
+
+        return actor_utils.format_and_complete_cast_list(
+            normalized,
+            is_animation,
+            self.config,
+            mode='auto'
+        )
+    
     # --- 生成NFO元数据 ---
     def sync_item_metadata(self, item_details: Dict[str, Any], tmdb_id: str,
                        final_cast_override: Optional[List[Dict[str, Any]]] = None,
@@ -4285,38 +4414,18 @@ class MediaProcessor:
                     skipped_count = 0
                     season_dirs_processed = set()
 
-                    # 构建已翻译演员的映射表，用于 NFO 角色名和演员名翻译
-                    translated_actor_map = {}
-                    if cast_to_write:
-                        for p in cast_to_write:
-                            p_id = str(p.get("id") or p.get("tmdb_id") or "")
-                            if p_id:
-                                translated_actor_map[p_id] = p
-
-                    # 获取无头像过滤开关
+                    # ★★★ 新增：获取无头像过滤开关 ★★★
                     remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
-
-                    def _translate_raw_cast(raw_cast_list):
-                        """辅助函数：过滤无头像演员，并替换为已翻译的中文"""
-                        if not raw_cast_list: return []
-                        translated_list = []
-                        for raw_actor in raw_cast_list:
-                            # ★ 核心修复：在这里拦截无头像的龙套演员！
-                            if remove_no_avatar and not raw_actor.get('profile_path'):
-                                continue
-                                
-                            actor_id = str(raw_actor.get("id") or "")
-                            if actor_id in translated_actor_map:
-                                new_actor = raw_actor.copy()
-                                # 替换为翻译后的名字和角色名
-                                new_actor['name'] = translated_actor_map[actor_id].get('name', raw_actor.get('name'))
-                                new_actor['character'] = translated_actor_map[actor_id].get('character', raw_actor.get('character'))
-                                translated_list.append(new_actor)
-                            else:
-                                # 有头像，但没进主翻译列表的客串演员，保留英文原名
-                                translated_list.append(raw_actor)
-                        return translated_list
                     
+                    def _filter_raw_cast(raw_cast_list):
+                        """辅助函数：仅过滤无头像演员，无需再翻译，因为源头已翻译"""
+                        if not raw_cast_list: return []
+                        return [a for a in raw_cast_list if not remove_no_avatar or a.get('profile_path')]
+                    
+                    formatted_season_casts_cache = {}
+                    # 剧集总演员表其实在传入时 (cast_to_write) 已经是格式化好的了，直接复用
+                    formatted_series_cast = cast_to_write 
+
                     for root_dir, dirs, files in os.walk(series_root_dir):
                         for filename in files:
                             if os.path.splitext(filename)[1].lower() not in valid_exts: continue
@@ -4324,15 +4433,19 @@ class MediaProcessor:
                             if match:
                                 target_s, target_e = int(match.group(1)), int(match.group(2))
                                 
-                                # ★ 提前提取季(Season)信息，供季 NFO 和分集兜底使用
                                 season_info = next((s for s in seasons_data if s.get('season_number') == target_s), None)
-                                season_cast = []
                                 season_crew = []
-                                if season_info:
-                                    s_credits = season_info.get('credits') or season_info.get('aggregate_credits') or {}
-                                    # ★ 核心：翻译季演员表
-                                    season_cast = _translate_raw_cast(s_credits.get('cast', []))
-                                    season_crew = s_credits.get('crew', [])
+                                
+                                # ★ 缓存季演员表格式化结果
+                                if target_s not in formatted_season_casts_cache:
+                                    if season_info:
+                                        s_credits = season_info.get('credits') or season_info.get('aggregate_credits') or {}
+                                        raw_s_cast = _filter_raw_cast(s_credits.get('cast', []))
+                                        season_crew = s_credits.get('crew', [])
+                                        # 仅在这里调用一次格式化
+                                        formatted_season_casts_cache[target_s] = self._format_episode_cast_for_nfo(raw_s_cast, item_details)
+                                    else:
+                                        formatted_season_casts_cache[target_s] = []
 
                                 if root_dir not in season_dirs_processed:
                                     if season_info:
@@ -4343,21 +4456,21 @@ class MediaProcessor:
                                     season_dirs_processed.add(root_dir)
 
                                 ep_list = episodes_data.values() if isinstance(episodes_data, dict) else (episodes_data if isinstance(episodes_data, list) else [])
-                                
-                                # 1. 尝试在 TMDb 数据中寻找这一集
                                 matched_ep = next((ep for ep in ep_list if ep.get("season_number") == target_s and ep.get("episode_number") == target_e), None)
                                 
+                                final_ep_cast = []
+
                                 if matched_ep:
-                                    # 正常生成 TMDb 数据的 NFO
                                     raw_ep_cast = matched_ep.get('credits', {}).get('cast', []) + matched_ep.get('credits', {}).get('guest_stars', [])
-                                    # ★ 核心：翻译分集演员表
-                                    ep_cast = _translate_raw_cast(raw_ep_cast)
-                                    
-                                    # 演员兜底：分集 -> 季 -> 剧
-                                    if not ep_cast: 
-                                        ep_cast = season_cast if season_cast else cast_to_write 
-                                    
-                                    # 导演兜底：分集 -> 季
+                                    ep_cast = _filter_raw_cast(raw_ep_cast)
+
+                                    if ep_cast:
+                                        # 只有当这一集有自己独有的演员表时，才调用格式化
+                                        final_ep_cast = self._format_episode_cast_for_nfo(ep_cast, item_details)
+                                    else:
+                                        # 兜底：直接拿缓存好的季演员表或剧演员表，不重复格式化！
+                                        final_ep_cast = formatted_season_casts_cache.get(target_s) or formatted_series_cast
+
                                     ep_crew = matched_ep.get('crew', [])
                                     if not ep_crew:
                                         ep_crew = matched_ep.get('credits', {}).get('crew', [])
@@ -4365,25 +4478,24 @@ class MediaProcessor:
                                         if 'credits' not in matched_ep:
                                             matched_ep['credits'] = {}
                                         matched_ep['credits']['crew'] = season_crew
-                                        
-                                    ep_nfo_content = nfo_builder.build_episode_nfo(matched_ep, ep_cast)
+
+                                    ep_nfo_content = nfo_builder.build_episode_nfo(matched_ep, final_ep_cast)
+
                                 else:
-                                    # 2. ★★★ 核心修复：TMDb 缺失时，生成兜底 NFO，防止 Emby 显示丑陋的文件名 ★★★
                                     dummy_ep = {
                                         "season_number": target_s,
                                         "episode_number": target_e,
-                                        "name": f"第 {target_e} 集", # 优雅的占位标题
+                                        "name": f"第 {target_e} 集",
                                         "overview": "",
-                                        "id": "", # 留空，nfo_builder 会自动跳过 tmdbid 和 uniqueid 标签
-                                        "credits": {"crew": season_crew} # 注入季导演
+                                        "id": "",
+                                        "credits": {"crew": season_crew}
                                     }
-                                    # 演员兜底：季 -> 剧
-                                    ep_cast = season_cast if season_cast else cast_to_write
-                                    ep_nfo_content = nfo_builder.build_episode_nfo(dummy_ep, ep_cast)
+                                    # 兜底：直接拿缓存
+                                    final_ep_cast = formatted_season_casts_cache.get(target_s) or formatted_series_cast
+                                    ep_nfo_content = nfo_builder.build_episode_nfo(dummy_ep, final_ep_cast)
 
                                 ep_nfo_path = os.path.join(root_dir, os.path.splitext(filename)[0] + ".nfo")
                                 
-                                # ★★★ 核心比对逻辑 ★★★
                                 if _write_nfo_if_changed(ep_nfo_path, ep_nfo_content):
                                     generated_count += 1
                                 else:

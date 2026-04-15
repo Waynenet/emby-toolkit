@@ -1435,19 +1435,39 @@ def translate_tmdb_metadata_recursively(
     config: dict = None
 ):
     """
-    【大一统翻译引擎】递归翻译 TMDb 数据的标题、简介、标语，以及导演/主创姓名。
+    【终极大一统翻译引擎】
+    递归翻译 TMDb 数据的标题、简介、标语。
+    地毯式翻译所有主创、导演、演员、客串明星的【姓名】和【角色名】。
     """
     if not ai_translator or not tmdb_data or not config:
         return
 
     pending_items = {}
-    pending_persons = set() # ★ 新增：收集待翻译的导演/主创
+    pending_persons = set() # 收集待翻译的人名 (导演/演员)
+    pending_roles = set()   # 收集待翻译的角色名 (Character)
     translated_count = 0
+
+    # ★ 统计计数器
+    stats = {
+        'original_cast_count': 0,      # 原始演员表总人数 (截断前)
+        'truncated_cast_count': 0,     # 截断后演员表总人数
+        'title_needs_translation': 0,  # 需要翻译的标题数
+        'overview_needs_translation': 0, # 需要翻译的简介数
+        'tagline_needs_translation': 0,  # 需要翻译的标语数
+        'title_cache_hits': 0,         # 标题命中缓存数
+        'overview_cache_hits': 0,      # 简介命中缓存数
+        'tagline_cache_hits': 0,       # 标语命中缓存数
+        'person_cache_hits': 0,        # 人名命中缓存数
+        'person_ai_calls': 0,          # 人名调用AI翻译数
+        'role_cache_hits': 0,          # 角色名命中缓存数
+        'role_ai_calls': 0,            # 角色名调用AI翻译数
+    }
     
     translate_title_enabled = config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False)
     translate_overview_enabled = config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False)
     translate_ep_overview_enabled = config.get(constants.CONFIG_OPTION_AI_TRANSLATE_EPISODE_OVERVIEW, False)
-    translate_actor_enabled = config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE, False) # ★ 新增
+    translate_actor_enabled = config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE, False)
+    remove_no_avatar = config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
 
     # --- 1. 收集与缓存检查阶段 ---
     def _collect_single_item(data_dict: Dict, specific_item_type: str):
@@ -1470,6 +1490,7 @@ def translate_tmdb_metadata_recursively(
             if not overview or not utils.contains_chinese(overview):
                 if local_info and local_info.get('overview') and utils.contains_chinese(local_info['overview']):
                     data_dict['overview'] = local_info['overview']
+                    stats['overview_cache_hits'] += 1  # ★ 命中缓存
                 else:
                     if not overview and tmdb_api_key:
                         try:
@@ -1482,6 +1503,7 @@ def translate_tmdb_metadata_recursively(
                         except Exception: pass
                     if data_dict.get('overview'):
                         needs_overview = True
+                        stats['overview_needs_translation'] += 1  # ★ 需要翻译
 
         # B. 检查标题 (Title)
         if translate_title_enabled:
@@ -1489,8 +1511,10 @@ def translate_tmdb_metadata_recursively(
             if current_title and not utils.contains_chinese(current_title):
                 if local_info and local_info.get('title') and utils.contains_chinese(local_info['title']):
                     data_dict[title_key] = local_info['title']
+                    stats['title_cache_hits'] += 1  # ★ 命中缓存
                 else:
                     needs_title = True
+                    stats['title_needs_translation'] += 1  # ★ 需要翻译
 
         # C. 检查标语 (Tagline)
         if translate_title_enabled and specific_item_type in ['Movie', 'Series']:
@@ -1507,6 +1531,7 @@ def translate_tmdb_metadata_recursively(
                     except Exception: pass
                 if data_dict.get('tagline'):
                     needs_tagline = True
+                    stats['tagline_needs_translation'] += 1  # ★ 需要翻译
 
         if needs_title or needs_overview or needs_tagline:
             pending_items[tmdb_id_str] = {
@@ -1518,19 +1543,69 @@ def translate_tmdb_metadata_recursively(
                 "ref": data_dict 
             }
 
-        # ★ D. 检查导演/主创 (Crew/Created By)
+        # ★ D. 地毯式收集人物和角色 (Crew, Cast, Guest Stars, Created By)
         if translate_actor_enabled:
             credits_data = data_dict.get('credits') or data_dict.get('aggregate_credits') or data_dict.get('casts') or {}
+            
+            # 收集导演
             for crew_member in credits_data.get('crew', []):
                 if crew_member.get('job') in ['Director', 'Series Director']:
                     name = crew_member.get('name')
                     if name and not utils.contains_chinese(name):
                         pending_persons.add(name)
             
-            for creator in data_dict.get('created_by', []):
-                name = creator.get('name')
+            # 收集主创
+            # for creator in data_dict.get('created_by', []):
+            #     name = creator.get('name')
+            #     if name and not utils.contains_chinese(name):
+            #         pending_persons.add(name)
+
+            # =================================================================
+            # 在翻译前进行智能截断
+            # =================================================================
+            max_actors = config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
+            try:
+                limit = int(max_actors)
+                if limit <= 0: limit = 30
+            except:
+                limit = 30
+
+            def _smart_truncate(actor_list, max_limit):
+                if not actor_list: return []
+                # ★ 记录截断前人数
+                stats['original_cast_count'] += len(actor_list)
+                # 1. 优先保留有头像的
+                if remove_no_avatar:
+                    valid_actors = [a for a in actor_list if a.get('profile_path')]
+                else:
+                    valid_actors = actor_list
+                # 2. 按 order 排序 (主演在前，客串在后)
+                valid_actors.sort(key=lambda x: x.get('order') if x.get('order') is not None else 999)
+                # 3. 截断
+                truncated = valid_actors[:max_limit]
+                # ★ 记录截断后人数
+                stats['truncated_cast_count'] += len(truncated)
+                return truncated
+
+            # 对原始数据进行原地截断 (这样后续的 NFO 和 DB 写入也会直接使用截断后的干净数据)
+            if 'cast' in credits_data:
+                credits_data['cast'] = _smart_truncate(credits_data['cast'], limit)
+            if 'guest_stars' in credits_data:
+                # 客串演员通常不需要太多，限制在 10 个以内即可，进一步省钱
+                credits_data['guest_stars'] = _smart_truncate(credits_data['guest_stars'], 10)
+
+            # 收集演员和客串 (此时已经是截断后的精华名单了)
+            all_actors = credits_data.get('cast', []) + credits_data.get('guest_stars', [])
+            for actor in all_actors:
+                name = actor.get('name')
                 if name and not utils.contains_chinese(name):
                     pending_persons.add(name)
+                    
+                character = actor.get('character')
+                if character:
+                    cleaned_char = utils.clean_character_name_static(character)
+                    if cleaned_char and not utils.contains_chinese(cleaned_char):
+                        pending_roles.add(cleaned_char)
 
     # --- 遍历收集 ---
     if item_type == 'Movie':
@@ -1549,7 +1624,7 @@ def translate_tmdb_metadata_recursively(
     BATCH_SIZE = 20 
 
     if pending_items:
-        logger.info(f"  ➜ [AI翻译引擎] 共收集到 {len(pending_items)} 个条目需要翻译...")
+        logger.info(f"  ➜ [AI翻译引擎] 开始进行翻译...")
         
         # 1. 翻译简介
         overviews_to_translate = {k: v["overview"] for k, v in pending_items.items() if v["overview"]}
@@ -1591,39 +1666,123 @@ def translate_tmdb_metadata_recursively(
                         translated_count += 1
                 import time; time.sleep(1)
 
-    # ★ 4. 翻译导演/主创
-    if pending_persons:
-        person_list = list(pending_persons)
+    # ★ 4. 翻译人物姓名和角色名
+    if pending_persons or pending_roles:
         person_trans_map = {}
+        role_trans_map = {}
         
         from database import actor_db
         db_manager = actor_db.ActorDBManager()
         
+        # 读取配置的翻译模式 (仅用于角色名)
+        role_translation_mode = config.get(constants.CONFIG_OPTION_AI_TRANSLATION_MODE, 'fast')
+        
+        # 提取上下文信息 (供角色名的顾问模式 quality 使用)
+        item_title = tmdb_data.get('title') or tmdb_data.get('name') or item_name
+        item_year = None
+        release_date = tmdb_data.get('release_date') or tmdb_data.get('first_air_date')
+        if release_date and len(release_date) >= 4:
+            item_year = release_date[:4]
+        
         with connection.get_db_connection() as conn:
             with conn.cursor() as cursor:
-                api_list = []
-                for name in person_list:
-                    cached = db_manager.get_translation_from_db(cursor, name)
-                    if cached and cached.get('translated_text'):
-                        person_trans_map[name] = cached['translated_text']
+                # ==========================================
+                # 处理人名 (导演/演员) - 固定音译模式 + 强制缓存
+                # ==========================================
+                if pending_persons:
+                    api_list = []
+                    for name in pending_persons:
+                        cached = db_manager.get_translation_from_db(cursor, name)
+                        if cached and cached.get('translated_text'):
+                            person_trans_map[name] = cached['translated_text']
+                            stats['person_cache_hits'] += 1
+                        else:
+                            api_list.append(name)
+                    
+                    stats['person_ai_calls'] = len(api_list)
+                    if api_list:
+                        logger.info(f"  ➜ [AI翻译引擎] 提交 {len(api_list)} 个人物姓名进行翻译 (模式: transliterate, 缓存命中: {stats['person_cache_hits']})...")
+                        for i in range(0, len(api_list), BATCH_SIZE):
+                            batch_names = api_list[i:i+BATCH_SIZE]
+                            # 人名永远使用音译模式
+                            trans_results = ai_translator.batch_translate(batch_names, mode='transliterate')
+
+                            if isinstance(trans_results, list) and len(trans_results) == len(batch_names):
+                                trans_results = {batch_names[j]: trans_results[j] for j in range(len(batch_names))}
+                            elif not isinstance(trans_results, dict):
+                                trans_results = {}
+
+                            for k, v in trans_results.items():
+                                # 终极类型防御：确保提取出纯字符串
+                                if isinstance(v, (list, tuple, set)):
+                                    v = next((x for x in v if isinstance(x, str) and x.strip()), None)
+                                if not v: continue
+                                v = str(v).strip()
+                                    
+                                if v and utils.contains_chinese(v):
+                                    person_trans_map[k] = v
+                                    # 人名永远写入缓存
+                                    db_manager.save_translation_to_db(cursor, k, v, ai_translator.provider)
+                            import time; time.sleep(1)
+
+                # ==========================================
+                # 处理角色名 (Character) - 根据配置模式，顾问模式跳过缓存
+                # ==========================================
+                if pending_roles:
+                    api_list = []
+                    
+                    # 如果是顾问模式，跳过缓存读取，全部重新翻译
+                    if role_translation_mode == 'quality':
+                        api_list = list(pending_roles)
                     else:
-                        api_list.append(name)
-                        
-                if api_list:
-                    logger.info(f"  ➜ [AI翻译引擎] 提交 {len(api_list)} 个导演/主创姓名进行翻译...")
-                    for i in range(0, len(api_list), BATCH_SIZE):
-                        batch_names = api_list[i:i+BATCH_SIZE]
-                        trans_results = ai_translator.batch_translate(batch_names, mode='transliterate')
-                        for k, v in trans_results.items():
-                            if v and utils.contains_chinese(v):
-                                person_trans_map[k] = v
-                                db_manager.save_translation_to_db(cursor, k, v, ai_translator.provider)
-                        import time; time.sleep(1)
+                        for role in pending_roles:
+                            cached = db_manager.get_translation_from_db(cursor, role)
+                            if cached and cached.get('translated_text'):
+                                role_trans_map[role] = cached['translated_text']
+                                stats['role_cache_hits'] += 1
+                            else:
+                                api_list.append(role)
+                    
+                    stats['role_ai_calls'] = len(api_list)
+                    if api_list:
+                        logger.info(f"  ➜ [AI翻译引擎] 提交 {len(api_list)} 个角色名进行翻译 (模式: {role_translation_mode}, 缓存命中: {stats['role_cache_hits']})...")
+                        for i in range(0, len(api_list), BATCH_SIZE):
+                            batch_roles = api_list[i:i+BATCH_SIZE]
+                            # 角色名使用配置的模式，并传入上下文
+                            trans_results = ai_translator.batch_translate(batch_roles, mode=role_translation_mode, title=item_title, year=item_year)
+
+                            if isinstance(trans_results, list) and len(trans_results) == len(batch_roles):
+                                trans_results = {batch_roles[j]: trans_results[j] for j in range(len(batch_roles))}
+                            elif not isinstance(trans_results, dict):
+                                trans_results = {}
+
+                            for k, v in trans_results.items():
+                                # 终极类型防御：确保提取出纯字符串
+                                if isinstance(v, (list, tuple, set)):
+                                    v = next((x for x in v if isinstance(x, str) and x.strip()), None)
+                                if not v: continue
+                                v = str(v).strip()
+                                    
+                                if not v or not utils.contains_chinese(v):
+                                    continue
+
+                                cleaned_v = utils.clean_character_name_static(v)
+                                if not cleaned_v:
+                                    continue
+
+                                role_trans_map[k] = cleaned_v
+                                # 顾问模式不写缓存，其他模式写缓存
+                                if role_translation_mode != 'quality':
+                                    db_manager.save_translation_to_db(cursor, k, cleaned_v, ai_translator.provider)
+
+                            import time; time.sleep(1)
         
-        # 回填翻译结果
-        if person_trans_map:
+        # 回填翻译结果到 JSON 树
+        if person_trans_map or role_trans_map:
             def _apply_person_trans(data_dict):
                 credits_data = data_dict.get('credits') or data_dict.get('aggregate_credits') or data_dict.get('casts') or {}
+                
+                # 替换导演
                 for crew_member in credits_data.get('crew', []):
                     if crew_member.get('job') in ['Director', 'Series Director']:
                         name = crew_member.get('name')
@@ -1631,11 +1790,26 @@ def translate_tmdb_metadata_recursively(
                             crew_member['original_name'] = name
                             crew_member['name'] = person_trans_map[name]
                             
+                # 替换主创
                 for creator in data_dict.get('created_by', []):
                     name = creator.get('name')
                     if name in person_trans_map:
                         creator['original_name'] = name
                         creator['name'] = person_trans_map[name]
+
+                # 替换演员和客串
+                all_actors = credits_data.get('cast', []) + credits_data.get('guest_stars', [])
+                for actor in all_actors:
+                    name = actor.get('name')
+                    if name in person_trans_map:
+                        actor['original_name'] = name
+                        actor['name'] = person_trans_map[name]
+                        
+                    character = actor.get('character')
+                    if character:
+                        cleaned_char = utils.clean_character_name_static(character)
+                        if cleaned_char in role_trans_map:
+                            actor['character'] = utils.clean_character_name_static(role_trans_map[cleaned_char])
 
             if item_type == 'Movie':
                 _apply_person_trans(tmdb_data)
@@ -1648,10 +1822,19 @@ def translate_tmdb_metadata_recursively(
                 for ep in episodes_list:
                     _apply_person_trans(ep)
             
-            translated_count += len(person_trans_map)
+            translated_count += len(person_trans_map) + len(role_trans_map)
 
-    if translated_count > 0:
-        logger.info(f"  ➜ [AI翻译引擎] 本次成功翻译了 {translated_count} 项数据 ({item_name})。")
+    # 统计汇总日志
+    total_needs = (stats['title_needs_translation'] + stats['overview_needs_translation'] + 
+                   stats['tagline_needs_translation'] + stats['person_ai_calls'] + stats['role_ai_calls'])
+    total_cache = (stats['title_cache_hits'] + stats['overview_cache_hits'] + 
+                   stats['tagline_cache_hits'] + stats['person_cache_hits'] + stats['role_cache_hits'])
+    
+    logger.info(f"  ➜ [AI翻译引擎] 翻译统计汇总 ({item_name}):")
+    logger.info(f"  ➜ 演员节点: 原始 {stats['original_cast_count']} 人次 → 截断保留 {stats['truncated_cast_count']} 人次 (含主剧/分季/分集)")
+    logger.info(f"  ➜ 待翻词条: 标题 {stats['title_needs_translation']} | 简介 {stats['overview_needs_translation']} | 标语 {stats['tagline_needs_translation']} | 人名 {stats['person_ai_calls']} | 角色 {stats['role_ai_calls']}")
+    logger.info(f"  ➜ 缓存命中: 标题 {stats['title_cache_hits']} | 简介 {stats['overview_cache_hits']} | 标语 {stats['tagline_cache_hits']} | 人名 {stats['person_cache_hits']} | 角色 {stats['role_cache_hits']}")
+    logger.info(f"  ➜ 最终消耗: 调用AI {total_needs} 次 | 节省 {total_cache} 次 | 成功回填 {translated_count} 项")
 
 def evaluate_season_airing_status(tmdb_id: str, season_number: int, api_key: str) -> bool:
     """
