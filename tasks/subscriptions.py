@@ -41,35 +41,6 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "sub_yue": ["CHT", "繁中", "繁体", "Cantonese"], 
 }
 
-# 解析影巢返回的体积字符串
-def _parse_size_to_gb(size_str):
-    """将影巢返回的体积字符串 (如 '58.3 GB', '1.77TB', '50G') 转换为 GB 浮点数"""
-    if not size_str:
-        return 0.0
-    
-    # 确保转换为字符串，去除空格并转大写
-    size_str = str(size_str).upper().replace(' ', '')
-    
-    # 匹配数字(含小数点)和后面的字母单位
-    match = re.search(r'([\d\.]+)([A-Z]*)', size_str)
-    if not match:
-        return 0.0
-        
-    try:
-        val = float(match.group(1))
-    except ValueError:
-        return 0.0
-        
-    unit = match.group(2)
-    
-    # 兼容 G, GB, GiB 等各种写法
-    if 'T' in unit: return val * 1024
-    if 'G' in unit: return val
-    if 'M' in unit: return val / 1024
-    if 'K' in unit: return val / (1024 * 1024)
-    
-    return 0.0
-
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
 def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Dict, tmdb_api_key: str, source: Dict = None) -> bool:
