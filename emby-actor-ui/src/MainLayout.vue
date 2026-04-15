@@ -288,21 +288,25 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .app-version { text-align: center; font-size: 12px; color: #999; opacity: 0.6; }
 
-/* 桌面端右上角悬浮任务胶囊 */
+/* 悬浮任务胶囊 (上方居中) */
 .floating-task-pill {
-  position: absolute;
-  top: 24px;
-  right: 24px;
-  z-index: 50;
-  display: flex;
+  position: absolute; 
+  top: 20px; 
+  
+  /* ★★★ 核心修改：水平居中魔法 ★★★ */
+  left: 50%;
+  transform: translateX(-50%);
+  
+  z-index: 50; 
+  display: flex; 
   align-items: center;
-  background: var(--card-bg-color);
-  backdrop-filter: blur(12px);
+  background: var(--card-bg-color); 
+  backdrop-filter: blur(12px); 
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--card-border-color);
-  border-radius: 30px;
+  border: 1px solid var(--card-border-color); 
+  border-radius: 30px; 
   padding: 6px 16px;
-  box-shadow: 0 4px 20px var(--card-shadow-color);
+  box-shadow: 0 4px 20px var(--card-shadow-color); 
   max-width: 400px;
 }
 .pill-icon { margin-right: 8px; }
@@ -321,6 +325,12 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.4); z-index: 999; backdrop-filter: blur(2px); }
   .n-layout-content .page-content-inner-wrapper { padding: 16px !important; padding-top: 60px !important; /* 留出悬浮按钮空间 */ }
   .mobile-menu-btn { position: absolute; top: 16px; left: 16px; z-index: 90; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-  .floating-task-pill { top: 16px; right: 16px; max-width: 60%; }
+  /* 确保手机端也是居中，且离顶部适当距离 */
+  .floating-task-pill { 
+    top: 12px; 
+    left: 50%; 
+    transform: translateX(-50%);
+    max-width: 85%; /* 手机上可以稍微宽一点，防止文字被挤没 */
+  }
 }
 </style>
