@@ -148,7 +148,7 @@
             </n-tab-pane>
 
             <!-- ================== 标签页 2: Emby ================== -->
-            <n-tab-pane name="emby" tab="Emby & 302反代">
+            <n-tab-pane name="emby" tab="媒体服务">
               <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
 
                 <!-- 左侧卡片: Emby 连接设置 -->
