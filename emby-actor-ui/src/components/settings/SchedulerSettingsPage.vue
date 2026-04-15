@@ -155,7 +155,7 @@
       <!-- ======================================================================= -->
       <n-card v-if="!isMobile" :bordered="false" class="dashboard-card">
         <template #header>
-          <span class="card-title">Telegram 快捷菜单（Pro）</span>
+          <span class="card-title">Telegram 快捷菜单</span>
         </template>
         <template #header-extra>
           <n-text depth="3">配置显示在 TG 机器人输入框左侧 Menu 按钮中的快捷任务 (保存后需重启应用生效)</n-text>
@@ -556,8 +556,19 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
       initializeSequence(newConfig.task_chain_low_freq_sequence || [], configuredLowFreqTaskSequence, chainTasks);
     }
     if (allTasks.length > 0) {
-      // TG 菜单使用 allTasks (包含所有任务)，如果没有配置则使用默认值
-      initializeSequence(newConfig.tg_menu_tasks || DEFAULT_TG_TASKS, configuredTgMenuSequence, allTasks);
+      // 1. 拷贝一份所有的可用任务
+      const tgMenuAvailableTasks = [...allTasks];
+      
+      // 2. 将高频和低频任务链作为"虚拟任务"加入到头部（如果后端没有返回的话）
+      if (!tgMenuAvailableTasks.find(t => t.key === 'task-chain-high-freq')) {
+        tgMenuAvailableTasks.unshift({ key: 'task-chain-high-freq', name: '⚡ 执行高频刷新任务链' });
+      }
+      if (!tgMenuAvailableTasks.find(t => t.key === 'task-chain-low-freq')) {
+        tgMenuAvailableTasks.unshift({ key: 'task-chain-low-freq', name: '💤 执行低频维护任务链' });
+      }
+
+      // 3. TG 菜单使用注入后的 tgMenuAvailableTasks，如果没有配置则使用默认值
+      initializeSequence(newConfig.tg_menu_tasks || DEFAULT_TG_TASKS, configuredTgMenuSequence, tgMenuAvailableTasks);
     }
   }
 }, { immediate: true, deep: true });

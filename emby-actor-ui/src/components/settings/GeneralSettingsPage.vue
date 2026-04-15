@@ -390,10 +390,6 @@
                         </n-input-group>
                       </n-form-item-grid-item>
 
-                      <n-gi span="1 s:2">
-                        <n-text depth="3" style="font-size:0.8em; margin-top: -6px; display: block;">为外部API请求启用 HTTP/HTTPS 代理。</n-text>
-                      </n-gi>
-
                       <!-- 日志配置 -->
                       <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 8px 0 0 0; font-size: 0.9em; color: gray;">日志配置</n-divider></n-gi>
                       <n-form-item-grid-item span="1">
