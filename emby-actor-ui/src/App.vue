@@ -137,4 +137,51 @@ html, body {
 .dashboard-card:nth-child(3) { animation-delay: 0.15s; }
 .dashboard-card:nth-child(4) { animation-delay: 0.20s; }
 .dashboard-card:nth-child(5) { animation-delay: 0.25s; }
+
+/* ==================== 5. 全局滚动条美化（隐藏丑陋的默认滚动条） ==================== */
+/* Chrome, Safari, Edge, Opera - 自定义细薄滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 3px;
+  transition: background 0.3s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}
+
+/* 暗色模式下的滚动条 */
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Firefox - 细薄滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+/* 特定需要完全隐藏滚动条的元素 */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/Opera */
+}
 </style>
