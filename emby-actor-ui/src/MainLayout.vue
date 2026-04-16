@@ -46,27 +46,23 @@
             </div>
           </n-dropdown>
 
-          <!-- ★★★ 核心修改：底部工具行 (左日志 - 中版本 - 右主题) ★★★ -->
           <div class="bottom-action-bar">
-            <!-- 左侧：日志按钮组 -->
             <div class="action-left">
-              <n-button-group v-if="authStore.isAdmin" size="small">
-                <n-tooltip><template #trigger><n-button @click="isRealtimeLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ReaderOutline" /></template></n-button></template>实时日志</n-tooltip>
-                <n-tooltip><template #trigger><n-button @click="isHistoryLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ArchiveOutline" /></template></n-button></template>历史日志</n-tooltip>
-              </n-button-group>
-            </div>
-            
-            <!-- 中间：版本号 -->
-            <div class="action-center">
               <span class="app-version">v{{ appVersion }}</span>
             </div>
 
-            <!-- 右侧：暗黑模式切换 -->
-            <div class="action-right">
+            <div class="action-center">
               <n-switch :value="props.isDark" @update:value="newValue => emit('update:is-dark', newValue)" size="small">
                 <template #checked-icon><n-icon :component="MoonIcon" /></template>
                 <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
               </n-switch>
+            </div>
+
+            <div class="action-right">
+              <n-button-group v-if="authStore.isAdmin" size="small">
+                <n-tooltip><template #trigger><n-button @click="isRealtimeLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ReaderOutline" /></template></n-button></template>实时日志</n-tooltip>
+                <n-tooltip><template #trigger><n-button @click="isHistoryLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ArchiveOutline" /></template></n-button></template>历史日志</n-tooltip>
+              </n-button-group>
             </div>
           </div>
         </div>
@@ -310,14 +306,14 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .action-left { 
   justify-self: start; 
-  display: flex; 
-  gap: 4px; 
 }
 .action-center { 
   justify-self: center; 
 }
 .action-right { 
   justify-self: end; 
+  display: flex; 
+  gap: 4px; 
 }
 
 .app-version { 
