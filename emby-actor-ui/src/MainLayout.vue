@@ -48,14 +48,14 @@
 
           <div class="bottom-action-bar">
             <div class="action-left">
-              <span class="app-version">v{{ appVersion }}</span>
-            </div>
-
-            <div class="action-center">
               <n-switch :value="props.isDark" @update:value="newValue => emit('update:is-dark', newValue)" size="small">
                 <template #checked-icon><n-icon :component="MoonIcon" /></template>
                 <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
               </n-switch>
+            </div>
+
+            <div class="action-center">
+              <span class="app-version">v{{ appVersion }}</span>
             </div>
 
             <div class="action-right">
