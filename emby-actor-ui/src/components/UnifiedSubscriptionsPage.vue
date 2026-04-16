@@ -1,6 +1,6 @@
 <!-- src/components/UnifiedSubscriptionsPage.vue -->
 <template>
-  <n-layout :content-style="{ padding: isMobile ? '12px' : '24px' }">
+  <div :content-style="{ padding: isMobile ? '12px' : '24px' }">
     <div class="unified-subscriptions-page">
       <n-page-header>
         <template #title>
@@ -305,13 +305,13 @@
         </n-space>
       </template>
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
-import { NLayout, NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NCheckboxGroup, NRadio, NForm, NFormItem, NInputNumber, NModal, NPopconfirm } from 'naive-ui';
+import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NCheckboxGroup, NRadio, NForm, NFormItem, NInputNumber, NModal, NPopconfirm } from 'naive-ui';
 import { FilmOutline as FilmIcon, TvOutline as TvIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, CaretDownOutline as CaretDownIcon, CheckmarkCircleOutline as WantedIcon, HourglassOutline as PendingIcon, BanOutline as IgnoredIcon, DownloadOutline as SubscribedIcon, PersonCircleOutline as SourceIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon, PauseCircleOutline as PausedIcon, ReaderOutline as AuditIcon, CloseOutline as CloseIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns'
 

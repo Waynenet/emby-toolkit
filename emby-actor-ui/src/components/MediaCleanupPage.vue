@@ -1,5 +1,5 @@
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <div class="cleanup-page">
       <n-page-header>
         <template #title>
@@ -81,14 +81,14 @@
       </n-modal>
 
     </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, computed, h, watch } from 'vue';
 import axios from 'axios';
 import { 
-  NLayout, NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, 
+  NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, 
   useMessage, NSpin, NAlert, NDataTable, NDropdown, useDialog, 
   NTooltip, NText, NModal
 } from 'naive-ui';

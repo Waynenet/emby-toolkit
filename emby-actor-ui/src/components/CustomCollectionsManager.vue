@@ -1,6 +1,6 @@
 <!-- src/components/CustomCollectionsManager.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <div class="custom-collections-manager">
       <!-- 1. 页面头部 -->
       <n-page-header>
@@ -999,7 +999,7 @@
       @confirm="handleDiscoverConfirm"
     />
 
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
@@ -1012,7 +1012,7 @@ import { zhCN } from 'date-fns/locale';
 import MappingManager from './modals/MappingManager.vue';
 import TmdbDiscoveryHelper from './modals/TmdbDiscoveryHelper.vue';
 import { 
-  NLayout, NPageHeader, NButton, NIcon, NText, NTag, NSpace,
+  NPageHeader, NButton, NIcon, NText, NTag, NSpace,
   useMessage, NPopconfirm, NModal, NForm, NFormItem, NInput, NSelect,
   NAlert, NRadioGroup, NRadio, NTooltip, NSpin, NGrid, NGi, NCard, NEmpty, useDialog, NTabs, NTabPane, NCheckboxGroup, NCheckbox, NInputNumber, NAutoComplete, NDynamicTags, NInputGroup, NRadioButton, NSlider, NAvatar, NImage
 } from 'naive-ui';

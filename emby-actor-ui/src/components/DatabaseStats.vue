@@ -3,7 +3,7 @@
   <!-- ================================================================================== -->
   <!-- 视图 A: PC 端 (宽屏) -->
   <!-- ================================================================================== -->
-  <n-layout v-if="!isMobile" content-style="padding: 24px;">
+  <div v-if="!isMobile" content-style="padding: 24px;">
     <div>
       <n-page-header title="数据看板" subtitle="了解您媒体库的核心数据统计" style="margin-bottom: 24px;">
       </n-page-header>
@@ -259,12 +259,12 @@
   
       </n-grid>
     </div>
-  </n-layout>
+  </div>
 
   <!-- ================================================================================== -->
   <!-- 视图 B: Mobile 端 (手机) -->
   <!-- ================================================================================== -->
-  <n-layout v-else content-style="padding: 12px; background-color: transparent;">
+  <div v-else content-style="padding: 12px; background-color: transparent;">
     <div class="mobile-container">
       <!-- 1. 核心数据概览 -->
       <n-grid :cols="2" :x-gap="8" :y-gap="8">
@@ -391,14 +391,14 @@
       </n-card>
 
     </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed, reactive } from 'vue';
 import axios from 'axios';
 import { 
-  NPageHeader, NLayout, NGrid, NGi, NCard, NStatistic, NSpin, NIcon, NSpace, NDivider, NIconWrapper,
+  NPageHeader, NGrid, NGi, NCard, NStatistic, NSpin, NIcon, NSpace, NDivider, NIconWrapper,
   NProgress, NEmpty, useThemeVars, NTag
 } from 'naive-ui';
 import { PersonOutline, FilmOutline, TvOutline, LayersOutline, CheckmarkCircleOutline as CheckIcon,

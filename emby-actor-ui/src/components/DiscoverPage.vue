@@ -1,6 +1,6 @@
 <!-- src/components/DiscoverPage.vue -->
 <template>
-  <n-layout :content-style="{ padding: isMobile ? '12px' : '24px' }">
+  <div :content-style="{ padding: isMobile ? '12px' : '24px' }">
   <div>
     <n-page-header title="影视探索" subtitle="发现您感兴趣的下一部作品" />
       
@@ -319,7 +319,7 @@
     </n-modal>
     
   </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>

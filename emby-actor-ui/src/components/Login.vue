@@ -1,6 +1,5 @@
 <template>
-  <!-- 使用 n-layout 自动适配主题背景色 -->
-  <n-layout class="login-layout">
+  <div class="login-layout">
     <div class="login-container">
       <n-card class="dashboard-card login-card" :bordered="false" size="large">
         
@@ -77,14 +76,14 @@
         </n-button>
       </template>
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { 
-  NLayout, NCard, NForm, NFormItemRow, NInput, NButton, 
+  NCard, NForm, NFormItemRow, NInput, NButton, 
   useMessage, NModal, NIcon 
 } from 'naive-ui';
 import { PersonOutline, LockClosedOutline } from '@vicons/ionicons5';
@@ -157,7 +156,6 @@ async function verifyToken() {
 </script>
 
 <style scoped>
-/* 使用 n-layout 撑满全屏，背景色会自动跟随主题 */
 .login-layout {
   height: 100vh;
   width: 100vw;

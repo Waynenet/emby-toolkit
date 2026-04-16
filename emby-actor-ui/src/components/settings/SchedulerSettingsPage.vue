@@ -1,6 +1,6 @@
 <!-- src/components/settings/SchedulerSettingsPage.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <!-- 加载状态 -->
     <div v-if="isLoading" class="center-container">
       <n-spin size="large" />
@@ -283,7 +283,7 @@
         <n-button type="warning" @click="runTaskFromModal(true)">深度模式 (全量)</n-button>
       </template>
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
@@ -291,7 +291,7 @@ import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import {
   NForm, NFormItem, NInput, NCheckbox, NGrid, NGi, NAlert,
   NButton, NCard, NSpace, NSwitch, NIcon, NText, NInputNumber,
-  useMessage, NLayout, NSpin, NModal, NButtonGroup
+  useMessage, NSpin, NModal, NButtonGroup
 } from 'naive-ui';
 import { Play24Regular, Settings24Regular, Drag24Regular, Save24Regular } from '@vicons/fluent';
 import { useConfig } from '../../composables/useConfig.js';

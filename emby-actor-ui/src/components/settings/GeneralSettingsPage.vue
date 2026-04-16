@@ -1,6 +1,6 @@
 <!-- src/components/settings/GeneralSettingsPage.vue -->
 <template>
-  <n-layout content-style="padding: 12px; max-width: 1600px; margin: 0 auto;">
+  <div content-style="padding: 12px; max-width: 1600px; margin: 0 auto;">
     <n-space vertical :size="12" style="margin-top: 2px;">
       
       <div v-if="configModel">
@@ -500,7 +500,7 @@
       </n-spin>
     </n-modal>
     
-  </n-layout>
+  </div>
   
   <!-- 导出选项模态框 -->
   <n-modal v-model:show="exportModalVisible" preset="dialog" title="选择要导出的数据表" style="width: 600px; max-width: 95vw;">

@@ -1,6 +1,6 @@
 <!-- src/components/ResubscribePage.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <div class="resubscribe-page">
       <n-page-header>
         <template #title>
@@ -238,13 +238,13 @@
     <n-modal v-model:show="showSettingsModal" preset="card" style="width: 90%; max-width: 800px;" title="规则设定">
       <ResubscribeSettingsPage @saved="handleSettingsSaved" />
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed, h, watch, nextTick } from 'vue';
 import axios from 'axios';
-import { NLayout, NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTooltip, NText, NDropdown, useDialog, NCheckbox, NInput, NSelect, NButtonGroup } from 'naive-ui';
+import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTooltip, NText, NDropdown, useDialog, NCheckbox, NInput, NSelect, NButtonGroup } from 'naive-ui';
 import { SyncOutline, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, AlertCircleOutline } from '@vicons/ionicons5';
 import { useConfig } from '../composables/useConfig.js';
 import ResubscribeSettingsPage from './settings/ResubscribeSettingsPage.vue';

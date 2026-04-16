@@ -1,5 +1,5 @@
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
   <div class="media-edit-page">
     <n-page-header @back="goBack">
       <template #title>
@@ -238,7 +238,7 @@
       <n-empty v-if="!isSearchingActors && actorSearchResults.length === 0 && actorSearchQuery" description="未找到相关人物" style="padding: 20px 0;" />
     </n-spin>
   </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>

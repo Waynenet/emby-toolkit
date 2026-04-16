@@ -1,6 +1,5 @@
 <template>
-  <!-- 1. 使用 n-layout 包裹，适配暗色/亮色主题背景 -->
-  <n-layout class="setup-layout">
+  <div class="setup-layout">
     <div class="setup-container">
       
       <!-- 2. 加上 dashboard-card 类实现辉光，同时保留 setup-card 用于控制尺寸 -->
@@ -45,13 +44,13 @@
         </n-form>
       </n-card>
     </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { NLayout, NCard, NForm, NFormItem, NInput, NButton, NSpace, useMessage } from 'naive-ui';
+import { NCard, NForm, NFormItem, NInput, NButton, NSpace, useMessage } from 'naive-ui';
 import axios from 'axios';
 
 const router = useRouter();

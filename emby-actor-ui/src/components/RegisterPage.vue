@@ -1,7 +1,6 @@
 <!-- src/components/RegisterPage.vue (UI 重构版) -->
 <template>
-  <!-- 使用 n-layout 自动适配主题背景色，与登录页保持一致 -->
-  <n-layout class="register-layout">
+  <div class="register-layout">
     <div class="register-container">
       <n-card class="dashboard-card register-card" :bordered="false" size="large">
         
@@ -110,14 +109,14 @@
         </template>
       </n-result>
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { 
-  NLayout, NCard, NForm, NFormItem, NInput, NButton, NSpin, NAlert, useMessage,
+  NCard, NForm, NFormItem, NInput, NButton, NSpin, NAlert, useMessage,
   NModal, NResult, NDescriptions, NDescriptionsItem, NSpace
 } from 'naive-ui';
 import axios from 'axios';

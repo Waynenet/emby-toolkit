@@ -1,6 +1,6 @@
 <!-- src/components/ActorSubscriptions.vue (最终健壮版 - 无限滚动) -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <div>
       <n-page-header>
         <template #title>
@@ -93,7 +93,7 @@
         @update:show="showDefaultConfigModal = $event"
       />
     </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>

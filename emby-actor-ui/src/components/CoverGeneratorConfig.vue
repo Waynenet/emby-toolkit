@@ -1,5 +1,5 @@
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <n-spin :show="isLoading">
       <div class="cover-generator-config">
         <n-page-header>
@@ -323,14 +323,14 @@
         </n-card>
       </div>
     </n-spin>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, watch } from 'vue';
 import axios from 'axios';
 import { 
-  useMessage, NLayout, NPageHeader, NButton, NIcon, NCard, NGrid, NGi, 
+  useMessage, NPageHeader, NButton, NIcon, NCard, NGrid, NGi, 
   NFormItem, NSwitch, NSelect, NTabs, NTabPane, NCheckboxGroup, NCheckbox, 
   NSpin, NSpace, NInput, NInputNumber, NRadioGroup, NRadioButton, NSlider, 
   NDivider, NAlert 

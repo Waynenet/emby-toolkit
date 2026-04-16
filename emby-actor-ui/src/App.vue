@@ -137,19 +137,4 @@ html, body {
 .dashboard-card:nth-child(3) { animation-delay: 0.15s; }
 .dashboard-card:nth-child(4) { animation-delay: 0.20s; }
 .dashboard-card:nth-child(5) { animation-delay: 0.25s; }
-
-/* ==================== 强制透视所有 Naive UI 布局底色 ==================== */
-.n-layout, 
-.n-layout-scroll-container, 
-.n-layout-sider, 
-.n-layout-header, 
-.n-layout-footer {
-  background-color: transparent !important;
-  background: transparent !important;
-}
-
-/* 顺便处理一下普通卡片（非 dashboard-card）的底色，使其也带一点半透明感 */
-.n-card {
-  background-color: var(--card-bg-color, rgba(30, 41, 59, 0.5)) !important;
-}
 </style>

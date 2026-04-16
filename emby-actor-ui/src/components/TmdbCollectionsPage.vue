@@ -1,6 +1,6 @@
 <!-- src/components/TmdbCollectionsPage.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
     <div class="collections-page">
       <n-page-header>
         <template #title>
@@ -349,14 +349,14 @@
         </n-tabs>
       </div>
     </n-modal>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
 // ... (Script 部分保持不变，逻辑无需修改) ...
 import { ref, onMounted, onBeforeUnmount, computed, watch, h } from 'vue';
 import axios from 'axios';
-import { NLayout, NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup } from 'naive-ui';
+import { NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup } from 'naive-ui';
 import { SyncOutline, AlbumsOutline as AlbumsIcon, EyeOutline as EyeIcon, CloudDownloadOutline as CloudDownloadIcon, CheckmarkCircleOutline as CheckmarkCircle, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, SearchOutline as SearchIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';

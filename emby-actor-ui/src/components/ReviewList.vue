@@ -1,6 +1,6 @@
 <!-- src/components/ReviewList.vue -->
 <template>
-  <n-layout content-style="padding: 24px;">
+  <div content-style="padding: 24px;">
   <n-card class="dashboard-card" :bordered="false" size="small">
     
     <n-alert title="手动处理操作提示" type="info" style="margin-top: 24px;">
@@ -97,7 +97,7 @@
       </n-spin>
     </div>
   </n-card>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
