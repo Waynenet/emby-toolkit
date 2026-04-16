@@ -171,6 +171,75 @@ class MediaProcessor:
                     pass
 
         return None, None
+    
+    # -- [追更补洞专用] 从文件路径提取电影版本文件列表 --
+    def _collect_movie_version_files_from_dir(self, media_path: str) -> List[str]:
+        """
+        实时监控电影 NFO 专用：
+        给定一个代表电影文件，自动收集同目录下的其它电影版本文件，
+        用于为多版本电影生成同名 .nfo。
+
+        注意：
+        - 只扫描当前目录，不递归，避免误扫 Extras / Behind the Scenes 等子目录。
+        - 跳过明显的样片、预告、花絮、字幕、mediainfo 等非正片文件。
+        - 跳过 SxxEyy 文件，避免剧集被误判成电影多版本。
+        """
+        if not media_path:
+            return []
+
+        movie_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
+        if not movie_dir or not os.path.isdir(movie_dir):
+            return [media_path] if os.path.isfile(media_path) else []
+
+        valid_exts = {
+            ".mp4", ".mkv", ".avi", ".ts", ".iso", ".rmvb", ".strm", ".mov", ".m2ts", ".webm"
+        }
+
+        # 明显不是正片的文件名关键词
+        skip_pattern = re.compile(
+            r"(^|[\s._\-\[\]()])"
+            r"(sample|trailer|trailers|preview|teaser|extra|extras|behind|featurette|"
+            r"花絮|预告|样片|片花|彩蛋|特辑|访谈)"
+            r"($|[\s._\-\[\]()])",
+            re.IGNORECASE
+        )
+
+        result = []
+
+        try:
+            for filename in os.listdir(movie_dir):
+                full_path = os.path.join(movie_dir, filename)
+                if not os.path.isfile(full_path):
+                    continue
+
+                stem, ext = os.path.splitext(filename)
+                ext = ext.lower()
+
+                if ext not in valid_exts:
+                    continue
+
+                if filename.startswith("."):
+                    continue
+
+                # 防止电影分支误扫剧集文件
+                if re.search(r"[sS]\d{1,4}[eE]\d{1,4}", filename):
+                    continue
+
+                # 跳过明显非正片
+                if skip_pattern.search(filename):
+                    continue
+
+                result.append(full_path)
+
+        except Exception as e:
+            logger.warning(f"  ➜ [元数据写入] 扫描电影多版本文件失败: {e}")
+            return [media_path] if os.path.isfile(media_path) else []
+
+        # 至少保证代表文件自己在里面
+        if os.path.isfile(media_path) and media_path not in result:
+            result.append(media_path)
+
+        return sorted(set(result))
 
     # -- [追更补洞专用] 从 TMDb 补齐连载季缓存 --
     def _patch_ongoing_series_cache_from_tmdb(
@@ -386,7 +455,7 @@ class MediaProcessor:
                 
                 if current_filename in known_files:
                     logger.info(f"  ➜ [实时监控] 文件已完美入库 ({current_filename})，直接跳过。")
-                    return folder_path # 即使跳过处理，也返回路径以便后续刷新检查
+                    return file_path
             except Exception as e:
                 logger.warning(f"  ➜ [实时监控] 查重失败，将继续常规流程: {e}")
 
@@ -786,16 +855,24 @@ class MediaProcessor:
             # 步骤 6: 通知 Emby 刷新 (可选)
             # =========================================================
             
+            # 电影多版本：代表文件处理完成后，同目录其它版本也应该一起通知 Emby。
+            notify_paths = [file_path]
+            if item_type == "Movie":
+                movie_files = self._collect_movie_version_files_from_dir(file_path)
+                if movie_files:
+                    notify_paths = movie_files
+
             if not skip_refresh:
-                logger.info(f"  ➜ [实时监控] 极速通知 Emby 单文件入库: {os.path.basename(file_path)}")
-                emby.notify_emby_file_changes([file_path], self.emby_url, self.emby_api_key)
+                if len(notify_paths) == 1:
+                    logger.info(f"  ➜ [实时监控] 极速通知 Emby 单文件入库: {os.path.basename(notify_paths[0])}")
+                else:
+                    logger.info(f"  ➜ [实时监控] 极速通知 Emby 电影多版本入库: {len(notify_paths)} 个文件")
+
+                emby.notify_emby_file_changes(notify_paths, self.emby_url, self.emby_api_key)
                 logger.info(f"  ➜ [实时监控] 预处理完成，Emby 将进行秒级精准入库...")
-            else:
-                pass
-                # logger.info(f"  ➜ [实时监控] 缓存已生成，等待批量极速通知...")
-            
-            # ★★★ 核心修改：直接返回具体的文件路径，不再返回父目录 ★★★
-            return file_path
+
+            # 批量模式下返回所有需要通知的文件
+            return notify_paths if item_type == "Movie" else file_path
 
         except Exception as e:
             logger.error(f"  ➜ [实时监控] 处理文件 {file_path} 时发生错误: {e}", exc_info=True)
@@ -822,7 +899,10 @@ class MediaProcessor:
                 # 现在返回的是具体的文件路径
                 processed_file = self.process_file_actively(file_path, skip_refresh=True)
                 if processed_file:
-                    valid_files_to_notify.add(processed_file)
+                    if isinstance(processed_file, (list, tuple, set)):
+                        valid_files_to_notify.update([p for p in processed_file if p])
+                    else:
+                        valid_files_to_notify.add(processed_file)
             except Exception as e:
                 logger.error(f"  ➜ [实时监控] 处理文件 '{file_path}' 失败: {e}")
 
@@ -1059,6 +1139,77 @@ class MediaProcessor:
                     return row['local_path']
         except Exception as e:
             logger.warning(f"通过 pick_code 查询 local_path 失败: {e}")
+        return None
+
+    # --- 多版本电影资产路径修复 (STRM/HTTP 模式) ---
+    def _resolve_strm_path_for_media_source(
+        self,
+        raw_path: str,
+        file_pc: Optional[str],
+        main_emby_path: str
+    ) -> Optional[str]:
+        """
+        多版本电影资产路径修复：
+        当 Emby 的辅助 MediaSource.Path 是 HTTP/真实媒体路径时，
+        如果主条目来自 STRM 库，则应优先还原为同目录下对应的 .strm 文件路径，
+        而不是用 p115_filesystem_cache.local_path 拼出 .mkv/.mp4 真实文件路径。
+        """
+        if not main_emby_path or not main_emby_path.lower().endswith(".strm"):
+            return None
+
+        base_dir = os.path.dirname(main_emby_path)
+        if not base_dir or not os.path.isdir(base_dir):
+            return None
+
+        # 1. 最准：用 pickcode 扫描同目录 STRM 内容
+        if file_pc:
+            try:
+                for name in os.listdir(base_dir):
+                    if not name.lower().endswith(".strm"):
+                        continue
+
+                    candidate = os.path.join(base_dir, name)
+                    if not os.path.isfile(candidate):
+                        continue
+
+                    try:
+                        with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read(8192)
+                        if file_pc in content:
+                            return candidate
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"  ➜ [资产路径] 扫描同目录 STRM 失败: {e}")
+
+        # 2. 次准：通过 pickcode 找真实文件名，再在 STRM 目录里找同 stem 的 .strm
+        if file_pc:
+            try:
+                db_local_path = self._get_local_path_by_pickcode(file_pc)
+                if db_local_path:
+                    real_name = os.path.basename(db_local_path.replace("\\", "/"))
+                    real_stem = os.path.splitext(real_name)[0]
+
+                    candidate = os.path.join(base_dir, real_stem + ".strm")
+                    if os.path.exists(candidate):
+                        return candidate
+
+                    # 有些 STRM 文件名可能被规范化过，做一次宽松匹配
+                    normalized_real_stem = re.sub(r"\s+", " ", real_stem).strip().lower()
+                    for name in os.listdir(base_dir):
+                        if not name.lower().endswith(".strm"):
+                            continue
+                        strm_stem = os.path.splitext(name)[0]
+                        normalized_strm_stem = re.sub(r"\s+", " ", strm_stem).strip().lower()
+                        if normalized_real_stem == normalized_strm_stem:
+                            return os.path.join(base_dir, name)
+            except Exception as e:
+                logger.warning(f"  ➜ [资产路径] 通过 pickcode 反查 STRM 路径失败: {e}")
+
+        # 3. 最后兜底：如果 raw_path 自己就是本地 STRM，直接用它
+        if raw_path and raw_path.lower().endswith(".strm") and os.path.exists(raw_path):
+            return raw_path
+
         return None
 
     # --- 从数据库逆向重建完整元数据 ---
@@ -1366,30 +1517,40 @@ class MediaProcessor:
                             raw_source_id = str(source.get('Id') or item_id)
                             source_id = raw_source_id.replace("mediasource_", "")
                             
-                            # ★★★ 终极修复：利用 local_strm_root + local_path 完美还原物理路径 ★★★
+                            # ★★★ STRM 多版本路径修复 ★★★
+                            # 资产展示路径必须优先使用 Emby/STRM 库路径。
+                            # p115_filesystem_cache.local_path 是真实媒体文件路径，不能直接当成 STRM 资产 path。
                             emby_path = raw_path
+                            main_emby_path = item_details_from_emby.get('Path', '')
+
                             if emby_path.startswith('http'):
-                                main_emby_path = item_details_from_emby.get('Path', '')
                                 if source_id == item_id:
-                                    # 主版本：直接使用顶层 Path
+                                    # 主版本：直接使用顶层 Path，通常就是 .strm
                                     emby_path = main_emby_path
                                 else:
-                                    # 辅版本：查库获取相对路径，与 local_strm_root 拼接
-                                    db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                    if db_local_path:
-                                        local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                        if local_strm_root:
-                                            # 完美拼接：/strm/媒体库 + 电影/.../xxx.mkv
-                                            emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                        elif main_emby_path:
-                                            # 兜底：如果没配 root，用主版本的目录 + 真实文件名
-                                            real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                            base_dir = os.path.dirname(main_emby_path)
-                                            emby_path = os.path.join(base_dir, real_filename)
+                                    # 辅版本：如果主版本是 STRM，则从同目录 STRM 文件反查
+                                    strm_path = self._resolve_strm_path_for_media_source(
+                                        raw_path=raw_path,
+                                        file_pc=file_pc,
+                                        main_emby_path=main_emby_path
+                                    )
+                                    if strm_path:
+                                        emby_path = strm_path
+                                    else:
+                                        # 非 STRM 库或反查失败时，才允许回退到真实路径
+                                        db_local_path = self._get_local_path_by_pickcode(file_pc)
+                                        if db_local_path:
+                                            local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
+                                            if local_strm_root:
+                                                emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
+                                            elif main_emby_path:
+                                                real_filename = os.path.basename(db_local_path.replace('\\', '/'))
+                                                base_dir = os.path.dirname(main_emby_path)
+                                                emby_path = os.path.join(base_dir, real_filename)
+                                            else:
+                                                emby_path = ''
                                         else:
                                             emby_path = ''
-                                    else:
-                                        emby_path = ''
                                 
                             mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
@@ -1431,7 +1592,7 @@ class MediaProcessor:
                         emby_path = item_details_from_emby.get('Path', '')
                         mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                         
-                        file_pc, file_sha1 = self._extract_115_fingerprints(raw_path)
+                        file_pc, file_sha1 = self._extract_115_fingerprints(emby_path)
                         if not file_sha1 and file_pc:
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
 
@@ -1751,28 +1912,42 @@ class MediaProcessor:
                             if not file_sha1 and file_pc:
                                 file_sha1 = self._get_sha1_by_pickcode(file_pc)
                             
-                            # ★★★ 终极修复：利用 local_strm_root + local_path 完美还原物理路径 ★★★
+                            # ★★★ STRM 分集多版本路径修复 ★★★
+                            # 资产 path 应该保存 Emby 入库路径。
+                            # 如果主分集是 .strm，辅版本也优先还原为同目录下对应的 .strm，
+                            # 不能直接把 p115_filesystem_cache.local_path 拼成 .mkv/.mp4。
                             emby_path = raw_path
+                            main_emby_path = item_details_from_emby.get('Path', '')
+
                             if emby_path.startswith('http'):
-                                main_emby_path = item_details_from_emby.get('Path', '')
                                 if clean_v_id == item_id:
-                                    # 主版本：直接使用顶层 Path
+                                    # 主版本：直接使用顶层 Path，通常就是当前分集的 .strm
                                     emby_path = main_emby_path
                                 else:
-                                    # 辅版本：查库获取相对路径，与 local_strm_root 拼接
-                                    db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                    if db_local_path:
-                                        local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                        if local_strm_root:
-                                            emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                        elif main_emby_path:
-                                            real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                            base_dir = os.path.dirname(main_emby_path)
-                                            emby_path = os.path.join(base_dir, real_filename)
+                                    # 辅版本：主版本来自 STRM 库时，先反查同目录 STRM
+                                    strm_path = self._resolve_strm_path_for_media_source(
+                                        raw_path=raw_path,
+                                        file_pc=file_pc,
+                                        main_emby_path=main_emby_path
+                                    )
+
+                                    if strm_path:
+                                        emby_path = strm_path
+                                    else:
+                                        # 非 STRM 库或反查失败时，才允许 fallback 到真实文件路径
+                                        db_local_path = self._get_local_path_by_pickcode(file_pc)
+                                        if db_local_path:
+                                            local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
+                                            if local_strm_root:
+                                                emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
+                                            elif main_emby_path:
+                                                real_filename = os.path.basename(db_local_path.replace('\\', '/'))
+                                                base_dir = os.path.dirname(main_emby_path)
+                                                emby_path = os.path.join(base_dir, real_filename)
+                                            else:
+                                                emby_path = ''
                                         else:
                                             emby_path = ''
-                                    else:
-                                        emby_path = ''
                                 
                             mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
@@ -1870,25 +2045,39 @@ class MediaProcessor:
                         if not file_sha1 and file_pc:
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
+                        # ★★★ STRM 分集多版本路径修复 ★★★
                         emby_path = raw_path
+                        main_emby_path = item_details_from_emby.get('Path', '')
+
                         if emby_path.startswith('http'):
-                            main_emby_path = item_details_from_emby.get('Path', '')
                             if clean_v_id == item_id:
+                                # 主版本：直接使用顶层 Path
                                 emby_path = main_emby_path
                             else:
-                                db_local_path = self._get_local_path_by_pickcode(file_pc)
-                                if db_local_path:
-                                    local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
-                                    if local_strm_root:
-                                        emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
-                                    elif main_emby_path:
-                                        real_filename = os.path.basename(db_local_path.replace('\\', '/'))
-                                        base_dir = os.path.dirname(main_emby_path)
-                                        emby_path = os.path.join(base_dir, real_filename)
+                                # 辅版本：优先还原为同目录 .strm
+                                strm_path = self._resolve_strm_path_for_media_source(
+                                    raw_path=raw_path,
+                                    file_pc=file_pc,
+                                    main_emby_path=main_emby_path
+                                )
+
+                                if strm_path:
+                                    emby_path = strm_path
+                                else:
+                                    # 找不到 STRM 才 fallback 到真实路径
+                                    db_local_path = self._get_local_path_by_pickcode(file_pc)
+                                    if db_local_path:
+                                        local_strm_root = self.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
+                                        if local_strm_root:
+                                            emby_path = os.path.join(local_strm_root, db_local_path.lstrip('/\\'))
+                                        elif main_emby_path:
+                                            real_filename = os.path.basename(db_local_path.replace('\\', '/'))
+                                            base_dir = os.path.dirname(main_emby_path)
+                                            emby_path = os.path.join(base_dir, real_filename)
+                                        else:
+                                            emby_path = ''
                                     else:
                                         emby_path = ''
-                                else:
-                                    emby_path = ''
                             
                         mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                         file_sha1 = self._get_sha1_by_pickcode(file_pc)
@@ -4359,11 +4548,27 @@ class MediaProcessor:
         try:
             if item_type == "Movie":
                 nfo_content = nfo_builder.build_movie_nfo(data_to_write, cast_to_write)
-                nfo_path = os.path.splitext(media_path)[0] + ".nfo"
-                if _write_nfo_if_changed(nfo_path, nfo_content):
-                    logger.info(f"  ➜ 成功写入电影 NFO: {nfo_path}")
-                else:
-                    logger.debug(f"  ➜ 电影 NFO 内容未变，跳过写入: {nfo_path}")
+
+                movie_files = self._collect_movie_version_files_from_dir(media_path)
+                if not movie_files:
+                    movie_files = [media_path]
+
+                generated_count = 0
+                skipped_count = 0
+
+                for movie_file in movie_files:
+                    nfo_path = os.path.splitext(movie_file)[0] + ".nfo"
+                    if _write_nfo_if_changed(nfo_path, nfo_content):
+                        generated_count += 1
+                        logger.info(f"  ➜ 成功写入电影 NFO: {nfo_path}")
+                    else:
+                        skipped_count += 1
+                        logger.debug(f"  ➜ 电影 NFO 内容未变，跳过写入: {nfo_path}")
+
+                if len(movie_files) > 1:
+                    logger.info(
+                        f"  ➜ 电影多版本 NFO 生成完成：实际更新 {generated_count} 个，跳过 {skipped_count} 个未变更。"
+                    )
 
             elif item_type == "Series":
                 nfo_path = os.path.join(series_root_dir, "tvshow.nfo")
