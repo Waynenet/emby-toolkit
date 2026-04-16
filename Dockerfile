@@ -41,7 +41,8 @@ RUN apt-get update && \
         bash \
         wget \
         curl \
-        dumb-init && \
+        dumb-init \
+        ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

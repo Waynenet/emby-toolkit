@@ -112,29 +112,48 @@ class P115OpenAPIClient:
         }
 
     def _do_request(self, method, url, **kwargs):
-        try:
-            current_token = self.access_token # 记录当前请求使用的 token
-            
-            # 支持自定义 headers 覆盖 (用于透传播放器 UA)
-            req_headers = self.headers.copy()
-            if 'headers' in kwargs:
-                req_headers.update(kwargs.pop('headers'))
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                current_token = self.access_token # 记录当前请求使用的 token
                 
-            resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs).json()
-            
-            if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
-                logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
+                # 支持自定义 headers 覆盖 (用于透传播放器 UA)
+                req_headers = self.headers.copy()
+                if 'headers' in kwargs:
+                    req_headers.update(kwargs.pop('headers'))
+                    
+                raw_resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs)
                 
-                # ★ 传入 current_token 进行比对
-                if refresh_115_token(current_token):
-                    logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
-                    return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
-                else:
-                    logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
-            
-            return resp
-        except Exception as e:
-            return {"state": False, "error_msg": str(e)}
+                try:
+                    resp = raw_resp.json()
+                except Exception as json_err:
+                    # 核心修复：捕获 115 返回非 JSON (如 502/405 网页) 的情况
+                    err_detail = f"HTTP {raw_resp.status_code}, Body: {raw_resp.text[:150]}"
+                    if attempt < max_retries - 1:
+                        logger.warning(f"  ➜ [115 API] 接口返回异常非JSON数据，等待 2 秒后重试 ({attempt+1}/{max_retries})... 详情: {err_detail}")
+                        time.sleep(2)
+                        continue
+                    return {"state": False, "error_msg": f"JSON解析失败: {json_err}. 详情: {err_detail}"}
+                
+                if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
+                    logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
+                    if refresh_115_token(current_token):
+                        logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
+                        # 续期成功后重试一次
+                        return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+                    else:
+                        logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
+                
+                return resp
+            except requests.exceptions.RequestException as req_err:
+                # 捕获网络连接超时等错误
+                if attempt < max_retries - 1:
+                    logger.warning(f"  ➜ [115 API] 网络请求异常，等待 2 秒后重试 ({attempt+1}/{max_retries})...")
+                    time.sleep(2)
+                    continue
+                return {"state": False, "error_msg": f"网络请求彻底失败: {str(req_err)}"}
+            except Exception as e:
+                return {"state": False, "error_msg": str(e)}
 
     def get_user_info(self):
         url = f"{self.base_url}/open/user/info"
@@ -940,6 +959,39 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ➜ 清理 115 文件缓存失败: {e}")
 
+    @staticmethod
+    def save_mediainfo_cache(sha1, mediainfo_json):
+        """写入本地 p115_mediainfo_cache，结构保持 Emby MediaSourceInfo 标准格式"""
+        if not sha1 or not mediainfo_json:
+            return False
+
+        try:
+            from psycopg2.extras import Json
+
+            sha1 = str(sha1).upper()
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json, created_at, hit_count)
+                        VALUES (%s, %s, NOW(), 0)
+                        ON CONFLICT (sha1)
+                        DO UPDATE SET
+                            mediainfo_json = EXCLUDED.mediainfo_json,
+                            created_at = NOW()
+                    """, (
+                        sha1,
+                        Json(mediainfo_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False))
+                    ))
+                    conn.commit()
+
+            logger.info(f"  ➜ [媒体信息缓存] 已写入本地 p115_mediainfo_cache -> {sha1[:12]}...")
+            return True
+
+        except Exception as e:
+            logger.error(f"  ➜ 写入 p115_mediainfo_cache 失败: {e}", exc_info=True)
+            return False
+
 # ======================================================================
 # ★★★ 115 整理记录 DB 管理器 ★★★
 # ======================================================================
@@ -1734,7 +1786,684 @@ class SmartOrganizer:
 
         return info_dict
 
-    def _fetch_and_parse_mediainfo(self, sha1, guessed_info=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
+    def _parse_ffprobe_rate(self, value):
+        """解析 ffprobe 的帧率字段，例如 24000/1001 -> 23.976"""
+        if not value or value == "0/0":
+            return None
+        try:
+            if "/" in str(value):
+                a, b = str(value).split("/", 1)
+                a = float(a)
+                b = float(b)
+                if b == 0:
+                    return None
+                return a / b
+            return float(value)
+        except Exception:
+            return None
+
+    def _probe_mediainfo_with_ffprobe(self, file_node, sha1=None, silent_log=False):
+        """
+        最终兜底：通过 115 直链调用容器内 ffprobe。
+        返回 Emby MediaSourceInfo 标准兼容结构，可直接写入 p115_mediainfo_cache。
+        """
+        if not file_node:
+            return None
+
+        if isinstance(file_node, dict):
+            pick_code = (
+                file_node.get('pc')
+                or file_node.get('pick_code')
+                or file_node.get('pickcode')
+            )
+            original_name = (
+                file_node.get('fn')
+                or file_node.get('n')
+                or file_node.get('file_name')
+                or file_node.get('original_name')
+                or sha1
+                or "unknown"
+            )
+        else:
+            pick_code = (
+                getattr(file_node, 'pc', None)
+                or getattr(file_node, 'pick_code', None)
+                or getattr(file_node, 'pickcode', None)
+            )
+            original_name = (
+                getattr(file_node, 'fn', None)
+                or getattr(file_node, 'n', None)
+                or getattr(file_node, 'file_name', None)
+                or getattr(file_node, 'original_name', None)
+                or sha1
+                or "unknown"
+            )
+
+        if not pick_code:
+            if not silent_log:
+                logger.debug(f"  ➜ [ffprobe兜底] 缺少 pick_code，跳过: {original_name}")
+            return None
+
+        try:
+            import shutil
+            import subprocess
+
+            if not shutil.which("ffprobe"):
+                if not silent_log:
+                    logger.warning("  ➜ [ffprobe兜底] 容器内未找到 ffprobe，请在镜像中安装 ffmpeg。")
+                return None
+
+            direct_url = None
+
+            # 1. Cookie 直链优先
+            try:
+                direct_url = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+            except Exception as e:
+                if not silent_log:
+                    logger.debug(f"  ➜ [ffprobe兜底] Cookie 直链获取失败: {e}")
+
+            # 2. OpenAPI 直链兜底
+            if not direct_url:
+                try:
+                    direct_url = self.client.openapi_downurl(pick_code, user_agent="Mozilla/5.0")
+                except Exception as e:
+                    if not silent_log:
+                        logger.debug(f"  ➜ [ffprobe兜底] OpenAPI 直链获取失败: {e}")
+
+            if not direct_url:
+                if not silent_log:
+                    logger.warning(f"  ➜ [ffprobe兜底] 无法获取直链，跳过: {original_name}")
+                return None
+
+            if not silent_log:
+                logger.info(f"  ➜ [ffprobe兜底] 尝试用 ffprobe 解析媒体信息")
+
+            cmd = [
+                "ffprobe",
+                "-hide_banner",
+                "-v", "error",
+                "-user_agent", "Mozilla/5.0",
+                "-rw_timeout", "15000000",
+                "-analyzeduration", "20000000",
+                "-probesize", "20000000",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                "-show_chapters",
+                str(direct_url)
+            ]
+
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=45
+            )
+
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip()
+                if not silent_log:
+                    logger.warning(f"  ➜ [ffprobe兜底] 解析失败: {original_name} -> {err[:300]}")
+                return None
+
+            probe_data = json.loads(proc.stdout or "{}")
+            emby_json = self._build_emby_mediainfo_from_ffprobe(
+                probe_data,
+                file_node,
+                sha1=sha1
+            )
+
+            if not emby_json:
+                if not silent_log:
+                    logger.warning(f"  ➜ [ffprobe兜底] 未解析出有效 MediaStreams: {original_name}")
+                return None
+
+            if not silent_log:
+                logger.info(f"  ➜ [ffprobe兜底] 成功生成媒体信息 -> {original_name}")
+
+            return emby_json
+
+        except subprocess.TimeoutExpired:
+            if not silent_log:
+                logger.warning(f"  ➜ [ffprobe兜底] 解析超时，跳过: {original_name}")
+            return None
+        except Exception as e:
+            if not silent_log:
+                logger.warning(f"  ➜ [ffprobe兜底] 解析异常: {original_name} -> {e}", exc_info=True)
+            return None
+    
+    def _ffprobe_rate_to_float(self, value):
+        """解析 ffprobe 帧率：24000/1001 -> 23.976"""
+        if not value or value == "0/0":
+            return None
+        try:
+            value = str(value)
+            if "/" in value:
+                a, b = value.split("/", 1)
+                a = float(a)
+                b = float(b)
+                if b == 0:
+                    return None
+                return a / b
+            return float(value)
+        except Exception:
+            return None
+
+    def _safe_int(self, value, default=0):
+        try:
+            if value is None or value == "":
+                return default
+            return int(float(value))
+        except Exception:
+            return default
+
+    def _normalize_lang_code(self, lang):
+        lang = (lang or "").lower().strip()
+        if lang in ("zh", "zho", "chi", "chs", "cht", "cmn"):
+            return "chi"
+        if lang in ("en", "eng"):
+            return "eng"
+        if lang in ("ja", "jpn", "jp"):
+            return "jpn"
+        if lang in ("ko", "kor", "kr"):
+            return "kor"
+        if lang in ("fr", "fre", "fra"):
+            return "fre"
+        if lang in ("es", "spa"):
+            return "spa"
+        if lang in ("de", "ger", "deu"):
+            return "ger"
+        return lang or None
+
+    def _display_language(self, lang, title=""):
+        lang = self._normalize_lang_code(lang)
+        title = title or ""
+
+        if lang == "chi":
+            if any(k in title for k in ["简", "简体", "chs", "CHS", "Simplified"]):
+                return "Chinese Simplified"
+            if any(k in title for k in ["繁", "繁体", "cht", "CHT", "Traditional"]):
+                return "Chinese Traditional"
+            return "Chinese"
+        if lang == "eng":
+            return "English"
+        if lang == "jpn":
+            return "Japanese"
+        if lang == "kor":
+            return "Korean"
+        if lang == "fre":
+            return "French"
+        if lang == "spa":
+            return "Spanish"
+        if lang == "ger":
+            return "German"
+
+        return lang.upper() if lang else "Unknown"
+
+    def _channel_layout_label(self, channels, channel_layout=None):
+        channel_layout = (channel_layout or "").lower()
+
+        if channels == 8:
+            return "7.1"
+        if channels == 7:
+            return "6.1"
+        if channels == 6:
+            return "5.1"
+        if channels == 2:
+            return "stereo"
+        if channels == 1:
+            return "mono"
+
+        if channel_layout:
+            return channel_layout.replace("(side)", "")
+
+        return str(channels) if channels else ""
+
+    def _audio_codec_profile_label(self, codec, profile="", title=""):
+        codec = (codec or "").lower()
+        profile_mix = f"{profile or ''} {title or ''}".lower()
+
+        if codec == "truehd":
+            return "TRUEHD Atmos" if "atmos" in profile_mix else "TRUEHD"
+
+        if codec == "eac3":
+            return "DDP Atmos" if "atmos" in profile_mix else "DDP"
+
+        if codec == "dts":
+            if "ma" in profile_mix or "master" in profile_mix or "xll" in profile_mix:
+                return "DTS-HD MA"
+            if "hra" in profile_mix or "high resolution" in profile_mix:
+                return "DTS-HD HRA"
+            return "DTS"
+
+        if codec == "ac3":
+            return "AC3"
+        if codec == "aac":
+            return "AAC"
+        if codec == "flac":
+            return "FLAC"
+        if codec == "opus":
+            return "OPUS"
+        if codec == "mp3":
+            return "MP3"
+
+        return codec.upper() if codec else ""
+
+    def _subtitle_codec_label(self, codec):
+        codec = (codec or "").lower()
+
+        mapping = {
+            "hdmv_pgs_subtitle": "PGSSUB",
+            "pgssub": "PGSSUB",
+            "subrip": "SUBRIP",
+            "srt": "SUBRIP",
+            "ass": "ASS",
+            "ssa": "SSA",
+            "webvtt": "VTT",
+            "mov_text": "MOV_TEXT",
+            "dvd_subtitle": "DVDSUB",
+        }
+
+        return mapping.get(codec, codec.upper() if codec else "")
+
+    def _build_emby_mediainfo_from_ffprobe(self, probe_data, file_node, sha1=None):
+        """
+        将 ffprobe 原始 JSON 转成 Emby MediaSourceInfo 兼容格式。
+        注意：这是给 p115_mediainfo_cache 用的，不是给 ffprobe 自己用的。
+        """
+        if not probe_data:
+            return None
+
+        original_name = (
+            file_node.get("fn")
+            or file_node.get("n")
+            or file_node.get("file_name")
+            or file_node.get("original_name")
+            or sha1
+            or "unknown"
+        )
+
+        ext = ""
+        if "." in original_name:
+            ext = original_name.rsplit(".", 1)[-1].lower()
+
+        fmt = probe_data.get("format") or {}
+        streams = probe_data.get("streams") or []
+        chapters_raw = probe_data.get("chapters") or []
+
+        media_streams = []
+
+        size = self._safe_int(
+            file_node.get("fs")
+            or file_node.get("size")
+            or fmt.get("size")
+            or 0
+        )
+
+        duration = 0.0
+        try:
+            duration = float(fmt.get("duration") or 0)
+        except Exception:
+            duration = 0.0
+
+        run_time_ticks = int(duration * 10000000) if duration > 0 else 0
+
+        bitrate = self._safe_int(fmt.get("bit_rate") or 0)
+        if not bitrate and size and duration > 0:
+            bitrate = int(size * 8 / duration)
+
+        container = ext
+        if not container:
+            format_name = (fmt.get("format_name") or "").lower()
+            if "matroska" in format_name:
+                container = "mkv"
+            elif "mov" in format_name or "mp4" in format_name:
+                container = "mp4"
+            else:
+                container = format_name.split(",")[0] if format_name else ""
+
+        # 章节
+        chapters = []
+        for idx, ch in enumerate(chapters_raw):
+            tags = ch.get("tags") or {}
+            try:
+                start_time = float(ch.get("start_time") or 0)
+            except Exception:
+                start_time = 0
+
+            chapters.append({
+                "Name": tags.get("title") or f"章节 {idx + 1}",
+                "MarkerType": "Chapter",
+                "ChapterIndex": idx,
+                "StartPositionTicks": int(start_time * 10000000)
+            })
+
+        for s in streams:
+            codec_type = (s.get("codec_type") or "").lower()
+            codec = (s.get("codec_name") or "").lower()
+            tags = s.get("tags") or {}
+            disposition = s.get("disposition") or {}
+
+            index = self._safe_int(s.get("index"), len(media_streams))
+            title = tags.get("title") or ""
+            lang = self._normalize_lang_code(tags.get("language"))
+            display_lang = self._display_language(lang, title)
+            is_default = bool(disposition.get("default"))
+            is_forced = bool(disposition.get("forced"))
+
+            if codec_type == "video":
+                width = self._safe_int(s.get("width"))
+                height = self._safe_int(s.get("height"))
+
+                bit_depth = 0
+                for k in ("bits_per_raw_sample", "bits_per_sample"):
+                    bit_depth = self._safe_int(s.get(k))
+                    if bit_depth:
+                        break
+
+                pix_fmt = (s.get("pix_fmt") or "").lower()
+                if not bit_depth:
+                    if "12" in pix_fmt:
+                        bit_depth = 12
+                    elif "10" in pix_fmt:
+                        bit_depth = 10
+                    elif pix_fmt:
+                        bit_depth = 8
+
+                fps = (
+                    self._ffprobe_rate_to_float(s.get("avg_frame_rate"))
+                    or self._ffprobe_rate_to_float(s.get("r_frame_rate"))
+                )
+
+                color_space = s.get("colorspace") or s.get("color_space") or ""
+                color_transfer = s.get("color_transfer") or ""
+                color_primaries = s.get("color_primaries") or ""
+                profile = s.get("profile") or ""
+
+                side_data_list = s.get("side_data_list") or []
+                side_text = json.dumps(side_data_list, ensure_ascii=False)
+
+                video_range = ""
+                extended_video_type = ""
+                extended_video_sub_type = "None"
+                extended_video_desc = "None"
+
+                # Dolby Vision
+                dv_profile = None
+                dv_compat = None
+
+                for sd in side_data_list:
+                    if not isinstance(sd, dict):
+                        continue
+
+                    side_type = str(sd.get("side_data_type") or "")
+                    if "DOVI" in side_type.upper() or "DOLBY VISION" in side_type.upper():
+                        dv_profile = sd.get("dv_profile") or sd.get("profile")
+                        dv_compat = (
+                            sd.get("dv_bl_signal_compatibility_id")
+                            or sd.get("bl_signal_compatibility_id")
+                            or sd.get("compatibility_id")
+                        )
+                        break
+
+                if not dv_profile and ("DOVI" in side_text.upper() or "DOLBY VISION" in side_text.upper()):
+                    m = re.search(r"dv_profile['\"]?\s*[:=]\s*['\"]?(\d+)", side_text, re.IGNORECASE)
+                    if m:
+                        dv_profile = m.group(1)
+
+                if dv_profile:
+                    dv_profile_str = str(dv_profile)
+                    extended_video_type = "DolbyVision"
+
+                    if dv_profile_str == "8":
+                        if str(dv_compat or "") == "1":
+                            extended_video_sub_type = "DoviProfile81"
+                            extended_video_desc = "Profile 8.1 (HDR10 compatible)"
+                        else:
+                            extended_video_sub_type = "DoviProfile8"
+                            extended_video_desc = "Profile 8"
+                    elif dv_profile_str == "7":
+                        extended_video_sub_type = "DoviProfile7"
+                        extended_video_desc = "Profile 7 (HDR10 compatible)" if color_transfer == "smpte2084" else "Profile 7"
+                    elif dv_profile_str == "5":
+                        extended_video_sub_type = "DoviProfile5"
+                        extended_video_desc = "Profile 5"
+                    else:
+                        extended_video_sub_type = f"DoviProfile{dv_profile_str}"
+                        extended_video_desc = f"Profile {dv_profile_str}"
+
+                    # 让现有解析器能得到 HDR10 DoVi P7 / HDR10 DoVi P8
+                    if color_transfer == "smpte2084":
+                        video_range = "DolbyVision HDR10"
+                    else:
+                        video_range = "DolbyVision"
+
+                # HDR10+
+                elif "HDR10+" in side_text or "SMPTE2094-40" in side_text:
+                    video_range = "HDR10+"
+
+                # HDR10 / HDR
+                elif color_transfer == "smpte2084":
+                    video_range = "HDR10"
+                elif color_primaries == "bt2020":
+                    video_range = "HDR"
+
+                video_codec_display = {
+                    "hevc": "HEVC",
+                    "h264": "H264",
+                    "av1": "AV1",
+                    "mpeg2video": "MPEG2VIDEO",
+                    "vc1": "VC1",
+                }.get(codec, codec.upper())
+
+                if width >= 3800:
+                    res_display = "4K"
+                elif width >= 1900:
+                    res_display = "1080p"
+                elif width >= 1200:
+                    res_display = "720p"
+                else:
+                    res_display = f"{height}p" if height else ""
+
+                if extended_video_type == "DolbyVision":
+                    effect_display = "Dolby Vision"
+                elif video_range == "HDR10+":
+                    effect_display = "HDR10+"
+                elif video_range == "HDR10":
+                    effect_display = "HDR10"
+                elif video_range == "HDR":
+                    effect_display = "HDR"
+                else:
+                    effect_display = ""
+
+                display_title = " ".join([x for x in [res_display, effect_display, video_codec_display] if x])
+
+                media_streams.append({
+                    "Type": "Video",
+                    "Codec": codec,
+                    "Index": index,
+                    "Level": self._safe_int(s.get("level")),
+                    "Title": title,
+                    "Width": width,
+                    "Height": height,
+                    "BitRate": self._safe_int(s.get("bit_rate") or bitrate),
+                    "Profile": profile,
+                    "BitDepth": bit_depth,
+                    "IsForced": is_forced,
+                    "Protocol": "File",
+                    "TimeBase": s.get("time_base") or "1/1000",
+                    "IsDefault": is_default,
+                    "RefFrames": self._safe_int(s.get("refs"), 1),
+                    "ColorSpace": color_space,
+                    "IsExternal": False,
+                    "VideoRange": video_range,
+                    "AspectRatio": f"{width}:{height}" if width and height else "",
+                    "PixelFormat": pix_fmt,
+                    "DisplayTitle": display_title,
+                    "IsAnamorphic": False,
+                    "IsInterlaced": False,
+                    "ColorTransfer": color_transfer,
+                    "RealFrameRate": fps,
+                    "AttachmentSize": 0,
+                    "ColorPrimaries": color_primaries,
+                    "AverageFrameRate": fps,
+                    "ExtendedVideoType": extended_video_type or "None",
+                    "IsHearingImpaired": False,
+                    "ExtendedVideoSubType": extended_video_sub_type,
+                    "IsTextSubtitleStream": False,
+                    "SupportsExternalStream": False,
+                    "ExtendedVideoSubTypeDescription": extended_video_desc
+                })
+
+            elif codec_type == "audio":
+                channels = self._safe_int(s.get("channels"))
+                channel_layout = self._channel_layout_label(channels, s.get("channel_layout"))
+                sample_rate = self._safe_int(s.get("sample_rate"))
+
+                profile = s.get("profile") or ""
+                codec_display = self._audio_codec_profile_label(codec, profile, title)
+
+                display_title_parts = []
+                if display_lang and display_lang != "Unknown":
+                    display_title_parts.append(display_lang)
+                if codec_display:
+                    display_title_parts.append(codec_display)
+                if channel_layout:
+                    display_title_parts.append(channel_layout)
+                if is_default:
+                    display_title_parts.append("(默认)")
+
+                display_title = " ".join(display_title_parts)
+
+                media_streams.append({
+                    "Type": "Audio",
+                    "Codec": codec,
+                    "Index": index,
+                    "Title": title,
+                    "BitRate": self._safe_int(s.get("bit_rate")),
+                    "BitDepth": self._safe_int(s.get("bits_per_raw_sample") or s.get("bits_per_sample")),
+                    "Channels": channels,
+                    "IsForced": is_forced,
+                    "Language": lang,
+                    "Protocol": "File",
+                    "TimeBase": s.get("time_base") or "1/1000",
+                    "IsDefault": is_default,
+                    "IsExternal": False,
+                    "SampleRate": sample_rate,
+                    "DisplayTitle": display_title,
+                    "IsInterlaced": False,
+                    "ChannelLayout": channel_layout,
+                    "AttachmentSize": 0,
+                    "DisplayLanguage": display_lang,
+                    "ExtendedVideoType": "None",
+                    "IsHearingImpaired": False,
+                    "ExtendedVideoSubType": "None",
+                    "IsTextSubtitleStream": False,
+                    "SupportsExternalStream": False,
+                    "ExtendedVideoSubTypeDescription": "None",
+                    "Profile": profile or codec_display
+                })
+
+            elif codec_type == "subtitle":
+                sub_codec = self._subtitle_codec_label(codec)
+
+                is_text_sub = codec in {
+                    "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"
+                }
+
+                display_title_parts = []
+                if display_lang and display_lang != "Unknown":
+                    display_title_parts.append(display_lang)
+                if is_default:
+                    display_title_parts.append("(默认")
+                    display_title_parts[-1] = display_title_parts[-1] + f" {sub_codec})"
+                else:
+                    display_title_parts.append(f"({sub_codec})")
+
+                display_title = " ".join(display_title_parts)
+
+                media_streams.append({
+                    "Type": "Subtitle",
+                    "Codec": sub_codec,
+                    "Index": index,
+                    "Title": title,
+                    "IsForced": is_forced,
+                    "Language": lang,
+                    "Protocol": "File",
+                    "TimeBase": s.get("time_base") or "1/1000",
+                    "IsDefault": is_default,
+                    "IsExternal": False,
+                    "DisplayTitle": display_title,
+                    "IsInterlaced": False,
+                    "AttachmentSize": 0,
+                    "DisplayLanguage": display_lang,
+                    "ExtendedVideoType": "None",
+                    "IsHearingImpaired": False,
+                    "ExtendedVideoSubType": "None",
+                    "IsTextSubtitleStream": is_text_sub,
+                    "SubtitleLocationType": "InternalStream",
+                    "SupportsExternalStream": False,
+                    "ExtendedVideoSubTypeDescription": "None"
+                })
+
+        # 归一化默认轨道：避免 MKV 多条字幕都带 default flag，导致显示一堆“默认”
+        seen_default_by_type = {
+            "Audio": False,
+            "Subtitle": False
+        }
+
+        for stream in media_streams:
+            stream_type = stream.get("Type")
+
+            if stream_type not in seen_default_by_type:
+                continue
+
+            if stream.get("IsDefault"):
+                if seen_default_by_type[stream_type]:
+                    stream["IsDefault"] = False
+
+                    display_title = stream.get("DisplayTitle") or ""
+                    display_title = display_title.replace("默认 ", "").replace("(默认 ", "(").replace("默认", "")
+                    display_title = display_title.replace("  ", " ").strip()
+                    stream["DisplayTitle"] = display_title
+                else:
+                    seen_default_by_type[stream_type] = True
+
+        if not media_streams:
+            return None
+
+        media_source_info = {
+            "Size": size,
+            "Type": "Default",
+            "Bitrate": bitrate,
+            "Formats": [],
+            "Chapters": [],
+            "IsRemote": True,
+            "Protocol": "File",
+            "Container": container,
+            "MediaStreams": media_streams,
+            "RunTimeTicks": run_time_ticks,
+            "RequiresClosing": False,
+            "RequiresLooping": False,
+            "RequiresOpening": False,
+            "SupportsProbing": True,
+            "IsInfiniteStream": False,
+            "HasMixedProtocols": False,
+            "SupportsDirectPlay": True,
+            "RequiredHttpHeaders": {},
+            "SupportsTranscoding": True,
+            "SupportsDirectStream": True,
+            "ReadAtNativeFramerate": False,
+            "AddApiKeyToDirectStreamUrl": False
+        }
+
+        return [{
+            "Chapters": chapters,
+            "MediaSourceInfo": media_source_info
+        }]
+
+    def _fetch_and_parse_mediainfo(self, sha1, guessed_info=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, file_node=None, silent_log=False):
         """
         通过 SHA1 获取真实的媒体信息，并转换为乐高重命名参数
         """
@@ -1754,7 +2483,7 @@ class SmartOrganizer:
             is_center = True
             data_source = "中心服务器(批量)"
 
-        # 3. 兜底：尝试查 P115Center 中心服务器 (单次查询)
+        # 3. 尝试查 P115Center 中心服务器 (单次查询)
         if not raw_json and pre_fetched_mediainfo is None:
             try:
                 import extensions
@@ -1768,9 +2497,30 @@ class SmartOrganizer:
             except Exception:
                 pass
 
-        if not raw_json: return {}, False
+        # 4. 本地和中心服务器都没有，最终用 ffprobe 解析 115 直链，并写入本地缓存
+        if not raw_json and file_node:
+            raw_json = self._probe_mediainfo_with_ffprobe(
+                file_node,
+                sha1=sha1,
+                silent_log=silent_log
+            )
 
-        # 3. 开始解析 Emby 的真实数据
+            if raw_json:
+                is_center = False
+                data_source = "ffprobe兜底"
+
+                # 写入 p115_mediainfo_cache，后续同 SHA1 直接走本地缓存
+                P115CacheManager.save_mediainfo_cache(sha1, raw_json)
+
+                # 同步塞回本轮预取字典，避免同一批里重复 probe
+                if local_pre_fetched_mediainfo is not None:
+                    local_pre_fetched_mediainfo[str(sha1).upper()] = raw_json
+                    local_pre_fetched_mediainfo[str(sha1)] = raw_json
+
+        if not raw_json:
+            return {}, False
+
+        # 5. 开始解析 Emby 的真实数据
         info = {}
         try:
             if isinstance(raw_json, list) and len(raw_json) > 0:
@@ -1990,7 +2740,14 @@ class SmartOrganizer:
         if not is_sub and enable_smart_rename:
             sha1 = file_node.get('sha1') or file_node.get('sha')
             if sha1:
-                real_info, is_center_cached = self._fetch_and_parse_mediainfo(sha1, video_info, pre_fetched_mediainfo, local_pre_fetched_mediainfo, silent_log=silent_log)
+                real_info, is_center_cached = self._fetch_and_parse_mediainfo(
+                    sha1,
+                    video_info,
+                    pre_fetched_mediainfo,
+                    local_pre_fetched_mediainfo,
+                    file_node=file_node,
+                    silent_log=silent_log
+                )
                 if real_info:
                     for k, v in real_info.items():
                         video_info[k] = v
