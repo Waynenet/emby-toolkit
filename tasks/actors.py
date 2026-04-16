@@ -14,38 +14,8 @@ import handler.emby as emby
 import task_manager
 import utils
 from actor_utils import enrich_all_actor_aliases_task
-from handler.actor_sync import UnifiedSyncHandler
 
 logger = logging.getLogger(__name__)
-
-# --- 同步演员映射表 ---
-def task_sync_person_map(processor):
-    """
-    【V2 - 支持进度反馈】任务：同步演员映射表。
-    """
-    task_name = "同步演员映射"
-    logger.trace(f"开始执行 '{task_name}'...")
-    
-    try:
-        config = processor.config
-        
-        sync_handler = UnifiedSyncHandler(
-            emby_url=config.get("emby_server_url"),
-            emby_api_key=config.get("emby_api_key"),
-            emby_user_id=config.get("emby_user_id"),
-            tmdb_api_key=config.get("tmdb_api_key", "")
-        )
-        
-        # ### 修改点：将任务管理器的回调函数传递给处理器 ###
-        sync_handler.sync_emby_person_map_to_db(
-            update_status_callback=task_manager.update_status_from_thread
-        )
-        
-        logger.trace(f"'{task_name}' 成功完成。")
-
-    except Exception as e:
-        logger.error(f"'{task_name}' 执行过程中发生严重错误: {e}", exc_info=True)
-        task_manager.update_status_from_thread(-1, f"错误：同步失败 ({str(e)[:50]}...)")
 
 # ✨✨✨ 演员数据补充函数 ✨✨✨
 def task_enrich_aliases(processor, force_full_update: bool = False):
@@ -160,35 +130,28 @@ def task_process_actor_subscriptions(processor):
     processor.run_scheduled_task(update_status_callback=task_manager.update_status_from_thread)
 
 # --- 翻译演员任务 ---
-def task_actor_translation(processor):
-    """
-    【V4.1 - 详细日志版】
-    - 增加详细日志：明确打印翻译跳过原因（结果为空/结果相同）以及 Emby API 更新失败的原因。
-    """
-    task_name = "中文化演员名 (智能版)"
+def task_persons_translation(processor):
+    task_name = "中文化人物名 (智能版)"
     logger.trace(f"--- 开始执行 '{task_name}' 任务 ---")
 
-    actor = processor.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE)
-
-    if not actor:
+    enabled = processor.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE)
+    if not enabled:
         logger.info("  ➜ AI翻译功能未启用，跳过任务。")
         return
-    
+
     try:
-        # ======================================================================
-        # 阶段 1: 扫描并聚合所有需要翻译的演员 (智能数据采集)
-        # ======================================================================
-        task_manager.update_status_from_thread(0, "阶段 1/3: 正在扫描 Emby，收集所有待翻译演员...")
-        
+        task_manager.update_status_from_thread(0, "阶段 1/3: 正在扫描 Emby，收集所有待翻译人物...")
+
         name_to_persons_map = {}
-        actors_to_enrich = []
+        persons_to_enrich = []
 
         person_generator = emby.get_all_persons_from_emby(
             base_url=processor.emby_url,
             api_key=processor.emby_api_key,
             user_id=processor.emby_user_id,
             stop_event=processor.get_stop_event(),
-            batch_size=500
+            batch_size=500,
+            source_item_types="Movie,Series,Season,Episode",
         )
 
         total_scanned = 0
@@ -203,31 +166,28 @@ def task_actor_translation(processor):
                 if name and not utils.contains_chinese(name):
                     tmdb_id = person.get("ProviderIds", {}).get("Tmdb")
                     if tmdb_id:
-                        actors_to_enrich.append({"name": name, "tmdb_id": tmdb_id})
-                    
-                    if name not in name_to_persons_map:
-                        name_to_persons_map[name] = []
-                    name_to_persons_map[name].append(person)
-            
+                        persons_to_enrich.append({"name": name, "tmdb_id": tmdb_id})
+
+                    name_to_persons_map.setdefault(name, []).append(person)
+
             total_scanned += len(person_batch)
-            task_manager.update_status_from_thread(5, f"阶段 1/3: 已扫描 {total_scanned} 名演员...")
+            task_manager.update_status_from_thread(5, f"阶段 1/3: 已扫描 {total_scanned} 名人物...")
 
         if not name_to_persons_map:
-            logger.info("  ➜ 扫描完成，没有发现需要翻译的演员名。")
-            task_manager.update_status_from_thread(100, "任务完成，所有演员名都无需翻译。")
+            logger.info("  ➜ 扫描完成，没有发现需要翻译的人物名。")
+            task_manager.update_status_from_thread(100, "任务完成，所有人物名都无需翻译。")
             return
 
-        logger.info(f"  ➜ 扫描完成！共发现 {len(name_to_persons_map)} 个外文名需要翻译。")
+        logger.info(f"  ➜ 扫描完成！共发现 {len(name_to_persons_map)} 个外文人物名需要翻译。")
 
-        # ======================================================================
-        # 阶段 2: 从本地数据库获取 Original Name
-        # ======================================================================
-        task_manager.update_status_from_thread(10, "阶段 2/3: 正在从本地缓存获取演员原始名...")
-        
+        task_manager.update_status_from_thread(10, "阶段 2/3: 正在从本地缓存获取人物原始名...")
+
         original_to_emby_name_map = {}
         texts_to_translate = set()
-        
-        tmdb_ids_to_query = list(set([int(actor['tmdb_id']) for actor in actors_to_enrich if actor.get('tmdb_id')]))
+
+        tmdb_ids_to_query = list(set(
+            int(p["tmdb_id"]) for p in persons_to_enrich if p.get("tmdb_id")
+        ))
 
         if tmdb_ids_to_query:
             tmdb_id_to_original_name = {}
@@ -236,53 +196,47 @@ def task_actor_translation(processor):
                     query = "SELECT tmdb_person_id, original_name FROM person_metadata WHERE tmdb_person_id = ANY(%s)"
                     cursor.execute(query, (tmdb_ids_to_query,))
                     for row in cursor.fetchall():
-                        tmdb_id_to_original_name[str(row['tmdb_person_id'])] = row['original_name']
-            
-            logger.trace(f"  ➜ 成功从本地数据库为 {len(tmdb_id_to_original_name)} 个TMDb ID找到了original_name。")
+                        tmdb_id_to_original_name[str(row["tmdb_person_id"])] = row["original_name"]
 
-            for actor in actors_to_enrich:
-                emby_name = actor['name']
-                tmdb_id = actor['tmdb_id']
+            for person in persons_to_enrich:
+                emby_name = person["name"]
+                tmdb_id = person["tmdb_id"]
                 original_name = tmdb_id_to_original_name.get(str(tmdb_id))
-                
+
                 text_for_translation = original_name if original_name and not utils.contains_chinese(original_name) else emby_name
-                
                 texts_to_translate.add(text_for_translation)
                 original_to_emby_name_map[text_for_translation] = emby_name
 
-        emby_names_with_tmdb_id = {actor['name'] for actor in actors_to_enrich}
+        emby_names_with_tmdb_id = {p["name"] for p in persons_to_enrich}
         for emby_name in name_to_persons_map.keys():
             if emby_name not in emby_names_with_tmdb_id:
                 texts_to_translate.add(emby_name)
                 original_to_emby_name_map[emby_name] = emby_name
 
-        # ======================================================================
-        # 阶段 3: 分批翻译并并发写回
-        # ======================================================================
         all_names_list = list(texts_to_translate)
-        TRANSLATION_BATCH_SIZE = 50
-        total_names_to_process = len(all_names_list)
-        total_batches = (total_names_to_process + TRANSLATION_BATCH_SIZE - 1) // TRANSLATION_BATCH_SIZE
-        
+        batch_size = 50
+        total_names = len(all_names_list)
+        total_batches = (total_names + batch_size - 1) // batch_size
         total_updated_count = 0
 
-        for i in range(0, total_names_to_process, TRANSLATION_BATCH_SIZE):
+        for i in range(0, total_names, batch_size):
             if processor.is_stop_requested():
                 logger.info("任务在翻译阶段被用户中断。")
                 break
 
-            current_batch_names = all_names_list[i:i + TRANSLATION_BATCH_SIZE]
-            batch_num = (i // TRANSLATION_BATCH_SIZE) + 1
-            
-            progress = int(20 + (i / total_names_to_process) * 80)
+            current_batch_names = all_names_list[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            progress = int(20 + (i / total_names) * 80) if total_names else 100
+
             task_manager.update_status_from_thread(
-                progress, 
+                progress,
                 f"阶段 3/3: 正在翻译批次 {batch_num}/{total_batches} (已成功 {total_updated_count} 个)"
             )
-            
+
             try:
                 translation_map = processor.ai_translator.batch_translate(
-                    texts=current_batch_names, mode="transliterate"
+                    texts=current_batch_names,
+                    mode="fast"
                 )
             except Exception as e_trans:
                 logger.error(f"翻译批次 {batch_num} 时发生错误: {e_trans}，将跳过此批次。")
@@ -292,23 +246,18 @@ def task_actor_translation(processor):
                 logger.warning(f"翻译批次 {batch_num} 未能返回任何结果。")
                 continue
 
-            batch_updated_count = 0
-            
-            # 1. 准备好所有需要更新的任务
             update_tasks = []
             for original_name, translated_name in translation_map.items():
-                # --- [新增日志] 详细记录跳过原因 ---
                 if not translated_name:
                     logger.warning(f"    - ➜ [跳过] 原名: '{original_name}' -> 翻译结果为空")
                     continue
-                
+
                 if original_name == translated_name:
-                    # 如果翻译结果和原文一样，说明AI认为不需要翻译，或者翻译失败
                     logger.info(f"  ➜ [跳过] 原名: '{original_name}' -> 结果与原文相同 (未变)")
                     continue
-                # -----------------------------------
 
-                persons_to_update = name_to_persons_map.get(original_name, [])
+                emby_name = original_to_emby_name_map.get(original_name, original_name)
+                persons_to_update = name_to_persons_map.get(emby_name, [])
                 for person in persons_to_update:
                     update_tasks.append((person.get("Id"), translated_name))
 
@@ -316,9 +265,7 @@ def task_actor_translation(processor):
                 logger.info(f"  ➜ 批次 {batch_num}: 翻译结果经比对后无有效变更，跳过写入。")
                 continue
 
-            logger.info(f"  ➜ 批次 {batch_num}/{total_batches}: 准备并发写入 {len(update_tasks)} 个更新...")
-            
-            # 2. 使用 ThreadPoolExecutor 执行并发更新
+            batch_updated_count = 0
             with ThreadPoolExecutor(max_workers=10) as executor:
                 future_to_task = {
                     executor.submit(
@@ -334,35 +281,29 @@ def task_actor_translation(processor):
                 for future in as_completed(future_to_task):
                     if processor.is_stop_requested():
                         break
-                    
-                    task_info = future_to_task[future] # (person_id, new_name)
+                    task_info = future_to_task[future]
                     try:
                         success = future.result()
                         if success:
                             batch_updated_count += 1
                         else:
-                            # --- [新增日志] 记录API调用失败 ---
-                            logger.warning(f"    - ➜ [更新失败] Emby API 拒绝更新演员 ID: {task_info[0]} -> '{task_info[1]}'")
+                            logger.warning(f"    - ➜ [更新失败] Emby API 拒绝更新人物 ID: {task_info[0]} -> '{task_info[1]}'")
                     except Exception as exc:
-                        logger.error(f"    - ➜ [异常] 更新演员 (ID: {task_info[0]}) 时发生错误: {exc}")
+                        logger.error(f"    - ➜ [异常] 更新人物 (ID: {task_info[0]}) 时发生错误: {exc}")
 
             total_updated_count += batch_updated_count
-            
             if batch_updated_count > 0:
-                logger.info(f"  ➜ 批次 {batch_num}/{total_batches} 完成，成功更新 {batch_updated_count} 个演员名。")
-        
-        # ======================================================================
-        # 阶段 3: 任务结束
-        # ======================================================================
-        final_message = f"  ➜ 任务完成！共成功翻译并更新了 {total_updated_count} 个演员名。"
+                logger.info(f"  ➜ 批次 {batch_num}/{total_batches} 完成，成功更新 {batch_updated_count} 个人物名。")
+
+        final_message = f"  ➜ 任务完成！共成功翻译并更新了 {total_updated_count} 个人物名。"
         if processor.is_stop_requested():
-            final_message = f"任务已中断。本次运行成功翻译并更新了 {total_updated_count} 个演员名。"
-        
+            final_message = f"任务已中断。本次运行成功翻译并更新了 {total_updated_count} 个人物名。"
+
         logger.info(final_message)
         task_manager.update_status_from_thread(100, final_message)
 
     except Exception as e:
-        logger.error(f"执行演员翻译任务时发生严重错误: {e}", exc_info=True)
+        logger.error(f"执行人物翻译任务时发生严重错误: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, f"任务失败: {e}")
 
 def task_merge_duplicate_actors(processor):
@@ -558,20 +499,6 @@ def task_merge_duplicate_actors(processor):
                 )
                 if delete_success:
                     deleted_count += 1
-                    try:
-                        with get_db_connection() as conn:
-                            with conn.cursor() as cursor:
-                                # ★★★ 修正 2/2: 更新映射表，而不是删除 ★★★
-                                cursor.execute(
-                                    "UPDATE person_metadata SET emby_person_id = %s WHERE tmdb_person_id = %s",
-                                    (keeper['Id'], tmdb_id)
-                                )
-                                if cursor.rowcount > 0:
-                                    logger.info(f"  ➜ 同步成功: 已将数据库中 TMDb ID '{tmdb_id}' 的映射更新为 Emby ID '{keeper['Id']}'。")
-                                else:
-                                    logger.warning(f"  ➜ 同步提醒: 在 person_metadata 中未找到 TMDb ID '{tmdb_id}'，无法更新。")
-                    except Exception as db_exc:
-                        logger.error(f"  ➜ 同步失败: 尝试更新 TMDb ID '{tmdb_id}' 的映射时出错: {db_exc}")
             else:
                 logger.error(f"  ➜ 由于媒体项更新失败，演员 '{deletee['Name']}' (ID: {deletee['Id']}) 将被跳过，不予删除，以保证数据安全。")
             
@@ -688,166 +615,13 @@ def task_purge_ghost_actors(processor):
             success = emby.delete_person_custom_api(
                 base_url=processor.emby_url, api_key=processor.emby_api_key, person_id=person_id
             )
-            
             if success:
                 deleted_count += 1
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("UPDATE person_metadata SET emby_person_id = NULL WHERE emby_person_id = %s", (person_id,))
-                            if cursor.rowcount > 0:
-                                logger.info(f"  ➜ 同步成功: 已从本地数据库解绑 Emby ID '{person_id}'。")
-                except Exception as db_exc:
-                    logger.error(f"  ➜ 同步失败: 尝试从本地数据库删除 ID '{person_id}' 时出错: {db_exc}")
-            
             time.sleep(0.2)
 
-        final_message = f"“幽灵演员”清理完成！共找到 {total_to_delete} 个目标，成功删除了 {deleted_count} 个。"
+        final_message = f"  ➜ “幽灵演员”清理完成！共找到 {total_to_delete} 个目标，成功删除了 {deleted_count} 个。"
         if processor.is_stop_requested():
             final_message = f"任务已中止。本次运行成功删除了 {deleted_count} 个“幽灵演员”。"
-        
-        logger.info(final_message)
-        task_manager.update_status_from_thread(100, final_message)
-
-    except Exception as e:
-        logger.error(f"执行 '{task_name}' 任务时发生严重错误: {e}", exc_info=True)
-        task_manager.update_status_from_thread(-1, f"任务失败: {e}")
-
-def task_purge_unregistered_actors(processor):
-    """
-    【高危 V5 - 命名修正版】
-    - 清理那些有关联媒体，但没有TMDb ID的“黑户”演员。
-    - 此任务只在你选定的媒体库范围内生效。
-    """
-    task_name = "删除黑户演员" 
-    logger.warning(f"--- !!! 开始执行高危任务: '{task_name}' !!! ---")
-
-    try:
-        # 1. 读取并验证媒体库配置
-        config = processor.config
-        library_ids_to_process = config.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS, [])
-
-        if not library_ids_to_process:
-            logger.error("  ➜ 任务中止：未在设置中选择任何要处理的媒体库。")
-            task_manager.update_status_from_thread(-1, "任务失败：未选择媒体库")
-            return
-
-        logger.info(f"  ➜ 将只扫描 {len(library_ids_to_process)} 个选定媒体库中的演员...")
-        task_manager.update_status_from_thread(10, f"  ➜ 正在从 {len(library_ids_to_process)} 个媒体库中获取所有媒体...")
-
-        # 2. 获取指定媒体库中的所有电影和剧集
-        all_media_items = emby.get_emby_library_items(
-            base_url=processor.emby_url,
-            api_key=processor.emby_api_key,
-            user_id=processor.emby_user_id,
-            library_ids=library_ids_to_process,
-            media_type_filter="Movie,Series",
-            fields="People"
-        )
-        if not all_media_items:
-            task_manager.update_status_from_thread(100, "  ➜ 任务完成：在选定的媒体库中未找到任何媒体项。")
-            return
-
-        # 3. 从媒体项中提取所有唯一的演员ID
-        task_manager.update_status_from_thread(30, "  ➜ 正在从媒体项中提取唯一的演员ID...")
-        unique_person_ids = set()
-        for item in all_media_items:
-            for person in item.get("People", []):
-                if person_id := person.get("Id"):
-                    unique_person_ids.add(person_id)
-        
-        person_ids_to_fetch = list(unique_person_ids)
-        logger.info(f"  ➜ 在选定媒体库中，共识别出 {len(person_ids_to_fetch)} 位独立演员。")
-
-        if not person_ids_to_fetch:
-            task_manager.update_status_from_thread(100, "  ➜ 任务完成：未在媒体项中找到任何演员。")
-            return
-
-        # 4. 分批获取这些演员的完整详情
-        task_manager.update_status_from_thread(50, f"  ➜ 正在分批获取 {len(person_ids_to_fetch)} 位演员的完整详情...")
-        all_people_in_scope_details = []
-        batch_size = 500
-        for i in range(0, len(person_ids_to_fetch), batch_size):
-            if processor.is_stop_requested():
-                logger.info("  ➜ 在分批获取演员详情阶段，任务被中止。")
-                break
-            
-            batch_ids = person_ids_to_fetch[i:i + batch_size]
-            logger.debug(f"  ➜ 正在获取批次 {i//batch_size + 1} 的演员详情 ({len(batch_ids)} 个)...")
-
-            person_details_batch = emby.get_emby_items_by_id(
-                base_url=processor.emby_url,
-                api_key=processor.emby_api_key,
-                user_id=processor.emby_user_id,
-                item_ids=batch_ids,
-                fields="ProviderIds,Name"
-            )
-            if person_details_batch:
-                all_people_in_scope_details.extend(person_details_batch)
-
-        if processor.is_stop_requested():
-            logger.warning("  ➜ 任务已中止。")
-            task_manager.update_status_from_thread(100, "任务已中止。")
-            return
-        
-        # ★★★ 新增：详细的获取结果统计日志 ★★★
-        logger.info(f"  ➜ 详情获取完成：成功获取到 {len(all_people_in_scope_details)} 位演员的完整详情。")
-
-        # 5. 基于完整的详情，筛选出真正的“幽灵”演员
-        ghosts_to_delete = [
-            p for p in all_people_in_scope_details 
-            if not p.get("ProviderIds", {}).get("Tmdb")
-        ]
-        total_to_delete = len(ghosts_to_delete)
-
-        # ★★★ 新增：核心的筛选结果统计日志 ★★★
-        logger.info(f"  ➜ 筛选完成：在 {len(all_people_in_scope_details)} 位演员中，发现 {total_to_delete} 个没有TMDb ID的“黑户演员”。")
-
-        if total_to_delete == 0:
-            # ★★★ 优化：更清晰的完成日志 ★★★
-            logger.info("  ➜ 扫描完成，在选定媒体库中未发现需要清理的“黑户演员”。")
-            task_manager.update_status_from_thread(100, "  ➜ 扫描完成，未发现无TMDb ID的演员。")
-            return
-        
-        logger.warning(f"  ➜ 共发现 {total_to_delete} 个“黑户演员”，即将开始删除...")
-        deleted_count = 0
-
-        # 6. 执行删除
-        for i, person in enumerate(ghosts_to_delete):
-            if processor.is_stop_requested():
-                logger.warning("  ➜ 任务被用户中止。")
-                break
-            
-            person_id = person.get("Id")
-            person_name = person.get("Name")
-            
-            progress = 60 + int((i / total_to_delete) * 40)
-            task_manager.update_status_from_thread(progress, f"({i+1}/{total_to_delete}) 正在删除: {person_name}")
-
-            success = emby.delete_person_custom_api(
-                base_url=processor.emby_url,
-                api_key=processor.emby_api_key,
-                person_id=person_id
-            )
-            
-            if success:
-                deleted_count += 1
-
-                #  如果 Emby 删除成功，则从本地数据库同步删除 
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("UPDATE person_metadata SET emby_person_id = NULL WHERE emby_person_id = %s", (person_id,))
-                            if cursor.rowcount > 0:
-                                logger.info(f"  ➜ 同步成功: 已从本地数据库解绑 Emby ID '{person_id}'。")
-                except Exception as db_exc:
-                    logger.error(f"      ➜ 同步失败: 尝试从 person_metadata 更新 ID '{person_id}' 时出错: {db_exc}")
-            
-            time.sleep(0.2)
-
-        final_message = f"清理完成！共找到 {total_to_delete} 个目标，成功删除了 {deleted_count} 个。"
-        if processor.is_stop_requested():
-            final_message = f"任务已中止。共删除了 {deleted_count} 个“黑户演员”。"
         
         logger.info(final_message)
         task_manager.update_status_from_thread(100, final_message)

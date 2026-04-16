@@ -1664,8 +1664,8 @@ class SmartOrganizer:
 
         # 4. 编码 (Codec) - ★ 统一使用商业名
         codec = ""
-        if re.search(r'[HX]265|HEVC', name_upper): codec = 'HEVC'
-        elif re.search(r'[HX]264|AVC', name_upper): codec = 'AVC'
+        if re.search(r'[HX][\.\s]?265|HEVC', name_upper): codec = 'HEVC'
+        elif re.search(r'[HX][\.\s]?264|AVC', name_upper): codec = 'AVC'
         elif re.search(r'AV1', name_upper): codec = 'AV1'
         
         bit_match = re.search(r'(\d{1,2})BIT', name_upper)
@@ -2691,16 +2691,19 @@ class SmartOrganizer:
         # =================================================================
         memory_dir_cache = {}
         
-        # 提前拉取目标主目录下的现有文件夹，填充到内存缓存中 (只需 1 次 API 请求)
+        # 提前拉取目标主目录下的现有文件夹，填充到内存缓存中 (★ 优化：直接查本地数据库，零 API 消耗)
         if final_home_cid:
             try:
-                existing_dirs_res = self.client.fs_files({'cid': final_home_cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
-                for item in existing_dirs_res.get('data', []):
-                    if str(item.get('fc') or item.get('type')) == '0':
-                        d_name = item.get('fn') or item.get('n') or item.get('file_name')
-                        d_id = item.get('fid') or item.get('file_id')
-                        if d_name and d_id:
-                            memory_dir_cache[f"{final_home_cid}_{d_name}"] = d_id
+                from database.connection import get_db_connection
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # 直接拉取该目录下的所有缓存项，利用 parent_id 索引极速返回
+                        cursor.execute("SELECT id, name FROM p115_filesystem_cache WHERE parent_id = %s", (str(final_home_cid),))
+                        for row in cursor.fetchall():
+                            d_name = row['name']
+                            d_id = str(row['id'])
+                            if d_name and d_id:
+                                memory_dir_cache[f"{final_home_cid}_{d_name}"] = d_id
             except Exception as e:
                 pass
 
@@ -2878,31 +2881,35 @@ class SmartOrganizer:
         
         for batch_target_cid, items in move_groups.items():
             # -----------------------------------------------------------
-            # ★ 1. 移动前：拉取目标目录现有文件，进行冲突检测
+            # ★ 1. 移动前：拉取目标目录现有文件，进行冲突检测 (★ 优化：直接查本地数据库缓存，零 API 消耗)
             # -----------------------------------------------------------
-            existing_res = self.client.fs_files({'cid': batch_target_cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
-            existing_files = [f for f in existing_res.get('data', []) if str(f.get('fc') or f.get('type')) == '1']
-            
             existing_names = {}      # name -> fid (用于精准同名覆盖)
             existing_tv_eps = {}     # (s, e) -> [fid1, fid2] (用于剧集洗版)
             existing_movie_vids = [] # [fid1, fid2] (用于电影洗版)
             
-            for ef in existing_files:
-                e_name = ef.get('fn') or ef.get('n') or ef.get('file_name')
-                e_fid = str(ef.get('fid') or ef.get('file_id'))
-                e_ext = e_name.split('.')[-1].lower() if '.' in e_name else ''
-                
-                if e_ext in known_video_exts:
-                    existing_names[e_name] = e_fid
-                    if self.media_type == 'tv':
-                        # 提取目标目录已有文件的 SxxEyy
-                        match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', e_name, re.IGNORECASE)
-                        if match:
-                            s, e = int(match.group(1)), int(match.group(2))
-                            if (s, e) not in existing_tv_eps: existing_tv_eps[(s, e)] = []
-                            existing_tv_eps[(s, e)].append(e_fid)
-                    else:
-                        existing_movie_vids.append(e_fid)
+            try:
+                from database.connection import get_db_connection
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT id, name FROM p115_filesystem_cache WHERE parent_id = %s", (str(batch_target_cid),))
+                        for row in cursor.fetchall():
+                            e_name = row['name']
+                            e_fid = str(row['id'])
+                            e_ext = e_name.split('.')[-1].lower() if '.' in e_name else ''
+                            
+                            if e_ext in known_video_exts:
+                                existing_names[e_name] = e_fid
+                                if self.media_type == 'tv':
+                                    # 提取目标目录已有文件的 SxxEyy
+                                    match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', e_name, re.IGNORECASE)
+                                    if match:
+                                        s, e = int(match.group(1)), int(match.group(2))
+                                        if (s, e) not in existing_tv_eps: existing_tv_eps[(s, e)] = []
+                                        existing_tv_eps[(s, e)].append(e_fid)
+                                else:
+                                    existing_movie_vids.append(e_fid)
+            except Exception as e:
+                logger.warning(f"  ➜ [冲突检测] 查询本地缓存失败: {e}")
 
             valid_items = []
             fids_to_delete = set()
@@ -2999,8 +3006,8 @@ class SmartOrganizer:
                                     if os.path.exists(old_dir_full_path):
                                         old_dirs_to_check.add(old_dir_full_path) # ★ 记录旧目录
                                         for f in os.listdir(old_dir_full_path):
-                                            # ★ 核心修复：把 nfo 也加进去，连同字幕一起删
-                                            if f.startswith(old_base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo']:
+                                            # ★ 核心修复：把 nfo 和图片也加进去，连同字幕一起删，彻底擦干净屁股
+                                            if f.startswith(old_base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo', 'jpg', 'png', 'jpeg', 'bif']:
                                                 sub_to_del = os.path.join(old_dir_full_path, f)
                                                 try:
                                                     os.remove(sub_to_del)
@@ -3032,7 +3039,7 @@ class SmartOrganizer:
 
                                         if not has_media:
                                             shutil.rmtree(curr_dir)
-                                            logger.info(f"  ➜ [完美擦屁股] 本地旧目录已无媒体文件，连锅端删除: {curr_dir}")
+                                            logger.info(f"  ➜ 本地旧目录已无媒体文件，连目录删除: {curr_dir}")
                                             curr_dir = os.path.dirname(curr_dir)
                                         else:
                                             break
@@ -3954,7 +3961,7 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
             old_base_name = os.path.splitext(os.path.basename(old_file_rel_path))[0]
             if os.path.exists(old_dir_full_path):
                 for f in os.listdir(old_dir_full_path):
-                    if f.startswith(old_base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo']:
+                    if f.startswith(old_base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo', 'jpg', 'png', 'jpeg', 'bif']:
                         sub_to_del = os.path.join(old_dir_full_path, f)
                         try:
                             os.remove(sub_to_del)

@@ -18,7 +18,6 @@
           </n-checkbox-group>
         </n-form-item>
         
-        <!-- 当勾选无脑转存时显示警告提示 -->
         <n-alert v-if="config.monitor_types && config.monitor_types.includes('all')" type="warning" style="margin-bottom: 24px;" :show-icon="true">
           <b>警告：</b>开启“无脑转存”后，将无视您的订阅列表、追剧状态和本地去重逻辑，全盘接收频道发布的所有 115 资源！<br/>
           这可能会快速消耗您的 115 空间配额和影巢积分，请谨慎使用。
@@ -44,8 +43,22 @@
           <n-select v-model:value="config.channels" multiple filterable tag placeholder="输入频道 Username 或 ID 并回车 (如 hdtv115)" :options="[]" />
         </n-form-item>
 
-        <n-form-item label="拦截关键词" path="block_keywords">
-          <n-select v-model:value="config.block_keywords" multiple filterable tag placeholder="输入关键词并回车 (如: 合集, 原盘, 大包)" :options="[]" />
+        <n-form-item path="block_keywords">
+          <template #label>
+            拦截规则
+            <n-tooltip trigger="hover">
+              <template #trigger><n-icon style="margin-left:4px; cursor:help;"><HelpCircleOutline /></n-icon></template>
+              命中规则的消息将被直接丢弃。支持普通关键词或正则表达式 (如: <code>合集|原盘|大包</code> 或 <code>^\[广告\]</code>)
+            </n-tooltip>
+          </template>
+          <n-dynamic-input v-model:value="config.block_keywords" @create="onCreateRegexObj" :min="0">
+            <template #default="{ value }">
+              <n-space align="center" :wrap="false" style="width: 100%">
+                <n-input v-model:value="value.pattern" placeholder="拦截关键词或正则" style="flex: 2" />
+                <n-select v-model:value="value.channel" :options="channelOptions" placeholder="指定频道" style="flex: 1" />
+              </n-space>
+            </template>
+          </n-dynamic-input>
         </n-form-item>
 
         <n-divider title-placement="left">登录授权</n-divider>
@@ -68,13 +81,94 @@
           </n-space>
         </n-form-item>
 
-        <!-- 验证码输入框 -->
         <n-form-item v-if="showCodeInput" label="输入验证码">
           <n-input-group>
             <n-input v-model:value="userBotCode" placeholder="输入 TG 收到的验证码" />
             <n-button type="primary" @click="submitUserBotCode" :loading="isSubmittingCode">确认登录</n-button>
           </n-input-group>
         </n-form-item>
+
+        <!-- ★★★ 高级设置：自定义正则 (支持频道隔离) ★★★ -->
+        <n-collapse style="margin-top: 24px; border-top: 1px solid rgba(128,128,128,0.2); padding-top: 16px;">
+          <n-collapse-item title="高级设置：自定义正则提取 (点击展开)" name="1">
+            <n-alert type="info" style="margin-bottom: 16px; font-size: 13px;">
+              当默认规则无法识别某些奇葩频道的格式时，可在此添加自定义正则表达式。<br/>
+              <b>注意：</b>必须使用 <code>()</code> 捕获组来提取目标内容。支持指定频道 (填 Username 或 ID)，<b>留空则全局生效</b>。
+            </n-alert>
+
+            <n-form-item>
+              <template #label>
+                TMDB ID 提取
+                <n-tooltip trigger="hover">
+                  <template #trigger><n-icon style="margin-left:4px; cursor:help;"><HelpCircleOutline /></n-icon></template>
+                  需 1 个捕获组。例如：<code>TMDB:\s*(\d+)</code>
+                </n-tooltip>
+              </template>
+              <n-dynamic-input v-model:value="config.custom_regex.tmdb" @create="onCreateRegexObj" :min="0">
+                <template #default="{ value }">
+                  <n-space align="center" :wrap="false" style="width: 100%">
+                    <n-input v-model:value="value.pattern" placeholder="正则表达式" style="flex: 2" />
+                    <n-select v-model:value="value.channel" :options="channelOptions" placeholder="指定频道" style="flex: 1" />
+                  </n-space>
+                </template>
+              </n-dynamic-input>
+            </n-form-item>
+
+            <n-form-item>
+              <template #label>
+                标题与年份提取
+                <n-tooltip trigger="hover">
+                  <template #trigger><n-icon style="margin-left:4px; cursor:help;"><HelpCircleOutline /></n-icon></template>
+                  需 2 个捕获组 (标题, 年份)。例如：<code>名称:\s*(.*?)\s*\((\d{4})\)</code>
+                </n-tooltip>
+              </template>
+              <n-dynamic-input v-model:value="config.custom_regex.title_year" @create="onCreateRegexObj" :min="0">
+                <template #default="{ value }">
+                  <n-space align="center" :wrap="false" style="width: 100%">
+                    <n-input v-model:value="value.pattern" placeholder="正则表达式" style="flex: 2" />
+                    <n-select v-model:value="value.channel" :options="channelOptions" placeholder="指定频道" style="flex: 1" />
+                  </n-space>
+                </template>
+              </n-dynamic-input>
+            </n-form-item>
+
+            <n-form-item>
+              <template #label>
+                季与集提取
+                <n-tooltip trigger="hover">
+                  <template #trigger><n-icon style="margin-left:4px; cursor:help;"><HelpCircleOutline /></n-icon></template>
+                  需 2 个捕获组 (季, 集) 或 1 个捕获组 (集)。例如：<code>S(\d+)E(\d+)</code>
+                </n-tooltip>
+              </template>
+              <n-dynamic-input v-model:value="config.custom_regex.season_episode" @create="onCreateRegexObj" :min="0">
+                <template #default="{ value }">
+                  <n-space align="center" :wrap="false" style="width: 100%">
+                    <n-input v-model:value="value.pattern" placeholder="正则表达式" style="flex: 2" />
+                    <n-select v-model:value="value.channel" :options="channelOptions" placeholder="指定频道" style="flex: 1" />
+                  </n-space>
+                </template>
+              </n-dynamic-input>
+            </n-form-item>
+
+            <n-form-item>
+              <template #label>
+                提取码(密码)提取
+                <n-tooltip trigger="hover">
+                  <template #trigger><n-icon style="margin-left:4px; cursor:help;"><HelpCircleOutline /></n-icon></template>
+                  需 1 个捕获组。例如：<code>密码:\s*([a-zA-Z0-9]{4})</code>
+                </n-tooltip>
+              </template>
+              <n-dynamic-input v-model:value="config.custom_regex.password" @create="onCreateRegexObj" :min="0">
+                <template #default="{ value }">
+                  <n-space align="center" :wrap="false" style="width: 100%">
+                    <n-input v-model:value="value.pattern" placeholder="正则表达式" style="flex: 2" />
+                    <n-select v-model:value="value.channel" :options="channelOptions" placeholder="指定频道" style="flex: 1" />
+                  </n-space>
+                </template>
+              </n-dynamic-input>
+            </n-form-item>
+          </n-collapse-item>
+        </n-collapse>
 
       </n-form>
     </n-spin>
@@ -89,10 +183,12 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
+import { HelpCircleOutline } from '@vicons/ionicons5';
 import { 
   NModal, NSpin, NForm, NFormItem, NInput, NSwitch, NCheckboxGroup, NCheckbox, 
-  NSpace, NSelect, NDivider, NAlert, NTag, NButton, NInputGroup, useMessage 
+  NSpace, NSelect, NDivider, NAlert, NTag, NButton, NInputGroup, useMessage,
+  NCollapse, NCollapseItem, NTooltip, NIcon, NDynamicInput 
 } from 'naive-ui';
 import axios from 'axios';
 
@@ -109,7 +205,13 @@ const config = ref({
   password: '',
   channels: [],
   monitor_types: ['movie', 'tv'],
-  block_keywords: []
+  block_keywords: [],
+  custom_regex: {
+    tmdb: [],
+    title_year: [],
+    season_episode: [],
+    password: []
+  }
 });
 
 // 授权状态
@@ -118,6 +220,22 @@ const showCodeInput = ref(false);
 const userBotCode = ref('');
 const isSendingCode = ref(false);
 const isSubmittingCode = ref(false);
+
+// 生成频道下拉选项
+const channelOptions = computed(() => {
+  const options = [{ label: '全局生效 (不限频道)', value: '' }];
+  if (config.value.channels && config.value.channels.length > 0) {
+    config.value.channels.forEach(c => {
+      options.push({ label: c, value: c });
+    });
+  }
+  return options;
+});
+
+// 创建新的正则对象
+const onCreateRegexObj = () => {
+  return { pattern: '', channel: '' };
+};
 
 // 暴露给父组件调用的方法
 const open = async () => {
@@ -134,6 +252,30 @@ const fetchConfig = async () => {
     const res = await axios.get('/api/subscription/tg_userbot/config');
     if (res.data.success) {
       config.value = res.data.data;
+      
+      // ★ 兼容旧版数据：将纯字符串数组转换为对象数组
+      if (Array.isArray(config.value.block_keywords)) {
+        config.value.block_keywords = config.value.block_keywords.map(item => {
+          return typeof item === 'string' ? { pattern: item, channel: '' } : item;
+        });
+      }
+      if (!config.value.custom_regex) {
+        config.value.custom_regex = { tmdb: [], title_year: [], season_episode: [], password: [] };
+      } else {
+        const keys = ['tmdb', 'title_year', 'season_episode', 'password'];
+        keys.forEach(key => {
+          if (Array.isArray(config.value.custom_regex[key])) {
+            config.value.custom_regex[key] = config.value.custom_regex[key].map(item => {
+              if (typeof item === 'string') {
+                return { pattern: item, channel: '' }; // 旧版数据默认全局生效
+              }
+              return item;
+            });
+          } else {
+            config.value.custom_regex[key] = [];
+          }
+        });
+      }
     }
   } catch (e) {
     message.error('读取配置失败');
@@ -148,7 +290,7 @@ const saveConfig = async () => {
     const res = await axios.post('/api/subscription/tg_userbot/config', config.value);
     if (res.data.success) {
       message.success(res.data.message);
-      await checkUserBotStatus(); // 保存后重新刷新状态
+      await checkUserBotStatus(); 
     }
   } catch (e) {
     message.error('保存失败');

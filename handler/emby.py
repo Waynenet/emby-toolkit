@@ -361,7 +361,7 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
     if fields:
         fields_to_request = fields
     else:
-        fields_to_request = "Type,ProviderIds,People,Path,OriginalTitle,DateCreated,PremiereDate,ProductionYear,ChildCount,RecursiveItemCount,Overview,CommunityRating,OfficialRating,Genres,Studios,Taglines,MediaStreams,TagItems,Tags"
+        fields_to_request = "Type,ProviderIds,People,Path,OriginalTitle,DateCreated,PremiereDate,ProductionYear,ChildCount,RecursiveItemCount,Overview,CommunityRating,OfficialRating,Genres,Studios,Taglines,MediaStreams,TagItems,Tags,Path"
 
     params = {
         "api_key": emby_api_key,
@@ -734,76 +734,6 @@ def get_emby_library_items(
     
     return all_items_from_selected_libraries
 
-# ✨✨✨ 刷新Emby元数据 ✨✨✨
-def refresh_emby_item_metadata(item_emby_id: str,
-                               emby_server_url: str,
-                               emby_api_key: str,
-                               user_id_for_ops: str,
-                               replace_all_metadata_param: bool = False,
-                               replace_all_images_param: bool = False,
-                               item_name_for_log: Optional[str] = None
-                               ) -> bool:
-    if not all([item_emby_id, emby_server_url, emby_api_key, user_id_for_ops]):
-        logger.error("刷新Emby元数据参数不足：缺少ItemID、服务器URL、API Key或UserID。")
-        return False
-    wait_for_server_idle(emby_server_url, emby_api_key)
-    log_identifier = f"'{item_name_for_log}'" if item_name_for_log else f"ItemID: {item_emby_id}"
-    
-    try:
-        logger.trace(f"  ➜ 正在为 {log_identifier} 获取当前详情...")
-        item_data = get_emby_item_details(item_emby_id, emby_server_url, emby_api_key, user_id_for_ops)
-        if not item_data:
-            logger.error(f"  ➜ 无法获取 {log_identifier} 的详情，所有操作中止。")
-            return False
-
-        item_needs_update = False
-        
-        if replace_all_metadata_param:
-            logger.trace(f"  ➜ 检测到 ReplaceAllMetadata=True，执行解锁...")
-            if item_data.get("LockData") is True:
-                item_data["LockData"] = False
-                item_needs_update = True
-            if item_data.get("LockedFields"):
-                item_data["LockedFields"] = []
-                item_needs_update = True
-        
-        if item_needs_update:
-            logger.trace(f"  ➜ 正在为 {log_identifier} 提交锁状态更新...")
-            update_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}"
-            update_params = {"api_key": emby_api_key}
-            headers = {'Content-Type': 'application/json'}
-            update_response = emby_client.post(update_url, json=item_data, headers=headers, params=update_params)
-            update_response.raise_for_status()
-            logger.trace(f"  ➜ 成功更新 {log_identifier} 的锁状态。")
-        else:
-            logger.trace(f"  ➜ 项目 {log_identifier} 的锁状态无需更新。")
-
-    except Exception as e:
-        logger.warning(f"  ➜ 在刷新前更新锁状态时失败: {e}。刷新将继续，但可能受影响。")
-
-    logger.debug(f"  ➜ 正在为 {log_identifier} 发送最终的刷新请求...")
-    refresh_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}/Refresh"
-    params = {
-        "api_key": emby_api_key,
-        "Recursive": str(item_data.get("Type") == "Series").lower(),
-        "MetadataRefreshMode": "Default",
-        "ImageRefreshMode": "Default",
-        "ReplaceAllMetadata": str(replace_all_metadata_param).lower(),
-        "ReplaceAllImages": str(replace_all_images_param).lower()
-    }
-    
-    try:
-        response = emby_client.post(refresh_url, params=params)
-        if response.status_code == 204:
-            logger.info(f"  ➜ 已成功为 {log_identifier} 刷新元数据。")
-            return True
-        else:
-            logger.error(f"  - 刷新请求失败: HTTP状态码 {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"  - 刷新请求时发生网络错误: {e}")
-        return False
-
 def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
     """
     【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。
@@ -883,7 +813,7 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
         # 直接提取所有文件所在的目录，去重 (防止批量入库时重复刷新同一个父目录)
         dirs_to_refresh = set(os.path.dirname(p) for p in file_paths if p)
         
-        #logger.info(f"  ➜ [极速通知] 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
+        # logger.info(f"  ➜ 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
         
         # 直接拿鞭子抽，让 Emby 扫目录
         for d in dirs_to_refresh:
@@ -896,66 +826,67 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
 
 # ✨✨✨ 分批次地从 Emby 获取所有 Person 条目 ✨✨✨
 def get_all_persons_from_emby(
-    base_url: str, 
-    api_key: str, 
-    user_id: Optional[str], 
+    base_url: str,
+    api_key: str,
+    user_id: Optional[str],
     stop_event: Optional[threading.Event] = None,
     batch_size: int = 500,
     update_status_callback: Optional[Callable] = None,
-    force_full_scan: bool = False
+    force_full_scan: bool = False,
+    source_item_types: str = "Movie,Series,Season,Episode",
 ) -> Generator[List[Dict[str, Any]], None, None]:
-    """
-    【V6.0 - 4.9+ 终极兼容版】
-    - 修正了全量扫描模式，使其在 Emby 4.9+ 上能正常工作。
-    - 同样切换到 /Items 端点并移除了 UserId 参数。
-    """
     if not user_id:
-        logger.error("  ➜ 获取所有演员需要提供 User ID，但未提供。任务中止。")
+        logger.error("  ➜ 获取所有人物需要提供 User ID，但未提供。任务中止。")
         return
 
     library_ids = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS)
-    
-    # ======================================================================
-    # 模式一：尝试按媒体库进行精准扫描 (如果配置了媒体库且未强制全量)
-    # ======================================================================
+
     if library_ids and not force_full_scan:
         logger.info(f"  ➜ 检测到配置了 {len(library_ids)} 个媒体库，将优先尝试精准扫描...")
-        
+
         media_items = get_emby_library_items(
-            base_url=base_url, api_key=api_key, user_id=user_id,
-            library_ids=library_ids, media_type_filter="Movie,Series", fields="People"
+            base_url=base_url,
+            api_key=api_key,
+            user_id=user_id,
+            library_ids=library_ids,
+            media_type_filter=source_item_types,
+            fields="People"
         )
 
         unique_person_ids = set()
         if media_items:
             for item in media_items:
-                if stop_event and stop_event.is_set(): return
+                if stop_event and stop_event.is_set():
+                    return
                 for person in item.get("People", []):
-                    if person_id := person.get("Id"):
+                    person_id = person.get("Id")
+                    if person_id:
                         unique_person_ids.add(person_id)
 
-        # ★★★ 核心智能检测逻辑 ★★★
-        # 如果成功通过精准模式获取到了演员ID，则继续执行并返回
         if unique_person_ids:
-            logger.info(f"  ➜ 精准扫描成功，发现 {len(unique_person_ids)} 位独立演员需要同步。")
+            logger.info(f"  ➜ 精准扫描成功，发现 {len(unique_person_ids)} 位独立人物需要同步。")
             person_ids_to_fetch = list(unique_person_ids)
-            
+
             precise_batch_size = 500
             total_precise = len(person_ids_to_fetch)
             processed_precise = 0
             for i in range(0, total_precise, precise_batch_size):
-                if stop_event and stop_event.is_set(): return
+                if stop_event and stop_event.is_set():
+                    return
                 batch_ids = person_ids_to_fetch[i:i + precise_batch_size]
                 person_details_batch = get_emby_items_by_id(
-                    base_url=base_url, api_key=api_key, user_id=user_id,
-                    item_ids=batch_ids, fields="ProviderIds,Name"
+                    base_url=base_url,
+                    api_key=api_key,
+                    user_id=user_id,
+                    item_ids=batch_ids,
+                    fields="ProviderIds,Name"
                 )
                 if person_details_batch:
                     yield person_details_batch
                     processed_precise += len(person_details_batch)
                     if update_status_callback:
                         progress = int((processed_precise / total_precise) * 95)
-                        update_status_callback(progress, f"已扫描 {processed_precise}/{total_precise} 名演员...")
+                        update_status_callback(progress, f"已扫描 {processed_precise}/{total_precise} 名人物...")
             return # ★★★ 精准模式成功，任务结束 ★★★
 
         # ★★★ 自动降级触发点 ★★★
@@ -2136,10 +2067,6 @@ def set_user_disabled_status(
 
     except Exception as e:
         logger.error(f"{action_text}用户 '{user_name_for_log}' 时发生严重错误: {e}", exc_info=True)
-        return False
-
-    except Exception as e:
-        logger.error(f"{action_text}用户 {user_id} 时发生严重错误: {e}", exc_info=True)
         return False
 
 # --- 获取用户完整详情 (含 Policy 和 Configuration) ---

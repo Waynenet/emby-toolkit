@@ -20,8 +20,7 @@ def _format_dateadded(date_str):
 
 def _add_common_elements(root, data):
     """添加所有 NFO 共用的基础标签"""
-    _add_element(root, 'outline', data.get('overview'))
-    _add_element(root, 'lockdata', 'false')
+    _add_element(root, 'lockdata', 'true')
     date_added = data.get('date_added')
     if date_added:
         _add_element(root, 'dateadded', _format_dateadded(date_added))
@@ -66,6 +65,30 @@ def _add_genres_and_tags(root, data):
         for tag in raw_keywords:
             _add_element(root, 'tag', tag.get('name') if isinstance(tag, dict) else tag)
 
+def _add_directors(root, data):
+    """统一的导演标签生成器，同时写入标准 director 标签和带头像的 actor 标签"""
+    top_directors = extract_top_directors(data, max_count=3)
+    for d in top_directors:
+        # 1. 写入标准的 director 标签 (兼容 Kodi)
+        dir_elem = ET.SubElement(root, 'director')
+        if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
+        dir_elem.text = d.get('name')
+        
+        # 2. ★★★ 核心修复：写入 Emby 专属的带头像导演标签 ★★★
+        # 通过伪装成 actor 并指定 type="Director"，Emby 会立即加载头像，且不会混入演员表
+        actor_elem = ET.SubElement(root, 'actor')
+        _add_element(actor_elem, 'name', d.get('name'))
+        _add_element(actor_elem, 'type', 'Director')
+        _add_element(actor_elem, 'role', 'Director')
+        _add_element(actor_elem, 'order', '1000') # 赋予极高的 order，防止干扰正常演员排序
+        
+        if d.get('id'):
+            _add_element(actor_elem, 'tmdbid', str(d.get('id')))
+            
+        if d.get('profile_path'):
+            img_url = d['profile_path'] if d['profile_path'].startswith('http') else f"https://image.tmdb.org/t/p/w500{d['profile_path']}"
+            _add_element(actor_elem, 'thumb', img_url)
+
 def build_movie_nfo(data: dict, cast: list) -> str:
     root = ET.Element('movie')
     _add_element(root, 'plot', data.get('overview'))
@@ -109,22 +132,13 @@ def build_movie_nfo(data: dict, cast: list) -> str:
             _add_element(set_elem, 'overview', collection.get('overview'))
 
     _add_genres_and_tags(root, data)
+
+    for studio in data.get('production_companies', []):
+        _add_element(root, 'studio', studio.get('name') if isinstance(studio, dict) else studio)  
+          
     _add_actors(root, cast) 
-    extended_cast = list(cast)
-    top_directors = extract_top_directors(data, max_count=3)
-    for d in top_directors:
-        # 1. 写入标准的 director 标签 (兼容 Kodi)
-        dir_elem = ET.SubElement(root, 'director')
-        if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
-        dir_elem.text = d.get('name')
+    _add_directors(root, data)
         
-        # 2. 伪装成 Actor 塞进列表 (让 Emby 能读取头像)
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
 
 def build_tvshow_nfo(data: dict, cast: list) -> str:
@@ -176,19 +190,8 @@ def build_tvshow_nfo(data: dict, cast: list) -> str:
         _add_element(root, 'studio', studio.get('name') if isinstance(studio, dict) else studio)
 
     _add_actors(root, cast) 
-    extended_cast = list(cast)
-    top_directors = extract_top_directors(data, max_count=3)
-    for d in top_directors:
-        dir_elem = ET.SubElement(root, 'director')
-        if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
-        dir_elem.text = d.get('name')
+    _add_directors(root, data)
         
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
 
 def build_season_nfo(data: dict) -> str:
@@ -217,7 +220,6 @@ def build_episode_nfo(data: dict, cast: list) -> str:
     
     title = data.get('name') or data.get('title')
     _add_element(root, 'title', title)
-    # ★★★ 集也加上拼音排序 ★★★
     _add_element(root, 'sorttitle', get_pinyin_initials(title))
     
     _add_element(root, 'season', data.get('season_number'))
@@ -235,17 +237,6 @@ def build_episode_nfo(data: dict, cast: list) -> str:
         ET.SubElement(root, 'uniqueid', type='tmdb', default='true').text = str(data.get('id'))
         _add_element(root, 'tmdbid', data.get('id'))
 
-    extended_cast = list(cast)
-    top_directors = extract_top_directors(data, max_count=3)
-    for d in top_directors:
-        dir_elem = ET.SubElement(root, 'director')
-        if d.get('id'): dir_elem.set('tmdbid', str(d.get('id')))
-        dir_elem.text = d.get('name')
+    _add_directors(root, data)
         
-        d_copy = d.copy()
-        d_copy['type'] = 'Director'
-        d_copy['character'] = 'Director'
-        extended_cast.append(d_copy)
-        
-    _add_actors(root, extended_cast) 
     return minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
