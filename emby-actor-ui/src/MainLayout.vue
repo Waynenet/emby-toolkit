@@ -22,7 +22,7 @@
           <img :src="logo" alt="Logo" class="logo-img" />
         </div>
 
-        <!-- 中间 导航菜单 -->
+        <!-- 中间 导航菜单 (支持滚动但隐藏滚动条) -->
         <div class="sider-menu-container">
           <n-menu
             :collapsed="collapsed"
@@ -36,30 +36,39 @@
 
         <!-- 底部 工具栏与用户信息 -->
         <div class="sider-bottom-tools" v-show="!collapsed || isMobile">
-          <n-divider style="margin: 0 0 16px 0; opacity: 0.5;" />
+          <n-divider style="margin: 0 0 16px 0; opacity: 0.3;" />
           
-          <div class="tools-actions-row">
-            <n-button-group v-if="authStore.isAdmin" size="small">
-              <n-tooltip><template #trigger><n-button @click="isRealtimeLogVisible = true" circle ghost><template #icon><n-icon :component="ReaderOutline" /></template></n-button></template>实时日志</n-tooltip>
-              <n-tooltip><template #trigger><n-button @click="isHistoryLogVisible = true" circle ghost><template #icon><n-icon :component="ArchiveOutline" /></template></n-button></template>历史日志</n-tooltip>
-            </n-button-group>
-
-            <!-- 明暗切换 -->
-            <n-switch :value="props.isDark" @update:value="newValue => emit('update:is-dark', newValue)" size="small">
-              <template #checked-icon><n-icon :component="MoonIcon" /></template>
-              <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
-            </n-switch>
-          </div>
-
           <!-- 用户名下拉 -->
-          <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" :options="userOptions" @select="handleUserSelect">
-            <div class="user-profile-btn">
+          <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" placement="right-end" :options="userOptions" @select="handleUserSelect">
+            <div class="user-profile-btn" style="margin-bottom: 16px;">
               <n-icon size="20" :component="UserCenterIcon" />
               <span class="username-text">欢迎, {{ authStore.username }}</span>
             </div>
           </n-dropdown>
 
-          <div class="app-version">v{{ appVersion }}</div>
+          <!-- ★★★ 核心修改：底部工具行 (左日志 - 中版本 - 右主题) ★★★ -->
+          <div class="bottom-action-bar">
+            <!-- 左侧：日志按钮组 -->
+            <div class="action-left">
+              <n-button-group v-if="authStore.isAdmin" size="small">
+                <n-tooltip><template #trigger><n-button @click="isRealtimeLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ReaderOutline" /></template></n-button></template>实时日志</n-tooltip>
+                <n-tooltip><template #trigger><n-button @click="isHistoryLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ArchiveOutline" /></template></n-button></template>历史日志</n-tooltip>
+              </n-button-group>
+            </div>
+            
+            <!-- 中间：版本号 -->
+            <div class="action-center">
+              <span class="app-version">v{{ appVersion }}</span>
+            </div>
+
+            <!-- 右侧：暗黑模式切换 -->
+            <div class="action-right">
+              <n-switch :value="props.isDark" @update:value="newValue => emit('update:is-dark', newValue)" size="small">
+                <template #checked-icon><n-icon :component="MoonIcon" /></template>
+                <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
+              </n-switch>
+            </div>
+          </div>
         </div>
       </div>
     </n-layout-sider>
@@ -253,10 +262,19 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
-/* 中间菜单区弹性拉伸 */
+/* ★★★ 菜单区支持滚动且完全隐藏滚动条 ★★★ */
 .sider-menu-container {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Firefox 隐藏滚动条 */
+  scrollbar-width: none; 
+  /* IE and Edge 隐藏滚动条 */
+  -ms-overflow-style: none; 
+}
+/* Chrome, Safari, Opera 隐藏滚动条 */
+.sider-menu-container::-webkit-scrollbar {
+  display: none;
 }
 
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: #8e8e93; padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
@@ -268,11 +286,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-.tools-actions-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
 }
 .user-profile-btn {
   display: flex;
@@ -286,17 +299,40 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .user-profile-btn:hover { background: rgba(120, 120, 120, 0.2); }
 .username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.app-version { text-align: center; font-size: 12px; color: #999; opacity: 0.6; }
+
+/* ★★★ 底部工具行全新网格布局 ★★★ */
+.bottom-action-bar {
+  display: grid;
+  /* 左边1份，中间根据内容自适应，右边1份（保证中间的永远在正中央） */
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  width: 100%;
+}
+.action-left { 
+  justify-self: start; 
+  display: flex; 
+  gap: 4px; 
+}
+.action-center { 
+  justify-self: center; 
+}
+.action-right { 
+  justify-self: end; 
+}
+
+.app-version { 
+  font-size: 12px; 
+  color: var(--n-text-color-3); 
+  opacity: 0.6; 
+  font-family: monospace; 
+}
 
 /* 悬浮任务胶囊 (上方居中) */
 .floating-task-pill {
   position: absolute; 
   top: 20px; 
-  
-  /* ★★★ 核心修改：水平居中魔法 ★★★ */
   left: 50%;
   transform: translateX(-50%);
-  
   z-index: 50; 
   display: flex; 
   align-items: center;
