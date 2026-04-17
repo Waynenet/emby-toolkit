@@ -4,9 +4,9 @@ import base64
 import io
 import math
 import numpy as np
+import logging
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from gevent import sleep
-from app.log import logger
 from .style_single_2 import darken_color, find_dominant_vibrant_colors
 from .badge_drawer import draw_badge
 

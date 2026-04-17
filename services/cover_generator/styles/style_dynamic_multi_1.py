@@ -5,11 +5,11 @@ import io
 import math
 import os
 import random
+import logging
 from pathlib import Path
 from gevent import sleep
 
 from PIL import Image, ImageDraw, ImageOps
-from app.log import logger
 from .style_multi_1 import (
     POSTER_GEN_CONFIG, add_shadow, create_blur_background, 
     create_gradient_background, draw_color_block, draw_multiline_text_on_image, 
