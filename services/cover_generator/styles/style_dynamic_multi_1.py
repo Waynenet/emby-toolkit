@@ -61,7 +61,12 @@ def create_style_dynamic_multi_1(library_dir, title, font_path, font_size=(1,1),
         all_posters = sorted([os.path.join(poster_folder, f) for f in os.listdir(poster_folder) if f.lower().endswith(formats)])
         if not all_posters: return False
 
-        extended_posters = (all_posters * 3)[:rows * cols]
+        # 计算铺满画面一共需要多少张图
+        needed_count = rows * cols
+        
+        # 预先将现有的图片无限循环，确保丢给处理流程的路径数量足够
+        extended_posters = (all_posters * needed_count)[:needed_count]
+        
         processed_images = []
         for p_path in extended_posters:
             try:
@@ -73,7 +78,13 @@ def create_style_dynamic_multi_1(library_dir, title, font_path, font_size=(1,1),
                 processed_images.append(add_shadow(img, offset=(int(s(15)), int(s(15))), shadow_color=(0, 0, 0, 200), blur_radius=int(s(10))))
             except: pass
 
-        if len(processed_images) < 3: return False
+        # ★ 修改点：只要有 1 张成功处理的图就可以继续，不需要必须 3 张
+        if not processed_images: 
+            return False
+
+        # ★ 修改点：如果成功处理的图片数量不够铺满墙，就用已有的图片反复循环来填补
+        while len(processed_images) < needed_count:
+            processed_images.extend(processed_images[:needed_count - len(processed_images)])
 
         col_images = [[], [], []]
         for i in range(len(processed_images)): col_images[i % 3].append(processed_images[i])

@@ -225,7 +225,7 @@ class CoverGeneratorService:
                 return [item for item in fallback_items if self.__get_image_url(item)][:limit]
             except Exception as e: pass
         
-        media_type_to_fetch = content_types or (['Movie'] if library.get('Type') == 'BoxSet' else {'movies': ['Movie'], 'tvshows': ['Series'], 'music': ['MusicAlbum'], 'boxsets': ['Movie', 'Series'], 'mixed': ['Movie', 'Series'], 'audiobooks': ['AudioBook']}.get(library.get('CollectionType'), ['Movie', 'Series']))
+        media_type_to_fetch = content_types or (['Movie', 'Series'] if library.get('Type') == 'BoxSet' else {'movies': ['Movie'], 'tvshows': ['Series'], 'music': ['MusicAlbum'], 'boxsets': ['Movie', 'Series'], 'mixed': ['Movie', 'Series'], 'audiobooks': ['AudioBook']}.get(library.get('CollectionType'), ['Movie', 'Series']))
         db_sort_by = 'Random' if self._sort_by == 'Random' else 'DateCreated'
         
         try:
