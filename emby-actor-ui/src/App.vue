@@ -138,50 +138,22 @@ html, body {
 .dashboard-card:nth-child(4) { animation-delay: 0.20s; }
 .dashboard-card:nth-child(5) { animation-delay: 0.25s; }
 
-/* ==================== 5. 全局滚动条美化（隐藏丑陋的默认滚动条） ==================== */
-/* Chrome, Safari, Edge, Opera - 自定义细薄滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(128, 128, 128, 0.3);
-  border-radius: 3px;
-  transition: background 0.3s ease;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(128, 128, 128, 0.5);
-}
-
-/* 暗色模式下的滚动条 */
-html.dark ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-html.dark ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-/* Firefox - 细薄滚动条 */
+/* ==================== 5. 全局滚动条隐藏 (保留滚动功能) ==================== */
+/* 1. Firefox 浏览器 */
 * {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+  scrollbar-width: none; /* 关键：将滚动条宽度设为无 */
 }
 
-/* 特定需要完全隐藏滚动条的元素 */
-.no-scrollbar {
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* IE/Edge */
+/* 2. IE 和旧版 Edge (Legacy) */
+* {
+  -ms-overflow-style: none; 
 }
 
-.no-scrollbar::-webkit-scrollbar {
-  display: none; /* Chrome/Safari/Opera */
+/* 3. Chrome, Safari, Edge (Chromium), Opera */
+/* 注意：这里使用 ::-webkit-scrollbar 伪元素 */
+::-webkit-scrollbar {
+  display: none; /* 关键：直接不显示滚动条轨道和滑块 */
+  width: 0;      /* 兜底：确保不占位 */
+  height: 0;     /* 兜底：确保横向也不占位 */
 }
 </style>

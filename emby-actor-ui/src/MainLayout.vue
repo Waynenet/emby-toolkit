@@ -258,19 +258,11 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
-/* ★★★ 菜单区支持滚动且完全隐藏滚动条 ★★★ */
+/* ★★★ 菜单区支持滚动 ★★★ */
 .sider-menu-container {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  /* Firefox 隐藏滚动条 */
-  scrollbar-width: none; 
-  /* IE and Edge 隐藏滚动条 */
-  -ms-overflow-style: none; 
-}
-/* Chrome, Safari, Opera 隐藏滚动条 */
-.sider-menu-container::-webkit-scrollbar {
-  display: none;
 }
 
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: #8e8e93; padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
