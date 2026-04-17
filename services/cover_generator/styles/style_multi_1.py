@@ -23,7 +23,7 @@ POSTER_GEN_CONFIG = {
     "MARGIN": 22, 
     "CORNER_RADIUS": 46.1, 
     "ROTATION_ANGLE": -15.8,
-    "START_X": 1050, 
+    "START_X": 850, 
     "START_Y": -362, 
     "COLUMN_SPACING": 100, 
     "SAVE_COLUMNS": True,
