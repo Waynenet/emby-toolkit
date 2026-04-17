@@ -17,6 +17,8 @@ from .style_multi_1 import (
 )
 from .badge_drawer import draw_badge
 
+logger = logging.getLogger(__name__)
+
 def create_style_dynamic_multi_1(library_dir, title, font_path, font_size=(1,1), is_blur=False, blur_size=50, color_ratio=0.8, item_count=None, config=None):
     try:
         target_w, target_h = 640, 360
@@ -49,7 +51,7 @@ def create_style_dynamic_multi_1(library_dir, title, font_path, font_size=(1,1),
         text_shadow_color = darken_color(blur_color, 0.8)
         text_layer = draw_text_on_image(text_layer, title_zh, (s(73.32), s(427.34)), zh_font_path, "ch.ttf", zh_sz, shadow=is_blur, shadow_color=text_shadow_color)
         if title_en:
-            text_layer, lc = draw_multiline_text_on_image(text_layer, title_en, (s(124.68), s(624.55)), en_font_path, "en.otf", en_sz, int(en_sz*0.1), shadow=is_blur, shadow_color=text_shadow_color, is_multiline=True)
+            text_layer, lc = draw_multiline_text_on_image(text_layer, title_en, (s(124.68), s(624.55)), en_font_path, "en.otf", en_sz, int(en_sz*0.1), shadow=is_blur, shadow_color=text_shadow_color)
             text_layer = draw_color_block(text_layer, (s(84.38), s(620.06)), (s(21.51), int(en_sz * 1.5 * lc)), get_random_color(first_image_path))
 
         if config and config.get("show_item_count", False) and item_count is not None:

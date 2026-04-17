@@ -10,6 +10,8 @@ from gevent import sleep
 from .style_single_2 import darken_color, find_dominant_vibrant_colors
 from .badge_drawer import draw_badge
 
+logger = logging.getLogger(__name__)
+
 canvas_size = (640, 360)
 
 def _clamp(v, lo, hi): return max(lo, min(hi, v))
