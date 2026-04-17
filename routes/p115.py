@@ -569,6 +569,35 @@ def create_115_directory():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@p115_bp.route('/washing_priority_groups', methods=['GET', 'POST'])
+@admin_required
+def handle_washing_priority_groups():
+    from database.connection import get_db_connection
+    if request.method == 'GET':
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM washing_priority_groups ORDER BY sort_order ASC")
+                    return jsonify({"success": True, "data": cursor.fetchall()})
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+            
+    if request.method == 'POST':
+        groups = request.json
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("TRUNCATE TABLE washing_priority_groups")
+                    for i, g in enumerate(groups):
+                        cursor.execute("""
+                            INSERT INTO washing_priority_groups (name, media_type, target_cids, priorities, sort_order)
+                            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+                        """, (g['name'], g['media_type'], json.dumps(g.get('target_cids', [])), json.dumps(g.get('priorities', [])), i))
+                    conn.commit()
+            return jsonify({"success": True, "message": "洗版优先级规则已保存"})
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+
 @p115_bp.route('/sorting_rules', methods=['GET', 'POST'])
 @admin_required
 def handle_sorting_rules():
@@ -911,6 +940,9 @@ def get_organize_records():
                 cursor.execute("SELECT COUNT(*) as unrecognized FROM p115_organize_records WHERE status = 'unrecognized'")
                 stat_unrecognized = cursor.fetchone()['unrecognized']
                 
+                cursor.execute("SELECT COUNT(*) as unqualified FROM p115_organize_records WHERE status = 'unqualified'")
+                stat_unqualified = cursor.fetchone()['unqualified']
+                
                 cursor.execute("SELECT COUNT(*) as this_week FROM p115_organize_records WHERE processed_at >= NOW() - INTERVAL '7 days'")
                 stat_week = cursor.fetchone()['this_week']
 
@@ -926,6 +958,7 @@ def get_organize_records():
                         "total": stat_total,
                         "success": stat_success,
                         "unrecognized": stat_unrecognized,
+                        "unqualified": stat_unqualified,
                         "thisWeek": stat_week,
                         "center_cached": stat_center_cached
                     }

@@ -79,7 +79,7 @@
                 <n-radio-group v-model:value="config.conflict_mode">
                   <n-space vertical>
                     <n-radio value="replace">
-                      <b>替换</b>
+                      <b>洗版</b>
                       <div style="font-size: 12px; color: gray;">删除目标目录中同一集/同一电影的旧版本，移入新版本。</div>
                     </n-radio>
                     <n-radio value="keep_both">
@@ -95,12 +95,6 @@
               </n-form-item>
               <n-divider style="margin: 12px 0;" />
 
-              <n-form-item label="智能重命名">
-                <n-switch v-model:value="config.enable_smart_rename" />
-                <template #feedback>
-                  <span style="font-size: 12px; color: gray;">开启后将通过中心服务器查询媒体信息补齐缺失的参数（较慢）。关闭则仅通过文件名猜测(极速)。</span>
-                </template>
-              </n-form-item>
               <n-form-item label="STRM 链接格式">
                 <n-radio-group v-model:value="config.strm_url_fmt">
                   <n-space vertical>
@@ -187,7 +181,6 @@ const saving = ref(false);
 // 默认配置
 const config = ref({
   keep_original_name: false,
-  enable_smart_rename: true,
   conflict_mode: 'replace',
   main_dir_format: ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'],
   season_dir_format: ['season_name_en'],
