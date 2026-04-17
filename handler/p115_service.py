@@ -997,7 +997,7 @@ class P115CacheManager:
 # ======================================================================
 class P115RecordManager:
     @staticmethod
-    def add_or_update_record(file_id, original_name, status, tmdb_id=None, media_type=None, target_cid=None, category_name=None, renamed_name=None, is_center_cached=False, pick_code=None, season_number=None):
+    def add_or_update_record(file_id, original_name, status, tmdb_id=None, media_type=None, target_cid=None, category_name=None, renamed_name=None, is_center_cached=False, pick_code=None, season_number=None, fail_reason=None):
         """添加或更新整理记录（基于 file_id 和 pick_code 唯一约束，智能继承原名）"""
         if not file_id or not original_name: return
         try:
@@ -1014,8 +1014,8 @@ class P115RecordManager:
 
                     cursor.execute("""
                         INSERT INTO p115_organize_records 
-                        (file_id, pick_code, original_name, status, tmdb_id, media_type, target_cid, category_name, renamed_name, processed_at, is_center_cached, season_number)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s)
+                        (file_id, pick_code, original_name, status, tmdb_id, media_type, target_cid, category_name, renamed_name, processed_at, is_center_cached, season_number, fail_reason)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s)
                         ON CONFLICT (file_id) 
                         DO UPDATE SET 
                             pick_code = EXCLUDED.pick_code,
@@ -1027,10 +1027,11 @@ class P115RecordManager:
                             renamed_name = EXCLUDED.renamed_name,
                             processed_at = NOW(),
                             is_center_cached = p115_organize_records.is_center_cached OR EXCLUDED.is_center_cached,
-                            season_number = EXCLUDED.season_number
+                            season_number = EXCLUDED.season_number,
+                            fail_reason = EXCLUDED.fail_reason
                     """, (str(file_id), pick_code, str(original_name), str(status), str(tmdb_id) if tmdb_id else None, 
                           str(media_type) if media_type else None, str(target_cid) if target_cid else None, 
-                          str(category_name) if category_name else None, str(renamed_name) if renamed_name else None, bool(is_center_cached), season_number))
+                          str(category_name) if category_name else None, str(renamed_name) if renamed_name else None, bool(is_center_cached), season_number, fail_reason))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 整理记录失败: {e}")
@@ -1841,7 +1842,7 @@ class SmartOrganizer:
 
         if not pick_code:
             if not silent_log:
-                logger.debug(f"  ➜ [ffprobe兜底] 缺少 pick_code，跳过: {original_name}")
+                logger.debug(f"  ➜ [ffprobe] 缺少 pick_code，跳过: {original_name}")
             return None
 
         try:
@@ -1850,7 +1851,7 @@ class SmartOrganizer:
 
             if not shutil.which("ffprobe"):
                 if not silent_log:
-                    logger.warning("  ➜ [ffprobe兜底] 容器内未找到 ffprobe，请在镜像中安装 ffmpeg。")
+                    logger.warning("  ➜ [ffprobe] 容器内未找到 ffprobe，请在镜像中安装 ffmpeg。")
                 return None
 
             direct_url = None
@@ -1860,7 +1861,7 @@ class SmartOrganizer:
                 direct_url = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
             except Exception as e:
                 if not silent_log:
-                    logger.debug(f"  ➜ [ffprobe兜底] Cookie 直链获取失败: {e}")
+                    logger.debug(f"  ➜ [ffprobe] Cookie 直链获取失败: {e}")
 
             # 2. OpenAPI 直链兜底
             if not direct_url:
@@ -1868,15 +1869,15 @@ class SmartOrganizer:
                     direct_url = self.client.openapi_downurl(pick_code, user_agent="Mozilla/5.0")
                 except Exception as e:
                     if not silent_log:
-                        logger.debug(f"  ➜ [ffprobe兜底] OpenAPI 直链获取失败: {e}")
+                        logger.debug(f"  ➜ [ffprobe] OpenAPI 直链获取失败: {e}")
 
             if not direct_url:
                 if not silent_log:
-                    logger.warning(f"  ➜ [ffprobe兜底] 无法获取直链，跳过: {original_name}")
+                    logger.warning(f"  ➜ [ffprobe] 无法获取直链，跳过: {original_name}")
                 return None
 
             if not silent_log:
-                logger.info(f"  ➜ [ffprobe兜底] 尝试用 ffprobe 解析媒体信息")
+                logger.info(f"  ➜ [ffprobe] 尝试用 ffprobe 解析媒体信息")
 
             cmd = [
                 "ffprobe",
@@ -1904,7 +1905,7 @@ class SmartOrganizer:
             if proc.returncode != 0:
                 err = (proc.stderr or "").strip()
                 if not silent_log:
-                    logger.warning(f"  ➜ [ffprobe兜底] 解析失败: {original_name} -> {err[:300]}")
+                    logger.warning(f"  ➜ [ffprobe] 解析失败: {original_name} -> {err[:300]}")
                 return None
 
             probe_data = json.loads(proc.stdout or "{}")
@@ -1916,21 +1917,21 @@ class SmartOrganizer:
 
             if not emby_json:
                 if not silent_log:
-                    logger.warning(f"  ➜ [ffprobe兜底] 未解析出有效 MediaStreams: {original_name}")
+                    logger.warning(f"  ➜ [ffprobe] 未解析出有效 MediaStreams: {original_name}")
                 return None
 
             if not silent_log:
-                logger.info(f"  ➜ [ffprobe兜底] 成功生成媒体信息 -> {original_name}")
+                logger.info(f"  ➜ [ffprobe] 成功生成媒体信息 -> {original_name}")
 
             return emby_json
 
         except subprocess.TimeoutExpired:
             if not silent_log:
-                logger.warning(f"  ➜ [ffprobe兜底] 解析超时，跳过: {original_name}")
+                logger.warning(f"  ➜ [ffprobe] 解析超时，跳过: {original_name}")
             return None
         except Exception as e:
             if not silent_log:
-                logger.warning(f"  ➜ [ffprobe兜底] 解析异常: {original_name} -> {e}", exc_info=True)
+                logger.warning(f"  ➜ [ffprobe] 解析异常: {original_name} -> {e}", exc_info=True)
             return None
     
     def _ffprobe_rate_to_float(self, value):
@@ -2494,6 +2495,7 @@ class SmartOrganizer:
                         raw_json = resp[sha1]
                         is_center = True
                         data_source = "中心服务器(单次)"
+                        P115CacheManager.save_mediainfo_cache(sha1, raw_json)
             except Exception:
                 pass
 
@@ -2507,7 +2509,7 @@ class SmartOrganizer:
 
             if raw_json:
                 is_center = False
-                data_source = "ffprobe兜底"
+                data_source = "ffprobe解析"
 
                 # 写入 p115_mediainfo_cache，后续同 SHA1 直接走本地缓存
                 P115CacheManager.save_mediainfo_cache(sha1, raw_json)
@@ -2583,6 +2585,35 @@ class SmartOrganizer:
 
                     fps = video_stream.get("RealFrameRate") or video_stream.get("AverageFrameRate")
                     if fps: info['fps'] = f"{round(fps)}fps"
+
+                # ★ 提取真实的音轨和字幕语言数组，供洗版裁判使用
+                info['audio_langs'] = []
+                info['sub_langs'] = []
+                
+                def _extract_lang_from_stream(stream_dict):
+                    # 1. 优先取 Language 字段
+                    lang = stream_dict.get("Language")
+                    if lang: return lang
+                    
+                    # 2. 其次从 Title 或 DisplayTitle 中模糊匹配
+                    text_to_search = f"{stream_dict.get('Title', '')} {stream_dict.get('DisplayTitle', '')}".lower()
+                    if 'chi' in text_to_search or 'zh' in text_to_search or '中' in text_to_search or '国语' in text_to_search or '粤语' in text_to_search:
+                        return 'chi'
+                    if 'eng' in text_to_search or 'en' in text_to_search or '英' in text_to_search:
+                        return 'eng'
+                    if 'jpn' in text_to_search or 'ja' in text_to_search or '日' in text_to_search:
+                        return 'jpn'
+                    if 'kor' in text_to_search or 'ko' in text_to_search or '韩' in text_to_search:
+                        return 'kor'
+                    return None
+
+                for s in streams:
+                    if s.get("Type") == "Audio":
+                        l = _extract_lang_from_stream(s)
+                        if l: info['audio_langs'].append(l)
+                    elif s.get("Type") == "Subtitle":
+                        l = _extract_lang_from_stream(s)
+                        if l: info['sub_langs'].append(l)
 
                 if audio_streams:
                     audio_tags = []
@@ -2733,11 +2764,11 @@ class SmartOrganizer:
             search_name = f"{name_body[:-len(lang_suffix)]}.mkv"
         video_info = self._extract_video_info(search_name)
 
-        # ★★★ 神医降维打击：基于 SHA1 获取真实参数并覆盖猜测 ★★★
-        enable_smart_rename = cfg.get('enable_smart_rename', False)
+        # 基于 SHA1 获取真实参数
         is_center_cached = False
+        real_info = None
         
-        if not is_sub and enable_smart_rename:
+        if not is_sub:
             sha1 = file_node.get('sha1') or file_node.get('sha')
             if sha1:
                 real_info, is_center_cached = self._fetch_and_parse_mediainfo(
@@ -2847,8 +2878,7 @@ class SmartOrganizer:
             )
             if not s_name: s_name = f"Season {season_num:02d}"
 
-        # ★ 返回值增加 s_name
-        return new_name, season_num, episode_num, s_name, is_center_cached
+        return new_name, season_num, episode_num, s_name, is_center_cached, video_info, bool(real_info)
 
     def _scan_files_recursively(self, cid, depth=0, max_depth=3, current_rel_path=""):
         all_files = []
@@ -3322,6 +3352,7 @@ class SmartOrganizer:
         moved_count = 0
         move_groups = {}
         unrecognized_fids = [] # ★ 终极垃圾桶：收集所有不符合要求的文件
+        unqualified_items = [] # ★ 质检不合格垃圾桶
         
         # ★ 新增：用于记录本批次已经生成的目标文件名，防止同名冲突
         seen_new_filenames = set()
@@ -3330,75 +3361,80 @@ class SmartOrganizer:
         pre_fetched_mediainfo = {}
         local_pre_fetched_mediainfo = {} # ★ 新增：本地预获取字典
         
-        if cfg.get('enable_smart_rename', False) and not keep_original:
-            video_sha1s = []
-            for file_item in candidates:
-                file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
-                ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-                if ext in known_video_exts:
-                    sha1 = file_item.get('sha1') or file_item.get('sha')
-                    
-                    # =========================================================
-                    # ★ 核心修复：在收集阶段，如果发现缺失 SHA1，提前主动请求补齐！
-                    # =========================================================
-                    if not sha1:
-                        fid = file_item.get('fid') or file_item.get('file_id')
-                        if fid:
-                            try:
-                                info_res = self.client.fs_get_info(fid)
-                                if info_res.get('state') and info_res.get('data'):
-                                    sha1 = info_res['data'].get('sha1')
-                                    if sha1:
-                                        file_item['sha1'] = sha1 # 存回字典，供后续主循环直接使用
-                            except Exception:
-                                pass
-                                
-                    if sha1: 
-                        video_sha1s.append(sha1)
-            
-            if video_sha1s:
-                # 先查本地缓存，剔除已有的，只查缺失的
-                local_cached_sha1s = set()
-                try:
-                    from database.connection import get_db_connection
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            # ★ 核心优化：直接把 json 也查出来放进内存！
-                            cursor.execute("SELECT sha1, mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = ANY(%s)", (list(video_sha1s),))
-                            for row in cursor.fetchall():
-                                local_cached_sha1s.add(row['sha1'])
-                                if row['mediainfo_json']:
-                                    local_pre_fetched_mediainfo[row['sha1']] = row['mediainfo_json'] if isinstance(row['mediainfo_json'], list) else json.loads(row['mediainfo_json'])
-                except Exception: pass
+        # ★ 核心修复：移除开关限制，强制批量预取真实媒体信息
+        video_sha1s = []
+        for file_item in candidates:
+            file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+            ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+            if ext in known_video_exts:
+                sha1 = file_item.get('sha1') or file_item.get('sha')
                 
-                missing_sha1s = list(set(video_sha1s) - local_cached_sha1s)
-                if missing_sha1s:
-                    req_count = len(missing_sha1s)
-                    logger.info(f"  ➜ [批量查询] 准备向中心服务器查询 {req_count} 个文件的媒体信息...")
-                    try:
-                        import extensions
-                        processor = extensions.media_processor_instance
-                        if processor and getattr(processor, 'p115_center', None):
-                            resp = processor.p115_center.download_emby_mediainfo_data(missing_sha1s)
+                # =========================================================
+                # ★ 核心修复：在收集阶段，如果发现缺失 SHA1，提前主动请求补齐！
+                # =========================================================
+                if not sha1:
+                    fid = file_item.get('fid') or file_item.get('file_id')
+                    if fid:
+                        try:
+                            info_res = self.client.fs_get_info(fid)
+                            if info_res.get('state') and info_res.get('data'):
+                                sha1 = info_res['data'].get('sha1')
+                                if sha1:
+                                    file_item['sha1'] = sha1 # 存回字典，供后续主循环直接使用
+                        except Exception:
+                            pass
                             
-                            if isinstance(resp, dict):
-                                # ★ 核心优化：过滤掉可能返回的空值/None，只统计真正有数据的命中项
-                                valid_hits = {k: v for k, v in resp.items() if v}
-                                hit_count = len(valid_hits)
+                if sha1: 
+                    video_sha1s.append(sha1)
+        
+        if video_sha1s:
+            # 先查本地缓存，剔除已有的，只查缺失的
+            local_cached_sha1s = set()
+            try:
+                from database.connection import get_db_connection
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # ★ 核心优化：直接把 json 也查出来放进内存！
+                        cursor.execute("SELECT sha1, mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = ANY(%s)", (list(video_sha1s),))
+                        for row in cursor.fetchall():
+                            local_cached_sha1s.add(row['sha1'])
+                            if row['mediainfo_json']:
+                                local_pre_fetched_mediainfo[row['sha1']] = row['mediainfo_json'] if isinstance(row['mediainfo_json'], list) else json.loads(row['mediainfo_json'])
+            except Exception: pass
+            
+            missing_sha1s = list(set(video_sha1s) - local_cached_sha1s)
+            if missing_sha1s:
+                req_count = len(missing_sha1s)
+                logger.info(f"  ➜ [批量查询] 准备向中心服务器查询 {req_count} 个文件的媒体信息...")
+                try:
+                    import extensions
+                    processor = extensions.media_processor_instance
+                    if processor and getattr(processor, 'p115_center', None):
+                        resp = processor.p115_center.download_emby_mediainfo_data(missing_sha1s)
+                        
+                        if isinstance(resp, dict):
+                            # ★ 核心优化：过滤掉可能返回的空值/None，只统计真正有数据的命中项
+                            valid_hits = {k: v for k, v in resp.items() if v}
+                            hit_count = len(valid_hits)
+                            
+                            if hit_count > 0:
+                                pre_fetched_mediainfo = valid_hits
+                                # ★ 核心修复：批量查询中心服务器后，立即写入本地缓存！
+                                for k_sha1, v_json in valid_hits.items():
+                                    P115CacheManager.save_mediainfo_cache(k_sha1, v_json)
+                                    local_pre_fetched_mediainfo[k_sha1] = v_json
                                 
-                                if hit_count > 0:
-                                    pre_fetched_mediainfo = valid_hits
-                                    if hit_count == req_count:
-                                        logger.info(f"  ➜ [批量查询] 完美命中！成功获取全部 {hit_count} 个文件的媒体信息。")
-                                    else:
-                                        logger.info(f"  ➜ [批量查询] 部分命中：成功获取 {hit_count}/{req_count} 个文件的媒体信息。")
+                                if hit_count == req_count:
+                                    logger.info(f"  ➜ [批量查询] 完美命中！成功获取全部 {hit_count} 个文件的媒体信息。")
                                 else:
-                                    logger.info(f"  ➜ [批量查询] 中心服务器暂无这 {req_count} 个文件的媒体信息。")
+                                    logger.info(f"  ➜ [批量查询] 部分命中：成功获取 {hit_count}/{req_count} 个文件的媒体信息。")
                             else:
-                                logger.warning(f"  ➜ [批量查询] 中心服务器返回数据格式异常。")
-                                
-                    except Exception as e:
-                        logger.warning(f"  ➜ [批量查询] 中心服务器查询失败: {e}")
+                                logger.info(f"  ➜ [批量查询] 中心服务器暂无这 {req_count} 个文件的媒体信息。")
+                        else:
+                            logger.warning(f"  ➜ [批量查询] 中心服务器返回数据格式异常。")
+                            
+                except Exception as e:
+                    logger.warning(f"  ➜ [批量查询] 中心服务器查询失败: {e}")
 
         # 确保 allowed_exts 有兜底，防止用户清空列表导致报错
         if not allowed_exts:
@@ -3415,7 +3451,7 @@ class SmartOrganizer:
                 ext = fn.split('.')[-1].lower() if '.' in fn else ''
                 if ext in known_video_exts:
                     # 临时调用重命名获取名字
-                    v_name, v_s, v_e, _, _ = self._rename_file_node(
+                    v_name, v_s, v_e, _, _, _, _ = self._rename_file_node(
                         file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), 
                         original_title=original_title, pre_fetched_mediainfo=pre_fetched_mediainfo, 
                         local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
@@ -3504,6 +3540,16 @@ class SmartOrganizer:
                 s_name = None
                 is_center_cached = False
                 real_target_cid = final_home_cid
+                has_real_info = False
+                
+                # 即使保留原名，也要提取真实参数供洗版使用
+                video_info = self._extract_video_info(file_name)
+                if ext in known_video_exts:
+                    if file_sha1:
+                        real_info, is_center_cached = self._fetch_and_parse_mediainfo(file_sha1, video_info, pre_fetched_mediainfo, local_pre_fetched_mediainfo, file_node=file_item, silent_log=True)
+                        if real_info:
+                            video_info.update(real_info)
+                            has_real_info = True
                 
                 # 1:1 复刻原始目录架构
                 rel_path = file_item.get('rel_path', '')
@@ -3544,7 +3590,7 @@ class SmartOrganizer:
                             break
                     real_target_cid = current_parent
             else:
-                new_filename, season_num, episode_num, s_name, is_center_cached = self._rename_file_node(
+                new_filename, season_num, episode_num, s_name, is_center_cached, video_info, has_real_info = self._rename_file_node(
                     file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), original_title=original_title,
                     pre_fetched_mediainfo=pre_fetched_mediainfo,
                     local_pre_fetched_mediainfo=local_pre_fetched_mediainfo 
@@ -3610,6 +3656,7 @@ class SmartOrganizer:
             file_item['_episode_num'] = episode_num
             file_item['_s_name'] = s_name
             file_item['_is_center_cached'] = is_center_cached
+            file_item['_video_info'] = video_info
             
             if real_target_cid not in move_groups:
                 move_groups[real_target_cid] = []
@@ -3671,50 +3718,84 @@ class SmartOrganizer:
             valid_items = []
             fids_to_delete = set()
             
+            from handler.resubscribe_service import WashingService
+            original_lang = (self.raw_metadata or {}).get('lang_code')
             for item in items:
                 new_name = item['_new_filename']
                 s_num = item.get('_season_num')
                 e_num = item.get('_episode_num')
                 ext = new_name.split('.')[-1].lower() if '.' in new_name else ''
                 is_vid = ext in known_video_exts
+                file_size = _parse_115_size(item.get('fs') or item.get('size'))
                 
-                is_conflict = False
-                conflict_old_fids = []
-                
-                # 判定是否冲突
-                if is_vid:
-                    if self.media_type == 'tv' and s_num is not None and e_num is not None:
-                        if (s_num, e_num) in existing_tv_eps:
-                            is_conflict = True
-                            conflict_old_fids = existing_tv_eps[(s_num, e_num)]
-                    elif self.media_type == 'movie':
-                        if existing_movie_vids:
-                            is_conflict = True
-                            conflict_old_fids = existing_movie_vids
-                
-                # 根据模式处理冲突
-                if is_conflict:
-                    if conflict_mode == 'skip':
-                        logger.info(f"  ➜ [覆盖模式:跳过] 目标目录已存在同集/同电影，放弃处理: {new_name}")
+                # ★★★ 核心升级：调用阶梯洗版优先级服务 ★★★
+                if is_vid and conflict_mode == 'replace':
+                    logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
+                    
+                    # ★ 核心修复：直接传 SHA1 和文件名，让洗版处理器自己去查原始流
+                    file_sha1 = item.get('sha1') or item.get('sha')
+                    
+                    action, reason = WashingService.decide_washing_action(
+                        sha1=file_sha1,
+                        file_name=new_name,
+                        file_size=file_size,
+                        target_cid=target_cid,
+                        media_type=self.media_type,
+                        tmdb_id=self.tmdb_id,
+                        season_num=s_num,
+                        episode_num=e_num,
+                        original_lang=original_lang
+                    )
+                    
+                    if action == 'REJECT':
+                        logger.warning(f"  ➜ [洗版拦截] {new_name} -> {reason}")
+                        unqualified_items.append({
+                            'fid': item.get('fid') or item.get('file_id'), 'name': item.get('fn') or item.get('file_name'), 
+                            'reason': reason, 'pc': item.get('pc') or item.get('pick_code'), 'season_num': s_num
+                        })
+                        continue
+                    elif action == 'SKIP':
+                        logger.info(f"  ➜ [洗版跳过] {new_name} -> {reason}")
                         unrecognized_fids.append(item.get('fid') or item.get('file_id'))
-                        continue # 丢弃新文件
-                    elif conflict_mode == 'replace':
-                        logger.info(f"  ➜ [覆盖模式:替换] 目标目录存在旧版本，准备删除旧版保留最新: {new_name}")
-                        fids_to_delete.update(conflict_old_fids)
-                        valid_items.append(item)
-                    elif conflict_mode == 'keep_both':
-                        # 多版本共存，但如果名字完全一样，必须删旧的防报错
-                        if new_name in existing_names:
-                            logger.info(f"  ➜ [覆盖模式:共存] 允许共存，但发现完全同名文件，执行同名覆盖: {new_name}")
-                            fids_to_delete.add(existing_names[new_name])
+                        continue
+                    elif action == 'REPLACE':
+                        logger.info(f"  ➜ [洗版替换] {new_name} -> {reason}")
+                        # 获取旧文件的 FID 用于删除
+                        if self.media_type == 'tv' and s_num is not None and e_num is not None:
+                            fids_to_delete.update(existing_tv_eps.get((s_num, e_num), []))
                         else:
-                            logger.info(f"  ➜ [覆盖模式:共存] 目标目录已存在同集，作为多版本共存: {new_name}")
+                            fids_to_delete.update(existing_movie_vids)
+                        valid_items.append(item)
+                    elif action == 'ACCEPT':
+                        logger.info(f"  ➜ [洗版入库] {new_name} -> {reason}")
+                        if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
                 else:
-                    # 不冲突，但也要防完全同名
-                    if new_name in existing_names:
-                        fids_to_delete.add(existing_names[new_name])
-                    valid_items.append(item)
+                    # 非视频文件，或非替换模式，走老逻辑
+                    is_conflict = False
+                    conflict_old_fids = []
+                    if is_vid:
+                        if self.media_type == 'tv' and s_num is not None and e_num is not None:
+                            if (s_num, e_num) in existing_tv_eps:
+                                is_conflict = True
+                                conflict_old_fids = existing_tv_eps[(s_num, e_num)]
+                        elif self.media_type == 'movie':
+                            if existing_movie_vids:
+                                is_conflict = True
+                                conflict_old_fids = existing_movie_vids
+                    
+                    if is_conflict:
+                        if conflict_mode == 'skip':
+                            logger.info(f"  ➜ [覆盖模式:跳过] 目标目录已存在同集/同电影，放弃处理: {new_name}")
+                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            continue 
+                        elif conflict_mode == 'keep_both':
+                            logger.info(f"  ➜ [覆盖模式:共存] 目标目录已存在同集/同电影，保留两者: {new_name}")
+                            if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
+                            valid_items.append(item)
+                    else:
+                        if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
+                        valid_items.append(item)
             
             if not valid_items:
                 continue # 这批全被 skip 了
@@ -4045,6 +4126,26 @@ class SmartOrganizer:
             logger.info(f"  ➜ 发现 {len(unrecognized_fids)} 个不合规文件(扩展名不符/花絮/样本/广告)，正在移入未识别目录...")
             # 同样传入列表，防止 115 API 报错
             self.client.fs_move(unrecognized_fids, unidentified_cid)
+            
+        if unqualified_items and unidentified_cid:
+            logger.info(f"  ➜ 发现 {len(unqualified_items)} 个质检不合格文件，正在移入未识别目录...")
+            unq_fids = [item['fid'] for item in unqualified_items if item['fid']]
+            self.client.fs_move(unq_fids, unidentified_cid)
+            
+            for item in unqualified_items:
+                P115RecordManager.add_or_update_record(
+                    file_id=item['fid'],
+                    original_name=item['name'],
+                    status='unqualified',
+                    tmdb_id=self.tmdb_id,
+                    media_type=self.media_type,
+                    target_cid=target_cid,
+                    category_name="质检不合格",
+                    renamed_name=None,
+                    pick_code=item['pc'],
+                    season_number=item['season_num'],
+                    fail_reason=item['reason']
+                )
 
         # =================================================================
         # ★ 极简垃圾回收：直接通知缓冲队列检查“待整理”目录
