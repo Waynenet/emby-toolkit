@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "9.0.3"  # 更新版本号
+APP_VERSION = "9.0.8"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -85,7 +85,7 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'system-auto-update',         # 系统自动更新
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
-DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail']
+DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail', 'intercept_notify']
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)
