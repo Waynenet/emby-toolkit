@@ -637,7 +637,7 @@
                         </div>
                       </template>
                       <n-alert type="warning" :show-icon="true">
-                        定义入库与洗版的标准（如：优先级1必须原盘，优先级2允许WEB-DL）。新文件入库时将自动对比库内旧版，实现平滑升级。
+                        定义入库与洗版的标准（如：优先级1必须4K，优先级2允许1080或720）。这样可以自动按优先级，实现平滑洗版。逐步用更好的版本替换旧版本。
                       </n-alert>
                     </n-card>
 
@@ -1202,6 +1202,7 @@
                       <n-checkbox-group v-model:value="configModel.telegram_notify_types">
                         <n-space>
                           <n-checkbox value="library_new" label="入库通知" />
+                          <n-checkbox value="intercept_notify" label="拦截通知" />
                           <n-checkbox value="transfer_success" label="转存通知" />
                           <n-checkbox value="playback" label="播放通知" />
                           <n-checkbox value="recognize_fail" label="识别失败" />

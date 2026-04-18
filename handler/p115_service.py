@@ -2720,7 +2720,10 @@ class SmartOrganizer:
 
     def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
-        if '.' not in original_name: return original_name, None, False
+        
+        # ★ 修复 1：无后缀文件的提前返回，补齐为 7 个返回值
+        if '.' not in original_name: 
+            return original_name, None, None, None, False, {}, False
 
         parts = original_name.rsplit('.', 1)
         name_body = parts[0]
@@ -2736,25 +2739,27 @@ class SmartOrganizer:
             if not lang_suffix:
                 match = re.search(r'(?:\.|-|_|\s)(chs|cht|zh-cn|zh-tw|eng|jpn|kor|tc|sc)(?:\.|-|_|$)', name_body, re.IGNORECASE)
                 if match: lang_suffix = f".{match.group(1)}"
-                # ★★★ 强制基础名注入 (专为 MP 字幕挂起等待机制设计) ★★★
-                forced_base_name = file_node.get('_forced_base_name')
-                if forced_base_name:
-                    new_name = f"{forced_base_name}{lang_suffix}.{ext}"
-                    season_num = file_node.get('_forced_season')
-                    episode_num = file_node.get('_forced_episode')
-                    s_name = None
-                    if is_tv and season_num is not None:
-                        cfg = self.rename_config
-                        season_format = cfg.get('season_dir_format', ['season_name_en'])
-                        s_name = self._build_name_from_format(
-                            season_format, 
-                            is_tv=True, 
-                            season_num=season_num, 
-                            original_title=original_title, 
-                            safe_title=new_base_name
-                        )
-                        if not s_name: s_name = f"Season {season_num:02d}"
-                    return new_name, season_num, episode_num, s_name, False
+            # ★★★ 强制基础名注入 (专为 MP 字幕挂起等待机制设计) ★★★
+            forced_base_name = file_node.get('_forced_base_name')
+            if forced_base_name:
+                new_name = f"{forced_base_name}{lang_suffix}.{ext}"
+                season_num = file_node.get('_forced_season')
+                episode_num = file_node.get('_forced_episode')
+                s_name = None
+                if is_tv and season_num is not None:
+                    cfg = self.rename_config
+                    season_format = cfg.get('season_dir_format', ['season_name_en'])
+                    s_name = self._build_name_from_format(
+                        season_format, 
+                        is_tv=True, 
+                        season_num=season_num, 
+                        original_title=original_title, 
+                        safe_title=new_base_name
+                    )
+                    if not s_name: s_name = f"Season {season_num:02d}"
+                
+                # ★ 修复 2：字幕文件的提前返回，补齐为 7 个返回值 (追加 {}, False)
+                return new_name, season_num, episode_num, s_name, False, {}, False
 
         cfg = self.rename_config
         
@@ -3476,6 +3481,9 @@ class SmartOrganizer:
                         key = (s_num, e_num) if self.media_type == 'tv' else 'movie'
                         if key in batch_video_names:
                             file_item['_forced_base_name'] = batch_video_names[key]
+                            # ★ 核心修复：将解析出的季集号写回字典，供 _rename_file_node 生成季目录名
+                            file_item['_forced_season'] = s_num
+                            file_item['_forced_episode'] = e_num
                             logger.debug(f"  ➜ [字幕对齐] 成功将字幕 '{fn}' 绑定至视频基础名 '{batch_video_names[key]}'")
 
         # =================================================================
@@ -3667,29 +3675,35 @@ class SmartOrganizer:
         # =================================================================
         conflict_mode = cfg.get('conflict_mode', 'replace') # 获取覆盖模式，默认洗版替换
         
-        # ★★★ 洗版特权检测 ★★★
-        force_replace = False
+        # ★★★ 洗版特权检测 (细化到单集) ★★★
+        active_washing_eps = set()
+        movie_active_washing = False
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT active_washing FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(self.tmdb_id), 'Series' if self.media_type == 'tv' else 'Movie'))
-                    row = cursor.fetchone()
-                    if row and row.get('active_washing'):
-                        force_replace = True
+                    if self.media_type == 'tv':
+                        # 查出该剧所有带有特权的分集
+                        cursor.execute("SELECT season_number, episode_number FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode' AND active_washing = TRUE", (str(self.tmdb_id),))
+                        for row in cursor.fetchall():
+                            active_washing_eps.add((row['season_number'], row['episode_number']))
+                    else:
+                        cursor.execute("SELECT active_washing FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Movie'", (str(self.tmdb_id),))
+                        row = cursor.fetchone()
+                        if row and row.get('active_washing'):
+                            movie_active_washing = True
         except Exception as e:
             pass
 
-        if force_replace:
-            conflict_mode = 'replace'
-            logger.info(f"  ➜ [洗版特权] 检测到当前剧集处于洗版状态，强制将覆盖模式切换为 '仅保留最新(替换)'！")
+        if active_washing_eps or movie_active_washing:
+            logger.info(f"  ➜ [洗版特权] 检测到当前媒体存在洗版特权标记，命中特权的文件将强制替换旧版！")
         
         for batch_target_cid, items in move_groups.items():
             # -----------------------------------------------------------
-            # ★ 1. 移动前：拉取目标目录现有文件，进行冲突检测 (★ 优化：直接查本地数据库缓存，零 API 消耗)
+            # ★ 1. 移动前：拉取目标目录现有文件，进行冲突检测 (保持不变)
             # -----------------------------------------------------------
-            existing_names = {}      # name -> fid (用于精准同名覆盖)
-            existing_tv_eps = {}     # (s, e) -> [fid1, fid2] (用于剧集洗版)
-            existing_movie_vids = [] # [fid1, fid2] (用于电影洗版)
+            existing_names = {}      
+            existing_tv_eps = {}     
+            existing_movie_vids = [] 
             
             try:
                 from database.connection import get_db_connection
@@ -3704,7 +3718,6 @@ class SmartOrganizer:
                             if e_ext in known_video_exts:
                                 existing_names[e_name] = e_fid
                                 if self.media_type == 'tv':
-                                    # 提取目标目录已有文件的 SxxEyy
                                     match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', e_name, re.IGNORECASE)
                                     if match:
                                         s, e = int(match.group(1)), int(match.group(2))
@@ -3715,11 +3728,30 @@ class SmartOrganizer:
             except Exception as e:
                 logger.warning(f"  ➜ [冲突检测] 查询本地缓存失败: {e}")
 
+            # =================================================================
+            # ★★★ 核心修复 1：视频优先排序 ★★★
+            # =================================================================
+            items.sort(key=lambda x: 0 if (x['_new_filename'].split('.')[-1].lower() in known_video_exts) else 1)
+            known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+
+            # =================================================================
+            # ★★★ 核心修复 4：外挂字幕豁免机制 ★★★
+            # 扫描本批次，记录哪些视频带有外挂字幕 (支持电影和剧集)
+            # =================================================================
+            episodes_with_ext_subs = set()
+            for item in items:
+                temp_name = item['_new_filename']
+                temp_ext = temp_name.split('.')[-1].lower() if '.' in temp_name else ''
+                if temp_ext in known_sub_exts:
+                    episodes_with_ext_subs.add((item.get('_season_num'), item.get('_episode_num')))
+
             valid_items = []
             fids_to_delete = set()
-            
+            rejected_episodes = set()
+
             from handler.resubscribe_service import WashingService
             original_lang = (self.raw_metadata or {}).get('lang_code')
+            
             for item in items:
                 new_name = item['_new_filename']
                 s_num = item.get('_season_num')
@@ -3728,11 +3760,29 @@ class SmartOrganizer:
                 is_vid = ext in known_video_exts
                 file_size = _parse_115_size(item.get('fs') or item.get('size'))
                 
-                # ★★★ 核心升级：调用阶梯洗版优先级服务 ★★★
-                if is_vid and conflict_mode == 'replace':
+                # 检查带头大哥是否已经挂了
+                if (s_num, e_num) in rejected_episodes:
+                    logger.info(f"  ➜ [关联跳过] 视频已被拦截/跳过，同步忽略字幕: {new_name}")
+                    unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                    continue
+
+                # 判断当前文件是否享有洗版特权
+                is_ep_active_washing = False
+                if self.media_type == 'tv' and s_num is not None and e_num is not None:
+                    is_ep_active_washing = (s_num, e_num) in active_washing_eps
+                elif self.media_type == 'movie':
+                    is_ep_active_washing = movie_active_washing
+                
+                effective_conflict_mode = 'replace' if is_ep_active_washing else conflict_mode
+
+                # ★ 判断是否享有外挂字幕豁免权
+                has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
+
+                # 调用阶梯洗版优先级服务
+                if is_vid and effective_conflict_mode == 'replace':
                     logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
                     
-                    # ★ 核心修复：直接传 SHA1 和文件名，让洗版处理器自己去查原始流
+                    video_info = item.get('_video_info') or self._extract_video_info(new_name)
                     file_sha1 = item.get('sha1') or item.get('sha')
                     
                     action, reason = WashingService.decide_washing_action(
@@ -3744,7 +3794,9 @@ class SmartOrganizer:
                         tmdb_id=self.tmdb_id,
                         season_num=s_num,
                         episode_num=e_num,
-                        original_lang=original_lang
+                        original_lang=original_lang,
+                        is_active_washing=is_ep_active_washing,
+                        has_external_subtitle=has_ext_sub # ★★★ 传入外挂字幕豁免标志 ★★★
                     )
                     
                     if action == 'REJECT':
@@ -3753,14 +3805,17 @@ class SmartOrganizer:
                             'fid': item.get('fid') or item.get('file_id'), 'name': item.get('fn') or item.get('file_name'), 
                             'reason': reason, 'pc': item.get('pc') or item.get('pick_code'), 'season_num': s_num
                         })
+                        # ★ 记入黑名单，株连九族
+                        rejected_episodes.add((s_num, e_num))
                         continue
                     elif action == 'SKIP':
                         logger.info(f"  ➜ [洗版跳过] {new_name} -> {reason}")
                         unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                        # ★ 记入黑名单，株连九族
+                        rejected_episodes.add((s_num, e_num))
                         continue
                     elif action == 'REPLACE':
                         logger.info(f"  ➜ [洗版替换] {new_name} -> {reason}")
-                        # 获取旧文件的 FID 用于删除
                         if self.media_type == 'tv' and s_num is not None and e_num is not None:
                             fids_to_delete.update(existing_tv_eps.get((s_num, e_num), []))
                         else:
@@ -3771,7 +3826,7 @@ class SmartOrganizer:
                         if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
                 else:
-                    # 非视频文件，或非替换模式，走老逻辑
+                    # 非视频文件，或非替换模式
                     is_conflict = False
                     conflict_old_fids = []
                     if is_vid:
@@ -3798,7 +3853,7 @@ class SmartOrganizer:
                         valid_items.append(item)
             
             if not valid_items:
-                continue # 这批全被 skip 了
+                continue # 这批全被 skip/reject 了
                 
             # -----------------------------------------------------------
             # ★ 2. 执行删除旧文件 (洗版/同名覆盖 + 完美擦屁股)
@@ -3920,6 +3975,8 @@ class SmartOrganizer:
                 # -----------------------------------------------------------
                 # ★ 5. 生成 STRM 和记录日志
                 # -----------------------------------------------------------
+                processed_episodes_for_flag = set() # ★ 新增：记录成功处理的集数
+                
                 for file_item in valid_items:
                     fid = file_item.get('fid') or file_item.get('file_id')
                     file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
@@ -3929,6 +3986,10 @@ class SmartOrganizer:
                     is_center_cached = file_item['_is_center_cached']
                     
                     moved_count += 1
+                    
+                    # ★ 记录成功处理的集数，用于后续精准核销特权
+                    if self.media_type == 'tv' and season_num is not None and file_item.get('_episode_num') is not None:
+                        processed_episodes_for_flag.add((season_num, file_item.get('_episode_num')))
                     pick_code = file_item.get('pc') or file_item.get('pick_code') 
                     file_sha1 = file_item.get('sha1') or file_item.get('sha')
                     ext = new_filename.split('.')[-1].lower() if '.' in new_filename else ''
@@ -4146,6 +4207,13 @@ class SmartOrganizer:
                     season_number=item['season_num'],
                     fail_reason=item['reason']
                 )
+                
+                # ★★★ 触发 TG 拦截通知 ★★★
+                try:
+                    from handler.telegram import send_intercept_notification
+                    send_intercept_notification(item['name'], item['reason'])
+                except Exception as e:
+                    logger.error(f"  ➜ 触发拦截通知失败: {e}")
 
         # =================================================================
         # ★ 极简垃圾回收：直接通知缓冲队列检查“待整理”目录
@@ -4161,23 +4229,28 @@ class SmartOrganizer:
             logger.debug("  ➜ [清理空目录] 批量任务模式，跳过单次垃圾回收检查，等待统一清理。")
 
         # --- 整理记录 ---
-        if moved_count > 0 or keep_original:
-            category_name = "未识别"
-            for rule in self.rules:
-                if str(rule.get('cid')) == str(target_cid):
-                    category_name = rule.get('dir_name', '未识别')
-                    break
-            
-        # ★★★ 解除洗版状态 ★★★
-        if force_replace and moved_count > 0:
+        if moved_count > 0:
             try:
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
-                        cursor.execute("UPDATE media_metadata SET active_washing = FALSE WHERE tmdb_id = %s AND item_type = %s", (str(self.tmdb_id), 'Series' if self.media_type == 'tv' else 'Movie'))
+                        if self.media_type == 'tv' and processed_episodes_for_flag:
+                            from psycopg2.extras import execute_batch
+                            update_data = [(str(self.tmdb_id), s, e) for s, e in processed_episodes_for_flag]
+                            execute_batch(cursor, """
+                                UPDATE media_metadata 
+                                SET active_washing = FALSE 
+                                WHERE parent_series_tmdb_id = %s 
+                                  AND item_type = 'Episode' 
+                                  AND season_number = %s 
+                                  AND episode_number = %s
+                            """, update_data)
+                            logger.info(f"  ➜ [洗版特权] 已精准核销 {len(processed_episodes_for_flag)} 个分集的洗版特权状态。")
+                        elif self.media_type == 'movie' and movie_active_washing:
+                            cursor.execute("UPDATE media_metadata SET active_washing = FALSE WHERE tmdb_id = %s AND item_type = 'Movie'", (str(self.tmdb_id),))
+                            logger.info(f"  ➜ [洗版特权] 已核销电影的洗版特权状态。")
                         conn.commit()
-                logger.info(f"  ➜ [洗版特权] 洗版文件整理完成，已解除洗版状态。")
             except Exception as e:
-                pass
+                logger.error(f"  ➜ 解除洗版状态失败: {e}")
 
         return True
 

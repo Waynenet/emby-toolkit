@@ -278,11 +278,13 @@ class WashingService:
                 or ""
             )
         norm["original_lang"] = cls._normalize_lang(raw_original_lang)
-
+        norm["has_external_subtitle"] = parsed.get("has_external_subtitle", False)
         return norm
 
     @classmethod
     def _match_priority(cls, norm_info: dict, priority_rule: dict) -> tuple[bool, str]:
+        is_exclude = priority_rule.get('is_exclude', False)
+
         # 1. 分辨率
         req_res = priority_rule.get("resolution", [])
         if req_res:
@@ -295,8 +297,10 @@ class WashingService:
                     match = True
                     break
 
-            if not match:
-                return False, f"分辨率未命中 ({file_res})"
+            if is_exclude:
+                if match: return True, f"命中排除条件: 分辨率 ({file_res})"
+            else:
+                if not match: return False, f"分辨率未命中 ({file_res})"
 
         # 2. 编码
         req_codec = priority_rule.get("codec", [])
@@ -314,16 +318,22 @@ class WashingService:
                 if c in ["avc", "h264"] and ("avc" in file_codec or "h264" in file_codec):
                     match = True
 
-            if not match:
-                return False, f"编码未命中 ({file_codec})"
+            if is_exclude:
+                if match: return True, f"命中排除条件: 编码 ({file_codec})"
+            else:
+                if not match: return False, f"编码未命中 ({file_codec})"
 
         # 3. 特效
         req_effect = priority_rule.get("effect", [])
         if req_effect:
             req_effect_lower = [str(e).lower().strip() for e in req_effect]
             file_effect = norm_info["effect"]
-            if file_effect not in req_effect_lower:
-                return False, f"特效未命中 ({file_effect})"
+            match = file_effect in req_effect_lower
+            
+            if is_exclude:
+                if match: return True, f"命中排除条件: 特效 ({file_effect})"
+            else:
+                if not match: return False, f"特效未命中 ({file_effect})"
 
         # 4. 音轨
         original_lang = norm_info.get("original_lang") or ""
@@ -335,9 +345,14 @@ class WashingService:
 
             if effective_req_audio:
                 if not norm_info["audio_langs"]:
-                    return False, "未提取到音轨语言"
-                if not any(a in norm_info["audio_langs"] for a in effective_req_audio):
-                    return False, "缺少必须的音轨"
+                    if not is_exclude: return False, "未提取到音轨语言"
+                else:
+                    # ★ 优化：找出具体命中了哪些不想要的音轨
+                    matched_audios = [a for a in norm_info["audio_langs"] if a in effective_req_audio]
+                    if is_exclude:
+                        if matched_audios: return True, f"命中排除条件: 音轨 ({', '.join(matched_audios)})"
+                    else:
+                        if not matched_audios: return False, "缺少必须的音轨"
 
         # 5. 字幕
         req_sub = priority_rule.get("subtitle", [])
@@ -346,20 +361,42 @@ class WashingService:
             effective_req_sub = {s for s in normalized_req_sub if s and s != original_lang}
 
             if effective_req_sub:
-                if not norm_info["sub_langs"]:
-                    return False, "未提取到字幕语言"
-                if not any(s in norm_info["sub_langs"] for s in effective_req_sub):
-                    return False, "缺少必须的字幕"
+                has_ext_sub = norm_info.get("has_external_subtitle", False)
+                matched_subs = [s for s in norm_info["sub_langs"] if s in effective_req_sub]
+                
+                if is_exclude:
+                    # 排除模式：只有明确提取到了不想要的字幕，才排除。外挂字幕不作为排除依据（无罪推定）
+                    if matched_subs: return True, f"命中排除条件: 字幕 ({', '.join(matched_subs)})"
+                else:
+                    # 普通模式：必须包含想要的字幕。如果有外挂字幕，豁免此检查（假设外挂字幕就是想要的）
+                    if not matched_subs and not has_ext_sub: 
+                        return False, "缺少必须的字幕"
 
         # 6. 体积
         min_size = priority_rule.get("min_size_gb")
         max_size = priority_rule.get("max_size_gb")
-        if min_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] < float(min_size):
-            return False, "体积过小"
-        if max_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] > float(max_size):
-            return False, "体积过大"
+        
+        if is_exclude:
+            # 排除模式下：如果设置了最小体积，意味着“排除小于等于该体积的资源”
+            if min_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] <= float(min_size):
+                return True, f"命中排除条件: 体积过小 ({norm_info['size_gb']:.1f}GB <= {min_size}GB)"
+            # 排除模式下：如果设置了最大体积，意味着“排除大于等于该体积的资源”
+            if max_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] >= float(max_size):
+                return True, f"命中排除条件: 体积过大 ({norm_info['size_gb']:.1f}GB >= {max_size}GB)"
+        else:
+            # 普通模式下：必须在区间内
+            if min_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] < float(min_size):
+                return False, "体积过小"
+            if max_size and norm_info["size_gb"] > 0 and norm_info["size_gb"] > float(max_size):
+                return False, "体积过大"
 
-        return True, "匹配成功"
+        # 最终返回
+        if is_exclude:
+            # 如果跑完了所有的 if 都没有 return True，说明没有任何排除条件被命中，安全放行
+            return False, "未命中任何排除条件"
+        else:
+            # 普通模式，跑完了所有的 if 都没有 return False，说明全部满足，成功命中
+            return True, "匹配成功"
 
     @classmethod
     def get_level(cls, norm_info: dict, priorities: list) -> tuple[int, str]:
@@ -367,20 +404,36 @@ class WashingService:
         for i, p_rule in enumerate(priorities):
             is_match, reason = cls._match_priority(norm_info, p_rule)
             if is_match:
+                if p_rule.get('is_exclude'):
+                    return -1, reason 
                 return i + 1, f"命中优先级 {i + 1}"
-            fail_reasons.append(f"优先级{i+1}[{reason}]")
+            
+            # ★★★ 核心修复：如果没命中排除规则，这是好事！不要把它记入失败原因！ ★★★
+            if not p_rule.get('is_exclude'):
+                fail_reasons.append(f"优先级{i+1}[{reason}]")
+                
+        if not fail_reasons:
+            return 0, "未配置任何有效的普通优先级规则"
+            
         return 0, " | ".join(fail_reasons)
 
     @classmethod
-    def _load_rule_group(cls, db_media_type: str, target_cid: str) -> Optional[dict]:
-        rule_group = None
+    def _load_priorities(cls, db_media_type: str, target_cid: str) -> list:
+        """
+        加载并合并所有匹配的规则组中的优先级。
+        支持 'All' (通用) 类型的规则组，实现全局前置排除。
+        """
+        combined_priorities = []
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT * FROM washing_priority_groups WHERE media_type = %s ORDER BY sort_order ASC",
-                        (db_media_type,)
-                    )
+                    # ★ 核心修改：使用 IN 语法，同时拉取当前类型和 'All' 类型的规则组
+                    cursor.execute("""
+                        SELECT * FROM washing_priority_groups 
+                        WHERE media_type IN (%s, 'All') 
+                        ORDER BY sort_order ASC
+                    """, (db_media_type,))
+                    
                     for row in cursor.fetchall():
                         cids = row.get("target_cids", [])
                         if isinstance(cids, str):
@@ -389,20 +442,19 @@ class WashingService:
                             except Exception:
                                 cids = []
 
+                        # 如果没有限制目录，或者当前目录在限制列表中，则合并其优先级
                         if not cids or str(target_cid) in cids:
-                            rule_group = dict(row)
-                            priorities = rule_group.get("priorities", [])
+                            priorities = row.get("priorities", [])
                             if isinstance(priorities, str):
                                 try:
                                     priorities = json.loads(priorities)
                                 except Exception:
                                     priorities = []
-                            rule_group["priorities"] = priorities
-                            break
+                            combined_priorities.extend(priorities)
         except Exception as e:
             logger.warning(f"  ➜ 获取洗版优先级规则失败: {e}")
 
-        return rule_group
+        return combined_priorities
 
     @classmethod
     def _load_existing_raw_infos(
@@ -498,8 +550,8 @@ class WashingService:
     @classmethod
     def decide_washing_action(
         cls,
-        sha1: str,          # ★ 改为接收 sha1
-        file_name: str,     # ★ 接收文件名（用于特效兜底）
+        sha1: str,
+        file_name: str,
         file_size: int,
         target_cid: str,
         media_type: str,
@@ -507,6 +559,8 @@ class WashingService:
         season_num: int = None,
         episode_num: int = None,
         original_lang: str = None,
+        is_active_washing: bool = False,
+        has_external_subtitle: bool = False, # ★★★ 新增参数 ★★★
     ) -> tuple[str, str]:
         """
         返回:
@@ -515,8 +569,16 @@ class WashingService:
         SKIP    已有更好版本/同级版本
         REJECT  不符合优先级规则
         """
-        # 1. ★ 直接通过 SHA1 获取最原始的视频流 JSON
+        # 1. 直接通过 SHA1 获取最原始的视频流 JSON
         raw_info = cls._get_raw_info_by_sha1(sha1)
+        
+        # 拦截逻辑：如果没有获取到媒体信息，直接视为不达标 (即使有特权也不能放行坏文件)
+        if not raw_info:
+            return "REJECT", "无法获取媒体流信息(可能是不支持的格式如ISO或文件损坏)"
+        
+        # ★★★ 核心修改：完结洗版特权通道 ★★★
+        if is_active_washing:
+            return "REPLACE", "完结洗版特权：无视优先级规则，强制替换零散旧版"
         
         # 2. 转换为字典以便注入辅助信息
         if isinstance(raw_info, list) and len(raw_info) > 0:
@@ -530,21 +592,24 @@ class WashingService:
         new_video_info["filename"] = file_name
         new_video_info["_file_size"] = file_size
         new_video_info["_original_lang"] = original_lang
+        new_video_info["has_external_subtitle"] = has_external_subtitle # ★★★ 注入字典 ★★★
 
         # 4. 统一调用标准化解析
         norm_new = cls._normalize_info(new_video_info)
 
         db_media_type = "Movie" if media_type.lower() == "movie" else "Series"
 
-        # 1. 规则组
-        rule_group = cls._load_rule_group(db_media_type, target_cid)
-        if not rule_group or not rule_group.get("priorities"):
+        # 1. 加载并合并所有匹配的优先级规则
+        priorities = cls._load_priorities(db_media_type, target_cid)
+        if not priorities:
             return "ACCEPT", "未配置优先级规则，默认放行"
-
-        priorities = rule_group["priorities"]
 
         # 2. 新文件是否达标
         new_level, new_reason_detail = cls.get_level(norm_new, priorities)
+        
+        # ★★★ 核心修改：处理命中排除规则的情况 ★★★
+        if new_level == -1:
+            return "REJECT", new_reason_detail
         if new_level == 0:
             return "REJECT", f"未达标 ({new_reason_detail})"
 
@@ -562,13 +627,21 @@ class WashingService:
 
         # 5. 找最优旧版
         best_old_level = 999
-        for raw_info in existing_raw_infos:
-            old_info = dict(raw_info or {})
+        for raw_old_info in existing_raw_infos:
+            if isinstance(raw_old_info, list) and len(raw_old_info) > 0:
+                old_info = dict(raw_old_info[0])
+            elif isinstance(raw_old_info, dict):
+                old_info = dict(raw_old_info)
+            else:
+                old_info = {}
+
             old_info["_original_lang"] = original_lang
             norm_old = cls._normalize_info(old_info)
 
             old_level, _ = cls.get_level(norm_old, priorities)
-            if old_level == 0:
+            
+            # ★★★ 核心修改：如果旧版命中了排除规则(-1)或未达标(0)，都视为最差等级 999 ★★★
+            if old_level <= 0:
                 old_level = 999
 
             if old_level < best_old_level:
