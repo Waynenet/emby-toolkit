@@ -28,17 +28,46 @@
                   <n-radio-button value="tv" label="电视剧" />
                 </n-radio-group>
               </n-space>
+              
+              <!-- 优化：将排序改为 3 个按钮，点击切换升降序 -->
               <n-space align="center">
                 <label>排序:</label>
-                <n-radio-group v-model:value="filters['sort_by']" :disabled="isSearchMode">
-                  <n-radio-button value="popularity.desc" label="热度降序" />
-                  <n-radio-button value="popularity.asc" label="热度升序" />
-                  <n-radio-button :value="mediaType === 'movie' ? 'primary_release_date.desc' : 'first_air_date.desc'" label="上映日期降序" />
-                  <n-radio-button :value="mediaType === 'movie' ? 'primary_release_date.asc' : 'first_air_date.asc'" label="上映日期升序" />
-                  <n-radio-button value="vote_average.desc" label="评分降序" />
-                  <n-radio-button value="vote_average.asc" label="评分升序" />
-                </n-radio-group>
+                <n-space>
+                  <n-button 
+                    :type="currentSortField === 'popularity' ? 'primary' : 'default'"
+                    @click="toggleSort('popularity')"
+                    :disabled="isSearchMode"
+                  >
+                    热度
+                    <template #icon v-if="currentSortField === 'popularity'">
+                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                    </template>
+                  </n-button>
+
+                  <n-button 
+                    :type="currentSortField === 'date' ? 'primary' : 'default'"
+                    @click="toggleSort('date')"
+                    :disabled="isSearchMode"
+                  >
+                    上映日期
+                    <template #icon v-if="currentSortField === 'date'">
+                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                    </template>
+                  </n-button>
+
+                  <n-button 
+                    :type="currentSortField === 'vote_average' ? 'primary' : 'default'"
+                    @click="toggleSort('vote_average')"
+                    :disabled="isSearchMode"
+                  >
+                    评分
+                    <template #icon v-if="currentSortField === 'vote_average'">
+                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                    </template>
+                  </n-button>
+                </n-space>
               </n-space>
+
               <n-space align="center">
                 <label>风格:</label>
                 <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode">
@@ -332,7 +361,11 @@ import {
   NInputNumber, NSpin, NGrid, NGi, NButton, NThing, useMessage, NIcon, 
   NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag
 } from 'naive-ui';
-import { Heart, HeartOutline, HourglassOutline, Star as StarIcon, FlashOutline as LightningIcon, DiceOutline as DiceIcon, ListOutline as ListIcon } from '@vicons/ionicons5';
+import { 
+  Heart, HeartOutline, HourglassOutline, Star as StarIcon, 
+  FlashOutline as LightningIcon, DiceOutline as DiceIcon, ListOutline as ListIcon,
+  ArrowUpOutline, ArrowDownOutline  // 新引入指示箭头的图标
+} from '@vicons/ionicons5';
 
 const authStore = useAuthStore();
 const message = useMessage();
@@ -357,6 +390,48 @@ const keywordOptions = ref([]);
 const selectedKeywords = ref([]); 
 const allStudios = ref([]); 
 const selectedStudios = ref([]);
+
+// ★★★ 排序状态解析与切换逻辑 ★★★
+const filters = reactive({
+  sort_by: 'popularity.desc',
+  vote_average_gte: 0,
+  page: 1,
+});
+
+const currentSortField = computed(() => {
+  if (filters.sort_by.startsWith('popularity')) return 'popularity';
+  if (filters.sort_by.startsWith('primary_release_date') || filters.sort_by.startsWith('first_air_date')) return 'date';
+  if (filters.sort_by.startsWith('vote_average')) return 'vote_average';
+  return 'popularity';
+});
+
+const currentSortDirection = computed(() => {
+  return filters.sort_by.endsWith('.asc') ? 'asc' : 'desc';
+});
+
+const toggleSort = (field) => {
+  if (currentSortField.value === field) {
+    // 已经选中该字段，翻转升降序
+    const newDir = currentSortDirection.value === 'desc' ? 'asc' : 'desc';
+    setSortBy(field, newDir);
+  } else {
+    // 选中新字段，默认给降序
+    setSortBy(field, 'desc');
+  }
+};
+
+const setSortBy = (field, dir) => {
+  if (field === 'popularity') {
+    filters.sort_by = `popularity.${dir}`;
+  } else if (field === 'date') {
+    const dateField = mediaType.value === 'movie' ? 'primary_release_date' : 'first_air_date';
+    filters.sort_by = `${dateField}.${dir}`;
+  } else if (field === 'vote_average') {
+    filters.sort_by = `vote_average.${dir}`;
+  }
+};
+// =============================
+
 const studioOptions = computed(() => {
   if (!allStudios.value || allStudios.value.length === 0) return [];
 
@@ -381,11 +456,7 @@ const isPoolLoading = ref(true);
 const ratingOptions = ref([]);
 const selectedRating = ref(null);
 const recommendationThemeName = ref('每日推荐');
-const filters = reactive({
-  sort_by: 'popularity.desc',
-  vote_average_gte: 0,
-  page: 1,
-});
+
 const results = ref([]);
 const totalPages = ref(0);
 const isLoadingMore = ref(false);
@@ -619,7 +690,6 @@ const updateMediaStatus = (mediaId, newStatus) => {
 };
 
 const handleSubscribe = async (media) => {
-  // 1. 如果是剧集，弹出季选择模态框
   if (media.media_type === 'tv' || mediaType.value === 'tv') {
     currentSeriesForSearch.value = media;
     showSeasonModal.value = true;
@@ -641,7 +711,6 @@ const handleSubscribe = async (media) => {
     return;
   }
 
-  // 2. 如果是电影，直接提交订阅请求到 MoviePilot
   if (subscribingId.value === media.id) return;
   const originalStatus = media.subscription_status || 'NONE';
   subscribingId.value = media.id;
@@ -675,19 +744,17 @@ const handleSubscribe = async (media) => {
   }
 };
 
-// ★★★ 提交单季订阅 ★★★
 const submitSeasonSubscription = async (season) => {
   subscribingSeasonId.value = season.id;
   try {
     const portalResponse = await axios.post('/api/portal/subscribe', {
-      tmdb_id: currentSeriesForSearch.value.id, // 传剧集ID
+      tmdb_id: currentSeriesForSearch.value.id, 
       item_type: 'Season',
       season_number: season.season_number,
       season_tmdb_id: season.id,
       item_name: `${currentSeriesForSearch.value.title || currentSeriesForSearch.value.name} 第 ${season.season_number} 季`
     });
     message.success(portalResponse.data.message);
-    // 更新模态框内该季的状态
     season.subscription_status = portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED';
   } catch (error) {
     message.error(error.response?.data?.message || '订阅失败');
@@ -696,7 +763,6 @@ const submitSeasonSubscription = async (season) => {
   }
 };
 
-// ★★★ 一键订阅所有缺失季 ★★★
 const submitAllSeasonsSubscription = async () => {
   subscribingAllSeasons.value = true;
   try {
@@ -706,7 +772,6 @@ const submitAllSeasonsSubscription = async () => {
       return;
     }
     
-    // 直接提交整剧订阅，后端会自动遍历并订阅所有缺失季
     const portalResponse = await axios.post('/api/portal/subscribe', {
       tmdb_id: currentSeriesForSearch.value.id,
       item_type: 'Series',
@@ -714,12 +779,10 @@ const submitAllSeasonsSubscription = async () => {
     });
     message.success("一键订阅已提交");
     
-    // 更新模态框内状态
     missingSeasons.forEach(s => {
       s.subscription_status = portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED';
     });
     
-    // 更新外部卡片状态
     updateMediaStatus(currentSeriesForSearch.value.id, portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED');
     
     setTimeout(() => { showSeasonModal.value = false; }, 1000);
@@ -801,6 +864,25 @@ onUnmounted(() => {
   gap: 16px; 
   margin-top: 24px;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+@media (max-width: 767px) {
+  .responsive-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+  
+  .overlay-info {
+    padding: 30px 6px 6px 6px !important;
+  }
+  
+  .media-title {
+    font-size: 0.85em !important;
+  }
+
+  .media-meta-row {
+    font-size: 0.75em !important;
+  }
 }
 
 .grid-item {
