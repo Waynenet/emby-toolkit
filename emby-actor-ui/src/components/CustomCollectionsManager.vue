@@ -86,8 +86,6 @@
               <div v-else class="bg-placeholder" :style="{ background: stringToGradient(item.name) }">
                 <span class="placeholder-text">{{ item.name.substring(0, 1) }}</span>
               </div>
-              <!-- ★★★ 修改结束 ★★★ -->
-
               <div class="bg-overlay"></div>
             </div>
 
@@ -160,13 +158,12 @@
     <n-modal
       v-model:show="showModal"
       preset="card"
-      style="width: 90%; max-width: 900px;"
+      style="width: 95%; max-width: 900px;"
       :title="isEditing ? '编辑合集配置' : '创建新合集'"
       :bordered="false"
       size="huge"
       class="modal-card-lite custom-modal"
     >
-      <!-- 头部类型选择区 (仅在新建或未锁定时显示，或者你想一直显示也可以，这里做成卡片式) -->
       <div v-if="!isEditing" class="type-selection-section">
         <div class="section-title">请选择合集类型</div>
         <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
@@ -200,9 +197,8 @@
         label-width="auto"
         require-mark-placement="right-hanging"
       >
-        <!-- ★★★ 基础信息区块 (包含名称、用户、内容类型) ★★★ -->
-        <n-grid :cols="2" :x-gap="24" :y-gap="12">
-          <!-- 第一行：名称 和 可见用户 -->
+        <!-- ★★★ 基础信息区块改为响应式 cols="1 s:2" ★★★ -->
+        <n-grid cols="1 s:2" responsive="screen" :x-gap="24" :y-gap="12">
           <n-gi>
             <n-form-item label="合集名称" path="name">
               <n-input v-model:value="currentCollection.name" placeholder="起个好听的名字，例如：豆瓣高分科幻" size="large" />
@@ -228,8 +224,6 @@
               />
             </n-form-item>
           </n-gi>
-
-          <!-- ★★★ 第二行：内容类型 (移动到这里，所有类型通用) ★★★ -->
           <n-gi :span="2">
             <n-form-item label="合集内容" path="definition.item_type">
               <n-checkbox-group v-model:value="currentCollection.definition.item_type" :disabled="isContentTypeLocked">
@@ -250,7 +244,6 @@
           </n-gi>
         </n-grid>
 
-        <!-- 核心配置区块：根据类型变化 -->
         <n-card :bordered="false" embedded class="config-card">
           <!-- 1. 榜单导入 (List) -->
           <div v-if="currentCollection.type === 'list'">
@@ -291,9 +284,7 @@
                   </n-space>
                 </n-form-item>
               </n-gi>
-              
               <n-gi>
-                <!-- ★★★ 原来的内容类型选择框已从这里移除 ★★★ -->
                 <n-form-item label="数量限制" path="definition.limit">
                   <n-input-number v-model:value="currentCollection.definition.limit" placeholder="留空不限" :min="1" style="width: 100%;">
                     <template #suffix>项</template>
@@ -303,10 +294,10 @@
             </n-grid>
           </div>
 
-          <!-- 2. 筛选规则 (Filter) (保持不变) -->
+          <!-- 2. 筛选规则 (Filter) -->
           <div v-if="currentCollection.type === 'filter'">
-             <!-- ... 筛选规则代码保持不变 ... -->
-             <n-grid :cols="2" :x-gap="24">
+             <!-- ★★★ 逻辑和范围区域改为响应式 ★★★ -->
+             <n-grid cols="1 s:2" responsive="screen" :x-gap="24" :y-gap="12">
               <n-gi>
                 <n-form-item label="匹配逻辑">
                   <n-radio-group v-model:value="currentCollection.definition.logic" name="logic-group">
@@ -332,214 +323,50 @@
               <div class="rules-container">
                 <div v-for="(rule, index) in currentCollection.definition.rules" :key="index" class="rule-row">
                   <div class="rule-index">{{ index + 1 }}</div>
+                  <!-- CSS 中我们把原来写死的 140px 给去掉了，改为更合理的弹性控制 -->
                   <n-select v-model:value="rule.field" :options="staticFieldOptions" placeholder="字段" class="rule-field" />
                   <n-select v-model:value="rule.operator" :options="getOperatorOptionsForRow(rule)" placeholder="操作" :disabled="!rule.field" class="rule-op" />
                   
                   <div class="rule-value">
                     <template v-if="rule.field === 'genres'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple filterable
-                        placeholder="选择一个或多个类型"
-                        :options="genreOptions"
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        filterable
-                        placeholder="选择类型"
-                        :options="genreOptions"
-                        :disabled="!rule.operator"
-                      />
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple filterable placeholder="选择一个或多个类型" :options="genreOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" filterable placeholder="选择类型" :options="genreOptions" :disabled="!rule.operator" />
                     </template>
                     <template v-else-if="rule.field === 'countries'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple filterable
-                        placeholder="选择一个或多个地区"
-                        :options="countryOptions"
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        filterable
-                        placeholder="选择地区"
-                        :options="countryOptions"
-                        :disabled="!rule.operator"
-                      />
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple filterable placeholder="选择一个或多个地区" :options="countryOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" filterable placeholder="选择地区" :options="countryOptions" :disabled="!rule.operator" />
                     </template>
                     <template v-else-if="rule.field === 'original_language'">
-                      <n-select
-                        v-model:value="rule.value"
-                        :multiple="rule.operator === 'is_one_of'"
-                        :options="filterLanguageOptions"
-                        placeholder="选择原始语言"
-                        clearable
-                        filterable
-                      />
+                      <n-select v-model:value="rule.value" :multiple="rule.operator === 'is_one_of'" :options="filterLanguageOptions" placeholder="选择原始语言" clearable filterable />
                     </template>
                     <template v-else-if="rule.field === 'studios'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple
-                        filterable
-                        placeholder="选择已配置的工作室"
-                        :options="computedStudioOptions" 
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        filterable
-                        placeholder="选择已配置的工作室"
-                        :options="computedStudioOptions"
-                        :disabled="!rule.operator"
-                        clearable
-                      />
-                      <!-- 提示用户去配置 -->
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-icon :component="HelpIcon" style="margin-left: 8px; cursor: help; color: var(--n-text-color-3); flex-shrink: 0;" />
-                        </template>
-                        工作室筛选基于“映射管理”中的配置。
-                      </n-tooltip>
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple filterable placeholder="选择已配置的工作室" :options="computedStudioOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" filterable placeholder="选择已配置的工作室" :options="computedStudioOptions" :disabled="!rule.operator" clearable />
                     </template>
                     <template v-else-if="rule.field === 'keywords'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple
-                        filterable
-                        placeholder="选择一个或多个关键词"
-                        :options="keywordOptions" 
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        filterable
-                        placeholder="选择一个关键词"
-                        :options="keywordOptions"
-                        :disabled="!rule.operator"
-                        clearable
-                      />
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple filterable placeholder="选择一个或多个关键词" :options="keywordOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" filterable placeholder="选择一个关键词" :options="keywordOptions" :disabled="!rule.operator" clearable />
                     </template>
                     <template v-else-if="rule.field === 'tags'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple
-                        filterable
-                        tag
-                        placeholder="选择或输入标签"
-                        :options="tagOptions"
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        filterable
-                        tag
-                        placeholder="选择或输入一个标签"
-                        :options="tagOptions"
-                        :disabled="!rule.operator"
-                        clearable
-                      />
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple filterable tag placeholder="选择或输入标签" :options="tagOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" filterable tag placeholder="选择或输入一个标签" :options="tagOptions" :disabled="!rule.operator" clearable />
                     </template>
                     <template v-else-if="rule.field === 'unified_rating'">
-                      <n-select
-                        v-if="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        v-model:value="rule.value"
-                        multiple
-                        placeholder="选择一个或多个家长分级"
-                        :options="unifiedRatingOptions" 
-                        :disabled="!rule.operator"
-                      />
-                      <n-select
-                        v-else
-                        v-model:value="rule.value"
-                        placeholder="选择一个家长分级"
-                        :options="unifiedRatingOptions" 
-                        :disabled="!rule.operator"
-                        clearable
-                      />
+                      <n-select v-if="['is_one_of', 'is_none_of'].includes(rule.operator)" v-model:value="rule.value" multiple placeholder="选择一个或多个家长分级" :options="unifiedRatingOptions" :disabled="!rule.operator" />
+                      <n-select v-else v-model:value="rule.value" placeholder="选择一个家长分级" :options="unifiedRatingOptions" :disabled="!rule.operator" clearable />
                     </template>
-                    <!-- 分辨率\质量\特效\音轨 -->
                     <template v-else-if="['resolution', 'quality', 'effect', 'audio_lang'].includes(rule.field)">
-                      <n-select
-                        v-model:value="rule.value"
-                        :multiple="['is_one_of', 'is_none_of'].includes(rule.operator)"
-                        :options="
-                          rule.field === 'resolution' ? resolutionOptions :
-                          rule.field === 'quality' ? qualityOptions :
-                          rule.field === 'effect' ? effectOptions :
-                          audioLangOptions
-                        "
-                        :placeholder="'选择' + ruleConfig[rule.field].label"
-                        clearable
-                        filterable
-                        @update:value="() => { if(!rule.operator) rule.operator = 'eq' }"
-                      />
+                      <n-select v-model:value="rule.value" :multiple="['is_one_of', 'is_none_of'].includes(rule.operator)" :options="rule.field === 'resolution' ? resolutionOptions : rule.field === 'quality' ? qualityOptions : rule.field === 'effect' ? effectOptions : audioLangOptions" :placeholder="'选择' + ruleConfig[rule.field].label" clearable filterable @update:value="() => { if(!rule.operator) rule.operator = 'eq' }" />
                     </template>
                     <template v-else-if="rule.field === 'actors' || rule.field === 'directors'">
-                      <n-select
-                        :value="getPersonIdsFromRule(rule.value)"
-                        @update:value="(ids, options) => updatePersonRuleValue(rule, options)"
-                        multiple
-                        filterable
-                        remote
-                        :placeholder="rule.field === 'actors' ? '输入以搜索并添加演员' : '输入以搜索并添加导演'"
-                        :options="actorOptions"
-                        :loading="isSearchingActors"
-                        @search="(query) => handlePersonSearch(query, rule)"  
-                        :disabled="!rule.operator"
-                        label-field="name"
-                        value-field="id"
-                        :render-option="renderPersonOption"
-                        :render-tag="renderPersonTag"
-                      />
+                      <n-select :value="getPersonIdsFromRule(rule.value)" @update:value="(ids, options) => updatePersonRuleValue(rule, options)" multiple filterable remote :placeholder="rule.field === 'actors' ? '输入以搜索并添加演员' : '输入以搜索并添加导演'" :options="actorOptions" :loading="isSearchingActors" @search="(query) => handlePersonSearch(query, rule)" :disabled="!rule.operator" label-field="name" value-field="id" :render-option="renderPersonOption" :render-tag="renderPersonTag" />
                     </template>
                     <template v-else-if="ruleConfig[rule.field]?.type === 'single_select_boolean'">
-                      <n-select
-                        v-model:value="rule.value"
-                        @update:value="rule.operator = 'is'"
-                        placeholder="选择状态"
-                        :options="[
-                          { label: '连载中', value: true },
-                          { label: '已完结', value: false }
-                        ]"
-                        :disabled="!rule.field"
-                      />
+                      <n-select v-model:value="rule.value" @update:value="rule.operator = 'is'" placeholder="选择状态" :options="[{ label: '连载中', value: true }, { label: '已完结', value: false }]" :disabled="!rule.field" />
                     </template>
-                    
-                    <n-input-number
-                      v-else-if="['release_date', 'date_added'].includes(rule.field)"
-                      v-model:value="rule.value"
-                      placeholder="天数"
-                      :disabled="!rule.operator"
-                    >
-                      <template #suffix>天内</template>
-                    </n-input-number>
-                    
-                    <n-input-number
-                      v-else-if="['rating', 'release_year', 'runtime'].includes(rule.field)"
-                      v-model:value="rule.value"
-                      placeholder="数值"
-                      :disabled="!rule.operator"
-                      :show-button="false"
-                    />
-                    
-                    <n-input 
-                        v-else-if="!['actors', 'directors'].includes(rule.field)" 
-                        v-model:value="rule.value" 
-                        placeholder="值" 
-                        :disabled="!rule.operator" 
-                    />
+                    <n-input-number v-else-if="['release_date', 'date_added'].includes(rule.field)" v-model:value="rule.value" placeholder="天数" :disabled="!rule.operator"><template #suffix>天内</template></n-input-number>
+                    <n-input-number v-else-if="['rating', 'release_year', 'runtime'].includes(rule.field)" v-model:value="rule.value" placeholder="数值" :disabled="!rule.operator" :show-button="false" />
+                    <n-input v-else-if="!['actors', 'directors'].includes(rule.field)" v-model:value="rule.value" placeholder="值" :disabled="!rule.operator" />
                   </div>
 
                   <n-button text type="error" class="rule-delete" @click="removeRule(index)">
@@ -555,8 +382,9 @@
             </n-form-item>
           </div>
 
-          <!-- 3. AI 推荐 (Recommendation) -->
+          <!-- 3. AI 推荐 -->
           <div v-if="['ai_recommendation', 'ai_recommendation_global'].includes(currentCollection.type)">
+            <!-- (保持不变) -->
              <div class="ai-hero-section" :class="{ global: currentCollection.type === 'ai_recommendation_global' }">
                 <div class="ai-icon-large">
                   <n-icon :component="SparklesIcon" />
@@ -575,7 +403,6 @@
              </div>
 
              <n-grid :cols="1" :y-gap="24" style="margin-top: 20px;">
-                <!-- 通用设置：推荐数量 -->
                 <n-gi>
                    <n-form-item label="推荐数量限制" path="definition.limit">
                     <n-input-number v-model:value="currentCollection.definition.limit" :default-value="20" :min="5" :max="100" style="width: 100%;">
@@ -583,26 +410,15 @@
                     </n-input-number>
                   </n-form-item>
                 </n-gi>
-
-                <!-- ★★★ 只有【全局推荐】才显示以下高级 LLM 选项 ★★★ -->
                 <template v-if="currentCollection.type === 'ai_recommendation_global'">
                     <n-gi>
                       <n-form-item path="definition.ai_discovery_ratio">
                         <template #label>
                           新片探索比例 (LLM 权重)
-                          <n-tooltip trigger="hover">
-                            <template #trigger><n-icon :component="HelpIcon" style="margin-left: 4px;" /></template>
-                            比例越高，AI 越倾向于推荐你库里没有的新片（会触发订阅下载）；<br/>
-                            比例越低，越倾向于从你现有的库存中挖掘相似影片。
-                          </n-tooltip>
                         </template>
                         <n-grid :cols="12" :x-gap="12" style="width: 100%">
                           <n-gi :span="10">
-                            <n-slider 
-                              v-model:value="currentCollection.definition.ai_discovery_ratio" 
-                              :step="0.05" :min="0" :max="1"
-                              :format-tooltip="val => `${(val * 100).toFixed(0)}%`"
-                            />
+                            <n-slider v-model:value="currentCollection.definition.ai_discovery_ratio" :step="0.05" :min="0" :max="1" :format-tooltip="val => `${(val * 100).toFixed(0)}%`" />
                           </n-gi>
                           <n-gi :span="2">
                             <span style="line-height: 34px; margin-left: 8px;">{{ (currentCollection.definition.ai_discovery_ratio * 100).toFixed(0) }}%</span>
@@ -612,39 +428,25 @@
                     </n-gi>
                     <n-gi>
                        <n-form-item label="推荐倾向 (Prompt)" path="definition.ai_prompt">
-                        <n-input
-                          v-model:value="currentCollection.definition.ai_prompt"
-                          type="textarea"
-                          placeholder="可选：微调 LLM 的推荐逻辑，例如 '最近心情不好，多推点喜剧' 或 '只要电影，不要剧集'。"
-                          :autosize="{ minRows: 2, maxRows: 4 }"
-                        />
+                        <n-input v-model:value="currentCollection.definition.ai_prompt" type="textarea" placeholder="可选：微调 LLM 的推荐逻辑" :autosize="{ minRows: 2, maxRows: 4 }" />
                       </n-form-item>
                     </n-gi>
                 </template>
-                
-                <!-- ★★★ 【个人推荐】显示提示信息 ★★★ -->
-                <template v-else>
-                    <n-gi>
-                        <n-alert type="info" :bordered="false">
-                            无需配置目标用户。系统会在用户访问此合集时，自动读取该用户的观看历史并实时生成推荐结果。
-                        </n-alert>
-                    </n-gi>
-                </template>
-
              </n-grid>
           </div>
         </n-card>
 
-        <!-- 高级设置 / 底部选项 -->
+        <!-- 高级设置 -->
         <n-collapse arrow-placement="right" style="margin-top: 16px;">
           <n-collapse-item title="高级设置 & 排序" name="advanced">
             <n-card :bordered="false" embedded>
-              <n-grid :cols="2" :x-gap="24">
+              <!-- ★★★ 高级排序区域改为响应式 ★★★ -->
+              <n-grid cols="1 s:2" responsive="screen" :x-gap="24" :y-gap="12">
                 <n-gi>
                   <n-form-item label="内容排序">
-                    <n-input-group>
-                      <n-select v-model:value="currentCollection.definition.default_sort_by" :options="sortFieldOptions" style="width: 60%" />
-                      <n-select v-model:value="currentCollection.definition.default_sort_order" :options="sortOrderOptions" style="width: 40%" />
+                    <n-input-group style="width: 100%;">
+                      <n-select v-model:value="currentCollection.definition.default_sort_by" :options="sortFieldOptions" style="flex: 2" />
+                      <n-select v-model:value="currentCollection.definition.default_sort_order" :options="sortOrderOptions" style="flex: 1" />
                     </n-input-group>
                   </n-form-item>
                 </n-gi>
@@ -668,19 +470,19 @@
                 </n-form-item>
                 <n-form-item :show-label="false" style="margin-bottom: 0;">
                    <n-checkbox v-model:checked="currentCollection.definition.dynamic_filter_enabled">
-                     启用实时用户状态过滤 (已看/收藏)
+                     启用实时用户状态过滤
                    </n-checkbox>
                 </n-form-item>
               </n-space>
 
-              <!-- 动态过滤规则 (仅当启用时显示) -->
+              <!-- ★★★ 动态过滤规则改造：使用 class 代替直接 style，配合响应式 CSS ★★★ -->
               <div v-if="currentCollection.definition.dynamic_filter_enabled" style="margin-top: 16px; background: rgba(0,0,0,0.03); padding: 12px; border-radius: 8px;">
                  <n-text depth="3" style="font-size: 12px; margin-bottom: 8px; display: block;">动态规则：根据每个用户的实时状态过滤内容</n-text>
-                 <div v-for="(rule, index) in currentCollection.definition.dynamic_rules" :key="index" style="display: flex; gap: 8px; margin-bottom: 8px;">
-                    <n-select v-model:value="rule.field" :options="dynamicFieldOptions" size="small" style="width: 140px;" />
-                    <n-select v-model:value="rule.operator" :options="getOperatorOptionsForRow(rule)" size="small" style="width: 100px;" />
-                    <n-select v-if="rule.field === 'playback_status'" v-model:value="rule.value" :options="[{label:'未播放',value:'unplayed'},{label:'播放中',value:'in_progress'},{label:'已播放',value:'played'}]" size="small" style="flex: 1;" />
-                    <n-select v-else-if="rule.field === 'is_favorite'" v-model:value="rule.value" :options="[{label:'已收藏',value:true},{label:'未收藏',value:false}]" size="small" style="flex: 1;" />
+                 <div v-for="(rule, index) in currentCollection.definition.dynamic_rules" :key="index" class="dynamic-rule-row">
+                    <n-select v-model:value="rule.field" :options="dynamicFieldOptions" size="small" style="flex: 1; min-width: 100px;" />
+                    <n-select v-model:value="rule.operator" :options="getOperatorOptionsForRow(rule)" size="small" style="flex: 1; min-width: 80px;" />
+                    <n-select v-if="rule.field === 'playback_status'" v-model:value="rule.value" :options="[{label:'未播放',value:'unplayed'},{label:'播放中',value:'in_progress'},{label:'已播放',value:'played'}]" size="small" style="flex: 1.5; min-width: 120px;" />
+                    <n-select v-else-if="rule.field === 'is_favorite'" v-model:value="rule.value" :options="[{label:'已收藏',value:true},{label:'未收藏',value:false}]" size="small" style="flex: 1.5; min-width: 120px;" />
                     <n-button size="small" text type="error" @click="removeDynamicRule(index)"><n-icon :component="DeleteIcon" /></n-button>
                  </div>
                  <n-button size="small" dashed block @click="addDynamicRule">+ 添加动态条件</n-button>
@@ -706,92 +508,51 @@
       </template>
     </n-modal>
     
+    <!-- (剩余部分保持不变...) -->
     <n-modal v-model:show="showDetailsModal" preset="card" style="width: 90%; max-width: 1200px;" :title="detailsModalTitle" :bordered="false" size="huge">
       <div v-if="isLoadingDetails" class="center-container"><n-spin size="large" /></div>
       <div v-else-if="selectedCollectionDetails">
         <n-tabs type="line" animated>
-          <!-- 1. 未识别 -->
           <n-tab-pane name="unidentified" :tab="`未识别 (${unidentifiedMediaInModal.length})`">
             <n-empty v-if="unidentifiedMediaInModal.length === 0" description="完美！所有项目都已成功识别。" style="margin-top: 40px;"></n-empty>
             <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="(media, index) in unidentifiedMediaInModal" :key="index">
                 <div class="movie-card">
-                  <!-- 角标 -->
                   <div class="status-badge unidentified">未识别</div>
-                  
-                  <!-- 占位图 -->
-                  <div class="poster-placeholder">
-                    <n-icon :component="HelpIcon" size="48" />
-                  </div>
-
-                  <!-- 底部文字遮罩 -->
+                  <div class="poster-placeholder"><n-icon :component="HelpIcon" size="48" /></div>
                   <div class="movie-info-overlay">
-                    <div class="movie-title">
-                      {{ media.title }}
-                      <span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
+                    <div class="movie-title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
                     <div class="movie-year">匹配失败</div>
                   </div>
-
-                  <!-- 悬停操作层 -->
                   <div class="movie-actions-overlay">
                     <n-button circle type="primary" @click="openTmdbSearch(media.title)">
                       <template #icon><n-icon :component="SearchIcon" /></template>
                     </n-button>
-                    <n-button round type="warning" @click="handleFixMatchClick(media)">
-                      修正匹配
-                    </n-button>
+                    <n-button round type="warning" @click="handleFixMatchClick(media)">修正匹配</n-button>
                   </div>
                 </div>
               </n-gi>
             </n-grid>
           </n-tab-pane>
-
-          <!-- 2. 缺失 (Missing) -->
           <n-tab-pane name="missing" :tab="`缺失${mediaTypeName} (${missingMediaInModal.length})`">
             <n-empty v-if="missingMediaInModal.length === 0" :description="`太棒了！没有已上映的缺失${mediaTypeName}。`" style="margin-top: 40px;"></n-empty>
             <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="(media, index) in missingMediaInModal" :key="index">
                 <div class="movie-card">
-                  <!-- 角标 -->
                   <div class="status-badge missing">缺失</div>
-
-                  <!-- 海报 -->
                   <img :src="getTmdbImageUrl(media.poster_path)" class="movie-poster" loading="lazy" />
-
-                  <!-- 底部文字遮罩 -->
                   <div class="movie-info-overlay">
-                    <!-- 标题 + 季号 -->
-                    <div class="movie-title" :title="media.title">
-                      {{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
-                    <!-- 年份 -->
-                    <div class="movie-year">
-                      {{ extractYear(media.release_date) || '未知年份' }}
-                    </div>
-                    <!-- 原始标题 (仅当不一致时显示) -->
-                    <div v-if="media.original_title && media.original_title !== media.title" class="original-source-title">
-                      {{ media.original_title }}
-                    </div>
+                    <div class="movie-title" :title="media.title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
+                    <div class="movie-year">{{ extractYear(media.release_date) || '未知年份' }}</div>
                   </div>
-
-                  <!-- 悬停操作层 -->
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)">
-                            <template #icon><n-icon :component="SearchIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle type="primary" @click="handleFixMatchClick(media)">
-                            <template #icon><n-icon :component="FixIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle type="primary" @click="handleFixMatchClick(media)"><template #icon><n-icon :component="FixIcon" /></template></n-button></template>
                         修正匹配
                       </n-tooltip>
                     </n-space>
@@ -800,8 +561,6 @@
               </n-gi>
             </n-grid>
           </n-tab-pane>
-
-          <!-- 3. 已入库 (In Library) -->
           <n-tab-pane name="in_library" :tab="`已入库 (${inLibraryMediaInModal.length})`">
              <n-empty v-if="inLibraryMediaInModal.length === 0" :description="`该合集在媒体库中没有任何${mediaTypeName}。`" style="margin-top: 40px;"></n-empty>
              <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
@@ -809,34 +568,18 @@
                 <div class="movie-card">
                   <div class="status-badge in_library">已入库</div>
                   <img :src="getTmdbImageUrl(media.poster_path)" class="movie-poster" loading="lazy" />
-                  
                   <div class="movie-info-overlay">
-                    <div class="movie-title">
-                      {{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
+                    <div class="movie-title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
                     <div class="movie-year">{{ extractYear(media.release_date) || '未知年份' }}</div>
-                    <div v-if="media.original_title && media.original_title !== media.title" class="original-source-title">
-                      {{ media.original_title }}
-                    </div>
                   </div>
-
-                  <!-- ★★★ 悬停操作层：包含搜索和修正 ★★★ -->
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)">
-                            <template #icon><n-icon :component="SearchIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle type="primary" @click="handleFixMatchClick(media)">
-                            <template #icon><n-icon :component="FixIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle type="primary" @click="handleFixMatchClick(media)"><template #icon><n-icon :component="FixIcon" /></template></n-button></template>
                         修正匹配
                       </n-tooltip>
                     </n-space>
@@ -845,8 +588,6 @@
               </n-gi>
             </n-grid>
           </n-tab-pane>
-
-          <!-- 4. 未上映 (Unreleased) -->
           <n-tab-pane name="unreleased" :tab="`未上映 (${unreleasedMediaInModal.length})`">
             <n-empty v-if="unreleasedMediaInModal.length === 0" :description="`该合集没有已知的未上映${mediaTypeName}。`" style="margin-top: 40px;"></n-empty>
              <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
@@ -854,34 +595,18 @@
                 <div class="movie-card">
                   <div class="status-badge unreleased">未上映</div>
                   <img :src="getTmdbImageUrl(media.poster_path)" class="movie-poster" loading="lazy" />
-                  
                   <div class="movie-info-overlay">
-                    <div class="movie-title">
-                      {{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
+                    <div class="movie-title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
                     <div class="movie-year">{{ extractYear(media.release_date) || '未知年份' }}</div>
-                    <div v-if="media.original_title && media.original_title !== media.title" class="original-source-title">
-                      {{ media.original_title }}
-                    </div>
                   </div>
-
-                  <!-- ★★★ 悬停操作层：包含搜索和修正 ★★★ -->
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)">
-                            <template #icon><n-icon :component="SearchIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle type="primary" @click="handleFixMatchClick(media)">
-                            <template #icon><n-icon :component="FixIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle type="primary" @click="handleFixMatchClick(media)"><template #icon><n-icon :component="FixIcon" /></template></n-button></template>
                         修正匹配
                       </n-tooltip>
                     </n-space>
@@ -890,8 +615,6 @@
               </n-gi>
             </n-grid>
           </n-tab-pane>
-
-          <!-- 5. 已订阅 (Subscribed) -->
           <n-tab-pane name="subscribed" :tab="`已订阅 (${subscribedMediaInModal.length})`">
             <n-empty v-if="subscribedMediaInModal.length === 0" :description="`你没有订阅此合集中的任何${mediaTypeName}。`" style="margin-top: 40px;"></n-empty>
              <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
@@ -899,34 +622,18 @@
                 <div class="movie-card">
                   <div class="status-badge subscribed">已订阅</div>
                   <img :src="getTmdbImageUrl(media.poster_path)" class="movie-poster" loading="lazy" />
-                  
                   <div class="movie-info-overlay">
-                    <div class="movie-title">
-                      {{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
+                    <div class="movie-title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
                     <div class="movie-year">{{ extractYear(media.release_date) || '未知年份' }}</div>
-                    <div v-if="media.original_title && media.original_title !== media.title" class="original-source-title">
-                      {{ media.original_title }}
-                    </div>
                   </div>
-
-                  <!-- ★★★ 悬停操作层：包含搜索和修正 ★★★ -->
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)">
-                            <template #icon><n-icon :component="SearchIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle type="primary" @click="handleFixMatchClick(media)">
-                            <template #icon><n-icon :component="FixIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle type="primary" @click="handleFixMatchClick(media)"><template #icon><n-icon :component="FixIcon" /></template></n-button></template>
                         修正匹配
                       </n-tooltip>
                     </n-space>
@@ -935,7 +642,6 @@
               </n-gi>
             </n-grid>
           </n-tab-pane>
-          <!-- 6. 已忽略 (Subscribed) -->
           <n-tab-pane name="ignored" :tab="`已忽略 (${ignoredMediaInModal.length})`">
             <n-empty v-if="ignoredMediaInModal.length === 0" :description="`你没有订阅此合集中的任何${mediaTypeName}。`" style="margin-top: 40px;"></n-empty>
              <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
@@ -943,34 +649,18 @@
                 <div class="movie-card">
                   <div class="status-badge ignored">已忽略</div>
                   <img :src="getTmdbImageUrl(media.poster_path)" class="movie-poster" loading="lazy" />
-                  
                   <div class="movie-info-overlay">
-                    <div class="movie-title">
-                      {{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span>
-                    </div>
+                    <div class="movie-title">{{ media.title }}<span v-if="media.season"> 第 {{ media.season }} 季</span></div>
                     <div class="movie-year">{{ extractYear(media.release_date) || '未知年份' }}</div>
-                    <div v-if="media.original_title && media.original_title !== media.title" class="original-source-title">
-                      {{ media.original_title }}
-                    </div>
                   </div>
-
-                  <!-- ★★★ 悬停操作层：包含搜索和修正 ★★★ -->
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)">
-                            <template #icon><n-icon :component="SearchIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button circle type="primary" @click="handleFixMatchClick(media)">
-                            <template #icon><n-icon :component="FixIcon" /></template>
-                          </n-button>
-                        </template>
+                        <template #trigger><n-button circle type="primary" @click="handleFixMatchClick(media)"><template #icon><n-icon :component="FixIcon" /></template></n-button></template>
                         修正匹配
                       </n-tooltip>
                     </n-space>
@@ -982,27 +672,15 @@
         </n-tabs>
       </div>
     </n-modal>
-    <!-- 映射管理模态框 (包裹新组件) -->
-    <n-modal
-      v-model:show="showMappingModal"
-      preset="card"
-      title="映射规则管理"
-      style="width: 900px; max-width: 95%;"
-      :bordered="false"
-    >
-      <!-- 探索助手 -->
+    <n-modal v-model:show="showMappingModal" preset="card" title="映射规则管理" style="width: 900px; max-width: 95%;" :bordered="false">
       <MappingManager @close="showMappingModal = false" />
     </n-modal>
-    <TmdbDiscoveryHelper
-      v-model:show="showDiscoverHelper"
-      :initial-url="currentEditingUrl"
-      @confirm="handleDiscoverConfirm"
-    />
-
+    <TmdbDiscoveryHelper v-model:show="showDiscoverHelper" :initial-url="currentEditingUrl" @confirm="handleDiscoverConfirm" />
   </div>
 </template>
 
 <script setup>
+// =========== 代码保持原有逻辑不变 ===========
 import { ref, onMounted, h, computed, watch, nextTick } from 'vue';
 import axios from 'axios';
 import { useConfig } from '../composables/useConfig.js';
@@ -1014,34 +692,18 @@ import TmdbDiscoveryHelper from './modals/TmdbDiscoveryHelper.vue';
 import { 
   NPageHeader, NButton, NIcon, NText, NTag, NSpace,
   useMessage, NPopconfirm, NModal, NForm, NFormItem, NInput, NSelect,
-  NAlert, NRadioGroup, NRadio, NTooltip, NSpin, NGrid, NGi, NCard, NEmpty, useDialog, NTabs, NTabPane, NCheckboxGroup, NCheckbox, NInputNumber, NAutoComplete, NDynamicTags, NInputGroup, NRadioButton, NSlider, NAvatar, NImage
+  NAlert, NRadioGroup, NRadio, NTooltip, NSpin, NGrid, NGi, NCard, NEmpty, useDialog, NTabs, NTabPane, NCheckboxGroup, NCheckbox, NInputNumber, NAutoComplete, NDynamicTags, NInputGroup, NRadioButton, NSlider, NAvatar, NImage, NDivider, NCollapse, NCollapseItem
 } from 'naive-ui';
 import { 
-  AddOutline as AddIcon, 
-  CreateOutline as EditIcon, 
-  TrashOutline as DeleteIcon,
-  SyncOutline as SyncIcon,
-  EyeOutline as EyeIcon,
-  PlayOutline as GenerateIcon,
-  HelpCircleOutline as HelpIcon,
-  ImageOutline as CoverIcon,
-  BuildOutline as FixIcon,
-  SearchOutline as SearchIcon,
-  SparklesOutline as SparklesIcon,
-  ListOutline as ListIcon,
-  FilterOutline as FilterIcon,
-  PersonOutline as PersonIcon,
-  GlobeOutline as GlobeIcon,
-  LinkOutline as LinkIcon,
-  CheckmarkCircle as CheckmarkCircleIcon,
-  FilmOutline as FilmIcon,
-  TvOutline as TvIcon,
-  TimeOutline as TimeIcon
+  AddOutline as AddIcon, CreateOutline as EditIcon, TrashOutline as DeleteIcon,
+  SyncOutline as SyncIcon, EyeOutline as EyeIcon, PlayOutline as GenerateIcon,
+  HelpCircleOutline as HelpIcon, ImageOutline as CoverIcon, BuildOutline as FixIcon,
+  SearchOutline as SearchIcon, SparklesOutline as SparklesIcon, ListOutline as ListIcon,
+  FilterOutline as FilterIcon, PersonOutline as PersonIcon, GlobeOutline as GlobeIcon,
+  LinkOutline as LinkIcon, CheckmarkCircle as CheckmarkCircleIcon, FilmOutline as FilmIcon,
+  TvOutline as TvIcon, TimeOutline as TimeIcon
 } from '@vicons/ionicons5';
 
-// ===================================================================
-// ▼▼▼ 所有 ref 变量定义 ▼▼▼
-// ===================================================================
 const message = useMessage();
 const collections = ref([]);
 const isLoading = ref(true);
@@ -1049,7 +711,7 @@ const showModal = ref(false);
 const isEditing = ref(false);
 const isSaving = ref(false);
 const formRef = ref(null);
-const gridRef = ref(null); // Grid 容器引用
+const gridRef = ref(null); 
 const syncLoading = ref({});
 const isSyncingMetadata = ref(false);
 const countryOptions = ref([]);
@@ -1080,31 +742,25 @@ const unidentifiedMediaInModal = computed(() => filterMediaByStatus('unidentifie
 const { configModel } = useConfig();
 const showMappingModal = ref(false);
 const studioMappingOptions = ref([]);
-// 探索助手控制状态
 const showDiscoverHelper = ref(false);
 const editingUrlIndex = ref(0); 
-// 计算当前正在编辑的 URL，传给子组件做回显 ★★★
+
 const currentEditingUrl = computed(() => {
   const item = customUrlList.value[editingUrlIndex.value];
   return item ? item.value : '';
 });
 
-// ★★★ 2. 打开助手
 const openDiscoverHelper = (index = 0) => {
   editingUrlIndex.value = index;
   showDiscoverHelper.value = true;
 };
 
-// ★★★ 3. 确认回调
 const handleDiscoverConfirm = (url, type) => {
-  // 1. 填入 URL
   if (customUrlList.value[editingUrlIndex.value]) {
     customUrlList.value[editingUrlIndex.value].value = url;
   } else {
     customUrlList.value.push({ value: url });
   }
-
-  // 2. 自动勾选对应的类型 (Movie/Series)
   const itemType = type === 'movie' ? 'Movie' : 'Series';
   if (!currentCollection.value.definition.item_type.includes(itemType)) {
     currentCollection.value.definition.item_type.push(itemType);
@@ -1112,17 +768,11 @@ const handleDiscoverConfirm = (url, type) => {
   }
 };
 
-// ===================================================================
-// ▼▼▼ 辅助函数 ▼▼▼
-// ===================================================================
-
-// 判断内容类型
 const hasContentType = (item, type) => {
   const types = item.definition?.item_type || ['Movie'];
   return Array.isArray(types) ? types.includes(type) : types === type;
 };
 
-// 获取类型标签文本
 const getTypeLabel = (type) => {
   const map = {
     'list': '榜单',
@@ -1133,7 +783,6 @@ const getTypeLabel = (type) => {
   return map[type] || '未知';
 };
 
-// 获取类型标签颜色
 const getTypeTagColor = (type) => {
   const map = {
     'list': 'warning',
@@ -1144,7 +793,6 @@ const getTypeTagColor = (type) => {
   return map[type] || 'default';
 };
 
-// 格式化时间
 const formatTime = (timeStr) => {
   if (!timeStr) return '从未同步';
   try {
@@ -1154,7 +802,6 @@ const formatTime = (timeStr) => {
   }
 };
 
-// 根据字符串生成随机渐变色
 const stringToGradient = (str) => {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -1179,18 +826,6 @@ const openTmdbSearch = (mediaOrTitle) => {
   const cleanTitle = query.replace(/\s*(第\s*\d+\s*季|Season\s*\d+).*/i, '').trim();
   window.open(`https://www.themoviedb.org/search?query=${encodeURIComponent(cleanTitle)}`, '_blank');
 };
-
-const getInitialDiscoverParams = () => ({
-  type: 'movie', sort_by: 'popularity.desc', release_year_gte: null, release_year_lte: null,
-  with_genres: [], without_genres: [], with_runtime_gte: null, with_runtime_lte: null,
-  with_companies: [], with_cast: [], with_crew: [], with_origin_country: null,
-  with_original_language: null, vote_average_gte: 0, vote_count_gte: 0,
-  with_keywords_labels: [],
-});
-
-// ===================================================================
-// ▼▼▼ 核心逻辑函数 ▼▼▼
-// ===================================================================
 
 const handleFixMatchClick = (media) => {
   newTmdbId.value = '';
@@ -1242,35 +877,21 @@ const handleFixMatchClick = (media) => {
   });
 };
 
-// 3. 新增：智能获取封面 URL 函数 (替换原有的 getTmdbImageUrl 调用逻辑)
 const getCardImageUrl = (item) => {
-  // 优先级 1: Emby 封面
-  // ★★★ 修改：走后端 /image_proxy 代理，解决外网无法加载内网 Emby 图片的问题 ★★★
   if (item.emby_collection_id) {
-    // 逻辑说明：
-    // 1. 我们不需要传 http://emby-ip:8096，后端会自动拼接配置里的 Emby 地址。
-    // 2. 我们不需要传 api_key，后端会自动注入，这样也更安全。
-    // 3. 直接返回相对路径，Vite (开发环境) 或 Nginx (生产环境) 会把它转发给 Python 后端。
     return `/image_proxy/Items/${item.emby_collection_id}/Images/Primary?maxHeight=600&quality=90`;
   }
-
-  // 优先级 2: TMDb 背景图 (走通用代理)
   let tmdbUrl = null;
   if (item.backdrop_path) {
     tmdbUrl = `https://image.tmdb.org/t/p/w780${item.backdrop_path}`;
-  }
-  // 优先级 3: TMDb 海报图 (走通用代理)
-  else if (item.poster_path) {
+  } else if (item.poster_path) {
     tmdbUrl = `https://image.tmdb.org/t/p/w780${item.poster_path}`;
   }
-
   if (tmdbUrl) {
     return `/api/image_proxy?url=${encodeURIComponent(tmdbUrl)}`;
   }
-
   return null;
 };
-
 
 const submitFixMatch = async (payload) => {
   if (!selectedCollectionDetails.value?.id) return;
@@ -1317,53 +938,20 @@ const ruleConfig = {
   is_favorite: { label: '是否收藏', type: 'user_data_bool', operators: ['is', 'is_not'] },
 };
 
-const resolutionOptions = [
-  { label: '4K', value: '4k' },
-  { label: '1080P', value: '1080p' },
-  { label: '720P', value: '720p' },
-  { label: '480P', value: '480p' }
-];
-
-const qualityOptions = [
-  { label: 'Remux', value: 'Remux' },
-  { label: 'BluRay', value: 'BluRay' },
-  { label: 'WEB-DL', value: 'WEB-DL' },
-  { label: 'WEBrip', value: 'WEBrip' },
-  { label: 'HDTV', value: 'HDTV' },
-  { label: 'DVDrip', value: 'DVDrip' }
-];
-
-const effectOptions = [
-  { label: 'SDR', value: 'SDR' },
-  { label: 'HDR', value: 'HDR' },
-  { label: 'HDR10+', value: 'HDR10+' },
-  { label: '杜比视界 (所有)', value: 'DoVi' },
-  { label: 'DoVi P5', value: 'DoVi_P5' },
-  { label: 'DoVi P7', value: 'DoVi_P7' },
-  { label: 'DoVi P8', value: 'DoVi_P8' }
-];
-
-const audioLangOptions = [
-  { label: '国语', value: '国语' },
-  { label: '粤语', value: '粤语' },
-  { label: '英语', value: '英语' },
-  { label: '日语', value: '日语' },
-  { label: '韩语', value: '韩语' }
-];
+const resolutionOptions = [{ label: '4K', value: '4k' },{ label: '1080P', value: '1080p' },{ label: '720P', value: '720p' },{ label: '480P', value: '480p' }];
+const qualityOptions = [{ label: 'Remux', value: 'Remux' },{ label: 'BluRay', value: 'BluRay' },{ label: 'WEB-DL', value: 'WEB-DL' },{ label: 'WEBrip', value: 'WEBrip' },{ label: 'HDTV', value: 'HDTV' },{ label: 'DVDrip', value: 'DVDrip' }];
+const effectOptions = [{ label: 'SDR', value: 'SDR' },{ label: 'HDR', value: 'HDR' },{ label: 'HDR10+', value: 'HDR10+' },{ label: '杜比视界 (所有)', value: 'DoVi' },{ label: 'DoVi P5', value: 'DoVi_P5' },{ label: 'DoVi P7', value: 'DoVi_P7' },{ label: 'DoVi P8', value: 'DoVi_P8' }];
+const audioLangOptions = [{ label: '国语', value: '国语' },{ label: '粤语', value: '粤语' },{ label: '英语', value: '英语' },{ label: '日语', value: '日语' },{ label: '韩语', value: '韩语' }];
 
 const filterLanguageOptions = ref([]);
 const fetchLanguageOptions = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/languages');
-    // 后端返回 [{label: '中文', value: 'zh'}, ...]
-    // 前端格式化为 "中文 (zh)" 以便展示
     filterLanguageOptions.value = response.data.map(item => ({
       label: `${item.label} (${item.value})`,
       value: item.value
     }));
-  } catch (error) {
-    console.error('获取语言列表失败:', error);
-  }
+  } catch (error) { }
 };
 
 const operatorLabels = {
@@ -1379,61 +967,31 @@ const fetchKeywordOptions = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/keywords');
     keywordOptions.value = response.data;
-  } catch (error) {
-    console.error('获取关键词失败:', error);
-  }
+  } catch (error) { }
 };
 
 const fetchStudioMappingOptions = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/studios');
     studioMappingOptions.value = response.data;
-  } catch (error) {
-    console.error('获取工作室映射失败:', error);
-  }
+  } catch (error) { }
 };
 
 const computedStudioOptions = computed(() => {
   const rawOptions = studioMappingOptions.value || [];
-  // 获取当前合集勾选的类型，例如 ['Movie', 'Series']
   const currentItemTypes = currentCollection.value.definition?.item_type || [];
-
-  // 将 Emby 类型映射为后端 Studio 类型
   const targetTypes = [];
   if (currentItemTypes.includes('Movie')) targetTypes.push('movie');
   if (currentItemTypes.includes('Series')) targetTypes.push('tv');
-
-  // 如果没选类型，或者原始数据为空，返回空
   if (targetTypes.length === 0 || rawOptions.length === 0) return [];
-
   return rawOptions.filter(opt => {
-    // 兼容旧数据：如果没有 types 字段，默认显示
     if (!opt.types || !Array.isArray(opt.types)) return true;
-
-    // ★★★ 核心逻辑：取交集 ★★★
-    // 只要工作室支持的类型 (opt.types) 与 合集包含的类型 (targetTypes) 有任何重叠，就显示。
-    // 例如：
-    // 1. 合集是混合库 (movie, tv)。CCTV(tv) 与 (movie, tv) 有重叠 -> 显示。
-    // 2. 合集是电影库 (movie)。CCTV(tv) 与 (movie) 无重叠 -> 隐藏。
-    // 3. 合集是电影库 (movie)。HBO(movie, tv) 与 (movie) 有重叠 -> 显示。
     return opt.types.some(t => targetTypes.includes(t));
-  }).map(opt => ({
-    label: opt.label,
-    value: opt.value // 绑定 Label 给后端
-  }));
+  }).map(opt => ({ label: opt.label, value: opt.value }));
 });
 
-const staticFieldOptions = computed(() => 
-  Object.keys(ruleConfig)
-    .filter(key => !ruleConfig[key].type.startsWith('user_data'))
-    .map(key => ({ label: ruleConfig[key].label, value: key }))
-);
-
-const dynamicFieldOptions = computed(() => 
-  Object.keys(ruleConfig)
-    .filter(key => ruleConfig[key].type.startsWith('user_data'))
-    .map(key => ({ label: ruleConfig[key].label, value: key }))
-);
+const staticFieldOptions = computed(() => Object.keys(ruleConfig).filter(key => !ruleConfig[key].type.startsWith('user_data')).map(key => ({ label: ruleConfig[key].label, value: key })));
+const dynamicFieldOptions = computed(() => Object.keys(ruleConfig).filter(key => ruleConfig[key].type.startsWith('user_data')).map(key => ({ label: ruleConfig[key].label, value: key })));
 
 const getOperatorOptionsForRow = (rule) => {
   if (!rule.field) return [];
@@ -1467,7 +1025,7 @@ const handleGenerateAllCovers = async () => {
   isGeneratingCovers.value = true;
   try {
     const response = await axios.post('/api/tasks/run', { task_name: 'generate-custom-collection-covers' });
-    message.success(response.data.message || '已提交一键生成自建合集封面任务！');
+    message.success(response.data.message || '已提交任务！');
   } catch (error) {
     message.error(error.response?.data?.error || '提交任务失败。');
   } finally {
@@ -1477,12 +1035,7 @@ const handleGenerateAllCovers = async () => {
 
 const renderPersonOption = ({ node, option }) => {
   node.children = [
-    h(NAvatar, {
-      src: getTmdbImageUrl(option.profile_path, 'w92'),
-      size: 'small',
-      style: 'margin-right: 8px;',
-      round: true,
-    }),
+    h(NAvatar, { src: getTmdbImageUrl(option.profile_path, 'w92'), size: 'small', style: 'margin-right: 8px;', round: true }),
     h('div', { style: 'display: flex; flex-direction: column;' }, [
       h(NText, null, { default: () => option.name }),
       h(NText, { depth: 3, style: 'font-size: 12px;' }, { default: () => `代表作: ${option.known_for || '暂无'}` })
@@ -1493,46 +1046,14 @@ const renderPersonOption = ({ node, option }) => {
 
 const renderPersonTag = ({ option, handleClose }) => {
   return h(
-    NTag,
-    {
-      type: 'info',
-      closable: true,
-      onClose: (e) => {
-        e.stopPropagation();
-        handleClose();
-      },
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        padding: '0 6px 0 2px', 
-        height: '24px'
-      },
-      round: true 
-    },
-    {
-      default: () => [
-        h(NAvatar, {
-          src: getTmdbImageUrl(option.profile_path, 'w92'),
-          size: 'small',
-          style: 'margin-right: 5px;',
-          round: true,
-        }),
-        option.name 
-      ]
-    }
+    NTag, { type: 'info', closable: true, onClose: (e) => { e.stopPropagation(); handleClose(); }, style: { display: 'flex', alignItems: 'center', padding: '0 6px 0 2px', height: '24px' }, round: true },
+    { default: () => [ h(NAvatar, { src: getTmdbImageUrl(option.profile_path, 'w92'), size: 'small', style: 'margin-right: 5px;', round: true }), option.name ] }
   );
 };
 
 const renderSelectOptionWithTag = (option) => {
   if (option.is_template_source) {
-    return h(
-      'div', 
-      { style: 'display: flex; justify-content: space-between; align-items: center; width: 100%;' },
-      [
-        h('span', null, option.label), 
-        h(NTag, { type: 'success', size: 'small', bordered: false }, { default: () => '模板源' }) 
-      ]
-    );
+    return h('div', { style: 'display: flex; justify-content: space-between; align-items: center; width: 100%;' }, [ h('span', null, option.label), h(NTag, { type: 'success', size: 'small', bordered: false }, { default: () => '模板源' }) ]);
   }
   return option.label;
 };
@@ -1542,11 +1063,7 @@ const fetchEmbyUsers = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/emby_users');
     embyUserOptions.value = response.data;
-  } catch (error) {
-    message.error('获取Emby用户列表失败。');
-  } finally {
-    isLoadingEmbyUsers.value = false;
-  }
+  } catch (error) { } finally { isLoadingEmbyUsers.value = false; }
 };
 
 const builtInLists = [
@@ -1581,34 +1098,19 @@ const filteredBuiltInLists = computed(() => {
   builtInLists.forEach(item => {
     if (item.value === 'custom') return;
     if (item.type === 'group') {
-      currentGroup = { 
-        type: 'group', 
-        label: item.label, 
-        key: item.key, 
-        children: [] 
-      };
+      currentGroup = { type: 'group', label: item.label, key: item.key, children: [] };
       result.push(currentGroup);
     } else {
-      if (currentGroup) {
-        currentGroup.children.push(item);
-      } else {
-        result.push(item);
-      }
+      if (currentGroup) currentGroup.children.push(item);
+      else result.push(item);
     }
   });
   return result;
 });
 const selectedBuiltInLists = ref([]);
 const customUrlList = ref([{ value: '' }]);
-const isMultiSource = computed(() => {
-  const builtInCount = selectedBuiltInLists.value.length;
-  const customCount = customUrlList.value.filter(u => u.value.trim()).length;
-  return (builtInCount + customCount) > 1;
-});
-
-const isContentTypeLocked = computed(() => {
-  return false
-});
+const isMultiSource = computed(() => (selectedBuiltInLists.value.length + customUrlList.value.filter(u => u.value.trim()).length) > 1);
+const isContentTypeLocked = computed(() => false);
 
 const sortFieldOptions = computed(() => {
   const options = [
@@ -1623,218 +1125,81 @@ const sortFieldOptions = computed(() => {
   if (Array.isArray(itemTypes) && itemTypes.includes('Series')) {
     options.splice(4, 0, { label: '最后一集更新时间', value: 'DateLastContentAdded' });
   }
-  if (currentCollection.value.type === 'list') {
-    if (!isMultiSource.value) {
-      options.splice(1, 0, { label: '榜单原始顺序', value: 'original' });
-    }
+  if (currentCollection.value.type === 'list' && !isMultiSource.value) {
+    options.splice(1, 0, { label: '榜单原始顺序', value: 'original' });
   }
   return options;
 });
-
-const sortOrderOptions = ref([
-  { label: '升序', value: 'Ascending' },
-  { label: '降序', value: 'Descending' },
-]);
+const sortOrderOptions = ref([{ label: '升序', value: 'Ascending' }, { label: '降序', value: 'Descending' }]);
 
 const getInitialFormModel = () => ({
-  id: null,
-  name: '',
-  type: 'list',
-  status: 'active',
-  allowed_user_ids: [],
-  definition: {
-    item_type: ['Movie'],
-    url: '',
-    limit: null,
-    target_library_ids: [],
-    default_sort_by: 'original',
-    default_sort_order: 'Ascending',
-    dynamic_filter_enabled: false,
-    dynamic_logic: 'AND',
-    dynamic_rules: [],
-    show_in_latest: false,
-  }
+  id: null, name: '', type: 'list', status: 'active', allowed_user_ids: [],
+  definition: { item_type: ['Movie'], url: '', limit: null, target_library_ids: [], default_sort_by: 'original', default_sort_order: 'Ascending', dynamic_filter_enabled: false, dynamic_logic: 'AND', dynamic_rules: [], show_in_latest: false }
 });
 const currentCollection = ref(getInitialFormModel());
 
 watch(() => currentCollection.value.type, (newType) => {
-  if (isEditing.value) { return; }
-  const sharedProps = {
-    item_type: ['Movie'],
-    default_sort_order: 'Ascending',
-    dynamic_filter_enabled: false,
-    dynamic_logic: 'AND',
-    dynamic_rules: [],
-    show_in_latest: false,
-  };
+  if (isEditing.value) return;
+  const sharedProps = { item_type: ['Movie'], default_sort_order: 'Ascending', dynamic_filter_enabled: false, dynamic_logic: 'AND', dynamic_rules: [], show_in_latest: false };
   if (newType === 'filter') {
-    currentCollection.value.definition = {
-      ...sharedProps,
-      logic: 'AND',
-      rules: [{ field: null, operator: null, value: '' }],
-      target_library_ids: [],
-      default_sort_by: 'none', 
-    };
+    currentCollection.value.definition = { ...sharedProps, logic: 'AND', rules: [{ field: null, operator: null, value: '' }], target_library_ids: [], default_sort_by: 'none' };
   } else if (newType === 'ai_recommendation') {
-    currentCollection.value.definition = {
-        ...sharedProps,
-        limit: 50,
-        item_type: ['Movie', 'Series'],
-        is_global_mode: false,
-        default_sort_by: 'PremiereDate', 
-        default_sort_order: 'Descending', 
-    };
+    currentCollection.value.definition = { ...sharedProps, limit: 50, item_type: ['Movie', 'Series'], is_global_mode: false, default_sort_by: 'PremiereDate', default_sort_order: 'Descending' };
   } else if (newType === 'ai_recommendation_global') {
-    currentCollection.value.definition = {
-        ...sharedProps,
-        ai_prompt: '',
-        limit: 20,
-        item_type: ['Movie', 'Series'],
-        is_global_mode: true,
-        ai_discovery_ratio: 0.2,
-        default_sort_by: 'PremiereDate', 
-        default_sort_order: 'Descending', 
-    };
+    currentCollection.value.definition = { ...sharedProps, ai_prompt: '', limit: 20, item_type: ['Movie', 'Series'], is_global_mode: true, ai_discovery_ratio: 0.2, default_sort_by: 'PremiereDate', default_sort_order: 'Descending' };
   } else if (newType === 'list') {
-    currentCollection.value.definition = { 
-      ...sharedProps,
-      url: [], 
-      limit: null,
-      default_sort_by: 'original', 
-    };
-    selectedBuiltInLists.value = []; 
-    customUrlList.value = [{ value: '' }];
+    currentCollection.value.definition = { ...sharedProps, url: [], limit: null, default_sort_by: 'original' };
+    selectedBuiltInLists.value = []; customUrlList.value = [{ value: '' }];
   }
 });
 
-const addCustomUrl = () => {
-  customUrlList.value.push({ value: '' });
-};
-
-const removeCustomUrl = (index) => {
-  if (customUrlList.value.length > 1) {
-    customUrlList.value.splice(index, 1);
-  } else {
-    customUrlList.value[0].value = ''; 
-  }
-};
+const addCustomUrl = () => { customUrlList.value.push({ value: '' }); };
+const removeCustomUrl = (index) => { if (customUrlList.value.length > 1) { customUrlList.value.splice(index, 1); } else { customUrlList.value[0].value = ''; } };
 
 const fetchEmbyLibraries = async () => {
   isLoadingLibraries.value = true;
   try {
     const response = await axios.get('/api/custom_collections/config/emby_libraries');
     embyLibraryOptions.value = response.data;
-  } catch (error) {
-    message.error('获取Emby媒体库列表失败。');
-  } finally {
-    isLoadingLibraries.value = false;
-  }
+  } catch (error) { } finally { isLoadingLibraries.value = false; }
 };
 
 const fetchCountryOptions = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/tmdb_countries');
-    countryOptions.value = response.data.map(item => ({
-      label: item.label, // 显示：中国大陆
-      value: item.value  // 存储：CN
-    }));
-  } catch (error) {
-    message.error('获取国家/地区列表失败。');
-  }
+    countryOptions.value = response.data.map(item => ({ label: item.label, value: item.value }));
+  } catch (error) { }
 };
-
-const isGenreSelectionDisabled = computed(() => false);
 
 const fetchGenreOptions = async () => {
   const types = currentCollection.value.definition?.item_type || [];
-  
-  // 如果没有选择任何类型，清空选项
-  if (types.length === 0) {
-    genreOptions.value = [];
-    return;
-  }
-
+  if (types.length === 0) { genreOptions.value = []; return; }
   const promises = [];
-
-  // 根据选中的类型，添加对应的 API 请求
-  if (types.includes('Movie')) {
-    promises.push(axios.get('/api/custom_collections/config/movie_genres').catch(() => ({ data: [] })));
-  }
-  if (types.includes('Series')) {
-    promises.push(axios.get('/api/custom_collections/config/tv_genres').catch(() => ({ data: [] })));
-  }
-
+  if (types.includes('Movie')) promises.push(axios.get('/api/custom_collections/config/movie_genres').catch(() => ({ data: [] })));
+  if (types.includes('Series')) promises.push(axios.get('/api/custom_collections/config/tv_genres').catch(() => ({ data: [] })));
   try {
-    // 并发请求
     const results = await Promise.all(promises);
-    
-    // 提取所有返回的类型数组并展平
     const allGenres = results.flatMap(res => res.data || []);
-    
-    // 去重 (使用 Set)
     const uniqueGenres = [...new Set(allGenres)];
-    
-    // 排序（可选，按拼音或字符顺序）
     uniqueGenres.sort((a, b) => a.localeCompare(b, 'zh-CN'));
-
-    // 映射为 Naive UI 需要的格式
-    genreOptions.value = uniqueGenres.map(name => ({
-      label: name,
-      value: name
-    }));
-  } catch (error) {
-    console.warn('获取类型列表失败:', error);
-    genreOptions.value = [];
-  }
+    genreOptions.value = uniqueGenres.map(name => ({ label: name, value: name }));
+  } catch (error) { genreOptions.value = []; }
 };
-
-watch(() => currentCollection.value.definition?.item_type, () => {
-  fetchGenreOptions();
-}, { deep: true });
+watch(() => currentCollection.value.definition?.item_type, () => { fetchGenreOptions(); }, { deep: true });
 
 const fetchTagOptions = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/tags');
-    tagOptions.value = response.data.map(name => ({
-      label: name,
-      value: name
-    }));
-  } catch (error) {
-    message.error('获取标签列表失败。');
-  }
-};
-
-let searchTimeout = null;
-const handleStudioSearch = (query) => {
-  if (!query) {
-    studioOptions.value = [];
-    return;
-  }
-  isSearchingStudios.value = true;
-  if (searchTimeout) clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(async () => {
-    try {
-      const response = await axios.get(`/api/search_studios?q=${query}`);
-      studioOptions.value = response.data.map(name => ({ label: name, value: name }));
-    } catch (error) {
-      console.error('搜索工作室失败:', error);
-      studioOptions.value = [];
-    } finally {
-      isSearchingStudios.value = false;
-    }
-  }, 300);
+    tagOptions.value = response.data.map(name => ({ label: name, value: name }));
+  } catch (error) { }
 };
 
 let personSearchTimeout = null;
-
 const handlePersonSearch = (query, rule) => {
   const isFilterRule = !!rule; 
   if (!query) {
-    if (isFilterRule) {
-      actorOptions.value = Array.isArray(rule.value) ? rule.value : [];
-    } else {
-      actorOptions.value = []; 
-    }
+    if (isFilterRule) actorOptions.value = Array.isArray(rule.value) ? rule.value : [];
+    else actorOptions.value = []; 
     return;
   }
   isSearchingActors.value = true;
@@ -1850,19 +1215,12 @@ const handlePersonSearch = (query, rule) => {
         actorOptions.value = [...selectedPersons, ...newResults];
       } else {
         actorOptions.value = searchResults;
-        directorOptions.value = searchResults;
       }
     } catch (error) {
-      console.error('搜索人物失败:', error);
-      if (isFilterRule) {
-        actorOptions.value = Array.isArray(rule.value) ? rule.value : [];
-      } else {
-        actorOptions.value = [];
-        directorOptions.value = [];
-      }
+      if (isFilterRule) actorOptions.value = Array.isArray(rule.value) ? rule.value : [];
+      else actorOptions.value = [];
     } finally {
       isSearchingActors.value = false;
-      isSearchingDirectors.value = false; 
     }
   }, 300);
 };
@@ -1871,38 +1229,19 @@ const getPersonIdsFromRule = (value) => {
   if (!Array.isArray(value)) return [];
   return value.filter(p => typeof p === 'object' && p !== null).map(p => p.id);
 };
-
-const updatePersonRuleValue = (rule, selectedOptions) => {
-  rule.value = selectedOptions;
-};
+const updatePersonRuleValue = (rule, selectedOptions) => { rule.value = selectedOptions; };
 
 const fetchUnifiedRatingOptions = async () => {
   try {
-    // 调用新的 API (我们在 routes/custom_collections.py 中刚刚修改过的)
     const response = await axios.get('/api/custom_collections/config/unified_ratings_options');
-    
-    // 后端返回的是字符串数组 ['全年龄', '限制级', ...]
-    // 我们将其转换为 Naive UI 需要的 { label, value } 格式
-    unifiedRatingOptions.value = response.data.map(name => ({
-      label: name,
-      value: name
-    }));
+    unifiedRatingOptions.value = response.data.map(name => ({ label: name, value: name }));
   } catch (error) {
-    console.error('获取家长分级列表失败:', error);
-    // 兜底：如果 API 失败，使用默认值 (防止下拉框为空)
-    unifiedRatingOptions.value = [
-      '全年龄', '家长辅导', '青少年', '成人', '限制级', '未知'
-    ].map(name => ({ label: name, value: name }));
+    unifiedRatingOptions.value = ['全年龄', '家长辅导', '青少年', '成人', '限制级', '未知'].map(name => ({ label: name, value: name }));
   }
 };
 
-const addRule = () => {
-  currentCollection.value.definition.rules?.push({ field: null, operator: null, value: '' });
-};
-
-const removeRule = (index) => {
-  currentCollection.value.definition.rules?.splice(index, 1);
-};
+const addRule = () => { currentCollection.value.definition.rules?.push({ field: null, operator: null, value: '' }); };
+const removeRule = (index) => { currentCollection.value.definition.rules?.splice(index, 1); };
 
 const typeOptions = [
   { label: '榜单导入', value: 'list', desc: 'RSS / 猫眼 / 豆瓣 / TMDb', icon: ListIcon },
@@ -1912,11 +1251,7 @@ const typeOptions = [
 ];
 
 const formRules = computed(() => {
-  const baseRules = {
-    name: { required: true, message: '请输入合集名称', trigger: 'blur' },
-    type: { required: true, message: '请选择合集类型' },
-    'definition.item_type': { type: 'array', required: true, message: '请至少选择一种合集内容' }
-  };
+  const baseRules = { name: { required: true, message: '请输入合集名称', trigger: 'blur' }, type: { required: true, message: '请选择合集类型' }, 'definition.item_type': { type: 'array', required: true, message: '请至少选择一种合集内容' } };
   if (currentCollection.value.type === 'list') {
     baseRules['definition.url'] = { required: true, message: '请选择一个内置榜单或输入一个自定义URL', trigger: 'blur' };
   } else if (currentCollection.value.type === 'filter') {
@@ -1924,9 +1259,7 @@ const formRules = computed(() => {
       type: 'array', required: true,
       validator: (rule, value) => {
         if (!value || value.length === 0) return new Error('请至少添加一条筛选规则');
-        if (value.some(r => !r.field || !r.operator || (Array.isArray(r.value) ? r.value.length === 0 : (r.value === null || r.value === '')))) {
-          return new Error('请将所有规则填写完整');
-        }
+        if (value.some(r => !r.field || !r.operator || (Array.isArray(r.value) ? r.value.length === 0 : (r.value === null || r.value === '')))) return new Error('请将所有规则填写完整');
         return true;
       },
       trigger: 'change'
@@ -1960,18 +1293,9 @@ const mediaTypeName = computed(() => {
 });
 
 const filterMediaByStatus = (status) => {
-  if (
-    !selectedCollectionDetails.value ||
-    !Array.isArray(selectedCollectionDetails.value.media_items)
-  ) return [];
-
-  if (Array.isArray(status)) {
-    return selectedCollectionDetails.value.media_items.filter(media =>
-      status.includes(media.status)
-    );
-  } else {
-    return selectedCollectionDetails.value.media_items.filter(media => media.status === status);
-  }
+  if (!selectedCollectionDetails.value || !Array.isArray(selectedCollectionDetails.value.media_items)) return [];
+  if (Array.isArray(status)) return selectedCollectionDetails.value.media_items.filter(media => status.includes(media.status));
+  else return selectedCollectionDetails.value.media_items.filter(media => media.status === status);
 };
 
 const missingMediaInModal = computed(() => filterMediaByStatus('missing'));
@@ -1985,204 +1309,105 @@ const fetchCollections = async () => {
   try {
     const response = await axios.get('/api/custom_collections');
     collections.value = response.data;
-    
-    // 1. 先让 loading 结束，触发 v-else 渲染 grid 容器
     isLoading.value = false; 
-    
-    // 2. 等待 DOM 更新完毕
     await nextTick(); 
-    
-    // 3. 此时 gridRef.value 才有值，可以安全绑定
     initSortable();
-    
-  } catch (error) {
-    message.error('加载自定义合集列表失败。');
-    isLoading.value = false; // 出错也要关闭 loading
-  }
+  } catch (error) { isLoading.value = false; }
 };
 
 const initSortable = () => {
-  if (sortableInstance) {
-    sortableInstance.destroy();
-  }
+  if (sortableInstance) sortableInstance.destroy();
   const gridEl = gridRef.value;
   if (!gridEl) return;
-
   sortableInstance = Sortable.create(gridEl, {
-    animation: 200,
-    draggable: '.grid-item',
-    handle: '.collection-card',
-    
-    filter: '.card-actions, button, .n-button, .n-icon', 
-    preventOnFilter: false, // 允许按钮的点击事件正常触发
-
-    forceFallback: true, 
-    ghostClass: 'sortable-ghost',
-    dragClass: 'sortable-drag',
-    delay: 10, 
-    delayOnTouchOnly: false,
+    animation: 200, draggable: '.grid-item', handle: '.collection-card', filter: '.card-actions, button, .n-button, .n-icon', preventOnFilter: false, forceFallback: true, ghostClass: 'sortable-ghost', dragClass: 'sortable-drag', delay: 10, delayOnTouchOnly: false,
     onEnd: handleDragEnd,
   });
 };
 
 const handleDragEnd = async (event) => {
   const { oldIndex, newIndex } = event;
-  // 如果位置没变，直接返回
   if (oldIndex === newIndex) return;
-
-  // 1. 修改本地数组顺序 (让 UI 立即响应)
   const movedItem = collections.value.splice(oldIndex, 1)[0];
   collections.value.splice(newIndex, 0, movedItem);
-
-  // 2. 提取新的 ID 顺序发送给后端
   const orderedIds = collections.value.map(c => c.id);
-  isSavingOrder.value = true; // 可以加个 loading 状态防止连续操作
-
+  isSavingOrder.value = true; 
   try {
-    // 调用后端 API 更新顺序
     await axios.post('/api/custom_collections/update_order', { ids: orderedIds });
     message.success('顺序已更新');
   } catch (error) {
     message.error('保存顺序失败，正在还原...');
-    // 失败时重新拉取列表还原顺序
     fetchCollections();
-  } finally {
-    isSavingOrder.value = false;
-  }
+  } finally { isSavingOrder.value = false; }
 };
 
 const openDetailsModal = async (collection) => {
-  showDetailsModal.value = true;
-  isLoadingDetails.value = true;
-  selectedCollectionDetails.value = null;
+  showDetailsModal.value = true; isLoadingDetails.value = true; selectedCollectionDetails.value = null;
   try {
     const response = await axios.get(`/api/custom_collections/${collection.id}/status`);
     selectedCollectionDetails.value = response.data;
-  } catch (error) {
-    message.error('获取合集详情失败。');
-    showDetailsModal.value = false;
-  } finally {
-    isLoadingDetails.value = false;
-  }
+  } catch (error) { showDetailsModal.value = false; } finally { isLoadingDetails.value = false; }
 };
 
 const handleSync = async (row) => {
   syncLoading.value[row.id] = true;
   try {
-    const payload = {
-      task_name: 'process-single-custom-collection', 
-      custom_collection_id: row.id 
-    };
-    const response = await axios.post('/api/tasks/run', payload);
-    message.success(response.data.message || `已提交同步任务: ${row.name}`);
-  } catch (error) {
-    message.error(error.response?.data?.error || '提交同步任务失败。');
-  } finally {
-    syncLoading.value[row.id] = false;
-  }
+    await axios.post('/api/tasks/run', { task_name: 'process-single-custom-collection', custom_collection_id: row.id });
+    message.success(`已提交同步任务: ${row.name}`);
+  } catch (error) { } finally { syncLoading.value[row.id] = false; }
 };
 
 const handleSyncAll = async () => {
   isSyncingAll.value = true;
   try {
-    const response = await axios.post('/api/tasks/run', { task_name: 'process_all_custom_collections' });
-    message.success(response.data.message || '已提交一键生成任务！');
-  } catch (error) {
-    message.error(error.response?.data?.error || '提交任务失败。');
-  } finally {
-    isSyncingAll.value = false;
-  }
+    await axios.post('/api/tasks/run', { task_name: 'process_all_custom_collections' });
+    message.success('已提交一键生成任务！');
+  } catch (error) { } finally { isSyncingAll.value = false; }
 };
 
 const triggerMetadataSync = async () => {
   isSyncingMetadata.value = true;
   try {
-    const response = await axios.post('/api/tasks/run', { task_name: 'populate-metadata' });
-    message.success(response.data.message || '快速同步元数据任务已在后台启动！');
-  } catch (error) {
-    message.error(error.response?.data?.error || '启动任务失败。');
-  } finally {
-    isSyncingMetadata.value = false;
-  }
+    await axios.post('/api/tasks/run', { task_name: 'populate-metadata' });
+    message.success('快速同步元数据任务已启动！');
+  } catch (error) { } finally { isSyncingMetadata.value = false; }
 };
 
 const handleCreateClick = () => {
-  isEditing.value = false;
-  currentCollection.value = getInitialFormModel();
-  selectedBuiltInLists.value = [];
-  customUrlList.value = [{ value: '' }];
-  showModal.value = true;
+  isEditing.value = false; currentCollection.value = getInitialFormModel();
+  selectedBuiltInLists.value = []; customUrlList.value = [{ value: '' }]; showModal.value = true;
 };
 
 const handleEditClick = (row) => {
   isEditing.value = true;
   const rowCopy = JSON.parse(JSON.stringify(row));
-
   if (Array.isArray(rowCopy.allowed_user_ids)) {
     const availableOptionsSet = new Set(embyUserOptions.value.map(opt => opt.value));
     rowCopy.allowed_user_ids = rowCopy.allowed_user_ids.filter(id => availableOptionsSet.has(id));
-  } else {
-    rowCopy.allowed_user_ids = [];
-  }
-
+  } else rowCopy.allowed_user_ids = [];
   if (!rowCopy.definition || typeof rowCopy.definition !== 'object') {
-    rowCopy.definition = rowCopy.type === 'filter'
-      ? { item_type: ['Movie'], logic: 'AND', rules: [] }
-      : { item_type: ['Movie'], url: '' };
+    rowCopy.definition = rowCopy.type === 'filter' ? { item_type: ['Movie'], logic: 'AND', rules: [] } : { item_type: ['Movie'], url: '' };
   }
-
-  if (typeof rowCopy.definition.show_in_latest === 'undefined') {
-    rowCopy.definition.show_in_latest = false;
-  }
-
-  if (!rowCopy.definition.default_sort_by) {
-    rowCopy.definition.default_sort_by = 'none';
-  }
-  if (!rowCopy.definition.default_sort_order) {
-    rowCopy.definition.default_sort_order = 'Ascending';
-  }
-
+  if (typeof rowCopy.definition.show_in_latest === 'undefined') rowCopy.definition.show_in_latest = false;
+  if (!rowCopy.definition.default_sort_by) rowCopy.definition.default_sort_by = 'none';
+  if (!rowCopy.definition.default_sort_order) rowCopy.definition.default_sort_order = 'Ascending';
   currentCollection.value = rowCopy;
 
   if (rowCopy.type === 'filter' && rowCopy.definition?.rules) {
-    const initialPersons = rowCopy.definition.rules
-      .filter(rule => (rule.field === 'actors' || rule.field === 'directors') && Array.isArray(rule.value))
-      .flatMap(rule => rule.value);
-    const uniquePersons = Array.from(new Map(initialPersons.map(p => [p.id, p])).values());
-    actorOptions.value = uniquePersons;
-  } else {
-    actorOptions.value = [];
-  }
+    const initialPersons = rowCopy.definition.rules.filter(rule => (rule.field === 'actors' || rule.field === 'directors') && Array.isArray(rule.value)).flatMap(rule => rule.value);
+    actorOptions.value = Array.from(new Map(initialPersons.map(p => [p.id, p])).values());
+  } else actorOptions.value = [];
 
   if (rowCopy.type === 'list') {
     let urls = rowCopy.definition.url;
-    if (typeof urls === 'string') {
-      urls = urls ? [urls] : [];
-    } else if (!Array.isArray(urls)) {
-      urls = [];
-    }
+    if (typeof urls === 'string') urls = urls ? [urls] : [];
+    else if (!Array.isArray(urls)) urls = [];
     const builtInValues = new Set(builtInLists.map(i => i.value));
-    const foundBuiltIns = [];
-    const foundCustoms = [];
-    urls.forEach(u => {
-      if (builtInValues.has(u)) {
-        foundBuiltIns.push(u);
-      } else {
-        foundCustoms.push({ value: u });
-      }
-    });
+    const foundBuiltIns = []; const foundCustoms = [];
+    urls.forEach(u => { if (builtInValues.has(u)) foundBuiltIns.push(u); else foundCustoms.push({ value: u }); });
     selectedBuiltInLists.value = foundBuiltIns;
-    if (foundCustoms.length === 0) {
-      customUrlList.value = [{ value: '' }];
-    } else {
-      customUrlList.value = foundCustoms;
-    }
-  } else {
-    selectedBuiltInLists.value = [];
-    customUrlList.value = [{ value: '' }];
-  }
-
-  currentCollection.value = rowCopy;
+    customUrlList.value = foundCustoms.length === 0 ? [{ value: '' }] : foundCustoms;
+  } else { selectedBuiltInLists.value = []; customUrlList.value = [{ value: '' }]; }
   showModal.value = true;
 };
 
@@ -2191,9 +1416,7 @@ const handleDelete = async (row) => {
     await axios.delete(`/api/custom_collections/${row.id}`);
     message.success(`合集 "${row.name}" 已删除。`);
     fetchCollections();
-  } catch (error) {
-    message.error('删除失败。');
-  }
+  } catch (error) { }
 };
 
 const handleSave = () => {
@@ -2202,20 +1425,10 @@ const handleSave = () => {
     isSaving.value = true;
     const dataToSend = JSON.parse(JSON.stringify(currentCollection.value));
     try {
-      if (isEditing.value) {
-        await axios.put(`/api/custom_collections/${dataToSend.id}`, dataToSend);
-        message.success('合集更新成功！');
-      } else {
-        await axios.post('/api/custom_collections', dataToSend);
-        message.success('合集创建成功！');
-      }
-      showModal.value = false;
-      fetchCollections();
-    } catch (error) {
-      message.error(error.response?.data?.error || '保存失败。');
-    } finally {
-      isSaving.value = false;
-    }
+      if (isEditing.value) { await axios.put(`/api/custom_collections/${dataToSend.id}`, dataToSend); message.success('合集更新成功！'); }
+      else { await axios.post('/api/custom_collections', dataToSend); message.success('合集创建成功！'); }
+      showModal.value = false; fetchCollections();
+    } catch (error) { message.error(error.response?.data?.error || '保存失败。'); } finally { isSaving.value = false; }
   });
 };
 
@@ -2223,27 +1436,16 @@ const getTmdbImageUrl = (posterPath, size = 'w300') => posterPath ? `https://ima
 const extractYear = (dateStr) => dateStr ? dateStr.substring(0, 4) : null;
 
 const addDynamicRule = () => {
-  if (!currentCollection.value.definition.dynamic_rules) {
-    currentCollection.value.definition.dynamic_rules = [];
-  }
+  if (!currentCollection.value.definition.dynamic_rules) currentCollection.value.definition.dynamic_rules = [];
   currentCollection.value.definition.dynamic_rules.push({ field: 'is_favorite', operator: 'is', value: true });
 };
-
-const removeDynamicRule = (index) => {
-  currentCollection.value.definition.dynamic_rules.splice(index, 1);
-};
-
-watch(() => discoverParams.value.type, () => {
-    discoverParams.value.with_genres = [];
-    discoverParams.value.with_runtime_gte = null;
-    discoverParams.value.with_runtime_lte = null;
-});
+const removeDynamicRule = (index) => { currentCollection.value.definition.dynamic_rules.splice(index, 1); };
 
 watch(isMultiSource, (isMulti) => {
   if (isMulti) {
     if (currentCollection.value.definition.default_sort_by === 'original') {
       currentCollection.value.definition.default_sort_by = 'none';
-      message.info('检测到多个榜单源，排序已自动重置为“不设置” (多榜单无法保持原始顺序)');
+      message.info('排序已自动重置为“不设置”');
     }
   }
 });
@@ -2251,398 +1453,81 @@ watch(isMultiSource, (isMulti) => {
 watch([selectedBuiltInLists, customUrlList], () => {
   const builtIns = selectedBuiltInLists.value;
   const customs = customUrlList.value.map(i => i.value.trim()).filter(v => v);
-  const combinedUrls = [...builtIns, ...customs];
-  currentCollection.value.definition.url = combinedUrls;
+  currentCollection.value.definition.url = [...builtIns, ...customs];
   const newItemTypes = new Set(currentCollection.value.definition.item_type || ['Movie']);
   builtIns.forEach(url => {
     const option = builtInLists.find(opt => opt.value === url);
-    if (option && option.contentType) {
-      option.contentType.forEach(t => newItemTypes.add(t));
-    }
+    if (option && option.contentType) option.contentType.forEach(t => newItemTypes.add(t));
   });
   currentCollection.value.definition.item_type = Array.from(newItemTypes);
 }, { deep: true });
 
 watch(showMappingModal, (newVal) => {
   if (!newVal) {
-    // 模态框关闭时，刷新下拉框数据
-    fetchKeywordOptions();
-    fetchStudioMappingOptions();
-    fetchCountryOptions();
-    fetchLanguageOptions();
-    fetchUnifiedRatingOptions();
+    fetchKeywordOptions(); fetchStudioMappingOptions(); fetchCountryOptions(); fetchLanguageOptions(); fetchUnifiedRatingOptions();
   }
 });
 
 onMounted(() => {
-  fetchCollections();
-  fetchCountryOptions();
-  fetchLanguageOptions(); 
-  fetchTagOptions();
-  fetchKeywordOptions(); 
-  fetchStudioMappingOptions(); 
-  fetchUnifiedRatingOptions();
-  fetchEmbyLibraries();
-  fetchEmbyUsers();
-  if (currentCollection.value.definition?.item_type) {
-      fetchGenreOptions();
-  }
+  fetchCollections(); fetchCountryOptions(); fetchLanguageOptions(); fetchTagOptions(); fetchKeywordOptions(); fetchStudioMappingOptions(); fetchUnifiedRatingOptions(); fetchEmbyLibraries(); fetchEmbyUsers();
+  if (currentCollection.value.definition?.item_type) fetchGenreOptions();
 });
 
 createRuleWatcher(() => currentCollection.value.definition.rules);
 createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
-
 </script>
 
 <style scoped>
-.custom-collections-manager {
-  padding: 0 10px;
-}
-.card-actions, .n-button {
-  cursor: pointer !important;
-}
-/* 拖拽手柄样式 */
-.drag-handle {
-  position: absolute;
-  top: 10px;
-  left: 10px; /* 放在左上角，或者你喜欢的任何位置 */
-  z-index: 10;
-  color: rgba(255, 255, 255, 0.6);
-  cursor: grab;
-  padding: 4px;
-  background: rgba(0,0,0,0.3);
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.2s, background 0.2s;
-}
+.custom-collections-manager { padding: 0 10px; }
+.card-actions, .n-button { cursor: pointer !important; }
 
-.drag-handle:hover {
-  color: #fff;
-  background: rgba(0,0,0,0.6);
-}
+/* Grid 布局 */
+.custom-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(280px * var(--card-scale, 1)), 1fr)); gap: 20px; margin-top: 24px; }
+.grid-item { position: relative; touch-action: none; }
 
-.drag-handle:active {
-  cursor: grabbing;
-}
+/* 卡片样式 */
+.collection-card { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; cursor: grab; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); transition: transform 0.2s, box-shadow 0.2s, filter 0.3s; background-color: var(--card-bg-color); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.05); }
+.collection-card:active { cursor: grabbing; }
+.collection-card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3); z-index: 2; }
+.collection-card.is-paused { filter: grayscale(100%); opacity: 0.8; }
+.collection-card.is-paused:hover { filter: grayscale(0%); opacity: 1; }
 
-/* ★★★ Grid 布局核心 ★★★ */
-.custom-grid {
-  display: grid;
-  /* 基础宽度 280px，根据 cardScale 缩放 */
-  grid-template-columns: repeat(auto-fill, minmax(calc(280px * var(--card-scale, 1)), 1fr));
-  gap: 20px;
-  margin-top: 24px;
-}
+.card-bg { position: absolute; inset: 0; z-index: 0; }
+.bg-image { width: 100%; height: 100%; pointer-events: none; }
+.bg-image :deep(img) { width: 100%; height: 100%; object-fit: cover; }
+.bg-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.placeholder-text { font-size: 48px; font-weight: bold; color: rgba(255, 255, 255, 0.2); text-transform: uppercase; }
+.bg-overlay { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.4) 50%, rgba(0, 0, 0, 0.1) 100%); }
 
-.grid-item {
-  /* 确保拖拽时占位正确 */
-  position: relative;
-  touch-action: none;
-}
+.card-type-icons { position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 6px; color: rgba(255, 255, 255, 0.9); background: rgba(0, 0, 0, 0.5); padding: 4px 8px; border-radius: 20px; backdrop-filter: blur(4px); }
+.card-info { position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 2; pointer-events: none; }
+.card-title { font-size: calc(16px * var(--card-scale, 1)); font-weight: bold; color: #fff; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-meta { display: flex; align-items: center; gap: 8px; }
+.mini-tag { height: 20px; font-size: 11px; opacity: 0.9; }
+.sync-time { font-size: 11px; color: rgba(255, 255, 255, 0.7); }
 
-/* ★★★ 卡片样式 ★★★ */
-.collection-card {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9; /* 强制 16:9 */
-  border-radius: 12px;
-  overflow: hidden;
-  cursor: pointer;
-  cursor: grab;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  transition: transform 0.2s, box-shadow 0.2s, filter 0.3s;
-  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
-  backdrop-filter: blur(10px); /* 增加毛玻璃效果 */
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
+.card-actions { position: absolute; bottom: 10px; right: 10px; z-index: 3; display: flex; gap: 8px; opacity: 0; transform: translateY(10px); transition: all 0.2s ease; }
+.collection-card:hover .card-actions { opacity: 1; transform: translateY(0); }
 
-.collection-card:active {
-  cursor: grabbing;
-}
+.paused-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-15deg); font-size: 24px; font-weight: 900; color: rgba(255, 255, 255, 0.3); border: 4px solid rgba(255, 255, 255, 0.3); padding: 4px 12px; border-radius: 8px; pointer-events: none; z-index: 1; letter-spacing: 2px; }
 
-.collection-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
-  z-index: 2;
-}
+.sortable-ghost { opacity: 0.4; background: rgba(255, 255, 255, 0.1); border: 2px dashed var(--n-primary-color); border-radius: 12px; pointer-events: none !important; }
+.sortable-drag { cursor: grabbing; opacity: 1; background: var(--card-bg-color); backdrop-filter: blur(16px); box-shadow: 0 16px 32px rgba(0,0,0,0.5); transform: scale(1.05); z-index: 9999; pointer-events: none !important; }
 
-/* ★★★ 暂停状态：黑白滤镜 ★★★ */
-.collection-card.is-paused {
-  filter: grayscale(100%);
-  opacity: 0.8;
-}
-.collection-card.is-paused:hover {
-  filter: grayscale(0%); /* 悬停时恢复彩色，方便操作 */
-  opacity: 1;
-}
+.center-container { display: flex; justify-content: center; align-items: center; height: 400px; }
 
-/* 背景层 */
-.card-bg {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-}
+.movie-card { border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; background-color: var(--card-bg-color); transition: transform 0.2s, box-shadow 0.2s; cursor: default; }
+.movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
+.movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
+.movie-card:hover .movie-poster { transform: scale(1.05); }
+.movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }
+.movie-title { font-size: 14px; font-weight: bold; line-height: 1.3; text-shadow: 0 1px 2px rgba(0,0,0,0.8); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+.movie-year { font-size: 12px; color: #ddd; margin-top: 2px; font-weight: 500; }
+.original-source-title { font-size: 11px; color: #aaa; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.8; }
+.movie-actions-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2px); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; opacity: 0; transition: opacity 0.2s ease-in-out; z-index: 20; }
+.movie-card:hover .movie-actions-overlay { opacity: 1; }
 
-.bg-image {
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-/* 深度选择器确保 naive-ui image 组件内部 img 填满 */
-.bg-image :deep(img) {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.bg-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.placeholder-text {
-  font-size: 48px;
-  font-weight: bold;
-  color: rgba(255, 255, 255, 0.2);
-  text-transform: uppercase;
-}
-
-/* 渐变遮罩：保证文字清晰 */
-.bg-overlay {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.4) 50%, rgba(0, 0, 0, 0.1) 100%);
-}
-
-/* ★★★ 右上角图标 ★★★ */
-.card-type-icons {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 2;
-  display: flex;
-  gap: 6px;
-  color: rgba(255, 255, 255, 0.9);
-  background: rgba(0, 0, 0, 0.5);
-  padding: 4px 8px;
-  border-radius: 20px;
-  backdrop-filter: blur(4px);
-}
-
-/* ★★★ 左下角信息 ★★★ */
-.card-info {
-  position: absolute;
-  bottom: 12px;
-  left: 12px;
-  right: 12px; /* 留出右侧空间给按钮 */
-  z-index: 2;
-  pointer-events: none; /* 让点击穿透 */
-}
-
-.card-title {
-  font-size: calc(16px * var(--card-scale, 1));
-  font-weight: bold;
-  color: #fff;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
-  margin-bottom: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.card-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.mini-tag {
-  height: 20px;
-  font-size: 11px;
-  opacity: 0.9;
-}
-
-.sync-time {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.7);
-}
-
-/* ★★★ 右下角操作按钮 ★★★ */
-.card-actions {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  z-index: 3;
-  display: flex;
-  gap: 8px;
-  opacity: 0; /* 默认隐藏 */
-  transform: translateY(10px);
-  transition: all 0.2s ease;
-}
-
-/* 悬停卡片时显示按钮 */
-.collection-card:hover .card-actions {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* 暂停状态遮罩文字 */
-.paused-overlay {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) rotate(-15deg);
-  font-size: 24px;
-  font-weight: 900;
-  color: rgba(255, 255, 255, 0.3);
-  border: 4px solid rgba(255, 255, 255, 0.3);
-  padding: 4px 12px;
-  border-radius: 8px;
-  pointer-events: none;
-  z-index: 1;
-  letter-spacing: 2px;
-}
-
-/* SortableJS 拖拽样式 */
-.sortable-ghost {
-  opacity: 0.4;
-  background: rgba(255, 255, 255, 0.1);
-  border: 2px dashed var(--n-primary-color);
-  border-radius: 12px;
-  pointer-events: none !important;
-}
-.sortable-drag {
-  cursor: grabbing;
-  opacity: 1;
-  background: var(--card-bg-color); /* 替换原来的 #202023 */
-  backdrop-filter: blur(16px);
-  box-shadow: 0 16px 32px rgba(0,0,0,0.5); /* 增加阴影，营造浮起感 */
-  transform: scale(1.05); /* 稍微放大 */
-  z-index: 9999; /* 确保在最上层 */
-  pointer-events: none !important;
-}
-
-/* 居中加载容器 */
-.center-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 400px;
-}
-
-/* ... (保留原有的模态框样式) ... */
-.movie-card {
-  border-radius: 8px;
-  overflow: hidden;
-  position: relative;
-  aspect-ratio: 2 / 3; 
-  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
-  transition: transform 0.2s, box-shadow 0.2s;
-  cursor: default;
-}
-
-.movie-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  z-index: 2;
-}
-
-.movie-poster {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  transition: transform 0.3s;
-}
-
-.movie-card:hover .movie-poster {
-  transform: scale(1.05);
-}
-
-.movie-info-overlay {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  padding: 60px 10px 10px 10px; 
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%);
-  color: #fff;
-  pointer-events: none; 
-  z-index: 10;
-}
-
-.movie-title {
-  font-size: 14px;
-  font-weight: bold;
-  line-height: 1.3;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.movie-year {
-  font-size: 12px;
-  color: #ddd; 
-  margin-top: 2px;
-  font-weight: 500;
-}
-
-.original-source-title {
-  font-size: 11px;
-  color: #aaa;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0.8;
-}
-
-.movie-actions-overlay {
-  position: absolute;
-  inset: 0; 
-  background: rgba(0, 0, 0, 0.6); 
-  backdrop-filter: blur(2px); 
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  gap: 12px;
-  opacity: 0;
-  transition: opacity 0.2s ease-in-out;
-  z-index: 20;
-}
-
-.movie-card:hover .movie-actions-overlay {
-  opacity: 1;
-}
-
-.status-badge {
-  position: absolute;
-  top: 10px;
-  left: -30px;
-  width: 100px;
-  height: 24px;
-  background-color: #666;
-  color: #fff;
-  font-size: 12px;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transform: rotate(-45deg); 
-  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-  z-index: 15;
-  pointer-events: none;
-}
-
+.status-badge { position: absolute; top: 10px; left: -30px; width: 100px; height: 24px; background-color: #666; color: #fff; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 15; pointer-events: none; }
 .status-badge.in_library { background-color: #63e2b7; color: #000; } 
 .status-badge.missing { background-color: #e88080; } 
 .status-badge.subscribed { background-color: #f2c97d; color: #000; } 
@@ -2650,197 +1535,94 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 .status-badge.unidentified { background-color: #d03050; }
 .status-badge.ignored { background-color: #69ace2; }
 
-.poster-placeholder {
-  width: 100%;
-  height: 100%;
-  background-color: var(--n-action-color); /* 替换原来的 #2d2d30 */
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  color: #666;
-}
+.poster-placeholder { width: 100%; height: 100%; background-color: var(--n-action-color); display: flex; flex-direction: column; justify-content: center; align-items: center; color: #666; }
 
-.type-selection-section {
-  margin-bottom: 20px;
-}
-.section-title {
-  font-size: 16px;
-  font-weight: bold;
-  margin-bottom: 12px;
-  color: var(--n-text-color-1);
-}
-.type-card {
-  border: 1px solid var(--n-border-color);
-  border-radius: 8px;
-  padding: 16px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  transition: all 0.2s ease;
-  position: relative;
-  background-color: var(--n-card-color);
-}
-.type-card:hover {
-  border-color: var(--n-primary-color);
-  background-color: rgba(var(--n-primary-color-rgb), 0.05);
-  transform: translateY(-2px);
-}
-.type-card.active {
-  border-color: var(--n-primary-color);
-  background-color: rgba(var(--n-primary-color-rgb), 0.1);
-  box-shadow: 0 0 0 1px var(--n-primary-color) inset;
-}
-.type-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background-color: var(--n-color-modal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--n-text-color-2);
-}
-.type-card.active .type-icon {
-  background-color: var(--n-primary-color);
-  color: #fff;
-}
-.type-info {
-  flex: 1;
-}
-.type-title {
-  font-weight: bold;
-  font-size: 14px;
-}
-.type-desc {
-  font-size: 12px;
-  color: var(--n-text-color-3);
-  margin-top: 2px;
-}
-.type-check {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  color: var(--n-primary-color);
-}
+.type-selection-section { margin-bottom: 20px; }
+.section-title { font-size: 16px; font-weight: bold; margin-bottom: 12px; color: var(--n-text-color-1); }
+.type-card { border: 1px solid var(--n-border-color); border-radius: 8px; padding: 16px; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: all 0.2s ease; position: relative; background-color: var(--n-card-color); }
+.type-card:hover { border-color: var(--n-primary-color); background-color: rgba(var(--n-primary-color-rgb), 0.05); transform: translateY(-2px); }
+.type-card.active { border-color: var(--n-primary-color); background-color: rgba(var(--n-primary-color-rgb), 0.1); box-shadow: 0 0 0 1px var(--n-primary-color) inset; }
+.type-icon { width: 40px; height: 40px; border-radius: 50%; background-color: var(--n-color-modal); display: flex; align-items: center; justify-content: center; color: var(--n-text-color-2); }
+.type-card.active .type-icon { background-color: var(--n-primary-color); color: #fff; }
+.type-info { flex: 1; }
+.type-title { font-weight: bold; font-size: 14px; }
+.type-desc { font-size: 12px; color: var(--n-text-color-3); margin-top: 2px; }
+.type-check { position: absolute; top: 8px; right: 8px; color: var(--n-primary-color); }
 
-.config-card {
-  background-color: var(--n-action-color); 
-  border-radius: 8px;
-  margin-top: 8px;
-}
+.config-card { background-color: var(--n-action-color); border-radius: 8px; margin-top: 8px; }
+.custom-url-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.add-url-btn { margin-top: 4px; border-style: dashed; }
 
-.custom-url-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-.add-url-btn {
-  margin-top: 4px;
-  border-style: dashed;
-}
-
-.rules-container {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+/* 基础规则行布局 */
+.rules-container { display: flex; flex-direction: column; gap: 8px; }
 .rule-row {
-  display: flex;
-  align-items: center;
-  gap: 12px; /*稍微增加一点间距更美观*/
-  background-color: var(--n-card-color);
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--n-border-color);
-  width: 100%;
-  box-sizing: border-box; /* 确保 padding 不会撑破宽度 */
+  display: flex; align-items: center; gap: 12px;
+  background-color: var(--n-card-color); padding: 8px 12px; border-radius: 6px;
+  border: 1px solid var(--n-border-color); width: 100%; box-sizing: border-box;
 }
-.rule-index {
-  width: 30px;
-  color: var(--n-text-color-3);
-  font-size: 12px;
-  font-weight: bold;
-  flex-shrink: 0;
-}
-.rule-field { 
-  width: 140px !important; 
-  flex-shrink: 0; /* 禁止压缩 */
-}
-.rule-op { 
-  width: 150px !important; 
-  flex-shrink: 0; /* 禁止压缩 */
-}
-.rule-value { 
-  flex: 1; /* 霸占剩余所有空间 */
-  min-width: 150px; /* 值选择下拉宽度 */
-  display: flex; 
-  align-items: center;
-}
-/* 4. 强制值区域内部的所有控件填满 */
-.rule-value > .n-select,
-.rule-value > .n-input,
-.rule-value > .n-input-number,
-.rule-value > .n-slider {
-  width: 100% !important; /* 强制填满 rule-value 的空间 */
-  flex-grow: 1;
-}
-.rule-delete { 
-  flex-shrink: 0;
-  margin-left: 4px; 
+.rule-index { width: 30px; color: var(--n-text-color-3); font-size: 12px; font-weight: bold; flex-shrink: 0; }
+.rule-field, .rule-op { width: 140px; flex-shrink: 0; }
+.rule-value { flex: 1; min-width: 150px; display: flex; align-items: center; }
+.rule-value > .n-select, .rule-value > .n-input, .rule-value > .n-input-number, .rule-value > .n-slider { width: 100% !important; flex-grow: 1; }
+.rule-delete { flex-shrink: 0; margin-left: 4px; }
+
+/* 动态规则基础布局 */
+.dynamic-rule-row {
+  display: flex; gap: 8px; margin-bottom: 8px; align-items: center;
 }
 
-.ai-section {
-  margin-top: 20px;
-  border: 1px solid rgba(242, 201, 125, 0.3); 
-  background: rgba(242, 201, 125, 0.05);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.ai-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: rgba(242, 201, 125, 0.1);
-  font-weight: bold;
-  color: #f2c97d;
-}
-.ai-content {
-  padding: 16px;
-}
+.ai-section { margin-top: 20px; border: 1px solid rgba(242, 201, 125, 0.3); background: rgba(242, 201, 125, 0.05); border-radius: 8px; overflow: hidden; }
+.ai-header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: rgba(242, 201, 125, 0.1); font-weight: bold; color: #f2c97d; }
+.ai-content { padding: 16px; }
 
-.ai-hero-section {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 20px;
-  background: linear-gradient(135deg, rgba(var(--n-primary-color-rgb), 0.1) 0%, rgba(var(--n-primary-color-rgb), 0) 100%);
-  border-radius: 8px;
-  border: 1px solid rgba(var(--n-primary-color-rgb), 0.2);
-}
-.ai-hero-section.global {
-  background: linear-gradient(135deg, rgba(100, 200, 255, 0.1) 0%, rgba(100, 200, 255, 0) 100%);
-  border-color: rgba(100, 200, 255, 0.2);
-}
-.ai-icon-large {
-  font-size: 40px;
-  color: var(--n-primary-color);
-}
-.ai-hero-title {
-  font-size: 18px;
-  font-weight: bold;
-}
-.ai-hero-desc {
-  color: var(--n-text-color-3);
-  margin-top: 4px;
-}
+.ai-hero-section { display: flex; align-items: center; gap: 16px; padding: 20px; background: linear-gradient(135deg, rgba(var(--n-primary-color-rgb), 0.1) 0%, rgba(var(--n-primary-color-rgb), 0) 100%); border-radius: 8px; border: 1px solid rgba(var(--n-primary-color-rgb), 0.2); }
+.ai-hero-section.global { background: linear-gradient(135deg, rgba(100, 200, 255, 0.1) 0%, rgba(100, 200, 255, 0) 100%); border-color: rgba(100, 200, 255, 0.2); }
+.ai-icon-large { font-size: 40px; color: var(--n-primary-color); }
+.ai-hero-title { font-size: 18px; font-weight: bold; }
+.ai-hero-desc { color: var(--n-text-color-3); margin-top: 4px; }
 
-.modal-footer-custom {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.modal-footer-custom { display: flex; justify-content: space-between; align-items: center; }
+
+/* ★★★ 响应式媒体查询：针对移动端屏幕全面优化表单布局 ★★★ */
+@media (max-width: 768px) {
+  /* 规则行重排为上下两层/三层小卡片 */
+  .rule-row {
+    flex-wrap: wrap;
+    position: relative;
+    padding-top: 36px; /* 留出上方空间给序号和删除按钮 */
+    padding-bottom: 12px;
+  }
+  .rule-index {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    width: auto;
+  }
+  .rule-delete {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    margin-left: 0;
+  }
+  .rule-field, .rule-op {
+    /* 并排占一半，移除强硬的像素宽度限制 */
+    flex: 1 1 calc(50% - 8px) !important;
+    width: auto !important;
+  }
+  .rule-value {
+    /* 值选择器独占一整行 */
+    flex: 0 0 100% !important;
+    width: 100% !important;
+    margin-top: 4px;
+  }
+  
+  /* 动态规则排版优化 */
+  .dynamic-rule-row {
+    flex-wrap: wrap; /* 允许折行 */
+  }
+  .dynamic-rule-row > .n-select {
+    flex: 1 1 100% !important; /* 每个选择器独立成行或最大化填充 */
+    min-width: 100px;
+  }
 }
 </style>
