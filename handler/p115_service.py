@@ -34,6 +34,10 @@ _MP_PARSE_CACHE = {}
 # 全局直链缓存池，供反向代理和Web路由共享 
 _DIRECT_URL_CACHE = {}
 
+# 全局目录缓存池
+_GLOBAL_DIR_CACHE = {}
+_GLOBAL_DIR_LOCK = threading.Lock()
+
 def get_115_tokens():
     """唯一真理：只从独立数据库获取 Token 和 Cookie"""
     auth_data = settings_db.get_setting('p115_auth_tokens')
@@ -112,48 +116,29 @@ class P115OpenAPIClient:
         }
 
     def _do_request(self, method, url, **kwargs):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                current_token = self.access_token # 记录当前请求使用的 token
+        try:
+            current_token = self.access_token # 记录当前请求使用的 token
+            
+            # 支持自定义 headers 覆盖 (用于透传播放器 UA)
+            req_headers = self.headers.copy()
+            if 'headers' in kwargs:
+                req_headers.update(kwargs.pop('headers'))
                 
-                # 支持自定义 headers 覆盖 (用于透传播放器 UA)
-                req_headers = self.headers.copy()
-                if 'headers' in kwargs:
-                    req_headers.update(kwargs.pop('headers'))
-                    
-                raw_resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs)
+            resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs).json()
+            
+            if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
+                logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
                 
-                try:
-                    resp = raw_resp.json()
-                except Exception as json_err:
-                    # 核心修复：捕获 115 返回非 JSON (如 502/405 网页) 的情况
-                    err_detail = f"HTTP {raw_resp.status_code}, Body: {raw_resp.text[:150]}"
-                    if attempt < max_retries - 1:
-                        logger.warning(f"  ➜ [115 API] 接口返回异常非JSON数据，等待 2 秒后重试 ({attempt+1}/{max_retries})... 详情: {err_detail}")
-                        time.sleep(2)
-                        continue
-                    return {"state": False, "error_msg": f"JSON解析失败: {json_err}. 详情: {err_detail}"}
-                
-                if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
-                    logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
-                    if refresh_115_token(current_token):
-                        logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
-                        # 续期成功后重试一次
-                        return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
-                    else:
-                        logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
-                
-                return resp
-            except requests.exceptions.RequestException as req_err:
-                # 捕获网络连接超时等错误
-                if attempt < max_retries - 1:
-                    logger.warning(f"  ➜ [115 API] 网络请求异常，等待 2 秒后重试 ({attempt+1}/{max_retries})...")
-                    time.sleep(2)
-                    continue
-                return {"state": False, "error_msg": f"网络请求彻底失败: {str(req_err)}"}
-            except Exception as e:
-                return {"state": False, "error_msg": str(e)}
+                # ★ 传入 current_token 进行比对
+                if refresh_115_token(current_token):
+                    logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
+                    return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+                else:
+                    logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
+            
+            return resp
+        except Exception as e:
+            return {"state": False, "error_msg": str(e)}
 
     def get_user_info(self):
         url = f"{self.base_url}/open/user/info"
@@ -450,6 +435,9 @@ class P115Service:
     _lock = threading.Lock()
     _rate_limit_lock = threading.Lock() # 专用于 API 流控的锁
     _downurl_lock = threading.Lock() # 直链专用锁
+    # 移动接口的绝对互斥锁
+    _move_lock = threading.Lock()
+    _last_move_time = 0
     
     # 客户端缓存
     _openapi_client = None
@@ -551,18 +539,20 @@ class P115Service:
             def _rate_limit(self):
                 """底层统一 API 流控拦截器 """
                 try:
-                    # 默认 0.5 秒
-                    interval = float(get_config().get(constants.CONFIG_OPTION_115_INTERVAL, 0.5))
+                    interval = float(get_config().get(constants.CONFIG_OPTION_115_INTERVAL, 1.5))
+                    if interval < 1.5:
+                        interval = 1.5
                 except (ValueError, TypeError):
-                    interval = 0.5
+                    interval = 1.5
                 
-                # 将 sleep 放回锁内。
-                # 现在改为公平阻塞：谁拿到锁，谁就等够间隔再释放。前端请求最多只需等前面一个请求的 0.5 秒。
                 with P115Service._rate_limit_lock:
                     current_time = time.time()
                     elapsed = current_time - P115Service._last_request_time
                     if elapsed < interval:
-                        time.sleep(interval - elapsed)
+                        import random
+                        # ★ 核心修复：加入 0.1~0.5 秒的随机抖动，打破固定频率的机器人特征
+                        jitter = random.uniform(0.1, 0.5)
+                        time.sleep((interval - elapsed) + jitter)
                     P115Service._last_request_time = time.time()
 
             def get_user_info(self):
@@ -644,9 +634,6 @@ class P115Service:
                 if cache_key in _DIRECT_URL_CACHE:
                     cached_data = _DIRECT_URL_CACHE[cache_key]
                     if now < cached_data['expire_at']:
-                        # ★ 提取缓存里的文件名打印
-                        #display_name = cached_data.get('name', pick_code[:8])
-                        #logger.info(f"  ➜ [直链缓存] 命中直链 -> {display_name} (UA: {str(user_agent)[:15]}...)")
                         return cached_data['url']
 
                 with P115Service._downurl_lock:
@@ -659,7 +646,17 @@ class P115Service:
                         time.sleep(1.5 - elapsed)
                     
                     try:
-                        res = self._cookie.download_url(pick_code, user_agent)
+                        # ★ 核心修复：使用独立线程池强制设置 15 秒超时，防止第三方库底层 Socket 死锁！
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(self._cookie.download_url, pick_code, user_agent)
+                            try:
+                                res = future.result(timeout=15)
+                            except TimeoutError:
+                                logger.error(f"  🛑 [超时拦截] 获取直链网络卡死超过 15 秒，已强制切断！")
+                                P115Service._last_downurl_time = time.time()
+                                return None
+
                         P115Service._last_downurl_time = time.time()
                         
                         if res:
@@ -991,6 +988,26 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ➜ 写入 p115_mediainfo_cache 失败: {e}", exc_info=True)
             return False
+
+    @staticmethod
+    def get_mediainfo_cache_text(sha1):
+        """从本地 p115_mediainfo_cache 读取 JSON 原文，用于直接生成 -mediainfo.json 文件"""
+        if not sha1:
+            return None
+
+        try:
+            sha1 = str(sha1).upper()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT mediainfo_json::text AS mediainfo_json_text FROM p115_mediainfo_cache WHERE sha1 = %s",
+                        (sha1,)
+                    )
+                    row = cursor.fetchone()
+                    return row['mediainfo_json_text'] if row and row.get('mediainfo_json_text') else None
+        except Exception as e:
+            logger.error(f"  ➜ 读取 p115_mediainfo_cache 失败: {e}")
+            return None
 
 # ======================================================================
 # ★★★ 115 整理记录 DB 管理器 ★★★
@@ -3299,17 +3316,34 @@ class SmartOrganizer:
         # ★★★ 核心升级：支持 / 分层创建多级目录 ★★★
         dir_parts = [p.strip() for p in std_root_name.split('/') if p.strip()]
         
+        # 提前计算基础相对路径，用于逐级修复 local_path
+        category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
+        base_rel_path = category_rule.get('category_path') or category_rule.get('dir_name', '未识别') if category_rule else "未识别"
+        
         for attempt in range(2):
             success_chain = True
             temp_parent_cid = current_parent_cid
             
             # 逐级检查/创建目录
             for part_name in dir_parts:
-                part_cid = P115CacheManager.get_cid(temp_parent_cid, part_name)
+                cache_key = f"{temp_parent_cid}_{part_name}"
                 
+                # 1. 优先查全局内存缓存 (抵抗并发)
+                with _GLOBAL_DIR_LOCK:
+                    part_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+                
+                # 2. 查数据库缓存
+                if not part_cid:
+                    part_cid = P115CacheManager.get_cid(temp_parent_cid, part_name)
+                    if part_cid:
+                        with _GLOBAL_DIR_LOCK:
+                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
+
                 # 缓存自愈检查
                 if part_cid and str(part_cid) == str(source_root_id) and str(temp_parent_cid) != str(root_item.get('pid') or root_item.get('parent_id')):
                     P115CacheManager.delete_cid(part_cid)
+                    with _GLOBAL_DIR_LOCK:
+                        _GLOBAL_DIR_CACHE.pop(cache_key, None)
                     part_cid = None
 
                 if not part_cid:
@@ -3317,19 +3351,45 @@ class SmartOrganizer:
                     if mk_res.get('state'):
                         part_cid = mk_res.get('cid')
                         P115CacheManager.save_cid(part_cid, temp_parent_cid, part_name)
+                        with _GLOBAL_DIR_LOCK:
+                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
                     else:
-                        # 模糊查找兜底
-                        try:
-                            search_res = self.client.fs_files({'cid': temp_parent_cid, 'search_value': part_name, 'limit': 1150, 'record_open_time': 0, 'count_folders': 0})
-                            for item in search_res.get('data', []):
-                                if item.get('fn') == part_name and str(item.get('fc', item.get('type'))) == '0':
-                                    part_cid = item.get('fid') or item.get('file_id')
-                                    P115CacheManager.save_cid(part_cid, temp_parent_cid, part_name)
-                                    break
-                        except: pass
+                        err_text = json.dumps(mk_res, ensure_ascii=False)
+                        should_search_after_mkdir_fail = any(
+                            kw in err_text.lower()
+                            for kw in ['exist', 'exists', 'already', '重复', '已存在', 'same_name', '文件名重复']
+                        )
+
+                        if should_search_after_mkdir_fail:
+                            try:
+                                # ★ 核心修复：使用 fs_files + search_value 精准定位！
+                                # 既突破了 1000 条限制，又不会触发全局 search 的 WAF 风控
+                                search_res = self.client.fs_files({
+                                    'cid': temp_parent_cid,
+                                    'search_value': part_name,
+                                    'limit': 100,
+                                    'show_dir': 1,
+                                    'record_open_time': 0
+                                })
+                                for item in search_res.get('data', []):
+                                    item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                                    item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                                    item_cid = item.get('fid') or item.get('file_id')
+                                    
+                                    if item_fc == '0' and item_name == part_name and item_cid:
+                                        part_cid = item_cid
+                                        P115CacheManager.save_cid(part_cid, temp_parent_cid, part_name)
+                                        with _GLOBAL_DIR_LOCK:
+                                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
+                                        break
+                            except Exception as e:
+                                logger.debug(f"  ➜ 目录精准定位失败: {e}")
                 
                 if part_cid:
                     temp_parent_cid = part_cid
+                    # ★ 核心修复：逐级累加路径并更新 DB，彻底解决年份目录 local_path 为 NULL 的问题！
+                    base_rel_path = f"{base_rel_path}/{part_name}"
+                    P115CacheManager.update_local_path(part_cid, base_rel_path)
                 else:
                     success_chain = False
                     break
@@ -3609,9 +3669,10 @@ class SmartOrganizer:
                 # ★ 直接使用返回的 s_name 创建/查找季目录
                 if self.media_type == 'tv' and season_num is not None and s_name:
                     cache_key = f"{final_home_cid}_{s_name}"
-                    s_cid = memory_dir_cache.get(cache_key) # ★ 优先查内存缓存
                     
-                    # ★ 如果缓存里存的是 'FAILED'，说明之前尝试过且失败了，直接跳过，防止 API 风暴
+                    with _GLOBAL_DIR_LOCK:
+                        s_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+                    
                     if s_cid == 'FAILED':
                         real_target_cid = final_home_cid
                     else:
@@ -3620,31 +3681,44 @@ class SmartOrganizer:
                         
                         if s_cid:
                             real_target_cid = s_cid
-                            memory_dir_cache[cache_key] = s_cid # 顺手存入内存
+                            with _GLOBAL_DIR_LOCK:
+                                _GLOBAL_DIR_CACHE[cache_key] = s_cid
                         else:
                             s_mk = self.client.fs_mkdir(s_name, final_home_cid)
                             s_cid = s_mk.get('cid') if s_mk.get('state') else None
                             
                             if not s_cid: 
                                 try:
-                                    s_search = self.client.fs_files({'cid': final_home_cid, 'search_value': s_name, 'limit': 1150, 'record_open_time': 0, 'count_folders': 0})
+                                    # ★ 核心修复：使用 fs_files + search_value 精准定位
+                                    s_search = self.client.fs_files({
+                                        'cid': final_home_cid, 
+                                        'search_value': s_name,
+                                        'limit': 100, 
+                                        'show_dir': 1,
+                                        'record_open_time': 0
+                                    })
                                     for item in s_search.get('data', []):
                                         item_name = item.get('fn') or item.get('n') or item.get('file_name')
-                                        item_fc = item.get('fc') if item.get('fc') is not None else item.get('type')
-                                        item_pid = str(item.get('pid') or item.get('parent_id') or item.get('cid'))
+                                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                                        item_cid = item.get('fid') or item.get('file_id')
                                         
-                                        if item_name == s_name and str(item_fc) == '0' and item_pid == str(final_home_cid):
-                                            s_cid = item.get('fid') or item.get('file_id')
+                                        if item_fc == '0' and item_name == s_name and item_cid:
+                                            s_cid = item_cid
                                             break
-                                except: pass
+                                except Exception: pass
                             
                             if s_cid:
                                 P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
-                                memory_dir_cache[cache_key] = s_cid # ★ 写入内存缓存
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = s_cid
                                 real_target_cid = s_cid
+                                
+                                # ★ 同步更新季目录的 local_path
+                                season_rel_path = f"{base_rel_path}/{s_name}"
+                                P115CacheManager.update_local_path(s_cid, season_rel_path)
                             else:
-                                # ★ 核心防御：如果创建和搜索都失败了，标记为 FAILED，同批次不再重试！
-                                memory_dir_cache[cache_key] = 'FAILED'
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = 'FAILED'
                                 real_target_cid = final_home_cid
 
             # =================================================================
@@ -4129,6 +4203,20 @@ class SmartOrganizer:
                                             file_sha1 = info_res['data'].get('sha1')
                                     except Exception: pass
 
+                                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                                    try:
+                                        mediainfo_filename = os.path.splitext(new_filename)[0] + "-mediainfo.json"
+                                        mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
+                                        mediainfo_text = P115CacheManager.get_mediainfo_cache_text(file_sha1) if file_sha1 else None
+                                        if mediainfo_text:
+                                            with open(mediainfo_filepath, 'w', encoding='utf-8') as f:
+                                                f.write(mediainfo_text)
+                                            logger.info(f"  ➜ 媒体信息文件已生成 -> {mediainfo_filename}")
+                                        else:
+                                            logger.debug(f"  ➜ 跳过媒体信息文件生成，未命中本地缓存: {new_filename}")
+                                    except Exception as e:
+                                        logger.error(f"  ➜ 生成媒体信息文件失败: {e}")
+
                                 if keep_original:
                                     rel_path = file_item.get('rel_path', '')
                                     if rel_path: file_local_path = os.path.join(relative_category_path, std_root_name, rel_path.replace('/', os.sep), new_filename)
@@ -4170,10 +4258,20 @@ class SmartOrganizer:
                     if progress_callback:
                         progress_callback()
             else:
-                err_msg = str(move_res.get('error_msg', move_res))
+                raw_err_msg = str(move_res.get('error_msg', move_res))
+                if (
+                    'Expecting value: line 1 column 1 (char 0)' in raw_err_msg
+                    or 'JSONDecodeError' in raw_err_msg
+                    or '<html' in raw_err_msg.lower()
+                    or '<!doctype html' in raw_err_msg.lower()
+                ):
+                    err_msg = '该片暂时无法整理，等待24小时后重试'
+                else:
+                    err_msg = raw_err_msg
+
                 logger.error(f"  ➜ [批量移动失败] 目标CID:{batch_target_cid}, 包含 {len(move_fids)} 个文件, 原因: {err_msg}")
                 
-                if '不存在' in err_msg or move_res.get('code') in [20004, 70004]:
+                if '不存在' in raw_err_msg or move_res.get('code') in [20004, 70004]:
                     logger.warning(f"  ➜ 检测到目标目录在网盘中已不存在，正在清理失效缓存: CID {batch_target_cid}")
                     P115CacheManager.delete_cid(batch_target_cid)
                 if progress_callback:
