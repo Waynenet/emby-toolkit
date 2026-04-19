@@ -11,28 +11,29 @@
             <template #header>
               <span class="card-title">筛选条件</span>
             </template>
-            <n-space vertical size="large">
-              <n-space align="center">
-                <label>搜索:</label>
+            <n-space vertical size="large" style="width: 100%;">
+              
+              <div class="filter-item">
+                <label class="filter-label">搜索:</label>
                 <n-input
+                  class="filter-control"
                   v-model:value="searchQuery"
                   placeholder="输入片名搜索..."
                   clearable
-                  style="min-width: 300px;"
                 />
-              </n-space>
-              <n-space align="center">
-                <label>类型:</label>
-                <n-radio-group v-model:value="mediaType" :disabled="isSearchMode">
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">类型:</label>
+                <n-radio-group class="filter-control" v-model:value="mediaType" :disabled="isSearchMode">
                   <n-radio-button value="movie" label="电影" />
                   <n-radio-button value="tv" label="电视剧" />
                 </n-radio-group>
-              </n-space>
+              </div>
               
-              <!-- 优化：将排序改为 3 个按钮，点击切换升降序 -->
-              <n-space align="center">
-                <label>排序:</label>
-                <n-space>
+              <div class="filter-item">
+                <label class="filter-label">排序:</label>
+                <div class="filter-control sort-buttons">
                   <n-button 
                     :type="currentSortField === 'popularity' ? 'primary' : 'default'"
                     @click="toggleSort('popularity')"
@@ -65,107 +66,115 @@
                       <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
                     </template>
                   </n-button>
-                </n-space>
-              </n-space>
+                </div>
+              </div>
 
-              <n-space align="center">
-                <label>风格:</label>
-                <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode">
-                  <n-radio-button value="include" label="包含" />
-                  <n-radio-button value="exclude" label="排除" />
-                </n-radio-group>
+              <div class="filter-item">
+                <label class="filter-label">风格:</label>
+                <div class="filter-control" style="display: flex; flex-direction: column; gap: 8px;">
+                  <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode">
+                    <n-radio-button value="include" label="包含" />
+                    <n-radio-button value="exclude" label="排除" />
+                  </n-radio-group>
+                  <n-select
+                    v-model:value="selectedGenres"
+                    :disabled="isSearchMode"
+                    multiple
+                    filterable
+                    :placeholder="genreFilterMode === 'include' ? '选择要包含的风格' : '选择要排除的风格'"
+                    :options="genreOptions"
+                  />
+                </div>
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">分级:</label>
                 <n-select
-                  v-model:value="selectedGenres"
-                  :disabled="isSearchMode"
-                  multiple
-                  filterable
-                  :placeholder="genreFilterMode === 'include' ? '选择要包含的风格' : '选择要排除的风格'"
-                  :options="genreOptions"
-                  style="min-width: 300px;"
-                />
-              </n-space>
-              <n-space align="center">
-                <label>分级:</label>
-                <n-select
+                  class="filter-control"
                   v-model:value="selectedRating"
                   :disabled="isSearchMode"
                   clearable
                   placeholder="选择内容分级"
                   :options="ratingOptions"
-                  style="min-width: 300px;"
                 />
-              </n-space>
-              <n-space align="center">
-              <label>地区:</label>
-              <n-select
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">地区:</label>
+                <n-select
+                  class="filter-control"
                   v-model:value="selectedRegions"
                   :disabled="isSearchMode"
                   multiple
                   filterable
                   placeholder="选择国家/地区"
                   :options="countryOptions"
-                  style="min-width: 300px;"
-              />
-              </n-space>
-              <n-space align="center">
-                <label>语言:</label>
+                />
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">语言:</label>
                 <n-select
+                  class="filter-control"
                   v-model:value="selectedLanguage"
                   :disabled="isSearchMode"
                   filterable
                   clearable
                   placeholder="选择原始语言"
                   :options="languageOptions"
-                  style="min-width: 300px;"
                 />
-              </n-space>
-              <n-space align="center">
-                <label>发行年份:</label>
-                <n-input-group>
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">发行年份:</label>
+                <n-input-group class="filter-control">
                   <n-input-number
                     v-model:value="yearFrom"
                     :disabled="isSearchMode"
                     :show-button="false"
-                    placeholder="从 (例如 1990)"
+                    placeholder="从例如1990"
                     clearable
-                    style="width: 150px;"
+                    style="flex: 1; min-width: 0;"
                   />
                   <n-input-number
                     v-model:value="yearTo"
                     :disabled="isSearchMode"
                     :show-button="false"
-                    placeholder="到 (例如 1999)"
+                    placeholder="到例如1999"
                     clearable
-                    style="width: 150px;"
+                    style="flex: 1; min-width: 0;"
                   />
                 </n-input-group>
-              </n-space>
-              <n-space align="center">
-                <label>{{ studioLabel }}:</label>
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">{{ studioLabel }}:</label>
                 <n-select
+                  class="filter-control"
                   v-model:value="selectedStudios"
                   :disabled="isSearchMode"
                   multiple
                   filterable
                   :placeholder="`选择${studioLabel} (映射)`"
                   :options="studioOptions"
-                  style="min-width: 300px;"
                 />
-              </n-space>
-              <n-space align="center">
-                <label>关键词:</label>
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">关键词:</label>
                 <n-select
+                  class="filter-control"
                   v-model:value="selectedKeywords"
                   :disabled="isSearchMode"
                   multiple
                   filterable
                   placeholder="选择关键词"
                   :options="keywordOptions"
-                  style="min-width: 300px;"
                 />
-              </n-space>
-              <n-space align="center">
-                <label>评分不低于:</label>
+              </div>
+
+              <div class="filter-item">
+                <label class="filter-label">评分最低:</label>
                 <n-input-number
                   v-model:value="filters.vote_average_gte"
                   :disabled="isSearchMode"
@@ -175,10 +184,12 @@
                   placeholder="最低评分"
                   style="width: 120px;"
                 />
-              </n-space>
+              </div>
+
             </n-space>
           </n-card>
         </n-gi>
+        
         <!-- 右侧“每日推荐”面板 -->
         <n-gi :span="1" v-if="!isMobile">
           <n-card :bordered="false" class="dashboard-card recommendation-card">
@@ -364,7 +375,7 @@ import {
 import { 
   Heart, HeartOutline, HourglassOutline, Star as StarIcon, 
   FlashOutline as LightningIcon, DiceOutline as DiceIcon, ListOutline as ListIcon,
-  ArrowUpOutline, ArrowDownOutline  // 新引入指示箭头的图标
+  ArrowUpOutline, ArrowDownOutline 
 } from '@vicons/ionicons5';
 
 const authStore = useAuthStore();
@@ -391,7 +402,6 @@ const selectedKeywords = ref([]);
 const allStudios = ref([]); 
 const selectedStudios = ref([]);
 
-// ★★★ 排序状态解析与切换逻辑 ★★★
 const filters = reactive({
   sort_by: 'popularity.desc',
   vote_average_gte: 0,
@@ -411,11 +421,9 @@ const currentSortDirection = computed(() => {
 
 const toggleSort = (field) => {
   if (currentSortField.value === field) {
-    // 已经选中该字段，翻转升降序
     const newDir = currentSortDirection.value === 'desc' ? 'asc' : 'desc';
     setSortBy(field, newDir);
   } else {
-    // 选中新字段，默认给降序
     setSortBy(field, 'desc');
   }
 };
@@ -430,7 +438,6 @@ const setSortBy = (field, dir) => {
     filters.sort_by = `vote_average.${dir}`;
   }
 };
-// =============================
 
 const studioOptions = computed(() => {
   if (!allStudios.value || allStudios.value.length === 0) return [];
@@ -468,7 +475,6 @@ const checkMobile = () => {
   isMobile.value = window.innerWidth < 768;
 };
 
-// ★★★ 季选择模态框相关状态 ★★★
 const showSeasonModal = ref(false);
 const loadingSeasons = ref(false);
 const seasonList = ref([]);
@@ -482,7 +488,6 @@ const studioLabel = computed(() => {
 
 const getGenreNames = (genreIds) => {
   if (!genreIds || genreIds.length === 0 || genres.value.length === 0) return '';
-  
   return genreIds
     .map(id => genres.value.find(g => g.id === id)?.name)
     .filter(Boolean) 
@@ -496,10 +501,7 @@ const getYear = (media) => {
   return new Date(dateStr).getFullYear();
 };
 const genreOptions = computed(() => {
-  return genres.value.map(item => ({
-    label: item.name, 
-    value: item.id    
-  }));
+  return genres.value.map(item => ({ label: item.name, value: item.id }));
 });
 const fetchGenres = async () => {  
   try {
@@ -508,52 +510,37 @@ const fetchGenres = async () => {
       : '/api/custom_collections/config/tmdb_tv_genres';
     const response = await axios.get(endpoint);
     genres.value = response.data;
-  } catch (error) {
-    message.error('加载类型列表失败');
-  }
+  } catch (error) { message.error('加载类型列表失败'); }
 };
 const fetchCountries = async () => {  
   try {
     const response = await axios.get('/api/custom_collections/config/tmdb_countries');
     countryOptions.value = response.data;
-  } catch (error) {
-    message.error('加载国家列表失败');
-  }
+  } catch (error) { message.error('加载国家列表失败'); }
 };
 const fetchLanguages = async () => {
   try {
     const response = await axios.get('/api/discover/config/languages');
     languageOptions.value = response.data;
-  } catch (error) {
-    message.error('加载语言列表失败');
-  }
+  } catch (error) { message.error('加载语言列表失败'); }
 };
 const fetchKeywords = async () => {
   try {
     const response = await axios.get('/api/discover/config/keywords');
     keywordOptions.value = response.data;
-  } catch (error) {
-    message.error('加载关键词列表失败');
-  }
+  } catch (error) { message.error('加载关键词列表失败'); }
 };
 const fetchStudios = async () => {
   try {
     const response = await axios.get('/api/discover/config/studios');
     allStudios.value = response.data;
-  } catch (error) {
-    message.error('加载工作室列表失败');
-  }
+  } catch (error) { message.error('加载工作室列表失败'); }
 };
 const fetchRatings = async () => {
   try {
     const response = await axios.get('/api/custom_collections/config/unified_ratings_options');
-    ratingOptions.value = response.data.map(label => ({
-      label: label,
-      value: label
-    }));
-  } catch (error) {
-    message.error('加载分级列表失败');
-  }
+    ratingOptions.value = response.data.map(label => ({ label: label, value: label }));
+  } catch (error) { message.error('加载分级列表失败'); }
 };
 const fetchDiscoverData = async () => {
   if (isLoadingMore.value || loading.value) return;
@@ -562,9 +549,7 @@ const fetchDiscoverData = async () => {
     let response;
     if (isSearchMode.value) {
       response = await axios.post('/api/discover/search', {
-        query: searchQuery.value,
-        media_type: mediaType.value,
-        page: filters.page,
+        query: searchQuery.value, media_type: mediaType.value, page: filters.page,
       });
     } else {
       const apiParams = {
@@ -605,20 +590,11 @@ const fetchEmbyConfig = async () => {
     embyServerUrl.value = response.data.emby_server_url;
     embyServerId.value = response.data.emby_server_id;
     registrationRedirectUrl.value = response.data.emby_public_url;
-  } catch (error) {
-    console.error('获取 Emby 配置失败:', error);
-    message.error('获取 Emby 配置失败');
-  }
+  } catch (error) { console.error('获取 Emby 配置失败:', error); }
 };
 const pickRandomRecommendation = () => {
-  if (!recommendationPool.value || recommendationPool.value.length === 0) {
-    currentRecommendation.value = null;
-    return;
-  }
-  if (recommendationPool.value.length === 1) {
-    currentRecommendation.value = recommendationPool.value[0];
-    return;
-  }
+  if (!recommendationPool.value || recommendationPool.value.length === 0) { currentRecommendation.value = null; return; }
+  if (recommendationPool.value.length === 1) { currentRecommendation.value = recommendationPool.value[0]; return; }
   let newRecommendation;
   do {
     const randomIndex = Math.floor(Math.random() * recommendationPool.value.length);
@@ -640,7 +616,6 @@ const fetchRecommendationPool = async () => {
         await axios.post('/api/discover/trigger_recommendation_update');
         let attempts = 0;
         const maxAttempts = 10;
-        const pollInterval = 3000;
         const intervalId = setInterval(async () => {
           if (attempts >= maxAttempts) {
             clearInterval(intervalId);
@@ -659,7 +634,7 @@ const fetchRecommendationPool = async () => {
             }
           } catch (pollError) {}
           attempts++;
-        }, pollInterval);
+        }, 3000);
       } catch (triggerError) {
         message.error("启动推荐任务失败。");
         isPoolLoading.value = false;
@@ -675,17 +650,10 @@ const fetchRecommendationPool = async () => {
 const updateMediaStatus = (mediaId, newStatus) => {
   const index = results.value.findIndex(m => m.id === mediaId);
   if (index !== -1) {
-    results.value[index] = { 
-      ...results.value[index], 
-      subscription_status: newStatus 
-    };
+    results.value[index] = { ...results.value[index], subscription_status: newStatus };
   }
-
   if (currentRecommendation.value && currentRecommendation.value.id === mediaId) {
-    currentRecommendation.value = {
-      ...currentRecommendation.value,
-      subscription_status: newStatus
-    };
+    currentRecommendation.value = { ...currentRecommendation.value, subscription_status: newStatus };
   }
 };
 
@@ -698,16 +666,12 @@ const handleSubscribe = async (media) => {
     try {
       const res = await axios.get(`/api/discover/tmdb/tv/${media.id}`);
       if (res.data && res.data.seasons) {
-        seasonList.value = res.data.seasons
-          .filter(s => s.season_number > 0)
-          .sort((a, b) => a.season_number - b.season_number);
+        seasonList.value = res.data.seasons.filter(s => s.season_number > 0).sort((a, b) => a.season_number - b.season_number);
       }
     } catch (e) {
       message.warning("获取季信息失败");
       seasonList.value = [];
-    } finally {
-      loadingSeasons.value = false;
-    }
+    } finally { loadingSeasons.value = false; }
     return;
   }
 
@@ -719,9 +683,7 @@ const handleSubscribe = async (media) => {
 
   try {
     const portalResponse = await axios.post('/api/portal/subscribe', {
-      tmdb_id: media.id,
-      item_type: 'Movie',
-      item_name: media.title || media.name,
+      tmdb_id: media.id, item_type: 'Movie', item_name: media.title || media.name,
     });
     message.success(portalResponse.data.message);
     let finalStatus = portalResponse.data.status;
@@ -739,9 +701,7 @@ const handleSubscribe = async (media) => {
   } catch (error) {
     updateMediaStatus(media.id, originalStatus);
     message.error(error.response?.data?.message || '提交请求失败');
-  } finally {
-    subscribingId.value = null;
-  }
+  } finally { subscribingId.value = null; }
 };
 
 const submitSeasonSubscription = async (season) => {
@@ -749,55 +709,39 @@ const submitSeasonSubscription = async (season) => {
   try {
     const portalResponse = await axios.post('/api/portal/subscribe', {
       tmdb_id: currentSeriesForSearch.value.id, 
-      item_type: 'Season',
-      season_number: season.season_number,
+      item_type: 'Season', season_number: season.season_number,
       season_tmdb_id: season.id,
       item_name: `${currentSeriesForSearch.value.title || currentSeriesForSearch.value.name} 第 ${season.season_number} 季`
     });
     message.success(portalResponse.data.message);
     season.subscription_status = portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED';
-  } catch (error) {
-    message.error(error.response?.data?.message || '订阅失败');
-  } finally {
-    subscribingSeasonId.value = null;
-  }
+  } catch (error) { message.error(error.response?.data?.message || '订阅失败'); } 
+  finally { subscribingSeasonId.value = null; }
 };
 
 const submitAllSeasonsSubscription = async () => {
   subscribingAllSeasons.value = true;
   try {
     const missingSeasons = seasonList.value.filter(s => !s.in_library && s.subscription_status !== 'SUBSCRIBED' && s.subscription_status !== 'WANTED');
-    if (missingSeasons.length === 0) {
-      message.info("所有季均已入库或已订阅");
-      return;
-    }
+    if (missingSeasons.length === 0) { message.info("所有季均已入库或已订阅"); return; }
     
     const portalResponse = await axios.post('/api/portal/subscribe', {
-      tmdb_id: currentSeriesForSearch.value.id,
-      item_type: 'Series',
+      tmdb_id: currentSeriesForSearch.value.id, item_type: 'Series',
       item_name: currentSeriesForSearch.value.title || currentSeriesForSearch.value.name
     });
     message.success("一键订阅已提交");
     
-    missingSeasons.forEach(s => {
-      s.subscription_status = portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED';
-    });
-    
+    missingSeasons.forEach(s => { s.subscription_status = portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED'; });
     updateMediaStatus(currentSeriesForSearch.value.id, portalResponse.data.status === 'approved' ? 'SUBSCRIBED' : 'REQUESTED');
-    
     setTimeout(() => { showSeasonModal.value = false; }, 1000);
-  } catch (error) {
-    message.error(error.response?.data?.message || '一键订阅失败');
-  } finally {
-    subscribingAllSeasons.value = false;
-  }
+  } catch (error) { message.error(error.response?.data?.message || '一键订阅失败'); } 
+  finally { subscribingAllSeasons.value = false; }
 };
 
 const onImageError = (e) => { e.target.src = '/default-avatar.png'; };
 const handleClickCard = (media) => {
   if (media.in_library && media.emby_item_id && embyServerId.value) {
     let baseUrl = registrationRedirectUrl.value || embyServerUrl.value;
-
     if (baseUrl) {
       baseUrl = baseUrl.replace(/\/+$/, '');
       const embyDetailUrl = `${baseUrl}/web/index.html#!/item?id=${media.emby_item_id}&serverId=${embyServerId.value}`;
@@ -826,26 +770,16 @@ const resetAndFetch = () => {
   fetchDiscoverDataDebounced();
 };
 watch(mediaType, () => {
-  selectedGenres.value = [];
-  selectedStudios.value = []; 
-  filters['sort_by'] = 'popularity.desc';
-  fetchGenres();
-  resetAndFetch();
+  selectedGenres.value = []; selectedStudios.value = []; filters['sort_by'] = 'popularity.desc';
+  fetchGenres(); resetAndFetch();
 });
-watch(searchQuery, (newValue) => { resetAndFetch(); });
+watch(searchQuery, () => { resetAndFetch(); });
 watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, genreFilterMode, yearFrom, yearTo, selectedRating], () => { resetAndFetch(); }, { deep: true });
 let observer = null;
 onMounted(() => {
   checkMobile();
   window.addEventListener('resize', checkMobile);
-  fetchGenres();
-  fetchCountries();
-  fetchLanguages();
-  fetchKeywords();
-  fetchStudios();
-  fetchRatings();
-  fetchEmbyConfig(); 
-  fetchRecommendationPool();
+  fetchGenres(); fetchCountries(); fetchLanguages(); fetchKeywords(); fetchStudios(); fetchRatings(); fetchEmbyConfig(); fetchRecommendationPool();
   resetAndFetch();
   observer = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting) { loadMore(); }
@@ -859,6 +793,50 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* ---------------- 新增：解决筛选表单宽度的 Flex 响应式布局 ---------------- */
+.filter-item {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  gap: 16px;
+}
+.filter-label {
+  flex-shrink: 0;
+  width: 75px; 
+  text-align: right;
+  padding-top: 5px; /* 让文本大致与输入框对齐 */
+  font-weight: 500;
+}
+.filter-control {
+  flex: 1;         /* 占满剩余空间 */
+  min-width: 0;    /* 防止内部元素撑破 flex 容器 */
+}
+.sort-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap; /* 空间不够时自动换行 */
+}
+
+/* 移动端特殊处理：标签在上，输入框在下，利用率最大化 */
+@media (max-width: 767px) {
+  .filter-item {
+    flex-direction: column; 
+    align-items: stretch;
+    gap: 6px;
+  }
+  .filter-label {
+    text-align: left;
+    width: auto;
+    padding-top: 0;
+    font-size: 0.9em;
+    color: #a3a3a3;
+  }
+  .filter-control {
+    width: 100%;
+  }
+}
+/* ------------------------------------------------------------------ */
+
 .responsive-grid {
   display: grid;
   gap: 16px; 
