@@ -1423,6 +1423,16 @@ class SmartOrganizer:
             
             # 补充评分供规则匹配
             data['vote_average'] = raw_details.get('vote_average', 0)
+            
+            # ★ 补充时长供规则匹配
+            if self.media_type == 'movie':
+                data['runtime'] = raw_details.get('runtime', 0)
+            else:
+                data['episode_run_time'] = raw_details.get('episode_run_time', [])
+
+            # ★ 补充季集数据，供动漫绝对集数推算使用
+            data['seasons'] = raw_details.get('seasons', [])
+            data['last_episode_to_air'] = raw_details.get('last_episode_to_air', {})
 
             _TMDB_METADATA_CACHE[cache_key] = data # 写入缓存
 
@@ -1623,7 +1633,7 @@ class SmartOrganizer:
 
     def get_target_cid(self, ignore_memory=False, season_num=None):
         """获取目标 CID：优先查历史整理记录（记忆手动纠错），其次遍历规则"""
-        
+        self.is_from_memory = False # 初始化记忆标记
         # 辅助函数：校验历史 CID 是否仍在当前启用的规则中
         def _is_cid_valid_in_rules(check_cid):
             if not check_cid: return False
@@ -1663,6 +1673,7 @@ class SmartOrganizer:
                                     # ★ 核心修复：校验记忆是否失效
                                     if _is_cid_valid_in_rules(history_cid):
                                         logger.info(f"  ➜ [分季记忆体] 发现该剧 '第 {season_num} 季' 曾被整理过，沿用专属分类: {row['category_name']} (CID: {history_cid})")
+                                        self.is_from_memory = True # 打上记忆命中标记
                                         return history_cid
                                     else:
                                         logger.warning(f"  ➜ [分季记忆体] 历史分类 (CID: {history_cid}) 已不在当前规则中，记忆失效，交由规则引擎重新分配。")
@@ -1683,6 +1694,7 @@ class SmartOrganizer:
                                 # ★ 核心修复：校验记忆是否失效
                                 if _is_cid_valid_in_rules(history_cid):
                                     logger.info(f"  ➜ [记忆体] 发现该媒体曾被整理过，沿用历史分类: {row['category_name']} (CID: {history_cid})")
+                                    self.is_from_memory = True # 打上记忆命中标记
                                     return history_cid
                                 else:
                                     logger.warning(f"  ➜ [记忆体] 历史分类 (CID: {history_cid}) 已不在当前规则中，记忆失效，交由规则引擎重新分配。")
@@ -2852,6 +2864,39 @@ class SmartOrganizer:
             if season_num is None:
                 season_num = 1
 
+        # ★★★ 动漫绝对集数转季号逻辑 (解决海贼王 S01E1158 的问题) ★★★
+        if is_tv and episode_num is not None and episode_num > 30:
+            seasons_data = self.details.get('seasons', [])
+            last_ep_data = self.details.get('last_episode_to_air', {})
+            
+            # ★ 核心修复：容量校验。检查当前解析出的 season_num 是否真的能容纳这个 episode_num
+            # 如果不能容纳 (比如 S01 只有 61 集，但文件是 E1158)，说明这是绝对集数，强制反推！
+            needs_recalc = False
+            if seasons_data:
+                current_season_data = next((s for s in seasons_data if s.get('season_number') == season_num), None)
+                if not current_season_data or current_season_data.get('episode_count', 0) < episode_num:
+                    needs_recalc = True
+            elif season_num == 1:
+                needs_recalc = True
+
+            if needs_recalc:
+                # 捷径：如果是最新集，直接取最新季
+                if last_ep_data and last_ep_data.get('episode_number') == episode_num:
+                    season_num = last_ep_data.get('season_number', 1)
+                    if not silent_log:
+                        logger.info(f"  ➜ [动漫分季修正] 命中最新集，自动修正为第 {season_num} 季")
+                elif seasons_data:
+                    # 累加算法：排除第 0 季(SP)，按顺序累加集数，推算所属季
+                    valid_seasons = sorted([s for s in seasons_data if s.get('season_number', 0) > 0], key=lambda x: x['season_number'])
+                    cumulative = 0
+                    for s in valid_seasons:
+                        cumulative += s.get('episode_count', 0)
+                        if episode_num <= cumulative:
+                            season_num = s['season_number']
+                            if not silent_log:
+                                logger.info(f"  ➜ [动漫分季修正] 绝对集数 {episode_num} 超出原季容量，已自动推算并修正为第 {season_num} 季！")
+                            break
+
         if hasattr(self, 'forced_season') and self.forced_season is not None:
             # ★ 核心修复：防止批量整理时，第一个文件的季号污染后续所有不同季号的文件
             if getattr(self, 'is_manual_correct', False):
@@ -3137,13 +3182,14 @@ class SmartOrganizer:
             
             if extracted_season is not None:
                 self.forced_season = extracted_season
-                logger.info(f"  ➜ [动态修正] 从物理文件名 '{parse_name}' 中提取到季号 S{extracted_season:02d}，正在重新评估目标分类...")
-                new_target_cid = self.get_target_cid()
-                if new_target_cid and str(new_target_cid) != str(target_cid):
-                    logger.info(f"  ➜ [动态修正] 目标分类已修正 (成功触发连载状态检查)")
-                    target_cid = new_target_cid
-                    # 同步更新 dest_parent_cid，防止后面创建目录时用错
-                    dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
+                if not getattr(self, 'is_manual_correct', False):
+                    logger.info(f"  ➜ [动态修正] 从物理文件名 '{parse_name}' 中提取到季号 S{extracted_season:02d}，正在重新评估目标分类...")
+                    new_target_cid = self.get_target_cid()
+                    if new_target_cid and str(new_target_cid) != str(target_cid):
+                        logger.info(f"  ➜ [动态修正] 目标分类已修正 (成功触发连载状态检查)")
+                        target_cid = new_target_cid
+                        # 同步更新 dest_parent_cid，防止后面创建目录时用错
+                        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
 
         # =================================================================
         # 1. 拦截合集包 (Collection Breakdown) - 仅限单项传入时触发
@@ -3194,6 +3240,106 @@ class SmartOrganizer:
                 candidates = self._scan_files_recursively(source_root_id, max_depth=3)
 
         if not candidates: return True
+
+        # =================================================================
+        # ★★★ 智能物理时长嗅探 (解决短剧 TMDb 缺乏时长元数据的问题) ★★★
+        # =================================================================
+        # 默认不嗅探
+        needs_runtime_check = False
+
+        # 手动重组 / 记忆命中时，目标目录已确定，直接跳过嗅探
+        if not getattr(self, 'is_manual_correct', False) and not getattr(self, 'is_from_memory', False):
+            for r in self.rules:
+                if not r.get('enabled', True):
+                    continue
+
+                # 如果在遇到时长规则之前，已经命中了当前高优先级规则，就无需嗅探
+                if str(r.get('cid')) == str(target_cid):
+                    break
+
+                if r.get('runtime_min') or r.get('runtime_max'):
+                    needs_runtime_check = True
+                    break
+
+        if needs_runtime_check:
+            current_runtime = 0
+            if self.media_type == 'movie':
+                current_runtime = self.details.get('runtime') or 0
+            else:
+                runtimes = self.details.get('episode_run_time', [])
+                if runtimes and len(runtimes) > 0:
+                    current_runtime = runtimes[0]
+
+            # 如果 TMDb 缺乏时长数据，主动去物理文件里抓取
+            if current_runtime == 0:
+                known_video_exts_sniff = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+                first_video = None
+                for c in candidates:
+                    fname = c.get('fn') or c.get('n') or c.get('file_name') or ''
+                    if fname.split('.')[-1].lower() in known_video_exts_sniff:
+                        first_video = c
+                        break
+                
+                if first_video:
+                    logger.info("  ➜ [时长嗅探] TMDb 缺乏时长数据，且分类规则依赖时长，正在提取物理文件时长...")
+                    sniff_sha1 = first_video.get('sha1') or first_video.get('sha')
+                    sniff_fid = first_video.get('fid') or first_video.get('file_id')
+
+                    # 如果没有 sha1，主动请求一次 info 补齐
+                    if not sniff_sha1 and sniff_fid:
+                        try:
+                            info_res = self.client.fs_get_info(sniff_fid)
+                            if info_res.get('state') and info_res.get('data'):
+                                sniff_sha1 = info_res['data'].get('sha1')
+                                first_video['sha1'] = sniff_sha1
+                        except: pass
+
+                    if sniff_sha1 or sniff_fid:
+                        # ★ 核心修复：先主动查一次本地数据库，避免已有缓存的文件重复跑 ffprobe
+                        cached_text = P115CacheManager.get_mediainfo_cache_text(sniff_sha1) if sniff_sha1 else None
+                        
+                        if not cached_text:
+                            # 只有本地真没有缓存时，才去调用解析流程 (跑 ffprobe)
+                            self._fetch_and_parse_mediainfo(
+                                sniff_sha1,
+                                guessed_info={},
+                                pre_fetched_mediainfo=None,
+                                local_pre_fetched_mediainfo=None,
+                                file_node=first_video,
+                                silent_log=True
+                            )
+                            # 跑完后再读一次刚写入的缓存
+                            cached_text = P115CacheManager.get_mediainfo_cache_text(sniff_sha1) if sniff_sha1 else None
+
+                        if cached_text:
+                            try:
+                                mi_json = json.loads(cached_text)
+                                ticks = 0
+                                if isinstance(mi_json, list) and len(mi_json) > 0:
+                                    ticks = mi_json[0].get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
+                                elif isinstance(mi_json, dict):
+                                    ticks = mi_json.get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
+
+                                if ticks > 0:
+                                    # Emby 的 RunTimeTicks 单位是 100纳秒，转换为分钟
+                                    physical_runtime = int(ticks / 10000000 / 60)
+                                    logger.info(f"  ➜ [时长嗅探] 成功获取物理时长: {physical_runtime} 分钟")
+
+                                    # 注入到 details 中，伪装成 TMDb 数据
+                                    if self.media_type == 'movie':
+                                        self.details['runtime'] = physical_runtime
+                                    else:
+                                        self.details['episode_run_time'] = [physical_runtime]
+
+                                    # 重新评估目标目录！
+                                    new_target_cid = self.get_target_cid(ignore_memory=True)
+                                    if new_target_cid and str(new_target_cid) != str(target_cid):
+                                        logger.info(f"  ➜ [时长嗅探] 物理时长触发了新的分类规则，目标目录已修正！")
+                                        target_cid = new_target_cid
+                                        # 同步更新 dest_parent_cid，防止后面创建目录时用错
+                                        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
+                            except Exception as e:
+                                logger.debug(f"  ➜ 解析物理时长失败: {e}")
 
         # =================================================================
         # ★★★ 3. 智能类型纠错嗅探 (Movie -> TV) ★★★
@@ -3854,24 +4000,29 @@ class SmartOrganizer:
 
                 # 调用阶梯洗版优先级服务
                 if is_vid and effective_conflict_mode == 'replace':
-                    logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
-                    
-                    video_info = item.get('_video_info') or self._extract_video_info(new_name)
-                    file_sha1 = item.get('sha1') or item.get('sha')
-                    
-                    action, reason = WashingService.decide_washing_action(
-                        sha1=file_sha1,
-                        file_name=new_name,
-                        file_size=file_size,
-                        target_cid=target_cid,
-                        media_type=self.media_type,
-                        tmdb_id=self.tmdb_id,
-                        season_num=s_num,
-                        episode_num=e_num,
-                        original_lang=original_lang,
-                        is_active_washing=is_ep_active_washing,
-                        has_external_subtitle=has_ext_sub # ★★★ 传入外挂字幕豁免标志 ★★★
-                    )
+                    # ★ 核心修复：手动重组拥有最高特权，无视洗版规则直接放行！
+                    if getattr(self, 'is_manual_correct', False):
+                        action = 'REPLACE'
+                        reason = '手动重组，无视洗版规则强制放行'
+                    else:
+                        logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
+                        
+                        video_info = item.get('_video_info') or self._extract_video_info(new_name)
+                        file_sha1 = item.get('sha1') or item.get('sha')
+                        
+                        action, reason = WashingService.decide_washing_action(
+                            sha1=file_sha1,
+                            file_name=new_name,
+                            file_size=file_size,
+                            target_cid=target_cid,
+                            media_type=self.media_type,
+                            tmdb_id=self.tmdb_id,
+                            season_num=s_num,
+                            episode_num=e_num,
+                            original_lang=original_lang,
+                            is_active_washing=is_ep_active_washing,
+                            has_external_subtitle=has_ext_sub # ★★★ 传入外挂字幕豁免标志 ★★★
+                        )
                     
                     if action == 'REJECT':
                         logger.warning(f"  ➜ [洗版拦截] {new_name} -> {reason}")
@@ -4306,12 +4457,20 @@ class SmartOrganizer:
                     fail_reason=item['reason']
                 )
                 
-                # ★★★ 触发 TG 拦截通知 ★★★
-                try:
-                    from handler.telegram import send_intercept_notification
-                    send_intercept_notification(item['name'], item['reason'])
-                except Exception as e:
-                    logger.error(f"  ➜ 触发拦截通知失败: {e}")
+            # ★★★ 触发 TG 拦截通知 (聚合版) ★★★
+            try:
+                from handler.telegram import send_intercept_notification
+                grouped_unqualified = {}
+                for item in unqualified_items:
+                    reason = item['reason']
+                    if reason not in grouped_unqualified:
+                        grouped_unqualified[reason] = []
+                    grouped_unqualified[reason].append(item['name'])
+                    
+                for reason, names in grouped_unqualified.items():
+                    send_intercept_notification(names, reason)
+            except Exception as e:
+                logger.error(f"  ➜ 触发拦截通知失败: {e}")
 
         # =================================================================
         # ★ 极简垃圾回收：直接通知缓冲队列检查“待整理”目录
@@ -4332,17 +4491,20 @@ class SmartOrganizer:
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
                         if self.media_type == 'tv' and processed_episodes_for_flag:
-                            from psycopg2.extras import execute_batch
-                            update_data = [(str(self.tmdb_id), s, e) for s, e in processed_episodes_for_flag]
-                            execute_batch(cursor, """
-                                UPDATE media_metadata 
-                                SET active_washing = FALSE 
-                                WHERE parent_series_tmdb_id = %s 
-                                  AND item_type = 'Episode' 
-                                  AND season_number = %s 
-                                  AND episode_number = %s
-                            """, update_data)
-                            logger.info(f"  ➜ [洗版特权] 已精准核销 {len(processed_episodes_for_flag)} 个分集的洗版特权状态。")
+                            # ★ 核心修复：取交集，只核销真正拥有特权且本次处理成功的集数
+                            actually_washed_eps = processed_episodes_for_flag.intersection(active_washing_eps)
+                            if actually_washed_eps:
+                                from psycopg2.extras import execute_batch
+                                update_data = [(str(self.tmdb_id), s, e) for s, e in actually_washed_eps]
+                                execute_batch(cursor, """
+                                    UPDATE media_metadata 
+                                    SET active_washing = FALSE 
+                                    WHERE parent_series_tmdb_id = %s 
+                                      AND item_type = 'Episode' 
+                                      AND season_number = %s 
+                                      AND episode_number = %s
+                                """, update_data)
+                                logger.info(f"  ➜ [洗版特权] 已精准核销 {len(actually_washed_eps)} 个分集的洗版特权状态。")
                         elif self.media_type == 'movie' and movie_active_washing:
                             cursor.execute("UPDATE media_metadata SET active_washing = FALSE WHERE tmdb_id = %s AND item_type = 'Movie'", (str(self.tmdb_id),))
                             logger.info(f"  ➜ [洗版特权] 已核销电影的洗版特权状态。")
@@ -4873,28 +5035,46 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
         original_name = r['original_name']
         old_cache = old_caches.get(file_id)
 
-        info_res = client.fs_get_info(file_id)
-        if not info_res or not info_res.get('state') or not info_res.get('data'):
-            logger.warning(f"无法在 115 中定位到该文件(ID:{file_id})，可能已被删除。")
-            continue
+        old_pid = None
+        pick_code = None
+        sha1 = None
+        info_data = {}
 
-        info_data = info_res['data']
-        old_pid = info_data.get('parent_id') or info_data.get('cid')
+        # ★ 核心提速：优先使用本地缓存，彻底干掉 1.5 秒/次的 API 延迟！
+        if old_cache and old_cache.get('parent_id') and old_cache.get('pick_code'):
+            old_pid = old_cache['parent_id']
+            pick_code = old_cache['pick_code']
+            sha1 = old_cache.get('sha1')
+            info_data = {
+                'file_id': file_id, 
+                'file_name': original_name, 
+                'file_category': '1', 
+                'parent_id': old_pid, 
+                'pick_code': pick_code, 
+                'sha1': sha1
+            }
+        else:
+            # 只有当缓存丢失时，才迫不得已去请求 115 API
+            info_res = client.fs_get_info(file_id)
+            if not info_res or not info_res.get('state') or not info_res.get('data'):
+                logger.warning(f"无法在 115 中定位到该文件(ID:{file_id})，可能已被删除。")
+                continue
+            info_data = info_res['data']
+            old_pid = info_data.get('parent_id') or info_data.get('cid')
+            pick_code = info_data.get('pick_code')
+            sha1 = info_data.get('sha1')
+
         if old_pid: old_pids.add(str(old_pid))
 
-        pick_code = info_data.get('pick_code')
-        if not pick_code and old_cache:
-            pick_code = old_cache['pick_code']
-
         root_items.append({
-            'fid': info_data.get('file_id') or file_id,
-            'file_id': info_data.get('file_id') or file_id,
+            'fid': file_id,
+            'file_id': file_id,
             'fn': original_name,
             'fc': str(info_data.get('file_category', '1')),
             'pid': old_pid,
             'pc': pick_code,
             'pick_code': pick_code,
-            'sha1': info_data.get('sha1') or (old_cache['sha1'] if old_cache else None),
+            'sha1': sha1,
             '_record_id': r['id'],
             '_old_cache': old_cache,
             '_info_data': info_data
