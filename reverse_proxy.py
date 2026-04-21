@@ -1,4 +1,4 @@
-# reverse_proxy.py (集成 HTTPStrm 缓存 + 完美去重聚合季集版)
+# reverse_proxy.py (集成 HTTPStrm 缓存 + 完美去重聚合季集版 + 修复刮削图片误伤)
 
 import logging
 import requests
@@ -117,16 +117,8 @@ def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, l
         logger.error(f"  ➜ Emby代理排序或内存回退时失败: {e}", exc_info=True)
         return {"Items": [], "TotalRecordCount": 0}
 
-# ==========================================
-# ★★★ 核心修复：聚合去重函数 (预处理) ★★★
-# ==========================================
 def _get_deduped_series_ids(base_url, api_key, user_id, raw_ids):
-    """
-    轻量级抓取：获取列表中所有 ID 的 Type 和 SeriesId，
-    将所有 Season/Episode 的 ID 替换为 SeriesId，并严格去重保留顺序。
-    """
     if not raw_ids: return []
-    # 仅请求必要的轻量字段
     lightweight_items = _fetch_items_in_chunks(base_url, api_key, user_id, raw_ids, "Type,SeriesId")
     lightweight_map = {item['Id']: item for item in lightweight_items}
     
@@ -136,7 +128,6 @@ def _get_deduped_series_ids(base_url, api_key, user_id, raw_ids):
         item_info = lightweight_map.get(eid)
         if not item_info: continue
         
-        # 核心逻辑：如果是季或集，并且存在剧集ID，则升级为剧集ID
         target_id = item_info.get('SeriesId') if item_info.get('Type') in ['Season', 'Episode'] and item_info.get('SeriesId') else eid
         
         if target_id not in seen_ids:
@@ -350,7 +341,6 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
                     elif tid != "None":
                         if show_placeholders: full_view_list.append({"is_missing": True, "tmdb_id": tid})
 
-                # ★★★ 先统一升维并去重，再分页 ★★★
                 real_eids_for_lightweight = [x['id'] for x in full_view_list if not x['is_missing']]
                 lightweight_items = _fetch_items_in_chunks(base_url, api_key, user_id, real_eids_for_lightweight, "Type,SeriesId")
                 lightweight_map = {item['Id']: item for item in lightweight_items}
@@ -438,7 +428,6 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
                     else: candidate_pool = engine.generate_global_vector(limit=300, allowed_types=item_types)
                     tmdb_ids_filter = [str(i['id']) for i in candidate_pool]
 
-            # ★★★ 无视分页限制，先向数据库拉取足够多的数据，确保完全去重 ★★★
             sql_limit = 5000 
             sql_offset = 0
             sql_sort = 'Random' if 'ai_recommendation' in collection_type else sort_by
@@ -452,7 +441,6 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
 
             raw_emby_ids = [i['Id'] for i in items]
             
-            # 升维去重 (转换为剧集ID序列)
             deduped_ids = _get_deduped_series_ids(base_url, api_key, user_id, raw_emby_ids)
             
             reported_total_count = min(len(deduped_ids), defined_limit) if defined_limit else len(deduped_ids)
@@ -462,16 +450,13 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
             full_fields = "PrimaryImageAspectRatio,ImageTags,HasPrimaryImage,ProviderIds,UserData,Name,ProductionYear,CommunityRating,DateCreated,PremiereDate,Type,RecursiveItemCount,SortName,ChildCount,BasicSyncInfo"
 
             if is_emby_proxy_sort_required:
-                # 排序交由代理负责，返回结果已经是去重分页好的剧集内容
                 sorted_data = _fetch_sorted_items_via_emby_proxy(user_id, deduped_ids, sort_by, sort_order, emby_limit, offset, full_fields, reported_total_count)
                 sorted_data["TotalRecordCount"] = reported_total_count
                 return Response(json.dumps(sorted_data), mimetype='application/json')
             else:
-                # 自己进行切片分页
                 paged_ids = deduped_ids[offset : offset + emby_limit]
                 items_from_emby = _fetch_items_in_chunks(base_url, api_key, user_id, paged_ids, full_fields)
                 
-                # 保证 Emby 数据顺序与 DB/Deduped_ids 顺序对齐
                 items_map = {item['Id']: item for item in items_from_emby}
                 final_items = [items_map[eid] for eid in paged_ids if eid in items_map]
                 
@@ -513,7 +498,6 @@ def handle_get_latest_items(user_id, params):
             is_series_only = isinstance(item_types, list) and len(item_types) == 1 and item_types[0] == 'Series'
             sort_by = 'DateLastContentAdded,DateCreated' if is_series_only else 'DateCreated'
 
-            # 取前 500 个数据做去重聚合
             items, total_count = queries_db.query_virtual_library_items(
                 rules=definition.get('rules', []), logic=definition.get('logic', 'AND'),
                 user_id=user_id, limit=500, offset=0, sort_by='DateCreated', sort_order='Descending',
@@ -542,7 +526,6 @@ def handle_get_latest_items(user_id, params):
                 if tmdb_ids_filter is not None and (len(tmdb_ids_filter) == 0 or tmdb_ids_filter == ["-1"]): continue
                 definition = coll.get('definition_json')
                 
-                # 每个库稍微多拉点用于聚合排重
                 items, _ = queries_db.query_virtual_library_items(
                     rules=definition.get('rules', []), logic=definition.get('logic', 'AND'),
                     user_id=user_id, limit=limit * 2, offset=0, sort_by='DateCreated', sort_order='Descending',
@@ -555,7 +538,6 @@ def handle_get_latest_items(user_id, params):
             
             deduped_ids = _get_deduped_series_ids(base_url, api_key, user_id, unique_raw_ids)
             
-            # 因为是从多个集合中抓取的，需根据 DateCreated 再次对最终的剧集进行统筹排序
             items_details = _fetch_items_in_chunks(base_url, api_key, user_id, deduped_ids, "DateCreated," + fields)
             items_details.sort(key=lambda x: x.get('DateCreated', ''), reverse=True)
             
@@ -632,7 +614,8 @@ def proxy_all(path):
         full_path_lower = full_path.lower()
         
         is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)
-        is_download = '/items/' in full_path_lower and '/download' in full_path_lower
+        # 严格区分：必须排除刮削图片下载的 /remoteimages/ 路径
+        is_download = '/items/' in full_path_lower and '/download' in full_path_lower and '/remoteimages/' not in full_path_lower
 
         if is_video_stream or is_download:
             if 'master.m3u8' not in full_path_lower and 'hls' not in full_path_lower:
