@@ -1,4 +1,4 @@
-# reverse_proxy.py (集成 HTTPStrm 缓存 + 完美去重聚合季集版 + 修复刮削图片误伤)
+# reverse_proxy.py (终极整合版：HTTPStrm缓存 + 完美去重聚合季集 + 排除图片/字幕误伤)
 
 import logging
 import requests
@@ -118,6 +118,10 @@ def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, l
         return {"Items": [], "TotalRecordCount": 0}
 
 def _get_deduped_series_ids(base_url, api_key, user_id, raw_ids):
+    """
+    轻量级抓取：获取列表中所有 ID 的 Type 和 SeriesId，
+    将所有 Season/Episode 的 ID 替换为 SeriesId，并严格去重保留顺序。
+    """
     if not raw_ids: return []
     lightweight_items = _fetch_items_in_chunks(base_url, api_key, user_id, raw_ids, "Type,SeriesId")
     lightweight_map = {item['Id']: item for item in lightweight_items}
@@ -613,8 +617,10 @@ def proxy_all(path):
         # ====================================================================
         full_path_lower = full_path.lower()
         
-        is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)
-        # 严格区分：必须排除刮削图片下载的 /remoteimages/ 路径
+        # 1. 拦截视频流播放，但必须排除字幕请求 (/subtitles/)
+        is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower) and '/subtitles/' not in full_path_lower
+        
+        # 2. 拦截客户端的“下载”操作，但必须排除网络图片下载 (/remoteimages/)
         is_download = '/items/' in full_path_lower and '/download' in full_path_lower and '/remoteimages/' not in full_path_lower
 
         if is_video_stream or is_download:
