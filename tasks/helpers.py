@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 AUDIO_SUBTITLE_KEYWORD_MAP = {
     # 音轨：chi=国语, yue=粤语
-    "chi": ["Mandarin", "CHI", "ZHO", "国语", "国配", "国英双语", "公映", "台配", "京译", "上译", "央译"],
-    "yue": ["Cantonese", "YUE", "粤语"],
+    # ★ 补充 guoyu, guo 等拼音匹配
+    "chi": ["Mandarin", "CHI", "ZHO", "国语","普通话", "国配", "国英双语", "公映", "台配", "京译", "上译", "央译", "guoyu", "guo"],
+    "yue": ["Cantonese", "YUE", "粤语", "粤配", "粤英双语", "港配", "粤语配音", "广东话", "yueyu", "yue"],
     "eng": ["English", "ENG", "英语"],
     "jpn": ["Japanese", "JPN", "日语"],
     "kor": ["Korean", "KOR", "韩语"],
@@ -302,6 +303,33 @@ def _get_resolution_tier(width: int, height: int) -> tuple[int, str]:
     
     return 0, "未知"
 
+def normalize_lang_code(lang_str: str) -> str:
+    """
+    统一语言代码标准化：
+    音轨：chi=国语, yue=粤语
+    字幕：chi=简体, yue=繁体
+    """
+    if not lang_str:
+        return ""
+
+    lang_str = str(lang_str).lower().strip()
+
+    # 中文相关：明确拆分
+    if lang_str in ['chi', 'guo', 'guoyu', 'zho', 'zh', 'chs', 'zh-cn', 'zh-sg', 'zh-hans', 'cmn', 'mandarin', '国语', '普通话', '中文', '简体', '简中']:
+        return 'chi'
+    if lang_str in ['yue', 'cht', 'cn', 'zh-hk', 'zh-tw', 'hk', 'tw', 'cantonese', '粤语', '繁体', '繁中', '粤配', '粤英双语', '港配', '粤语配音', '广东话']:
+        return 'yue'
+
+    # 其他语言
+    if lang_str in ['eng', 'en', 'english', '英语', '英文']:
+        return 'eng'
+    if lang_str in ['jpn', 'ja', 'jp', 'japanese', '日语', '日文']:
+        return 'jpn'
+    if lang_str in ['kor', 'ko', 'kr', 'korean', '韩语', '韩文']:
+        return 'kor'
+
+    return lang_str
+
 def _get_detected_languages_from_streams(
     media_streams: List[dict],
     stream_type: str
@@ -313,37 +341,38 @@ def _get_detected_languages_from_streams(
     """
     detected_langs = set()
 
-    standard_codes = {
-        'chi': {'chi', 'zho', 'chs', 'zh-cn', 'zh-hans', 'zh-sg', 'cmn'},
-        'yue': {'yue', 'cht'},
-        'eng': {'eng'},
-        'jpn': {'jpn'},
-        'kor': {'kor'},
-    }
-
     for stream in media_streams:
         if stream.get('Type') != stream_type:
             continue
+            
+        stream_langs = set()
 
-        # 1. 先看 Language 字段
-        lang_code = str(stream.get('Language', '')).lower().strip()
-        if lang_code:
-            for key, codes in standard_codes.items():
-                if lang_code in codes:
-                    detected_langs.add(key)
-
-        # 2. 再看标题和显示标题
+        # 1. 先看标题和显示标题 (优先级最高)
         raw_title = stream.get('Title') or ''
         raw_display = stream.get('DisplayTitle') or ''
         title_string = f"{raw_title} {raw_display}".lower().strip()
 
-        if not title_string:
-            continue
+        if title_string:
+            for lang_key, keywords in AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                normalized_lang_key = lang_key.replace('sub_', '')
+                if any(keyword.lower() in title_string for keyword in keywords):
+                    stream_langs.add(normalized_lang_key)
 
-        for lang_key, keywords in AUDIO_SUBTITLE_KEYWORD_MAP.items():
-            normalized_lang_key = lang_key.replace('sub_', '')
-            if any(keyword.lower() in title_string for keyword in keywords):
-                detected_langs.add(normalized_lang_key)
+        # 2. 再看 Language 字段
+        lang_code = str(stream.get('Language', '')).lower().strip()
+        if lang_code:
+            norm_lang = normalize_lang_code(lang_code)
+            if norm_lang:
+                stream_langs.add(norm_lang)
+
+        # 3. ★★★ 核心冲突解决 ★★★
+        # 如果一条音轨同时被识别为 yue 和 chi (例如 Title="yue", Language="chi")
+        if 'yue' in stream_langs and 'chi' in stream_langs:
+            # 只要标题里没有明确写国语/普通话，我们就认为它是纯粤语，剔除被 Language 误导的 chi
+            if not any(k in title_string for k in ['guo', '国', 'mandarin']):
+                stream_langs.remove('chi')
+
+        detected_langs.update(stream_langs)
 
     return detected_langs
 
