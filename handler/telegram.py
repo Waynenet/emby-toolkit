@@ -419,6 +419,7 @@ def send_playback_notification(data: dict):
         action_map = {
             "playback.start": "▶️ 开始播放",
             "playback.pause": "⏸ 暂停播放",
+            "playback.unpause": "⏯ 恢复播放",
             "playback.stop": "⏹ 停止播放"
         }
         action_str = action_map.get(event_type, "🎬 播放状态改变")
