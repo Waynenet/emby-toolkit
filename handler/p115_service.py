@@ -1988,48 +1988,68 @@ class SmartOrganizer:
         except Exception:
             return default
 
-    def _normalize_lang_code(self, lang):
-        lang = (lang or "").lower().strip()
-        if lang in ("zh", "zho", "chi", "chs", "cht", "cmn"):
-            return "chi"
-        if lang in ("en", "eng"):
-            return "eng"
-        if lang in ("ja", "jpn", "jp"):
-            return "jpn"
-        if lang in ("ko", "kor", "kr"):
-            return "kor"
-        if lang in ("fr", "fre", "fra"):
-            return "fre"
-        if lang in ("es", "spa"):
-            return "spa"
-        if lang in ("de", "ger", "deu"):
-            return "ger"
-        return lang or None
+    def _get_friendly_display_info(self, raw_lang, raw_title, stream_type):
+        """
+        返回: (底层ISO代码, UI主标题, UI副标题)
+        解决 Emby 选择失效问题，并提供完美的中文 UI 展示。
+        """
+        from tasks import helpers
+        import utils
 
-    def _display_language(self, lang, title=""):
-        lang = self._normalize_lang_code(lang)
-        title = title or ""
+        raw_title = (raw_title or "").strip()
+        # 统一调用 helpers 里的标准化方法
+        norm_lang = helpers.normalize_lang_code(raw_lang)
 
-        if lang == "chi":
-            if any(k in title for k in ["简", "简体", "chs", "CHS", "Simplified"]):
-                return "Chinese Simplified"
-            if any(k in title for k in ["繁", "繁体", "cht", "CHT", "Traditional"]):
-                return "Chinese Traditional"
-            return "Chinese"
-        if lang == "eng":
-            return "English"
-        if lang == "jpn":
-            return "Japanese"
-        if lang == "kor":
-            return "Korean"
-        if lang == "fre":
-            return "French"
-        if lang == "spa":
-            return "Spanish"
-        if lang == "ger":
-            return "German"
+        friendly_title = raw_title
 
-        return lang.upper() if lang else "Unknown"
+        # 1. 翻译副标题 (Title)：保留原有中文，只翻译拼音/英文
+        if raw_title and not utils.contains_chinese(raw_title):
+            title_lower = raw_title.lower()
+            for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                if any(k.lower() in title_lower for k in keywords):
+                    if key == "chi": friendly_title = "国语"
+                    elif key == "yue": friendly_title = "粤语"
+                    elif key == "sub_chi": friendly_title = "简中"
+                    elif key == "sub_yue": friendly_title = "繁中"
+                    elif key in ["eng", "sub_eng"]: friendly_title = "英语"
+                    elif key in ["jpn", "sub_jpn"]: friendly_title = "日语"
+                    elif key in ["kor", "sub_kor"]: friendly_title = "韩语"
+                    break
+
+        # 2. 终极增强：如果标题本来就是空的，根据底层语言智能补齐中文标签！
+        if not friendly_title:
+            if stream_type == "Audio":
+                if norm_lang == "chi": friendly_title = "国语"
+                elif norm_lang == "yue": friendly_title = "粤语"
+                elif norm_lang == "eng": friendly_title = "英语"
+                elif norm_lang == "jpn": friendly_title = "日语"
+                elif norm_lang == "kor": friendly_title = "韩语"
+            else:
+                if norm_lang == "chi": friendly_title = "简中"
+                elif norm_lang == "yue": friendly_title = "繁中"
+                elif norm_lang == "eng": friendly_title = "英语"
+                elif norm_lang == "jpn": friendly_title = "日语"
+                elif norm_lang == "kor": friendly_title = "韩语"
+
+        # 3. 生成底层语言代码 (Language)
+        final_iso_lang = norm_lang
+        
+        # 修正：如果标题明确是粤语/繁体，但底层没识别出来，修正底层 ISO
+        if friendly_title in ["粤语", "繁中", "繁体"]:
+            final_iso_lang = "yue"
+        elif friendly_title in ["国语", "简中", "简体"]:
+            final_iso_lang = "chi"
+
+        # ★ 底层伪装术：只要是中文（国语/粤语/简/繁），底层统统告诉 Emby 是 chi
+        # 这样 Emby 的“首选中文”就能 100% 命中！
+        # if final_iso_lang in ["chi", "yue"]:
+        #     final_iso_lang = "chi"
+
+        # 4. 生成 UI 主标题 (DisplayLanguage)
+        display_lang = friendly_title if friendly_title else "未知"
+
+        # ★ 绝对不能清空 friendly_title！Emby 下拉框的第二行全靠它！
+        return final_iso_lang, display_lang, friendly_title
 
     def _channel_layout_label(self, channels, channel_layout=None):
         channel_layout = (channel_layout or "").lower()
@@ -2176,13 +2196,11 @@ class SmartOrganizer:
             disposition = s.get("disposition") or {}
 
             index = self._safe_int(s.get("index"), len(media_streams))
-            title = tags.get("title") or ""
-            lang = self._normalize_lang_code(tags.get("language"))
-            display_lang = self._display_language(lang, title)
             is_default = bool(disposition.get("default"))
             is_forced = bool(disposition.get("forced"))
 
             if codec_type == "video":
+                title = tags.get("title") or ""
                 width = self._safe_int(s.get("width"))
                 height = self._safe_int(s.get("height"))
 
@@ -2347,6 +2365,12 @@ class SmartOrganizer:
                 })
 
             elif codec_type == "audio":
+                raw_lang = tags.get("language")
+                raw_title = tags.get("title")
+                
+                # ★ 调用新的智能解析方法
+                lang, display_lang, title = self._get_friendly_display_info(raw_lang, raw_title, "Audio")
+
                 channels = self._safe_int(s.get("channels"))
                 channel_layout = self._channel_layout_label(channels, s.get("channel_layout"))
                 sample_rate = self._safe_int(s.get("sample_rate"))
@@ -2355,7 +2379,7 @@ class SmartOrganizer:
                 codec_display = self._audio_codec_profile_label(codec, profile, title)
 
                 display_title_parts = []
-                if display_lang and display_lang != "Unknown":
+                if display_lang and display_lang != "未知":
                     display_title_parts.append(display_lang)
                 if codec_display:
                     display_title_parts.append(codec_display)
@@ -2370,22 +2394,22 @@ class SmartOrganizer:
                     "Type": "Audio",
                     "Codec": codec,
                     "Index": index,
-                    "Title": title,
+                    "Title": title, # ★ 净化后的副标题
                     "BitRate": self._safe_int(s.get("bit_rate")),
                     "BitDepth": self._safe_int(s.get("bits_per_raw_sample") or s.get("bits_per_sample")),
                     "Channels": channels,
                     "IsForced": is_forced,
-                    "Language": lang,
+                    "Language": lang, # ★ 伪装后的底层 ISO 代码
                     "Protocol": "File",
                     "TimeBase": s.get("time_base") or "1/1000",
                     "IsDefault": is_default,
                     "IsExternal": False,
                     "SampleRate": sample_rate,
-                    "DisplayTitle": display_title,
+                    "DisplayTitle": display_title, # ★ 完美的 UI 标题 (如: 国语 AAC stereo (默认))
                     "IsInterlaced": False,
                     "ChannelLayout": channel_layout,
                     "AttachmentSize": 0,
-                    "DisplayLanguage": display_lang,
+                    "DisplayLanguage": display_lang, # ★ 完美的 UI 语言 (如: 国语)
                     "ExtendedVideoType": "None",
                     "IsHearingImpaired": False,
                     "ExtendedVideoSubType": "None",
@@ -2396,18 +2420,20 @@ class SmartOrganizer:
                 })
 
             elif codec_type == "subtitle":
-                sub_codec = self._subtitle_codec_label(codec)
+                raw_lang = tags.get("language")
+                raw_title = tags.get("title")
+                
+                # ★ 调用新的智能解析方法
+                lang, display_lang, title = self._get_friendly_display_info(raw_lang, raw_title, "Subtitle")
 
-                is_text_sub = codec in {
-                    "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"
-                }
+                sub_codec = self._subtitle_codec_label(codec)
+                is_text_sub = codec in {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 
                 display_title_parts = []
-                if display_lang and display_lang != "Unknown":
+                if display_lang and display_lang != "未知":
                     display_title_parts.append(display_lang)
                 if is_default:
-                    display_title_parts.append("(默认")
-                    display_title_parts[-1] = display_title_parts[-1] + f" {sub_codec})"
+                    display_title_parts.append(f"(默认 {sub_codec})")
                 else:
                     display_title_parts.append(f"({sub_codec})")
 
@@ -2417,17 +2443,17 @@ class SmartOrganizer:
                     "Type": "Subtitle",
                     "Codec": sub_codec,
                     "Index": index,
-                    "Title": title,
+                    "Title": title, # ★ 净化后的副标题
                     "IsForced": is_forced,
-                    "Language": lang,
+                    "Language": lang, # ★ 伪装后的底层 ISO 代码
                     "Protocol": "File",
                     "TimeBase": s.get("time_base") or "1/1000",
                     "IsDefault": is_default,
                     "IsExternal": False,
-                    "DisplayTitle": display_title,
+                    "DisplayTitle": display_title, # ★ 完美的 UI 标题 (如: 简中 (默认 SRT))
                     "IsInterlaced": False,
                     "AttachmentSize": 0,
-                    "DisplayLanguage": display_lang,
+                    "DisplayLanguage": display_lang, # ★ 完美的 UI 语言 (如: 简中)
                     "ExtendedVideoType": "None",
                     "IsHearingImpaired": False,
                     "ExtendedVideoSubType": "None",
@@ -2852,13 +2878,22 @@ class SmartOrganizer:
                     episode_num = int(name_without_ext)
                 else:
                     clean_name = re.sub(r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0', '', name_without_ext)
-                    end_match = re.search(r'(?:^|[ \.\-\_\[\(])(\d{1,4})(?:[\]\)]|\s*)$', clean_name)
-                    if end_match:
-                        episode_num = int(end_match.group(1))
+                    
+                    # ★★★ 核心修复：新增动漫专属特征匹配，优先级高于普通数字兜底 ★★★
+                    anime_match = re.search(r'(?:\s-\s+)(\d{1,4})(?:\s|$)|\[(\d{1,4})\]|【(\d{1,4})】', clean_name)
+                    if anime_match:
+                        ep_str = anime_match.group(1) or anime_match.group(2) or anime_match.group(3)
+                        episode_num = int(ep_str)
                     else:
-                        mid_match = re.search(r'(?:^|[ \-\_\[\(])(\d{1,4})(?:[ \.\-\_\]\)]|$)', clean_name)
-                        if mid_match:
-                            episode_num = int(mid_match.group(1))
+                        # 结尾数字匹配
+                        end_match = re.search(r'(?:^|[ \.\-\_\[\(])(\d{1,4})(?:[\]\)]|\s*)$', clean_name)
+                        if end_match:
+                            episode_num = int(end_match.group(1))
+                        else:
+                            # 中间数字匹配 (最容易误伤，优先级最低)
+                            mid_match = re.search(r'(?:^|[ \-\_\[\(])(\d{1,4})(?:[ \.\-\_\]\)]|$)', clean_name)
+                            if mid_match:
+                                episode_num = int(mid_match.group(1))
                 
             # 4. 终极兜底
             if season_num is None:
