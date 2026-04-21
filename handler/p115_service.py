@@ -1410,6 +1410,23 @@ class SmartOrganizer:
 
             data['title'] = current_title
             data['original_title'] = original_title
+
+            # ★★★ 尝试提取纯英文名 (title_en) ★★★
+            english_title = None
+            # 如果原名本身就是英文，直接用原名
+            if original_title and not utils.contains_chinese(original_title) and re.match(r'^[a-zA-Z0-9\s\-_:\.,!\?\'"&]+$', original_title):
+                english_title = original_title
+            else:
+                # 否则去别名里找美国的别名
+                alt_titles_data = raw_details.get("alternative_titles", {})
+                alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
+                for alt in alt_list:
+                    if alt.get("iso_3166_1", "").upper() == "US":
+                        english_title = utils.clean_invisible_chars(alt.get("title", ""))
+                        break
+            
+            # 存入 data 供后续调用
+            data['title_en'] = english_title or original_title # 兜底用原名
             
             # 提取年份
             date_str = raw_details.get('release_date') or raw_details.get('first_air_date')
@@ -2034,16 +2051,20 @@ class SmartOrganizer:
         # 3. 生成底层语言代码 (Language)
         final_iso_lang = norm_lang
         
-        # 修正：如果标题明确是粤语/繁体，但底层没识别出来，修正底层 ISO
-        if friendly_title in ["粤语", "繁中", "繁体"]:
-            final_iso_lang = "yue"
-        elif friendly_title in ["国语", "简中", "简体"]:
-            final_iso_lang = "chi"
+        # 修正：如果标题明确包含粤语/繁体关键字，修正底层 ISO (模糊匹配防漏)
+        title_lower = (raw_title or "").lower()
+        is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("yue", [])) or \
+                 any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
+                 
+        is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("chi", [])) or \
+                 any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
 
-        # ★ 底层伪装术：只要是中文（国语/粤语/简/繁），底层统统告诉 Emby 是 chi
-        # 这样 Emby 的“首选中文”就能 100% 命中！
-        # if final_iso_lang in ["chi", "yue"]:
-        #     final_iso_lang = "chi"
+        # 如果明确包含粤语关键字，且没有国语关键字，则底层强制给 yue
+        if is_yue and not is_chi:
+            final_iso_lang = "yue"
+        # 如果包含国语关键字，或者既有国语又有粤语(如"国粤双语")，底层给 chi
+        elif is_chi:
+            final_iso_lang = "chi"
 
         # 4. 生成 UI 主标题 (DisplayLanguage)
         display_lang = friendly_title if friendly_title else "未知"
@@ -2464,27 +2485,53 @@ class SmartOrganizer:
                 })
 
         # 归一化默认轨道：避免 MKV 多条字幕都带 default flag，导致显示一堆“默认”
-        seen_default_by_type = {
-            "Audio": False,
-            "Subtitle": False
-        }
+        config = get_config()
+        pref_language_code = config.get(constants.CONFIG_OPTION_115_DEFAULT_LANGUAGE, "")
 
-        for stream in media_streams:
-            stream_type = stream.get("Type")
+        def _force_default_track(streams, stream_type, pref_code):
+            type_streams = [s for s in streams if s.get("Type") == stream_type]
+            if not type_streams: return
 
-            if stream_type not in seen_default_by_type:
-                continue
+            best_track = None
+            
+            # 1. 强权模式：大道至简，直接精准匹配底层 Language 代码！
+            if pref_code:
+                for s in type_streams:
+                    if s.get("Language") == pref_code:
+                        best_track = s
+                        break
+            
+            # 2. 兜底模式 1：如果没有配置，或者没找到目标语言，尊重文件原有的默认轨
+            if not best_track:
+                for s in type_streams:
+                    if s.get("IsDefault"):
+                        best_track = s
+                        break
+            
+            # 3. 兜底模式 2：如果连原文件都没有默认轨，强行把第一条轨设为默认
+            if not best_track:
+                best_track = type_streams[0]
 
-            if stream.get("IsDefault"):
-                if seen_default_by_type[stream_type]:
-                    stream["IsDefault"] = False
+            # 开始执行篡改
+            for s in type_streams:
+                is_target = (s == best_track)
+                s["IsDefault"] = is_target
+                
+                # 暴力清洗原有的 "(默认)" 字符串，防止出现 "(默认) (默认)" 的尴尬情况
+                import re
+                dt = s.get("DisplayTitle", "")
+                dt = re.sub(r'\(默认\s*', '(', dt)
+                dt = dt.replace('(默认)', '').replace('默认', '').replace('()', '').strip()
+                
+                # 为真太子打上思想钢印
+                if is_target:
+                    dt += " (默认)"
+                    
+                s["DisplayTitle"] = dt.replace("  ", " ")
 
-                    display_title = stream.get("DisplayTitle") or ""
-                    display_title = display_title.replace("默认 ", "").replace("(默认 ", "(").replace("默认", "")
-                    display_title = display_title.replace("  ", " ").strip()
-                    stream["DisplayTitle"] = display_title
-                else:
-                    seen_default_by_type[stream_type] = True
+        # 执行音轨和字幕的强权篡改
+        _force_default_track(media_streams, "Audio", pref_language_code)
+        _force_default_track(media_streams, "Subtitle", pref_language_code)
 
         if not media_streams:
             return None
@@ -2728,7 +2775,8 @@ class SmartOrganizer:
             
             # 优先使用传入的 safe_title，防止文件名包含 \/:*?"<>| 导致报错
             if block == 'title_zh': val = safe_title if safe_title else (self.details.get('title') or self.original_title)
-            elif block == 'title_en': val = original_title or self.details.get('original_title') or self.original_title
+            elif block == 'title_en': val = self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title
+            elif block == 'title_orig': val = original_title or self.details.get('original_title') or self.original_title
             elif block == 'year': val = f"({self.details.get('date', '')[:4]})" if self.details.get('date') else None
             elif block == 'year_pure': val = self.details.get('date', '')[:4] if self.details.get('date') else None
             elif block == 'tmdb_bracket': val = f"{{tmdb={self.tmdb_id}}}"
@@ -2850,7 +2898,13 @@ class SmartOrganizer:
         
         if is_tv and (season_num is None or episode_num is None):
             # 1. 标准特征匹配 (S01E01, EP01, 第1集)
-            pattern = r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话]'
+            pattern = (
+                r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b'
+                r'|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b'
+                r'|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b'
+                r'|第(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+                r'|(?:^|[ \.\-\_\[\(])(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+            )
             match = re.search(pattern, original_name, re.IGNORECASE)
             if match:
                 s = match.group(1)
@@ -3212,7 +3266,7 @@ class SmartOrganizer:
             elif m3: extracted_season = int(m3.group(1))
             else:
                 # 动漫或无季号命名兜底：只要看起来像是有集号的，统统按第一季算
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话]', parse_name, re.IGNORECASE):
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', parse_name, re.IGNORECASE):
                     extracted_season = 1
             
             if extracted_season is not None:
@@ -3391,7 +3445,7 @@ class SmartOrganizer:
                     break
                 
                 # 2. 标准特征 (EP01, S01E01)
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\d{1,4}[集话]', c_name, re.IGNORECASE):
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\d{1,4}[集话話回]', c_name, re.IGNORECASE):
                     is_actually_tv = True
                     break
                 
@@ -3704,7 +3758,9 @@ class SmartOrganizer:
                         silent_log=True  # ★ 开启静默，防止预扫描时重复打印日志
                     )
                     key = (v_s, v_e) if self.media_type == 'tv' else 'movie'
-                    batch_video_names[key] = v_name.rsplit('.', 1)[0]
+                    # 电影只保留第一个视频作为基准 (通常电影只有一个正片)
+                    if key not in batch_video_names:
+                        batch_video_names[key] = v_name.rsplit('.', 1)[0]
             
             # 2. 将视频基础名注入到同批次的字幕中
             if batch_video_names:
@@ -3714,18 +3770,58 @@ class SmartOrganizer:
                     if ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']:
                         s_num = file_item.get('_forced_season')
                         e_num = file_item.get('_forced_episode')
-                        if self.media_type == 'tv' and (s_num is None or e_num is None):
-                            match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', fn, re.IGNORECASE)
-                            if match:
-                                s_num, e_num = int(match.group(1)), int(match.group(2))
                         
-                        key = (s_num, e_num) if self.media_type == 'tv' else 'movie'
+                        # ★ 电影无脑匹配逻辑：只要是电影，且批次里有视频，无脑重命名成视频的形状！
+                        if self.media_type == 'movie' and 'movie' in batch_video_names:
+                            file_item['_forced_base_name'] = batch_video_names['movie']
+                            logger.debug(f"  ➜ [字幕对齐] 电影无脑绑定: 字幕 '{fn}' -> 视频 '{batch_video_names['movie']}'")
+                            continue
+
+                        # ★ 剧集匹配逻辑：使用强大的正则和纯数字兜底提取集号
+                        if self.media_type == 'tv' and (s_num is None or e_num is None):
+                            # 1. 标准特征匹配
+                            match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', fn, re.IGNORECASE)
+                            if match:
+                                s = match.group(1)
+                                e = match.group(2)
+                                ep_only = match.group(3)
+                                e_only = match.group(4)
+                                zh_ep = match.group(5)
+                                if s_num is None: s_num = int(s) if s else None
+                                if e_num is None: e_num = int(e) if e else (int(ep_only) if ep_only else (int(e_only) if e_only else int(zh_ep)))
+                            
+                            # 2. 纯数字兜底 (针对 01.srt, 02.ass 这种)
+                            if e_num is None:
+                                name_without_ext = fn.rsplit('.', 1)[0]
+                                if name_without_ext.isdigit():
+                                    e_num = int(name_without_ext)
+                                else:
+                                    clean_name = re.sub(r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0', '', name_without_ext)
+                                    anime_match = re.search(r'(?:\s-\s+)(\d{1,4})(?:\s|$)|\[(\d{1,4})\]|【(\d{1,4})】', clean_name)
+                                    if anime_match:
+                                        ep_str = anime_match.group(1) or anime_match.group(2) or anime_match.group(3)
+                                        e_num = int(ep_str)
+                                    else:
+                                        end_match = re.search(r'(?:^|[ \.\-\_\[\(])(\d{1,4})(?:[\]\)]|\s*)$', clean_name)
+                                        if end_match:
+                                            e_num = int(end_match.group(1))
+                                        else:
+                                            mid_match = re.search(r'(?:^|[ \-\_\[\(])(\d{1,4})(?:[ \.\-\_\]\)]|$)', clean_name)
+                                            if mid_match:
+                                                e_num = int(mid_match.group(1))
+                            
+                            # 3. 季号兜底
+                            if s_num is None:
+                                s_num = getattr(self, 'forced_season', 1)
+                        
+                        key = (s_num, e_num)
                         if key in batch_video_names:
                             file_item['_forced_base_name'] = batch_video_names[key]
-                            # ★ 核心修复：将解析出的季集号写回字典，供 _rename_file_node 生成季目录名
                             file_item['_forced_season'] = s_num
                             file_item['_forced_episode'] = e_num
-                            logger.debug(f"  ➜ [字幕对齐] 成功将字幕 '{fn}' 绑定至视频基础名 '{batch_video_names[key]}'")
+                            logger.debug(f"  ➜ [字幕对齐] 剧集精准绑定: 字幕 '{fn}' -> 视频 '{batch_video_names[key]}'")
+                        else:
+                            logger.warning(f"  ➜ [字幕对齐] 警告：字幕 '{fn}' 提取到 S{s_num}E{e_num}，但未找到对应的视频文件！")
 
         # =================================================================
         # ★★★ 核心性能修复：内存级目录缓存 ★★★
@@ -4451,7 +4547,7 @@ class SmartOrganizer:
                     or '<html' in raw_err_msg.lower()
                     or '<!doctype html' in raw_err_msg.lower()
                 ):
-                    err_msg = '该片暂时无法整理，等待24小时后重试'
+                    err_msg = '该片无法整理，请手动重命名移动后增量生成STRM。'
                 else:
                     err_msg = raw_err_msg
 

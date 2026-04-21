@@ -586,6 +586,18 @@
                           </n-text>
                       </template>
                   </n-form-item>
+                  <n-form-item label="默认语言 (音轨/字幕)" path="p115_default_language">
+                      <n-select v-model:value="configModel.p115_default_language" :options="[
+                          { label: '不修改 (保留文件原始默认)', value: '' },
+                          { label: '优先国语/简体', value: 'chi' },
+                          { label: '优先粤语/繁体', value: 'yue' }
+                      ]" />
+                      <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">
+                              生成的媒体信息中，优先使用此语言。
+                          </n-text>
+                      </template>
+                  </n-form-item>
                     <n-form-item label="同步下载字幕" path="p115_download_subs">
                         <n-switch v-model:value="configModel.p115_download_subs">
                             <template #checked>下载到本地</template>

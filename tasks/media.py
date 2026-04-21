@@ -1980,6 +1980,9 @@ def task_restore_mediainfo(processor):
         task_manager.update_status_from_thread(100, "未配置本地媒体库目录或目录不存在")
         time.sleep(1)
         return
+
+    from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer
+    client = P115Service.get_client()
         
     # 1. 收集所有需要恢复的 strm 文件路径
     strm_files_to_restore = []
@@ -2004,6 +2007,42 @@ def task_restore_mediainfo(processor):
     
     restored_count = 0
     failed_count = 0
+
+    def _probe_and_cache_mediainfo_online(pc, sha1, filename):
+        """
+        当本地缓存没有媒体信息时，使用 115 直链 + ffprobe 在线提取，
+        成功后写入 p115_mediainfo_cache，并返回原始 mediainfo JSON。
+        """
+        if not client or not pc or not sha1:
+            return None
+
+        try:
+            # 只借用现成 ffprobe 逻辑，跳过 SmartOrganizer.__init__ 的 TMDb 初始化
+            probe_helper = SmartOrganizer.__new__(SmartOrganizer)
+            probe_helper.client = client
+
+            file_node = {
+                "pick_code": pc,
+                "pc": pc,
+                "file_name": filename,
+                "fn": filename,
+            }
+
+            raw_json = probe_helper._probe_mediainfo_with_ffprobe(
+                file_node=file_node,
+                sha1=sha1,
+                silent_log=False
+            )
+
+            if raw_json:
+                P115CacheManager.save_mediainfo_cache(sha1, raw_json)
+                # logger.info(f"  ➜ [媒体信息还原] 本地缓存缺失，已在线 ffprobe 提取并写入缓存: {filename}")
+                return raw_json
+
+        except Exception as e:
+            logger.warning(f"  ➜ [媒体信息还原] 在线 ffprobe 提取失败 {filename}: {e}")
+
+        return None
     
     for i, strm_path in enumerate(strm_files_to_restore):
         if processor.is_stop_requested(): break
@@ -2034,8 +2073,15 @@ def task_restore_mediainfo(processor):
             
         # 3. 通过 SHA1 精准获取媒体信息
         mediainfo = media_db.get_mediainfo_by_sha1(sha1) if sha1 else None
+
+        # 4. 如果缓存没有媒体信息，尝试在线 ffprobe 提取并回填缓存
+        if not mediainfo and sha1 and pc:
+            raw_json = _probe_and_cache_mediainfo_online(pc, sha1, filename)
+            if raw_json:
+                # 保险起见，重新从数据库读取一次，保证后续统一走同一套数据来源
+                mediainfo = media_db.get_mediainfo_by_sha1(sha1) or raw_json
         
-        # 4. 写入本地文件
+        # 5. 写入本地文件
         if mediainfo:
             json_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
             try:
