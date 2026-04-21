@@ -1,4 +1,4 @@
-# reverse_proxy.py (集成 HTTPStrm 短效缓存防重复穿透版)
+# reverse_proxy.py (集成 HTTPStrm 短效缓存防重复穿透版 + 聚合季/集展示版)
 
 import logging
 import requests
@@ -27,7 +27,6 @@ MISSING_ID_PREFIX = "-800000_"
 
 # ==========================================
 # 缓存字典，用于防止播放器嗅探导致的重复请求
-# 格式: { "原始strm链接": ("终极CDN链接", 缓存过期时间戳) }
 # ==========================================
 _strm_cdn_cache = {}
 CACHE_TTL_SECONDS = 7200  # 缓存存活时间
@@ -117,6 +116,45 @@ def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, l
     except Exception as e:
         logger.error(f"  ➜ Emby代理排序或内存回退时失败: {e}", exc_info=True)
         return {"Items": [], "TotalRecordCount": 0}
+
+# ==========================================
+# ★★★ 新增：将季/集自动升级为展示“剧集”的辅助函数 ★★★
+# ==========================================
+def _upgrade_items_to_series_map(items, base_url, api_key, user_id, fields):
+    """
+    检查返回的 Emby 项目，如果包含 Type="Season" 或 "Episode"，
+    自动向上抓取其父级剧集，并返回映射关系。
+    """
+    if not items: return {}
+    
+    series_ids_to_fetch = set()
+    for item in items:
+        if item.get('Type') in ['Season', 'Episode'] and item.get('SeriesId'):
+            series_ids_to_fetch.add(item.get('SeriesId'))
+            
+    series_map = {}
+    if series_ids_to_fetch:
+        # 确保包含必要的字段请求
+        fetch_fields = fields
+        if "Type" not in fetch_fields: fetch_fields += ",Type"
+        if "SeriesId" not in fetch_fields: fetch_fields += ",SeriesId"
+        
+        series_details = _fetch_items_in_chunks(base_url, api_key, user_id, list(series_ids_to_fetch), fetch_fields)
+        series_map = {item['Id']: item for item in series_details}
+        
+    result_map = {}
+    for item in items:
+        original_id = item['Id']
+        if item.get('Type') in ['Season', 'Episode'] and item.get('SeriesId'):
+            sid = item.get('SeriesId')
+            if sid in series_map:
+                result_map[original_id] = series_map[sid]
+            else:
+                result_map[original_id] = item
+        else:
+            result_map[original_id] = item
+            
+    return result_map
 
 def handle_get_views():
     real_server_id = extensions.EMBY_SERVER_ID
@@ -328,26 +366,56 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
                 base_url, api_key = _get_real_emby_url_and_key()
                 full_fields = "PrimaryImageAspectRatio,ImageTags,HasPrimaryImage,ProviderIds,UserData,Name,ProductionYear,CommunityRating,Type"
                 emby_details = _fetch_items_in_chunks(base_url, api_key, user_id, real_eids, full_fields)
-                emby_map = {item['Id']: item for item in emby_details}
+                
+                # ★★★ 新增：将请求到的季/集替换为剧集本身实现聚合展示 ★★★
+                emby_map = _upgrade_items_to_series_map(emby_details, base_url, api_key, user_id, full_fields)
 
                 final_items = []
+                seen_emby_ids = set()
+                seen_missing_base_tids = set()
+
                 for entry in paged_part:
                     if not entry['is_missing']:
                         eid = entry['id']
-                        if eid in emby_map: final_items.append(emby_map[eid])
+                        if eid in emby_map: 
+                            item = emby_map[eid]
+                            # 去重：确保同一剧集在列表中只显示一次
+                            if item['Id'] not in seen_emby_ids:
+                                final_items.append(item)
+                                seen_emby_ids.add(item['Id'])
                     else:
                         tid = entry['tmdb_id']
+                        
+                        # 剥离占位符上的 _S_ 季后缀
+                        base_tid = str(tid).split('_S_')[0] if isinstance(tid, str) and '_S_' in tid else str(tid)
+                        
+                        # 缺失占位符去重
+                        if base_tid in seen_missing_base_tids:
+                            continue
+                        seen_missing_base_tids.add(base_tid)
+                        
                         meta = status_map.get(tid, {})
                         status = meta.get('subscription_status', 'WANTED')
                         db_item_type = meta.get('item_type', 'Movie')
+                        
+                        # 格式化剧集名称
+                        display_name = meta.get('title', '未知内容')
+                        if '_S_' in str(tid) or db_item_type == 'Series':
+                            db_item_type = 'Series'
+                            display_name = re.sub(r'\s*(第[\d一二三四五六七八九十百]+季|Season\s*\d+)$', '', display_name, flags=re.IGNORECASE)
+
                         placeholder = {
-                            "Name": meta.get('title', '未知内容'),
-                            "ServerId": extensions.EMBY_SERVER_ID, "Id": to_missing_item_id(tid), "Type": db_item_type,
+                            "Name": display_name,
+                            "ServerId": extensions.EMBY_SERVER_ID, 
+                            "Id": to_missing_item_id(base_tid), 
+                            "Type": db_item_type,
                             "ProductionYear": int(meta.get('release_year')) if meta.get('release_year') else None,
-                            "ImageTags": {"Primary": f"missing_{status}_{tid}"}, "HasPrimaryImage": True,
+                            "ImageTags": {"Primary": f"missing_{status}_{base_tid}"}, 
+                            "HasPrimaryImage": True,
                             "PrimaryImageAspectRatio": 0.6666666666666666,
                             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False},
-                            "ProviderIds": {"Tmdb": tid}, "LocationType": "Virtual"
+                            "ProviderIds": {"Tmdb": base_tid}, 
+                            "LocationType": "Virtual"
                         }
                         r_date = meta.get('release_date')
                         r_year = meta.get('release_year')
@@ -386,12 +454,42 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
 
             if is_emby_proxy_sort_required:
                 sorted_data = _fetch_sorted_items_via_emby_proxy(user_id, final_emby_ids, sort_by, sort_order, emby_limit, offset, full_fields, reported_total_count)
+                emby_details = sorted_data.get("Items", [])
+                
+                # ★★★ 新增：非列表型虚拟库，同样向上聚合为剧集 ★★★
+                base_url, api_key = _get_real_emby_url_and_key()
+                upgraded_map = _upgrade_items_to_series_map(emby_details, base_url, api_key, user_id, full_fields)
+                
+                new_items = []
+                seen_ids = set()
+                for item in emby_details:
+                    u_item = upgraded_map.get(item['Id'], item)
+                    if u_item['Id'] not in seen_ids:
+                        new_items.append(u_item)
+                        seen_ids.add(u_item['Id'])
+                        
+                sorted_data["Items"] = new_items
+                # 防止 Emby 因去重后数目不足提前终止翻页
+                if len(new_items) < emby_limit: 
+                    sorted_data["TotalRecordCount"] = len(new_items)
+                
                 return Response(json.dumps(sorted_data), mimetype='application/json')
             else:
                 base_url, api_key = _get_real_emby_url_and_key()
                 items_from_emby = _fetch_items_in_chunks(base_url, api_key, user_id, final_emby_ids, full_fields)
-                items_map = {item['Id']: item for item in items_from_emby}
-                final_items = [items_map[eid] for eid in final_emby_ids if eid in items_map]
+                
+                # ★★★ 聚合去重 ★★★
+                upgraded_map = _upgrade_items_to_series_map(items_from_emby, base_url, api_key, user_id, full_fields)
+                
+                final_items = []
+                seen_ids = set()
+                for eid in final_emby_ids:
+                    if eid in upgraded_map:
+                        u_item = upgraded_map[eid]
+                        if u_item['Id'] not in seen_ids:
+                            final_items.append(u_item)
+                            seen_ids.add(u_item['Id'])
+                            
                 expected_count = len(final_emby_ids)
                 actual_count = len(final_items)
                 if actual_count < expected_count:
@@ -409,6 +507,11 @@ def handle_get_latest_items(user_id, params):
         virtual_library_id = params.get('ParentId') or params.get('customViewId')
         limit = int(params.get('Limit', 20))
         fields = params.get('Fields', "PrimaryImageAspectRatio,BasicSyncInfo,DateCreated,UserData")
+        
+        # 确保包含获取剧集信息的必要字段
+        fetch_fields = fields
+        if 'SeriesId' not in fetch_fields: fetch_fields += ",SeriesId"
+        if 'Type' not in fetch_fields: fetch_fields += ",Type"
 
         def get_collection_filter_ids(coll_data):
             c_type = coll_data.get('type')
@@ -443,8 +546,21 @@ def handle_get_latest_items(user_id, params):
             
             if not items: return Response(json.dumps([]), mimetype='application/json')
             final_emby_ids = [i['Id'] for i in items]
-            sorted_data = _fetch_sorted_items_via_emby_proxy(user_id, final_emby_ids, sort_by, 'Descending', limit, 0, fields, len(final_emby_ids))
-            return Response(json.dumps(sorted_data.get("Items", [])), mimetype='application/json')
+            sorted_data = _fetch_sorted_items_via_emby_proxy(user_id, final_emby_ids, sort_by, 'Descending', limit, 0, fetch_fields, len(final_emby_ids))
+            
+            # 首页“最新”聚合剧集
+            emby_details = sorted_data.get("Items", [])
+            upgraded_map = _upgrade_items_to_series_map(emby_details, base_url, api_key, user_id, fetch_fields)
+            
+            new_items = []
+            seen_ids = set()
+            for item in emby_details:
+                u_item = upgraded_map.get(item['Id'], item)
+                if u_item['Id'] not in seen_ids:
+                    new_items.append(u_item)
+                    seen_ids.add(u_item['Id'])
+                    
+            return Response(json.dumps(new_items), mimetype='application/json')
 
         elif not virtual_library_id:
             included_collection_ids = custom_collection_db.get_active_collection_ids_for_latest_view()
@@ -484,9 +600,20 @@ def handle_get_latest_items(user_id, params):
             return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
 
         if not latest_ids: return Response(json.dumps([]), mimetype='application/json')
-        items_from_emby = _fetch_items_in_chunks(base_url, api_key, user_id, latest_ids, fields)
-        items_map = {item['Id']: item for item in items_from_emby}
-        final_items = [items_map[id] for id in latest_ids if id in items_map]
+        items_from_emby = _fetch_items_in_chunks(base_url, api_key, user_id, latest_ids, fetch_fields)
+        
+        # 全部“最新”聚合剧集
+        upgraded_map = _upgrade_items_to_series_map(items_from_emby, base_url, api_key, user_id, fetch_fields)
+        
+        final_items = []
+        seen_ids = set()
+        for eid in latest_ids:
+            if eid in upgraded_map:
+                u_item = upgraded_map[eid]
+                if u_item['Id'] not in seen_ids:
+                    final_items.append(u_item)
+                    seen_ids.add(u_item['Id'])
+                    
         return Response(json.dumps(final_items), mimetype='application/json')
     except Exception as e:
         logger.error(f"  ➜ 处理最新媒体时发生未知错误: {e}", exc_info=True)
