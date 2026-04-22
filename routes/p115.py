@@ -724,14 +724,25 @@ def handle_sorting_rules():
 @p115_bp.route('/play/<pick_code>/<path:filename>', methods=['GET', 'HEAD'])
 def play_115_video(pick_code, filename=None):
     """
-    终极极速 302 直链解析服务 (双接口轮流尝试版)
+    302 直链解析服务
     """
+    client_ua = request.headers.get('User-Agent', '')
+    client_ua_lower = client_ua.lower()
+    
     if request.method == 'HEAD':
         return '', 200
 
     try:
-        # 恢复获取真实 UA
-        player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+        # 1. 识别是否为 Emby 服务端 (Probe 或 ffmpeg Remux)
+        is_emby_server = False
+        if any(kw in client_ua_lower for kw in ['emby', 'jellyfin', 'lavf', 'kodi']):
+            is_emby_server = True
+
+        # 2. 决定申请直链使用的 UA
+        # 如果是 Emby 服务端，用标准 Chrome UA 伪装骗过 115
+        # 如果是真实客户端，必须用客户端自己的 UA，否则 302 后 115 会报 403 防盗链！
+        fake_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        request_ua = fake_ua if is_emby_server else client_ua
         
         client = P115Service.get_client()
         if not client:
@@ -746,25 +757,48 @@ def play_115_video(pick_code, filename=None):
         for i in range(max_retries):
             try:
                 if use_openapi:
-                    real_url = client.openapi_downurl(pick_code, user_agent=player_ua)
+                    real_url = client.openapi_downurl(pick_code, user_agent=request_ua)
                 else:
-                    real_url = client.download_url(pick_code, user_agent=player_ua)
+                    real_url = client.download_url(pick_code, user_agent=request_ua)
                     
                 if real_url:
                     break
             except Exception as e:
                 logger.warning(f"  ➜ [直链解析] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
             
-            # 核心：如果没拿到，切换布尔值，下一次循环就换另一个接口
             use_openapi = not use_openapi
             time.sleep(0.5)
         
         if not real_url:
             return "Failed to get download URL or Rate Limited", 404
+
+        # =================================================================
+        # ★★★ 核心分流逻辑 ★★★
+        # =================================================================
+        if is_emby_server:
+            logger.info(f"  ➜ 检测到 Emby 服务端介入 ({client_ua})，启动中转代理！")
             
-        response = redirect(real_url, code=302)
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
+            headers_to_115 = {
+                "User-Agent": request_ua,
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }
+            if 'Range' in request.headers:
+                headers_to_115['Range'] = request.headers['Range']
+
+            resp = requests.get(real_url, headers=headers_to_115, stream=True, timeout=10)
+            
+            excluded_headers = ['content-encoding', 'transfer-encoding', 'connection', 'host']
+            response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_headers]
+            
+            return Response(stream_with_context(resp.iter_content(chunk_size=8192)), status=resp.status_code, headers=response_headers)
+
+        else:
+            # 正常第三方客户端，下发 302，让它自己去连 115！
+            # logger.info(f"  ➜ 客户端 ({client_ua})，下发 302 直链！")
+            response = redirect(real_url, code=302)
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            return response
         
     except Exception as e:
         logger.error(f"  ➜ 直链解析发生异常: {e}")
@@ -876,6 +910,84 @@ def handle_custom_strm_regex():
         clean_rules = [r.strip() for r in rules if r and r.strip()]
         settings_db.save_setting("custom_strm_regex", clean_rules)
         return jsonify({"success": True, "message": "自定义正则已保存"})
+    
+def _normalize_episode_regex_rules(raw_rules):
+    if not isinstance(raw_rules, list):
+        return [], "规则数据格式错误，必须是数组"
+
+    clean_rules = []
+
+    for i, item in enumerate(raw_rules):
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get('name') or f'规则{i + 1}').strip()
+        pattern = str(item.get('pattern') or '').strip()
+        mode = str(item.get('mode') or 'episode_only').strip()
+        enabled = bool(item.get('enabled', True))
+
+        if not pattern:
+            continue
+
+        if mode not in ('season_episode', 'episode_only'):
+            return [], f"第 {i + 1} 条规则模式非法: {mode}"
+
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return [], f"第 {i + 1} 条规则正则语法错误: {e}"
+
+        try:
+            season_group = int(item.get('season_group') or 1)
+            episode_group = int(item.get('episode_group') or 1)
+            default_season = int(item.get('default_season') or 1)
+        except Exception:
+            return [], f"第 {i + 1} 条规则分组序号或默认季号必须是整数"
+
+        if season_group < 1 or episode_group < 1:
+            return [], f"第 {i + 1} 条规则捕获组序号必须 >= 1"
+
+        if default_season < 0:
+            return [], f"第 {i + 1} 条规则默认季号不能小于 0"
+
+        clean_rules.append({
+            "id": str(item.get('id') or f'episode_regex_{i + 1}'),
+            "enabled": enabled,
+            "name": name,
+            "pattern": pattern,
+            "mode": mode,  # season_episode | episode_only
+            "season_group": season_group,
+            "episode_group": episode_group,
+            "default_season": default_season,
+        })
+
+    return clean_rules, None
+
+@p115_bp.route('/episode_regex_rules', methods=['GET', 'POST'])
+@admin_required
+def handle_episode_regex_rules():
+    """管理自定义季集号识别正则"""
+    setting_key = 'p115_episode_regex_rules'
+
+    if request.method == 'GET':
+        rules = settings_db.get_setting(setting_key) or []
+        if not isinstance(rules, list):
+            rules = []
+        return jsonify({"success": True, "data": rules})
+
+    payload = request.json or {}
+    raw_rules = payload if isinstance(payload, list) else payload.get('rules', [])
+
+    clean_rules, error = _normalize_episode_regex_rules(raw_rules)
+    if error:
+        return jsonify({"success": False, "message": error}), 400
+
+    settings_db.save_setting(setting_key, clean_rules)
+    return jsonify({
+        "success": True,
+        "message": "自定义季集号识别规则已保存",
+        "data": clean_rules
+    })
     
 # ======================================================================
 # ★★★ 115 整理记录面板 API ★★★

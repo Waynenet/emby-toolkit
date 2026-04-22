@@ -63,56 +63,76 @@ MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
 
 def _flush_mp_batch(key):
-    """缓冲结束，将收集到的同集视频和字幕打包送入核心整理"""
+    """缓冲结束，将收集到的同集视频和字幕打包送入核心处理"""
     with MP_BATCH_LOCK:
         if key not in MP_BATCH_QUEUE:
             return
         task = MP_BATCH_QUEUE.pop(key)
-        
-    files = task['files']
-    if not files: return
-    
+
+    files = task.get('files') or []
+    if not files:
+        return
+
     client = P115Service.get_client()
-    if not client: return
-    
+    if not client:
+        logger.warning("  ➜ [MP合并整理] 115 客户端未初始化，任务取消。")
+        return
+
     tmdb_id, media_type, season_num, episode_num = key
-    title = files[0]['title']
-    
-    logger.info(f"  ➜ [MP合并整理] 缓冲结束，开始打包整理 {len(files)} 个文件 (包含视频: {task['has_video']}) -> ID:{tmdb_id}")
-    
+    title = files[0].get('title') or ''
+
+    logger.info(
+        f"  ➜ [MP合并整理] 缓冲结束，开始处理 {len(files)} 个文件 "
+        f"(包含视频: {task.get('has_video', False)}) -> ID:{tmdb_id}"
+    )
+
     try:
         organizer = SmartOrganizer(client, tmdb_id, media_type, title)
+
         if season_num is not None and str(season_num).isdigit():
             organizer.forced_season = int(season_num)
-            
-        target_cid = organizer.get_target_cid(season_num=organizer.forced_season if hasattr(organizer, 'forced_season') else None)
-        
-        if target_cid:
-            file_nodes = []
-            for f in files:
-                file_nodes.append({
-                    'fid': f['file_id'],
-                    'file_id': f['file_id'],
-                    'fn': f['name'],
-                    'file_name': f['name'],
-                    'fc': '1',
-                    'type': '1',
-                    'pid': f['parent_id'],
-                    'pc': f['pickcode'],
-                    'pick_code': f['pickcode'],
-                    '_forced_season': f.get('season_num'),
-                    '_forced_episode': f.get('episode_num'),
-                    '_skip_gc': True # 批处理内部统一执行 GC
-                })
-            
-            # ★ 核心：将列表整体传给 execute，底层会自动对齐字幕和视频的名字！
-            organizer.execute(file_nodes, target_cid)
-            
-            # 批处理结束后统一触发垃圾回收
-            from handler.p115_service import P115DeleteBuffer
-            P115DeleteBuffer.add(check_save_path=True)
+
+        file_nodes = []
+        for f in files:
+            file_nodes.append({
+                'fid': f.get('file_id'),
+                'file_id': f.get('file_id'),
+                'fn': f.get('name'),
+                'file_name': f.get('name'),
+                'fc': '1',
+                'type': '1',
+                'pid': f.get('parent_id'),
+                'parent_id': f.get('parent_id'),
+                'pc': f.get('pickcode'),
+                'pick_code': f.get('pickcode'),
+                '115_path': f.get('115_path'), # ★ 核心新增：将 115 物理路径传递给底层
+                '_forced_season': f.get('season_num'),
+                '_forced_episode': f.get('episode_num'),
+                '_skip_gc': True,   
+                '_from_mp': True    
+            })
+
+        config = get_config()
+        mp_classify_enabled = bool(config.get(constants.CONFIG_OPTION_115_MP_CLASSIFY, False))
+
+        if mp_classify_enabled:
+            logger.info("  ➜ [MP直出] MP分类已开启：跳过整理/归类/重命名，直接生成 STRM 和 -mediainfo.json。")
+            ok = organizer.execute_mp_passthrough(file_nodes)
+            if not ok:
+                logger.warning("  ➜ [MP直出] 直出处理未完全成功。")
         else:
-            logger.info(f"  ➜ [MP合并整理] 未命中分类规则，保持原样。")
+            target_cid = organizer.get_target_cid(
+                season_num=organizer.forced_season if hasattr(organizer, 'forced_season') else None
+            )
+
+            if target_cid:
+                organizer.execute(file_nodes, target_cid)
+            else:
+                logger.info("  ➜ [MP合并整理] 未命中分类规则，保持原样。")
+
+        from handler.p115_service import P115DeleteBuffer
+        P115DeleteBuffer.add(check_save_path=True)
+
     except Exception as e:
         logger.error(f"  ➜ [MP合并整理] 失败: {e}", exc_info=True)
 
@@ -916,15 +936,14 @@ def emby_webhook():
         try:
             transfer_info = data.get("data", {}).get("transferinfo", {})
             media_info = data.get("data", {}).get("mediainfo", {})
-            meta_info = data.get("data", {}).get("meta", {}) # ★ 提取 meta 信息
+            meta_info = data.get("data", {}).get("meta", {}) 
             
             target_item = transfer_info.get("target_item", {})
             target_dir = transfer_info.get("target_diritem", {})
             
-            # 提取单文件信息
             file_id = target_item.get("fileid")
             file_name = target_item.get("name")
-            file_type = target_item.get("type") # 'file'
+            file_type = target_item.get("type") 
             pickcode = target_item.get("pickcode")
             dir_cid = target_dir.get("fileid")
             
@@ -941,7 +960,6 @@ def emby_webhook():
 
             media_type = 'tv' if media_type_cn == '电视剧' else 'movie'
             
-            # 极速单文件处理
             if file_type == 'file':
                 file_info = {
                     'file_id': file_id,
@@ -952,14 +970,13 @@ def emby_webhook():
                     'media_type': media_type,
                     'title': title,
                     'season_num': begin_season,
-                    'episode_num': begin_episode
+                    'episode_num': begin_episode,
+                    '115_path': target_item.get("path") # ★ 核心新增：直接提取 115 物理路径
                 }
                 
-                # ★ 区分日志前缀，方便排错
                 log_prefix = "MP字幕上传" if mp_event_type == "transfer.subtitle.complete" else "MP视频上传"
                 logger.info(f"  ➜ [{log_prefix}] 收到文件: {file_name}，进入合并缓冲池...")
                 
-                # ★ 修改为调用缓冲池入队函数
                 _enqueue_mp_file(file_info)
                 return jsonify({"status": "processing_single_file"}), 200
             else:
@@ -1215,10 +1232,6 @@ def emby_webhook():
             lib_id = library_info.get("Id")
             lib_name = library_info.get("Name", "未知库")
             allowed_libs = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS) or []
-
-            # 执行打标（全库生效）
-            if event_type in ["item.add", "library.new"]:
-                spawn(_handle_immediate_tagging_with_lib, original_item_id, original_item_name, lib_id, lib_name)
 
             # 【关键拦截点】
             if lib_id not in allowed_libs and original_item_type != "Audio":

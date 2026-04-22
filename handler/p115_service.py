@@ -2821,6 +2821,93 @@ class SmartOrganizer:
 
         return "".join(final_parts)
 
+    def _get_episode_regex_rules(self):
+        """懒加载自定义季集号识别规则，避免每个文件都查数据库"""
+        cache_attr = '_episode_regex_rules_cache'
+
+        if not hasattr(self, cache_attr):
+            try:
+                rules = settings_db.get_setting('p115_episode_regex_rules') or []
+                if not isinstance(rules, list):
+                    rules = []
+            except Exception as e:
+                logger.warning(f"  ➜ [自定义季集号识别] 读取规则失败，已忽略: {e}")
+                rules = []
+
+            setattr(self, cache_attr, rules)
+
+        return getattr(self, cache_attr, [])
+    
+    def _safe_group_to_int(self, match, group_index):
+        """安全获取组索引，防止组索引不存在"""
+        try:
+            if not group_index:
+                return None
+            value = match.group(int(group_index))
+            if value is None:
+                return None
+            value = str(value).strip()
+            if not value:
+                return None
+            return int(value)
+        except Exception:
+            return None
+        
+    def _parse_season_episode_by_custom_regex(self, original_name, rel_path=''):
+        """
+        返回:
+            (season_num, episode_num, matched_rule_name) 或 (None, None, None)
+        """
+        rules = self._get_episode_regex_rules()
+        if not rules or not original_name:
+            return None, None, None
+
+        for idx, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            if not rule.get('enabled', True):
+                continue
+
+            rule_name = str(rule.get('name') or f'规则{idx + 1}').strip()
+            pattern = str(rule.get('pattern') or '').strip()
+            mode = str(rule.get('mode') or 'episode_only').strip()
+
+            if not pattern:
+                continue
+
+            try:
+                match = re.search(pattern, original_name, re.IGNORECASE)
+                if not match and rel_path:
+                    # 可选增强：允许规则匹配相对路径，适合目录名里带季号、文件名只写 01 的情况
+                    match = re.search(pattern, rel_path, re.IGNORECASE)
+            except re.error as e:
+                logger.warning(f"  ➜ [自定义季集号识别] 规则 '{rule_name}' 正则非法，已跳过: {e}")
+                continue
+
+            if not match:
+                continue
+
+            if mode == 'season_episode':
+                season_group = int(rule.get('season_group') or 1)
+                episode_group = int(rule.get('episode_group') or 2)
+
+                season_num = self._safe_group_to_int(match, season_group)
+                episode_num = self._safe_group_to_int(match, episode_group)
+
+                if season_num is not None and episode_num is not None:
+                    return season_num, episode_num, rule_name
+
+            else:
+                # episode_only
+                episode_group = int(rule.get('episode_group') or 1)
+                default_season = int(rule.get('default_season') or 1)
+
+                episode_num = self._safe_group_to_int(match, episode_group)
+                if episode_num is not None:
+                    return default_season, episode_num, rule_name
+
+        return None, None, None
+
     def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
         
@@ -2895,60 +2982,86 @@ class SmartOrganizer:
         # ★ 优先使用 Webhook 强塞进来的精准数据
         season_num = file_node.get('_forced_season')
         episode_num = file_node.get('_forced_episode')
-        
-        if is_tv and (season_num is None or episode_num is None):
-            # 1. 标准特征匹配 (S01E01, EP01, 第1集)
-            pattern = (
-                r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b'
-                r'|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b'
-                r'|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b'
-                r'|第(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
-                r'|(?:^|[ \.\-\_\[\(])(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
-            )
-            match = re.search(pattern, original_name, re.IGNORECASE)
-            if match:
-                s = match.group(1)
-                e = match.group(2)
-                ep_only = match.group(3)
-                e_only = match.group(4)
-                zh_ep = match.group(5)
-                if season_num is None:
-                    season_num = int(s) if s else None # 暂不兜底为1，留给相对路径提取
-                if episode_num is None:
-                    episode_num = int(e) if e else (int(ep_only) if ep_only else (int(e_only) if e_only else int(zh_ep)))
-            
-            # 2. 从相对路径提取季号 (解决多季目录混合选择，且文件名为纯数字/EP01的情况)
-            if season_num is None:
-                rel_path = file_node.get('rel_path', '')
-                if rel_path:
-                    m_rel = re.search(r'(?:Season\s*|S|第)(\d{1,4})(?:季)?(?:/|$)', rel_path, re.IGNORECASE)
-                    if m_rel:
-                        season_num = int(m_rel.group(1))
 
-            # 3. ★ 纯数字兜底提取集号
+        if is_tv and (season_num is None or episode_num is None):
+            rel_path = file_node.get('rel_path', '')
+
+            # 0. ★ 先跑用户自定义规则，命中即优先使用
+            custom_season, custom_episode, custom_rule_name = self._parse_season_episode_by_custom_regex(
+                original_name=original_name,
+                rel_path=rel_path
+            )
+
+            if custom_season is not None and season_num is None:
+                season_num = custom_season
+            if custom_episode is not None and episode_num is None:
+                episode_num = custom_episode
+
+            if custom_rule_name and not silent_log:
+                logger.info(
+                    f"  ➜ [自定义季集号识别] 命中规则 '{custom_rule_name}' -> "
+                    f"S{int(season_num or 1):02d}E{int(episode_num or 0):02d} | {original_name}"
+                )
+
+            # 1. 自定义没补全，再走原有硬编码识别
+            if season_num is None or episode_num is None:
+                pattern = (
+                    r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b'
+                    r'|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b'
+                    r'|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b'
+                    r'|第(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+                    r'|(?:^|[ \.\-\_\[\(])(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+                )
+
+                match = re.search(pattern, original_name, re.IGNORECASE)
+                if match:
+                    s = match.group(1)
+                    e = match.group(2)
+                    ep_only = match.group(3)
+                    e_only = match.group(4)
+                    zh_ep = match.group(5)
+
+                    if season_num is None:
+                        season_num = int(s) if s else None
+
+                    if episode_num is None:
+                        episode_num = int(e) if e else (
+                            int(ep_only) if ep_only else (
+                                int(e_only) if e_only else int(zh_ep)
+                            )
+                        )
+
+            # 2. 从相对路径提取季号
+            if season_num is None and rel_path:
+                m_rel = re.search(r'(?:Season\s*|S|第)(\d{1,4})(?:季)?(?:/|$)', rel_path, re.IGNORECASE)
+                if m_rel:
+                    season_num = int(m_rel.group(1))
+
+            # 3. ★ 纯数字 / 动漫数字兜底提取集号
             if episode_num is None:
                 name_without_ext = original_name.rsplit('.', 1)[0]
                 if name_without_ext.isdigit():
                     episode_num = int(name_without_ext)
                 else:
-                    clean_name = re.sub(r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0', '', name_without_ext)
-                    
-                    # ★★★ 核心修复：新增动漫专属特征匹配，优先级高于普通数字兜底 ★★★
+                    clean_name = re.sub(
+                        r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0',
+                        '',
+                        name_without_ext
+                    )
+
                     anime_match = re.search(r'(?:\s-\s+)(\d{1,4})(?:\s|$)|\[(\d{1,4})\]|【(\d{1,4})】', clean_name)
                     if anime_match:
                         ep_str = anime_match.group(1) or anime_match.group(2) or anime_match.group(3)
                         episode_num = int(ep_str)
                     else:
-                        # 结尾数字匹配
                         end_match = re.search(r'(?:^|[ \.\-\_\[\(])(\d{1,4})(?:[\]\)]|\s*)$', clean_name)
                         if end_match:
                             episode_num = int(end_match.group(1))
                         else:
-                            # 中间数字匹配 (最容易误伤，优先级最低)
                             mid_match = re.search(r'(?:^|[ \-\_\[\(])(\d{1,4})(?:[ \.\-\_\]\)]|$)', clean_name)
                             if mid_match:
                                 episode_num = int(mid_match.group(1))
-                
+
             # 4. 终极兜底
             if season_num is None:
                 season_num = 1
@@ -4642,6 +4755,183 @@ class SmartOrganizer:
                         conn.commit()
             except Exception as e:
                 logger.error(f"  ➜ 解除洗版状态失败: {e}")
+
+        return True
+    
+    def execute_mp_passthrough(self, file_nodes):
+        """
+        MP直出模式 (终极优化版)：
+        完全信任 115 现有的目录结构和文件名 (直接从 Webhook 传来的 115_path 提取)。
+        跳过整理、归类、移动、重命名。
+        直接在本地 1:1 映射生成 STRM 和 -mediainfo.json。
+        """
+        config = get_config()
+        local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+        etk_url = (config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or "").rstrip("/")
+        media_root_name = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME) or "").strip("/")
+
+        if not local_root or not etk_url:
+            logger.warning("  ➜ [MP直出] 未配置本地 STRM 根目录或 ETK 地址，跳过。")
+            return False
+
+        os.makedirs(local_root, exist_ok=True)
+
+        known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+        sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+
+        for file_item in file_nodes:
+            original_name = file_item.get("fn") or file_item.get("file_name") or ""
+            if "." not in original_name:
+                continue
+
+            # ★ 修复：使用 [-1] 提取后缀，防止文件名中包含多个点导致报错
+            ext = original_name.rsplit(".", 1)[-1].lower()
+            fid = file_item.get("fid") or file_item.get("file_id")
+            parent_id = file_item.get("pid") or file_item.get("parent_id")
+            pick_code = file_item.get("pc") or file_item.get("pick_code")
+            sha1 = file_item.get("sha1") or file_item.get("sha")
+            full_115_path = file_item.get("115_path")
+
+            is_video = ext in known_video_exts
+            is_sub = ext in sub_exts
+            
+            if not is_video and not is_sub:
+                continue
+
+            # ==========================================================
+            # ★ 核心优化：直接从 Webhook 传来的 115_path 提取相对路径，0 API 消耗！
+            # 彻底砍掉画蛇添足的 Season 拼接逻辑，完全 1:1 映射 115 物理路径
+            # ==========================================================
+            parent_rel_path = ""
+            if full_115_path:
+                path_parts = [p for p in full_115_path.split('/') if p]
+                
+                start_idx = 0
+                if media_root_name and media_root_name in path_parts:
+                    # 如果配置了根目录名称，从根目录的下一级开始截取
+                    start_idx = path_parts.index(media_root_name) + 1
+                elif len(path_parts) > 1:
+                    # 兜底：如果没有配置，默认剥离第一层目录 (如 /影视待整理/)
+                    start_idx = 1
+                    
+                if len(path_parts) > start_idx:
+                    # 剥离根目录，并去掉最后的文件名，剩下的就是纯净的相对目录！
+                    # 例如：['影视待整理', '虾路相逢', 'Season 01', 'S01E01.mkv'] -> '虾路相逢/Season 01'
+                    parent_rel_path = "/".join(path_parts[start_idx:-1])
+            else:
+                logger.warning(f"  ➜ [MP直出] 缺少 115_path 参数，无法映射目录结构: {original_name}")
+                continue
+
+            # 确定本地落盘目录
+            local_dir = os.path.join(local_root, parent_rel_path) if parent_rel_path else local_root
+            os.makedirs(local_dir, exist_ok=True)
+
+            # 补齐 SHA1 (仅视频需要，用于缓存 mediainfo)
+            if is_video and not sha1 and fid:
+                try:
+                    info_res = self.client.fs_get_info(fid)
+                    if info_res.get('state') and info_res.get('data'):
+                        fetched_sha1 = info_res['data'].get('sha1')
+                        if fetched_sha1:
+                            sha1 = str(fetched_sha1).upper()
+                            file_item['sha1'] = sha1
+                except Exception:
+                    pass
+
+            # 1. 处理视频 (STRM + Mediainfo)
+            if is_video and pick_code:
+                # 生成 STRM
+                strm_filename = os.path.splitext(original_name)[0] + ".strm"
+                strm_filepath = os.path.join(local_dir, strm_filename)
+
+                if not etk_url.startswith("http"):
+                    # 挂载模式
+                    mount_path = os.path.join(etk_url, parent_rel_path, original_name).replace("\\", "/")
+                    strm_content = mount_path
+                else:
+                    # API 模式
+                    strm_content = f"{etk_url}/api/p115/play/{pick_code}/{original_name}"
+
+                with open(strm_filepath, "w", encoding="utf-8") as f:
+                    f.write(strm_content)
+                logger.info(f"  ➜ [MP直出] STRM 已生成 -> {strm_filename}")
+
+                # 生成 Mediainfo
+                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                    try:
+                        mediainfo_text = None
+                        if sha1:
+                            mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
+
+                        if not mediainfo_text:
+                            mediainfo_obj = self._probe_mediainfo_with_ffprobe(file_item, sha1=sha1, silent_log=False)
+                            if mediainfo_obj:
+                                probe_sha1 = sha1 or file_item.get('sha1') or file_item.get('sha')
+                                if probe_sha1:
+                                    probe_sha1 = str(probe_sha1).upper()
+                                    P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                    sha1 = probe_sha1
+                                    file_item['sha1'] = probe_sha1
+                                mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
+
+                        if mediainfo_text:
+                            mediainfo_filename = os.path.splitext(original_name)[0] + "-mediainfo.json"
+                            mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
+                            with open(mediainfo_filepath, "w", encoding="utf-8") as f:
+                                f.write(mediainfo_text)
+                            logger.info(f"  ➜ [MP直出] 媒体信息已生成 -> {mediainfo_filename}")
+                    except Exception as e:
+                        logger.error(f"  ➜ [MP直出] 生成媒体信息失败: {e}")
+
+            # 2. 处理字幕 (直接下载)
+            elif is_sub and config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True) and pick_code:
+                try:
+                    sub_filepath = os.path.join(local_dir, original_name)
+                    if not os.path.exists(sub_filepath):
+                        url_obj = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                        if url_obj:
+                            import requests
+                            headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                            resp = requests.get(str(url_obj), stream=True, timeout=30, headers=headers)
+                            resp.raise_for_status()
+                            with open(sub_filepath, "wb") as f:
+                                for chunk in resp.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                            logger.info(f"  ➜ [MP直出] 字幕下载完成 -> {original_name}")
+                except Exception as e:
+                    logger.error(f"  ➜ [MP直出] 下载字幕失败: {e}")
+
+            # 3. 写入数据库缓存 (保持 Emby 扫库和后续删除的闭环)
+            try:
+                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+            except Exception:
+                file_size = 0
+
+            file_local_path = os.path.join(parent_rel_path, original_name).replace("\\", "/") if parent_rel_path else original_name
+
+            if fid and pick_code:
+                P115CacheManager.save_file_cache(
+                    fid=fid,
+                    parent_id=parent_id,
+                    name=original_name,
+                    sha1=sha1,
+                    pick_code=pick_code,
+                    local_path=file_local_path,
+                    size=file_size
+                )
+
+                P115RecordManager.add_or_update_record(
+                    file_id=fid,
+                    pick_code=pick_code,
+                    original_name=original_name,
+                    status="success",
+                    tmdb_id=self.tmdb_id,
+                    media_type=self.media_type,
+                    target_cid=parent_id,
+                    category_name="MP直出",
+                    renamed_name=original_name,
+                    season_number=file_item.get('_forced_season')
+                )
 
         return True
 
