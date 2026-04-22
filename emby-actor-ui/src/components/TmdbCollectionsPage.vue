@@ -1,6 +1,6 @@
 <!-- src/components/TmdbCollectionsPage.vue -->
 <template>
-  <div content-style="padding: 24px;">
+  <div :style="{ padding: isMobile ? '12px' : '24px' }">
     <div class="collections-page">
       <n-page-header>
         <template #title>
@@ -378,6 +378,12 @@ const INCREMENT = 50;
 const loaderRef = ref(null);
 let observer = null;
 
+// ★★★ 新增：移动端检测 ★★★
+const isMobile = ref(false);
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768;
+};
+
 const searchQuery = ref('');
 const filterStatus = ref('all');
 const sortKey = ref('last_checked_at');
@@ -595,12 +601,17 @@ const triggerFullRefresh = async () => {
 };
 
 onMounted(() => {
+  checkMobile();
+  window.addEventListener('resize', checkMobile);
   loadCachedData();
   loadSettings();
   observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { threshold: 1.0 });
   if (loaderRef.value) observer.observe(loaderRef.value);
 });
-onBeforeUnmount(() => { if (observer) observer.disconnect(); });
+onBeforeUnmount(() => { 
+  window.removeEventListener('resize', checkMobile);
+  if (observer) observer.disconnect(); 
+});
 watch(loaderRef, (newEl) => { if (observer && newEl) observer.observe(newEl); });
 watch(isTaskRunning, (isRunning, wasRunning) => {
   if (wasRunning && !isRunning) {
@@ -660,7 +671,12 @@ const extractYear = (dateStr) => {
 </script>
 
 <style scoped>
-.collections-page { padding: 0 10px; }
+/* 手机端去除额外的左右 padding */
+.collections-page { padding: 0; }
+@media (min-width: 768px) {
+  .collections-page { padding: 0 10px; }
+}
+
 .center-container { display: flex; justify-content: center; align-items: center; height: calc(100vh - 200px); }
 
 /* ★★★ Grid 布局 ★★★ */
@@ -867,7 +883,7 @@ const extractYear = (dateStr) => {
    ▼▼▼ 模态框及内部电影海报墙样式 ▼▼▼
    ========================================= */
 
-/* 模态框尺寸控制 */
+/* 模态框尺寸控制：恢复基础设定 */
 .collection-details-modal {
   width: 90%;
   max-width: 1200px;
@@ -893,11 +909,11 @@ const extractYear = (dateStr) => {
   box-sizing: border-box;
 }
 
-/* 手机端模态框及内部边距适配 */
+/* 手机端模态框及内部边距适配：保留优化 */
 @media (max-width: 600px) {
   .collection-details-modal {
     width: 95% !important; /* 手机端加宽模态框 */
-    height: 90vh !important;
+    height: 85vh !important;
   }
   :deep(.n-tabs-nav) {
     padding: 0 12px; /* 减小导航栏边距 */
