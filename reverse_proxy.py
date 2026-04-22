@@ -1,4 +1,4 @@
-# reverse_proxy.py (终极版：HTTPStrm缓存 + 聚合去重 + 排除误伤 + 原生合集隐身)
+# reverse_proxy.py (终极整合版：防抖缓存 + 聚合去重 + 排除误伤 + 原生合集彻底隐身)
 
 import logging
 import requests
@@ -763,7 +763,7 @@ def proxy_all(path):
                 return handle_get_mimicked_library_items(user_id, parent_id, request.args)
 
         # ====================================================================
-        # ★★★ 新增：拦截并过滤原生合集列表和搜索结果，隐藏底层自建实体 ★★★
+        # ★★★ 新增：拦截并过滤原生合集列表和搜索结果，彻底隐藏底层自建实体 ★★★
         # ====================================================================
         base_url, api_key = _get_real_emby_url_and_key()
         target_url = f"{base_url}/{request.path.lstrip('/')}"
@@ -772,58 +772,79 @@ def proxy_all(path):
         forward_params = request.args.copy()
         forward_params['api_key'] = api_key
 
-        is_json_list_query = request.method == 'GET' and re.search(r'/(items|hints)$', full_path_lower)
-        hidden_emby_collection_ids = set()
+        # 扩大侦测范围：包括所有可能返回合集的路由
+        is_list_endpoint = request.method == 'GET' and re.search(r'/(items|hints|search|views|shows|movies)', full_path_lower)
         
-        if is_json_list_query:
+        hidden_ids = set()
+        if is_list_endpoint:
             try:
                 active_colls = custom_collection_db.get_all_active_custom_collections()
-                hidden_emby_collection_ids = {str(c.get('emby_collection_id')) for c in active_colls if c.get('emby_collection_id')}
+                # 终极防漏：全部转字符串并剔除横杠 '-'，确保 100% 匹配
+                hidden_ids = {str(c.get('emby_collection_id')).replace('-', '') for c in active_colls if c.get('emby_collection_id')}
             except Exception as e:
                 logger.error(f"获取隐藏合集ID失败: {e}")
 
+        # 如果是列表请求并且有需要隐藏的合集，取消流式传输，读取后进行过滤
+        if is_list_endpoint and hidden_ids:
+            resp = requests.request(
+                method=request.method, url=target_url, headers=forward_headers,
+                params=forward_params, data=request.get_data(), stream=False, timeout=30.0
+            )
+            
+            content_type = resp.headers.get('Content-Type', '').lower()
+            if 'application/json' in content_type:
+                try:
+                    resp_data = resp.json()
+                    modified = False
+                    
+                    # 内部过滤函数，剔除横杠比对
+                    def filter_items(items_list):
+                        nonlocal modified
+                        original_len = len(items_list)
+                        new_list = [item for item in items_list if str(item.get("Id", "")).replace('-', '') not in hidden_ids and str(item.get("ItemId", "")).replace('-', '') not in hidden_ids]
+                        if len(new_list) < original_len:
+                            modified = True
+                        return new_list
+
+                    if "Items" in resp_data and isinstance(resp_data["Items"], list):
+                        original_len = len(resp_data["Items"])
+                        resp_data["Items"] = filter_items(resp_data["Items"])
+                        if modified and "TotalRecordCount" in resp_data:
+                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["Items"])))
+                            
+                    elif "SearchHints" in resp_data and isinstance(resp_data["SearchHints"], list):
+                        original_len = len(resp_data["SearchHints"])
+                        resp_data["SearchHints"] = filter_items(resp_data["SearchHints"])
+                        if modified and "TotalRecordCount" in resp_data:
+                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["SearchHints"])))
+
+                    elif isinstance(resp_data, list):
+                        resp_data = filter_items(resp_data)
+
+                    response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
+                    
+                    if modified:
+                        modified_json = json.dumps(resp_data)
+                        return Response(modified_json, resp.status_code, response_headers, mimetype='application/json')
+                    else:
+                        return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
+                
+                except Exception as e:
+                    logger.error(f"[PROXY] 过滤原生合集数据时出错: {e}", exc_info=True)
+                    response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
+                    return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
+            else:
+                response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
+                return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
+
+        # ====================================================================
+        # 兜底：视频流、图片等普通请求（必须使用流式传输 stream=True 保证性能）
+        # ====================================================================
         resp = requests.request(
             method=request.method, url=target_url, headers=forward_headers,
             params=forward_params, data=request.get_data(), stream=True, timeout=(10.0, 1800.0)
         )
         
-        content_type = resp.headers.get('Content-Type', '').lower()
-        if is_json_list_query and hidden_emby_collection_ids and 'application/json' in content_type:
-            try:
-                resp_data = resp.json()
-                modified = False
-                
-                if "Items" in resp_data and isinstance(resp_data["Items"], list):
-                    original_len = len(resp_data["Items"])
-                    resp_data["Items"] = [item for item in resp_data["Items"] if str(item.get("Id")) not in hidden_emby_collection_ids]
-                    if len(resp_data["Items"]) < original_len:
-                        modified = True
-                        if "TotalRecordCount" in resp_data:
-                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["Items"])))
-                
-                elif "SearchHints" in resp_data and isinstance(resp_data["SearchHints"], list):
-                    original_len = len(resp_data["SearchHints"])
-                    resp_data["SearchHints"] = [item for item in resp_data["SearchHints"] if str(item.get("Id")) not in hidden_emby_collection_ids and str(item.get("ItemId")) not in hidden_emby_collection_ids]
-                    if len(resp_data["SearchHints"]) < original_len:
-                        modified = True
-                        if "TotalRecordCount" in resp_data:
-                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["SearchHints"])))
-
-                elif isinstance(resp_data, list):
-                    original_len = len(resp_data)
-                    resp_data = [item for item in resp_data if str(item.get("Id")) not in hidden_emby_collection_ids and str(item.get("ItemId")) not in hidden_emby_collection_ids]
-                    if len(resp_data) < original_len:
-                        modified = True
-
-                if modified:
-                    modified_json = json.dumps(resp_data)
-                    excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-                    response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-                    return Response(modified_json, resp.status_code, response_headers, mimetype='application/json')
-            except Exception as e:
-                logger.error(f"[PROXY] 过滤原生合集数据时出错: {e}", exc_info=True)
-                pass # 报错则回退为不作处理直接返回
-
         excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
         return Response(resp.iter_content(chunk_size=1024 * 1024), resp.status_code, response_headers)
