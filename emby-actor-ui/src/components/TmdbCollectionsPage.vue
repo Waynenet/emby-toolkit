@@ -230,7 +230,8 @@
           <!-- 缺失影片 Tab -->
           <n-tab-pane name="missing" :tab="`缺失影片 (${missingMoviesInModal.length})`">
             <n-empty v-if="missingMoviesInModal.length === 0" description="太棒了！没有已上映的缺失影片。" style="margin-top: 40px;"></n-empty>
-            <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
+            <!-- 增加了列数，缩小了图片 -->
+            <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="movie in missingMoviesInModal" :key="movie.tmdb_id">
                 <div class="movie-card">
                   <div class="status-badge missing">待订阅</div>
@@ -259,7 +260,7 @@
           <!-- 已入库 Tab -->
           <n-tab-pane name="in_library" :tab="`已入库 (${inLibraryMoviesInModal.length})`">
              <n-empty v-if="inLibraryMoviesInModal.length === 0" description="该合集在媒体库中没有任何影片。" style="margin-top: 40px;"></n-empty>
-             <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
+             <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="movie in inLibraryMoviesInModal" :key="movie.tmdb_id">
                 <div class="movie-card">
                   <div class="status-badge in_library">已入库</div>
@@ -295,7 +296,7 @@
           <!-- 未上映 Tab -->
           <n-tab-pane name="unreleased" :tab="`未上映 (${unreleasedMoviesInModal.length})`">
             <n-empty v-if="unreleasedMoviesInModal.length === 0" description="该合集没有已知的未上映影片。" style="margin-top: 40px;"></n-empty>
-            <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
+            <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="movie in unreleasedMoviesInModal" :key="movie.tmdb_id">
                 <div class="movie-card">
                   <div class="status-badge unreleased">未上映</div>
@@ -322,7 +323,7 @@
           <!-- 已订阅 Tab -->
           <n-tab-pane name="subscribed" :tab="`已订阅 (${subscribedMoviesInModal.length})`">
             <n-empty v-if="subscribedMoviesInModal.length === 0" description="你没有订阅此合集中的任何影片。" style="margin-top: 40px;"></n-empty>
-            <n-grid v-else cols="2 s:3 m:4 l:5 xl:6" :x-gap="12" :y-gap="12" responsive="screen">
+            <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="movie in subscribedMoviesInModal" :key="movie.tmdb_id">
                 <div class="movie-card">
                   <div class="status-badge subscribed">已订阅</div>
@@ -883,10 +884,10 @@ const extractYear = (dateStr) => {
    ▼▼▼ 模态框及内部电影海报墙样式 ▼▼▼
    ========================================= */
 
-/* 模态框尺寸控制：恢复基础设定 */
+/* 模态框尺寸控制：缩小宽度 */
 .collection-details-modal {
-  width: 90%;
-  max-width: 1200px;
+  width: 85%; /* 从 90% 缩小到 85% */
+  max-width: 1000px; /* 从 1200px 缩小到 1000px */
   height: 80vh;
 }
 
