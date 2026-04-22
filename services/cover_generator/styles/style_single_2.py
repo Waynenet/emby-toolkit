@@ -105,6 +105,7 @@ def create_style_single_2(image_path, title, font_path, font_size=(1,1), blur_si
         
         zh_bbox = draw.textbbox((0, 0), title_zh, font=zh_font)
         zh_w, zh_h = zh_bbox[2] - zh_bbox[0], zh_bbox[3] - zh_bbox[1]
+        zh_offset_y = zh_bbox[1]
         
         en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
         if title_en:
@@ -118,26 +119,31 @@ def create_style_single_2(image_path, title, font_path, font_size=(1,1), blur_si
                     else: curr_line = test_line
                 if curr_line: en_lines.append(curr_line)
             else: en_lines = [title_en]
-            for line in en_lines: total_en_h += draw.textbbox((0, 0), line, font=en_font)[3] + en_spacing
+            
+            for line in en_lines: 
+                lb = draw.textbbox((0, 0), line, font=en_font)
+                total_en_h += (lb[3] - lb[1]) + en_spacing
             total_en_h -= en_spacing
 
         title_spacing = 40 if title_en else 0
         total_text_y = left_area_center_y - (zh_h + total_en_h + title_spacing) // 2
 
-        zh_x, zh_y = left_area_center_x - zh_w // 2, total_text_y
+        zh_x = left_area_center_x - zh_w // 2
+        zh_y = total_text_y - zh_offset_y
         for offset in range(3, shadow_offset + 1, 2):
             shadow_draw.text((zh_x + offset, zh_y + offset), title_zh, font=zh_font, fill=text_shadow_color)
         draw.text((zh_x, zh_y), title_zh, font=zh_font, fill=text_color)
         
         if en_lines:
-            en_y = zh_y + zh_h + title_spacing
-            for i, line in enumerate(en_lines):
+            curr_en_y = total_text_y + zh_h + title_spacing
+            for line in en_lines:
                 lb = draw.textbbox((0, 0), line, font=en_font)
                 ex = left_area_center_x - (lb[2] - lb[0]) // 2
-                cy = en_y + i * (lb[3] - lb[1] + en_spacing)
+                cy = curr_en_y - lb[1]
                 for offset in range(2, shadow_offset // 2 + 1):
                     shadow_draw.text((ex + offset, cy + offset), line, font=en_font, fill=text_shadow_color)
                 draw.text((ex, cy), line, font=en_font, fill=text_color)
+                curr_en_y += (lb[3] - lb[1]) + en_spacing
 
         combined = Image.alpha_composite(canvas, shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_offset)))
         combined = Image.alpha_composite(combined, text_layer)

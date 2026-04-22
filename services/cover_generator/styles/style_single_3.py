@@ -25,11 +25,10 @@ def create_style_single_3(image_path, title, font_path, font_size=(1,1), blur_si
         mixed = np.clip(np.array(bg, float) * (1 - float(color_ratio)) + np.array([[tint]], float) * float(color_ratio), 0, 255).astype(np.uint8)
         frame = Image.fromarray(mixed).convert("RGBA")
 
-        # 字体逻辑与 single 1 看齐
         zh_font_size = int(canvas_size[1] * 0.17 * float(zh_font_size_ratio))
         en_font_size = int(canvas_size[1] * 0.07 * float(en_font_size_ratio))
-        zh_font = ImageFont.truetype(str(zh_font_path), zh_font_size)
-        en_font = ImageFont.truetype(str(en_font_path), en_font_size)
+        zh_font = ImageFont.truetype(str(zh_font_path), max(1, zh_font_size))
+        en_font = ImageFont.truetype(str(en_font_path), max(1, en_font_size))
         
         txt_layer = Image.new("RGBA", canvas_size, (0,0,0,0))
         shadow_layer = Image.new("RGBA", canvas_size, (0,0,0,0))
@@ -40,6 +39,7 @@ def create_style_single_3(image_path, title, font_path, font_size=(1,1), blur_si
         
         zh_bbox = draw.textbbox((0, 0), title_zh, font=zh_font)
         zh_w, zh_h = zh_bbox[2] - zh_bbox[0], zh_bbox[3] - zh_bbox[1]
+        zh_offset_y = zh_bbox[1]
         
         en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
         if title_en:
@@ -53,24 +53,29 @@ def create_style_single_3(image_path, title, font_path, font_size=(1,1), blur_si
                     else: curr_line = test_line
                 if curr_line: en_lines.append(curr_line)
             else: en_lines = [title_en]
-            for line in en_lines: total_en_h += draw.textbbox((0, 0), line, font=en_font)[3] + en_spacing
+            
+            for line in en_lines: 
+                lb = draw.textbbox((0, 0), line, font=en_font)
+                total_en_h += (lb[3] - lb[1]) + en_spacing
             total_en_h -= en_spacing
 
         title_spacing = 40 if title_en else 0
         total_text_y = cy - (zh_h + total_en_h + title_spacing) // 2
 
-        zh_x, zh_y = cx - zh_w // 2, total_text_y
+        zh_x = cx - zh_w // 2
+        zh_y = total_text_y - zh_offset_y
         for off in range(3, 11, 2): sdraw.text((zh_x+off, zh_y+off), title_zh, font=zh_font, fill=shadow_color)
         draw.text((zh_x, zh_y), title_zh, font=zh_font, fill=text_color)
         
         if en_lines:
-            en_y = zh_y + zh_h + title_spacing
+            curr_en_y = total_text_y + zh_h + title_spacing
             for i, line in enumerate(en_lines):
                 lb = draw.textbbox((0, 0), line, font=en_font)
                 ex = cx - (lb[2] - lb[0]) // 2
-                cy_pos = en_y + i * (lb[3] - lb[1] + en_spacing)
+                cy_pos = curr_en_y - lb[1]
                 for off in range(2, 8, 2): sdraw.text((ex+off, cy_pos+off), line, font=en_font, fill=shadow_color)
                 draw.text((ex, cy_pos), line, font=en_font, fill=text_color)
+                curr_en_y += (lb[3] - lb[1]) + en_spacing
 
         frame = Image.alpha_composite(frame, shadow_layer.filter(ImageFilter.GaussianBlur(8)))
         frame = Image.alpha_composite(frame, txt_layer)

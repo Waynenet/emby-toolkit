@@ -4,7 +4,6 @@ import logging
 import os
 import random
 import math
-import colorsys
 from pathlib import Path
 from collections import Counter
 import numpy as np
@@ -29,7 +28,6 @@ def add_shadow(img, offset=(5, 5), shadow_color=(0, 0, 0, 100), blur_radius=3):
     result.paste(img, (blur_radius, blur_radius), img if img.mode == "RGBA" else None)
     return Image.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(blur_radius)), result)
 
-# 优化后的左对齐换行文字绘制
 def draw_text_on_image(image, text, position, font_path, font_size, fill_color=(255, 255, 255, 255), shadow=False, shadow_color=None, shadow_offset=10, shadow_alpha=75):
     img_copy = image.copy()
     text_layer, shadow_layer = Image.new('RGBA', img_copy.size, (255, 255, 255, 0)), Image.new('RGBA', img_copy.size, (0, 0, 0, 0))
@@ -49,7 +47,6 @@ def draw_multiline_text_on_image(image, text, position, font_path, font_size, ma
     draw = ImageDraw.Draw(text_layer)
     font = ImageFont.truetype(font_path, font_size)
     
-    # 限制宽度的智能换行 (基于画布左侧空间设置max_width)
     lines, words = [], text.split(" ")
     curr_line = words[0]
     for w in words[1:]:
@@ -143,15 +140,14 @@ def create_style_multi_1(library_dir, title, font_path, font_size=(1,1), is_blur
             elif col_index == 2: column_center_y += -155; column_center_x += conf["CELL_WIDTH"] * 2 - 40
             result.paste(rotated_column, (column_center_x - rotated_column.width // 2, column_center_y - rotated_column.height // 2), rotated_column)
 
-        # 文字排版与大小计算保持与 single 同步
-        zh_sz = int(conf["CANVAS_HEIGHT"] * 0.17 * float(font_size[0]))
-        en_sz = int(conf["CANVAS_HEIGHT"] * 0.07 * float(font_size[1]))
+        # 这里使用跟旧版几乎一模一样的字体大小基数和相对排版
+        zh_sz = int(163 * float(font_size[0]))
+        en_sz = max(30, int(50 * float(font_size[1])))
         text_shadow_color = darken_color(blur_color, 0.8)
 
-        # 绝对定位，左侧绘制
+        # 完全保留原来的绝对位置(73.32, 427.34)，保持你的多图排版不变
         result = draw_text_on_image(result, title_zh, (73.32, 427.34), zh_font_path, zh_sz, shadow=is_blur, shadow_color=text_shadow_color)
         if title_en:
-            # 加入最大宽度控制(750px)，超过就换行
             result, line_count = draw_multiline_text_on_image(result, title_en, (124.68, 624.55), en_font_path, en_sz, max_width=750, line_spacing=int(en_sz*0.1), shadow=is_blur, shadow_color=text_shadow_color)
             result = draw_color_block(result, (84.38, 620.06), (21.51, en_sz + int(en_sz*0.1) + (line_count - 1) * (en_sz + int(en_sz*0.1))), get_random_color(first_image_path))
 

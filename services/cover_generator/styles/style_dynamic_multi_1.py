@@ -27,13 +27,13 @@ def create_style_dynamic_multi_1(library_dir, title, font_path, font_size=(1,1),
         if is_blur: bg_img = create_blur_background(first_img, 640, 360, blur_c, blur_size * scale, color_ratio)
         else: bg_img = create_gradient_background(640, 360, get_poster_primary_color(first_img))
 
-        # 字体逻辑保持与 static 的 multi 同步
-        zh_sz = int(1080 * 0.17 * float(font_size[0]) * scale)
-        en_sz = int(1080 * 0.07 * float(font_size[1]) * scale)
+        # 字体绝对尺寸基数与 multi_1 同步
+        zh_sz = int(163 * float(font_size[0]) * scale)
+        en_sz = int(max(30, 50 * float(font_size[1])) * scale)
         text_shadow_color = darken_color(blur_c, 0.8)
 
         text_layer = Image.new("RGBA", (640, 360), (0, 0, 0, 0))
-        # 根据 scale 缩小左侧文字排版位置
+        # 根据 scale 缩小左侧文字排版的原位绝对位置
         text_layer = draw_text_on_image(text_layer, title[0], (73.32 * scale, 427.34 * scale), font_path[0], zh_sz, shadow=is_blur, shadow_color=text_shadow_color)
         if title[1]:
             text_layer, lc = draw_multiline_text_on_image(text_layer, title[1], (124.68 * scale, 624.55 * scale), font_path[1], en_sz, max_width=750 * scale, line_spacing=int(en_sz*0.1), shadow=is_blur, shadow_color=text_shadow_color)

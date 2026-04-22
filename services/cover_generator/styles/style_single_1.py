@@ -137,7 +137,7 @@ def create_style_single_1(image_path, title, font_path, font_size=(1,1), blur_si
         
         canvas = Image.alpha_composite(canvas.convert("RGBA"), cards_canvas)
         
-        # 5. 文字处理 (保留原视觉左侧排版，加入自动换行)
+        # 文字处理 (精准剥离内部留白，实现绝对居中)
         text_layer = Image.new('RGBA', canvas_size, (255, 255, 255, 0))
         shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
         shadow_draw, draw = ImageDraw.Draw(shadow_layer), ImageDraw.Draw(text_layer)
@@ -154,10 +154,9 @@ def create_style_single_1(image_path, title, font_path, font_size=(1,1), blur_si
         text_shadow_color = darken_color(bg_color, 0.8) + (75,)
         shadow_offset = 12
         
-        # 换行算法
         zh_bbox = draw.textbbox((0, 0), title_zh, font=zh_font)
-        zh_w = zh_bbox[2] - zh_bbox[0]
-        zh_h = zh_bbox[3] - zh_bbox[1]
+        zh_w, zh_h = zh_bbox[2] - zh_bbox[0], zh_bbox[3] - zh_bbox[1]
+        zh_offset_y = zh_bbox[1] # 获取字体内部上方留白，用于高度矫正
         
         en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
         if title_en:
@@ -171,27 +170,33 @@ def create_style_single_1(image_path, title, font_path, font_size=(1,1), blur_si
                     else: curr_line = test_line
                 if curr_line: en_lines.append(curr_line)
             else: en_lines = [title_en]
-            for line in en_lines: total_en_h += draw.textbbox((0, 0), line, font=en_font)[3] + en_spacing
+            
+            for line in en_lines: 
+                lb = draw.textbbox((0, 0), line, font=en_font)
+                total_en_h += (lb[3] - lb[1]) + en_spacing
             total_en_h -= en_spacing
 
         title_spacing = 40 if title_en else 0
+        # 精准视觉总高度计算
         total_text_y = left_area_center_y - (zh_h + total_en_h + title_spacing) // 2
 
         zh_x = left_area_center_x - zh_w // 2
-        zh_y = total_text_y
+        zh_y = total_text_y - zh_offset_y # 减去顶部透明留白，实现视觉完美对齐
+        
         for offset in range(3, shadow_offset + 1, 2):
             shadow_draw.text((zh_x + offset, zh_y + offset), title_zh, font=zh_font, fill=text_shadow_color)
         draw.text((zh_x, zh_y), title_zh, font=zh_font, fill=text_color)
         
         if en_lines:
-            en_y = zh_y + zh_h + title_spacing
-            for i, line in enumerate(en_lines):
+            curr_en_y = total_text_y + zh_h + title_spacing
+            for line in en_lines:
                 lb = draw.textbbox((0, 0), line, font=en_font)
                 ex = left_area_center_x - (lb[2] - lb[0]) // 2
-                cy = en_y + i * (lb[3] - lb[1] + en_spacing)
+                cy = curr_en_y - lb[1] # 同样对英文进行留白矫正
                 for offset in range(2, shadow_offset // 2 + 1):
                     shadow_draw.text((ex + offset, cy + offset), line, font=en_font, fill=text_shadow_color)
                 draw.text((ex, cy), line, font=en_font, fill=text_color)
+                curr_en_y += (lb[3] - lb[1]) + en_spacing
         
         combined = Image.alpha_composite(canvas, shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_offset)))
         combined = Image.alpha_composite(combined, text_layer)

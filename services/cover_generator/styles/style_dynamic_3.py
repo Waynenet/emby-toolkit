@@ -27,7 +27,6 @@ def create_style_dynamic_3(image_paths, title, font_path, font_size=(1,1), blur_
             
         if not assets: return False
 
-        # 同 single 1
         zh_font_size = int(1080 * 0.17 * float(font_size[0]) * scale)
         en_font_size = int(1080 * 0.07 * float(font_size[1]) * scale)
         zh_f = ImageFont.truetype(str(font_path[0]), max(1, zh_font_size))
@@ -44,8 +43,9 @@ def create_style_dynamic_3(image_paths, title, font_path, font_size=(1,1), blur_
             
             zh_bbox = draw.textbbox((0, 0), title[0], font=zh_f)
             zh_w, zh_h = zh_bbox[2] - zh_bbox[0], zh_bbox[3] - zh_bbox[1]
-            en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
+            zh_offset_y = zh_bbox[1]
             
+            en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
             if title[1]:
                 if draw.textbbox((0, 0), title[1], font=en_f)[2] > zh_w and " " in title[1]:
                     words = title[1].split(" ")
@@ -57,24 +57,29 @@ def create_style_dynamic_3(image_paths, title, font_path, font_size=(1,1), blur_
                         else: curr_line = test_line
                     if curr_line: en_lines.append(curr_line)
                 else: en_lines = [title[1]]
-                for line in en_lines: total_en_h += draw.textbbox((0, 0), line, font=en_f)[3] + en_spacing
+                for line in en_lines: 
+                    lb = draw.textbbox((0, 0), line, font=en_f)
+                    total_en_h += (lb[3] - lb[1]) + en_spacing
                 total_en_h -= en_spacing
 
             title_spacing = int(40*scale) if title[1] else 0
-            zh_y = cy - (zh_h + total_en_h + title_spacing) // 2
+            total_text_y = cy - (zh_h + total_en_h + title_spacing) // 2
+
             zh_x = cx - zh_w // 2
+            zh_y = total_text_y - zh_offset_y
             
             for offset in range(3, shadow_offset + 1, 2): shadow_draw.text((zh_x + offset, zh_y + offset), title[0], font=zh_f, fill=shadow_color)
             draw.text((zh_x, zh_y), title[0], font=zh_f, fill=text_color)
             
             if en_lines:
-                en_y = zh_y + zh_h + title_spacing
+                curr_en_y = total_text_y + zh_h + title_spacing
                 for i, line in enumerate(en_lines):
                     lb = draw.textbbox((0, 0), line, font=en_f)
                     ex = cx - (lb[2] - lb[0]) // 2
-                    cy_pos = en_y + i * (lb[3] - lb[1] + en_spacing)
+                    cy_pos = curr_en_y - lb[1]
                     for offset in range(2, shadow_offset // 2 + 1): shadow_draw.text((ex + offset, cy_pos + offset), line, font=en_f, fill=shadow_color)
                     draw.text((ex, cy_pos), line, font=en_f, fill=text_color)
+                    curr_en_y += (lb[3] - lb[1]) + en_spacing
                     
             txt = Image.alpha_composite(shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_offset)), txt_layer)
             if config and config.get("show_item_count", False) and item_count is not None:

@@ -64,8 +64,6 @@ def create_style_dynamic_1(image_paths, title, font_path, font_size=(1,1), blur_
             
         if not assets: return False
         
-        # 字体逻辑同步 single_1 
-        # (基础画布1080 * 0.17 * ratio) 然后再缩小到当前动画画布尺寸(* scale)
         zh_font_size = int(1080 * 0.17 * float(font_size[0]) * scale)
         en_font_size = int(1080 * 0.07 * float(font_size[1]) * scale)
         zh_font = ImageFont.truetype(font_path[0], max(1, zh_font_size))
@@ -78,11 +76,11 @@ def create_style_dynamic_1(image_paths, title, font_path, font_size=(1,1), blur_
         left_area_center_x, left_area_center_y = int(canvas_size[0] * 0.25), canvas_size[1] // 2
         text_color, text_shadow_color, shadow_offset = (255, 255, 255, 229), darken_color(assets[0]['badge'], 0.8) + (75,), max(3, int(12*scale))
         
-        # 换行算法
         zh_bbox = draw.textbbox((0, 0), title[0], font=zh_font)
         zh_w, zh_h = zh_bbox[2] - zh_bbox[0], zh_bbox[3] - zh_bbox[1]
-        en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
+        zh_offset_y = zh_bbox[1]
         
+        en_lines, en_spacing, total_en_h = [], int(en_font_size * 0.3), 0
         if title[1]:
             if draw.textbbox((0, 0), title[1], font=en_font)[2] > zh_w and " " in title[1]:
                 words = title[1].split(" ")
@@ -94,24 +92,29 @@ def create_style_dynamic_1(image_paths, title, font_path, font_size=(1,1), blur_
                     else: curr_line = test_line
                 if curr_line: en_lines.append(curr_line)
             else: en_lines = [title[1]]
-            for line in en_lines: total_en_h += draw.textbbox((0, 0), line, font=en_font)[3] + en_spacing
+            for line in en_lines: 
+                lb = draw.textbbox((0, 0), line, font=en_font)
+                total_en_h += (lb[3] - lb[1]) + en_spacing
             total_en_h -= en_spacing
 
         title_spacing = int(40*scale) if title[1] else 0
-        zh_y = left_area_center_y - (zh_h + total_en_h + title_spacing) // 2
+        total_text_y = left_area_center_y - (zh_h + total_en_h + title_spacing) // 2
+
         zh_x = left_area_center_x - zh_w // 2
+        zh_y = total_text_y - zh_offset_y
         
         for offset in range(3, shadow_offset + 1, 2): shadow_draw.text((zh_x + offset, zh_y + offset), title[0], font=zh_font, fill=text_shadow_color)
         draw.text((zh_x, zh_y), title[0], font=zh_font, fill=text_color)
         
         if en_lines:
-            en_y = zh_y + zh_h + title_spacing
+            curr_en_y = total_text_y + zh_h + title_spacing
             for i, line in enumerate(en_lines):
                 lb = draw.textbbox((0, 0), line, font=en_font)
                 ex = left_area_center_x - (lb[2] - lb[0]) // 2
-                cy = en_y + i * (lb[3] - lb[1] + en_spacing)
+                cy = curr_en_y - lb[1]
                 for offset in range(2, shadow_offset // 2 + 1): shadow_draw.text((ex + offset, cy + offset), line, font=en_font, fill=text_shadow_color)
                 draw.text((ex, cy), line, font=en_font, fill=text_color)
+                curr_en_y += (lb[3] - lb[1]) + en_spacing
                 
         static_text = Image.alpha_composite(shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_offset)), text_layer)
         
