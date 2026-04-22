@@ -210,17 +210,16 @@
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
 
-    <!-- 详情模态框 (保持不变) -->
+    <!-- 详情模态框 -->
     <n-modal 
       v-model:show="showModal" 
       preset="card" 
-      style="width: 90%; max-width: 1200px; height: 80vh;" 
+      class="collection-details-modal"
       content-style="padding: 0; overflow: hidden; display: flex; flex-direction: column;"
       :title="selectedCollection ? `详情 - ${selectedCollection.name}` : ''" 
       :bordered="false" 
       size="huge"
     >
-      <!-- ... (模态框内容保持不变，包含之前的 Tab 样式修复) ... -->
       <div class="dashboard-card" v-if="selectedCollection" style="display: flex; flex-direction: column; height: 100%;">
         <n-tabs 
           type="line" 
@@ -352,7 +351,6 @@
 </template>
 
 <script setup>
-// ... (Script 部分保持不变，逻辑无需修改) ...
 import { ref, onMounted, onBeforeUnmount, computed, watch, h } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup } from 'naive-ui';
@@ -378,7 +376,6 @@ const displayCount = ref(50);
 const INCREMENT = 50;
 const loaderRef = ref(null);
 let observer = null;
-
 
 const searchQuery = ref('');
 const filterStatus = ref('all');
@@ -530,16 +527,13 @@ const loadCachedData = async () => {
   }
 };
 
-/// ★★★ 1. 状态变量 ★★★
 const autoCompleteEnabled = ref(false);
 const autoSubEnabled = ref(false);
 const isUpdatingSettings = ref(false);
 
-// ★★★ 2. 加载设置 ★★★
 const loadSettings = async () => {
   try {
     const response = await axios.get('/api/collections/settings');
-    // 后端现在返回的是整个对象 { auto_complete_enabled: true, ... }
     autoCompleteEnabled.value = response.data.auto_complete_enabled;
     autoSubEnabled.value = response.data.auto_sub_enabled;
   } catch (e) {
@@ -547,13 +541,9 @@ const loadSettings = async () => {
   }
 };
 
-// ★★★ 3. 保存设置 ★★★
-
-// 处理“自动发现合集”开关
 const handleAutoCompleteChange = async (value) => {
   isUpdatingSettings.value = true;
   try {
-    // 发送 JSON 对象，注意保持另一个设置的原值
     await axios.post('/api/collections/settings', {
       auto_complete_enabled: value,
       auto_sub_enabled: autoSubEnabled.value 
@@ -571,11 +561,9 @@ const handleAutoCompleteChange = async (value) => {
   }
 };
 
-// 处理“自动订阅缺失”开关
 const handleAutoSubChange = async (value) => {
   isUpdatingSettings.value = true;
   try {
-    // 发送 JSON 对象，注意保持另一个设置的原值
     await axios.post('/api/collections/settings', {
       auto_complete_enabled: autoCompleteEnabled.value,
       auto_sub_enabled: value 
@@ -876,13 +864,25 @@ const extractYear = (dateStr) => {
 }
 
 /* =========================================
-   ▼▼▼ 模态框内的电影海报墙样式 ▼▼▼
+   ▼▼▼ 模态框及内部电影海报墙样式 ▼▼▼
    ========================================= */
+
+/* 模态框尺寸控制 */
+.collection-details-modal {
+  width: 90%;
+  max-width: 1200px;
+  height: 80vh;
+}
 
 /* 1. 强制 Tabs 的内容包装器占满剩余高度 */
 :deep(.n-tabs-pane-wrapper) {
   flex: 1;
   overflow: hidden;
+}
+
+/* 给 Tabs 导航栏增加左右内边距，防止文字贴边 */
+:deep(.n-tabs-nav) {
+  padding: 0 24px;
 }
 
 /* 2. 给滚动区域增加内边距 */
@@ -893,16 +893,18 @@ const extractYear = (dateStr) => {
   box-sizing: border-box;
 }
 
-/* 3. 滚动条样式 */
-:deep(.n-tab-pane)::-webkit-scrollbar {
-  width: 6px;
-}
-:deep(.n-tab-pane)::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
-}
-:deep(.n-tab-pane)::-webkit-scrollbar-track {
-  background-color: transparent;
+/* 手机端模态框及内部边距适配 */
+@media (max-width: 600px) {
+  .collection-details-modal {
+    width: 95% !important; /* 手机端加宽模态框 */
+    height: 90vh !important;
+  }
+  :deep(.n-tabs-nav) {
+    padding: 0 12px; /* 减小导航栏边距 */
+  }
+  :deep(.n-tab-pane) {
+    padding: 16px 12px !important; /* 手机端减小内边距，给海报留出更多空间 */
+  }
 }
 
 /* 卡片容器：强制 2:3 比例 */
@@ -911,7 +913,7 @@ const extractYear = (dateStr) => {
   overflow: hidden;
   position: relative;
   aspect-ratio: 2 / 3; 
-  background-color: var(--card-bg-color); /* 替换原来的 #202023 */
+  background-color: var(--card-bg-color);
   transition: transform 0.2s, box-shadow 0.2s;
   cursor: default;
 }
