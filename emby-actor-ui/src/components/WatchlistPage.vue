@@ -357,9 +357,6 @@
       :bordered="false"
       size="huge"
     >
-      <template #header-extra>
-        <n-icon size="20" :component="SettingsIcon" />
-      </template>
 
       <!-- ★★★ 修改：引入 grid 布局容器 ★★★ -->
       <div class="settings-layout">
@@ -388,29 +385,35 @@
                 
                 <n-collapse-transition :show="watchlistConfig.auto_pending.enabled">
                   <div class="setting-sub-panel">
-                    <n-grid :x-gap="12" :y-gap="12" :cols="3">
-                      <n-grid-item>
+                    <!-- ★★★ 优化：使用 Flex 布局允许换行，解决手机端看不全和电脑端换行问题 ★★★ -->
+                    <div class="auto-pending-grid">
+                      <div class="auto-pending-item">
                         <div class="sub-label">保护期 (天)</div>
                         <n-input-number v-model:value="watchlistConfig.auto_pending.days" size="small" placeholder="天数">
                           <template #suffix>天</template>
                         </n-input-number>
-                      </n-grid-item>
-                      <n-grid-item>
+                      </div>
+                      <div class="auto-pending-item">
                         <div class="sub-label">保护集数</div>
                         <n-input-number v-model:value="watchlistConfig.auto_pending.episodes" size="small" placeholder="集数">
                           <template #suffix>集</template>
                         </n-input-number>
-                      </n-grid-item>
-                      <n-grid-item>
+                      </div>
+                      <div class="auto-pending-item">
                         <div class="sub-label">
-                          待定状态虚标集数 
-                          <n-tooltip trigger="hover"><template #trigger><n-icon size="14" :component="PendingIcon" /></template>防止 MP 提前完成订阅</n-tooltip>
+                          虚标集数 
+                          <n-tooltip trigger="hover">
+                            <template #trigger>
+                              <n-icon size="14" :component="PendingIcon" style="vertical-align: -2px; margin-left: 2px;" />
+                            </template>
+                            防止 MP 提前完成订阅
+                          </n-tooltip>
                         </div>
                         <n-input-number v-model:value="watchlistConfig.auto_pending.default_total_episodes" size="small">
                           <template #suffix>集</template>
                         </n-input-number>
-                      </n-grid-item>
-                    </n-grid>
+                      </div>
+                    </div>
                   </div>
                 </n-collapse-transition>
               </div>
@@ -450,7 +453,7 @@
                   <n-input-number 
                     v-model:value="watchlistConfig.auto_pause" 
                     size="small" 
-                    style="width: 150px" 
+                    style="width: 120px" 
                     placeholder="0=关闭"
                     :min="0"
                   >
@@ -587,7 +590,7 @@
                   <n-input-number 
                     v-model:value="watchlistConfig.revival_check_days" 
                     size="small" 
-                    style="width: 160px" 
+                    style="width: 120px" 
                     placeholder="天数"
                     :min="1"
                   >
@@ -1819,8 +1822,26 @@ html.dark .progress-separator :deep(.n-progress-graph-line-rail) {
   align-items: start; /* 顶部对齐 */
 }
 
+/* ★★★ 新增：新剧保护子选项弹性布局 ★★★ */
+.auto-pending-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.auto-pending-item {
+  flex: 1;
+  min-width: 110px; /* 保证在小屏幕上能换行 */
+}
+
 /* 手机端适配 */
 @media (max-width: 768px) {
+  /* ★★★ 修复：模态框在手机端强制单列，解决右侧内容不可见问题 ★★★ */
+  .settings-layout {
+    grid-template-columns: 1fr; 
+    gap: 16px;
+  }
+
   .responsive-grid {
     /* 手机端强制单列，或者双列看情况。单列通常展示信息更全 */
     grid-template-columns: 1fr; 
