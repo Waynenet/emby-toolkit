@@ -1,4 +1,4 @@
-# reverse_proxy.py (终极整合版：防抖缓存 + 聚合去重 + 排除误伤 + 原生合集彻底隐身)
+# reverse_proxy.py (终极整合版：HTTPStrm缓存 + 完美去重聚合季集 + 排除图片/字幕误伤)
 
 import logging
 import requests
@@ -611,11 +611,11 @@ def proxy_all(path):
     # --- 2. HTTP 代理逻辑 ---
     try:
         full_path = f'/{path}'
-        full_path_lower = full_path.lower()
         
         # ====================================================================
         # ★★★ 拦截 H: 视频流请求 (集成 HTTPStrm 缓存优化版) ★★★
         # ====================================================================
+        full_path_lower = full_path.lower()
         
         # 1. 拦截视频流播放，但必须排除字幕请求 (/subtitles/)
         is_video_stream = '/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower) and '/subtitles/' not in full_path_lower
@@ -762,84 +762,13 @@ def proxy_all(path):
                 user_id = user_id_match.group(1)
                 return handle_get_mimicked_library_items(user_id, parent_id, request.args)
 
-        # ====================================================================
-        # ★★★ 新增：拦截并过滤原生合集列表和搜索结果，彻底隐藏底层自建实体 ★★★
-        # ====================================================================
         base_url, api_key = _get_real_emby_url_and_key()
         target_url = f"{base_url}/{request.path.lstrip('/')}"
         forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
         forward_headers['Host'] = urlparse(base_url).netloc
         forward_params = request.args.copy()
         forward_params['api_key'] = api_key
-
-        # 扩大侦测范围：包括所有可能返回合集的路由
-        is_list_endpoint = request.method == 'GET' and re.search(r'/(items|hints|search|views|shows|movies)', full_path_lower)
         
-        hidden_ids = set()
-        if is_list_endpoint:
-            try:
-                active_colls = custom_collection_db.get_all_active_custom_collections()
-                # 终极防漏：全部转字符串并剔除横杠 '-'，确保 100% 匹配
-                hidden_ids = {str(c.get('emby_collection_id')).replace('-', '') for c in active_colls if c.get('emby_collection_id')}
-            except Exception as e:
-                logger.error(f"获取隐藏合集ID失败: {e}")
-
-        # 如果是列表请求并且有需要隐藏的合集，取消流式传输，读取后进行过滤
-        if is_list_endpoint and hidden_ids:
-            resp = requests.request(
-                method=request.method, url=target_url, headers=forward_headers,
-                params=forward_params, data=request.get_data(), stream=False, timeout=30.0
-            )
-            
-            content_type = resp.headers.get('Content-Type', '').lower()
-            if 'application/json' in content_type:
-                try:
-                    resp_data = resp.json()
-                    modified = False
-                    
-                    # 内部过滤函数，剔除横杠比对
-                    def filter_items(items_list):
-                        nonlocal modified
-                        original_len = len(items_list)
-                        new_list = [item for item in items_list if str(item.get("Id", "")).replace('-', '') not in hidden_ids and str(item.get("ItemId", "")).replace('-', '') not in hidden_ids]
-                        if len(new_list) < original_len:
-                            modified = True
-                        return new_list
-
-                    if "Items" in resp_data and isinstance(resp_data["Items"], list):
-                        original_len = len(resp_data["Items"])
-                        resp_data["Items"] = filter_items(resp_data["Items"])
-                        if modified and "TotalRecordCount" in resp_data:
-                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["Items"])))
-                            
-                    elif "SearchHints" in resp_data and isinstance(resp_data["SearchHints"], list):
-                        original_len = len(resp_data["SearchHints"])
-                        resp_data["SearchHints"] = filter_items(resp_data["SearchHints"])
-                        if modified and "TotalRecordCount" in resp_data:
-                            resp_data["TotalRecordCount"] = max(0, resp_data["TotalRecordCount"] - (original_len - len(resp_data["SearchHints"])))
-
-                    elif isinstance(resp_data, list):
-                        resp_data = filter_items(resp_data)
-
-                    response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
-                    
-                    if modified:
-                        modified_json = json.dumps(resp_data)
-                        return Response(modified_json, resp.status_code, response_headers, mimetype='application/json')
-                    else:
-                        return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
-                
-                except Exception as e:
-                    logger.error(f"[PROXY] 过滤原生合集数据时出错: {e}", exc_info=True)
-                    response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
-                    return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
-            else:
-                response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']]
-                return Response(resp.content, resp.status_code, response_headers, mimetype=content_type)
-
-        # ====================================================================
-        # 兜底：视频流、图片等普通请求（必须使用流式传输 stream=True 保证性能）
-        # ====================================================================
         resp = requests.request(
             method=request.method, url=target_url, headers=forward_headers,
             params=forward_params, data=request.get_data(), stream=True, timeout=(10.0, 1800.0)
