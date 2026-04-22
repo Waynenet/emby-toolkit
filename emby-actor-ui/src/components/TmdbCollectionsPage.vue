@@ -141,6 +141,18 @@
                 <div class="card-content-container">
                   <div class="card-header">
                     <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.name }}</n-ellipsis>
+                    <!-- 删除按钮移至右上角 -->
+                    <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
+                      <template #trigger>
+                        <n-button text type="error" circle size="tiny" title="删除合集" @click.stop>
+                          <template #icon><n-icon :component="TrashIcon" /></template>
+                        </n-button>
+                      </template>
+                      <div style="max-width: 240px;">
+                        <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
+                        <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
+                      </div>
+                    </n-popconfirm>
                   </div>
 
                   <!-- 统计数据展示区 -->
@@ -184,17 +196,6 @@
                     <!-- 外部链接按钮需要 @click.stop 防止触发卡片点击 -->
                     <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" size="18" /></template></n-button></template>在 Emby 中打开</n-tooltip>
                     <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" size="18" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
-                    <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
-                      <template #trigger>
-                        <n-button text type="error" @click.stop>
-                          <template #icon><n-icon :component="TrashIcon" size="18" /></template>
-                        </n-button>
-                      </template>
-                      <div style="max-width: 240px;">
-                        <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
-                        <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
-                      </div>
-                    </n-popconfirm>
                   </div>
                 </div>
               </div>
@@ -666,8 +667,8 @@ const extractYear = (dateStr) => {
 .responsive-grid {
   display: grid;
   gap: 16px;
-  /* 320px 基准宽度 */
-  grid-template-columns: repeat(auto-fill, minmax(calc(320px * var(--card-scale, 1)), 1fr));
+  /* 缩小基准宽度，让一行能显示更多卡片 */
+  grid-template-columns: repeat(auto-fill, minmax(calc(260px * var(--card-scale, 1)), 1fr));
 }
 
 .grid-item {
@@ -729,7 +730,8 @@ const extractYear = (dateStr) => {
 /* ★★★ 海报区域 ★★★ */
 .card-poster-container {
   flex-shrink: 0; 
-  width: calc(130px * var(--card-scale, 1));
+  /* 配合卡片变窄，缩小海报宽度，给右侧留出空间 */
+  width: calc(100px * var(--card-scale, 1));
   height: auto; 
   min-height: 100%; 
   position: relative;
@@ -782,14 +784,12 @@ const extractYear = (dateStr) => {
 }
 
 .card-title {
+  flex: 1; /* 占据剩余空间 */
+  min-width: 0; /* 必须，否则 flex 子项不会截断 */
   font-weight: 600;
   font-size: 1.1em !important; 
   line-height: 1.3;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  /* n-ellipsis 会处理截断 */
 }
 
 /* 统计数据网格 */
@@ -839,9 +839,9 @@ const extractYear = (dateStr) => {
   padding-top: calc(8px * var(--card-scale, 1));
   border-top: 1px solid var(--n-border-color);
   display: flex;
-  justify-content: space-around; 
+  justify-content: center; /* 改为居中对齐，让按钮聚拢 */
   align-items: center;
-  gap: calc(4px * var(--card-scale, 1));
+  gap: calc(16px * var(--card-scale, 1)); /* 设置固定的间距 */
 }
 
 .card-actions :deep(.n-button) {
