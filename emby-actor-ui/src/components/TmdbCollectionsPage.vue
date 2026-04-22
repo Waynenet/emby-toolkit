@@ -174,9 +174,8 @@
                   <div class="card-actions">
                     <n-tooltip>
                       <template #trigger>
-                        <n-button type="primary" ghost size="small" @click.stop="() => openMissingMoviesModal(item)">
+                        <n-button text @click.stop="() => openMissingMoviesModal(item)">
                           <template #icon><n-icon :component="EyeIcon" /></template>
-                          详情
                         </n-button>
                       </template>
                       查看详情
