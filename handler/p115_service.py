@@ -17,6 +17,7 @@ import constants
 from database import settings_db
 from database.connection import get_db_connection
 import handler.tmdb as tmdb
+from tasks import helpers
 import utils
 try:
     from p115client import P115Client
@@ -2008,69 +2009,83 @@ class SmartOrganizer:
     def _get_friendly_display_info(self, raw_lang, raw_title, stream_type):
         """
         返回: (底层ISO代码, UI主标题, UI副标题)
-        解决 Emby 选择失效问题，并提供完美的中文 UI 展示。
+        Title 才是真理！强制纠错底层语言标签，并智能转换“语/文”。
         """
-        from tasks import helpers
-        import utils
+        raw_lang = str(raw_lang or "").strip()
+        raw_title = str(raw_title or "").strip()
 
-        raw_title = (raw_title or "").strip()
-        # 统一调用 helpers 里的标准化方法
+        def _format_label(label, s_type):
+            if not label or label == "未知":
+                return label
+            if s_type == "Subtitle":
+                if label in ["国语", "普通话", "中文"]:
+                    return "简中"
+                if label in ["粤语", "广东话"]:
+                    return "繁中"
+                if label.endswith("语") and label != "无语言":
+                    return label[:-1] + "文"
+            return label
+
         norm_lang = helpers.normalize_lang_code(raw_lang)
+        title_lower = raw_title.lower()
 
-        friendly_title = raw_title
+        # 先处理复合字幕标题
+        if stream_type == "Subtitle":
+            text = re.sub(r'[\.\-_+/|]+', ' ', title_lower)
 
-        # 1. 翻译副标题 (Title)：保留原有中文，只翻译拼音/英文
-        if raw_title and not utils.contains_chinese(raw_title):
-            title_lower = raw_title.lower()
+            has_chs = any(x in text for x in ["chs", "sc", "gb", "zh-cn", "zh-hans", "简中", "简体", "简英"])
+            has_cht = any(x in text for x in ["cht", "tc", "big5", "zh-tw", "zh-hant", "繁中", "繁体", "繁英"])
+            has_eng = any(x in text for x in ["eng", "english", "英文", "英语", "英字"])
+
+            if has_chs and has_eng and not has_cht:
+                return "chi", "简英双语", "简英双语"
+            if has_cht and has_eng and not has_chs:
+                return "yue", "繁英双语", "繁英双语"
+
+            # ★ 字幕流只看字幕关键词，不看音轨关键词
+            is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
+            is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
+        else:
+            # 音轨流只看音轨关键词
+            is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("yue", []))
+            is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("chi", []))
+
+        if is_yue and not is_chi:
+            norm_lang = "yue"
+        elif is_chi and not is_yue:
+            norm_lang = "chi"
+        elif stream_type == "Subtitle":
+            # 字幕流里若同时出现，繁中优先于简中，可按你的偏好调整
+            if is_yue:
+                norm_lang = "yue"
+            elif is_chi:
+                norm_lang = "chi"
+        else:
             for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                if stream_type == "Subtitle" and not key.startswith("sub_"):
+                    continue
+                if stream_type != "Subtitle" and key.startswith("sub_"):
+                    continue
                 if any(k.lower() in title_lower for k in keywords):
-                    if key == "chi": friendly_title = "国语"
-                    elif key == "yue": friendly_title = "粤语"
-                    elif key == "sub_chi": friendly_title = "简中"
-                    elif key == "sub_yue": friendly_title = "繁中"
-                    elif key in ["eng", "sub_eng"]: friendly_title = "英语"
-                    elif key in ["jpn", "sub_jpn"]: friendly_title = "日语"
-                    elif key in ["kor", "sub_kor"]: friendly_title = "韩语"
+                    norm_lang = key.replace('sub_', '')
                     break
 
-        # 2. 终极增强：如果标题本来就是空的，根据底层语言智能补齐中文标签！
-        if not friendly_title:
-            if stream_type == "Audio":
-                if norm_lang == "chi": friendly_title = "国语"
-                elif norm_lang == "yue": friendly_title = "粤语"
-                elif norm_lang == "eng": friendly_title = "英语"
-                elif norm_lang == "jpn": friendly_title = "日语"
-                elif norm_lang == "kor": friendly_title = "韩语"
-            else:
-                if norm_lang == "chi": friendly_title = "简中"
-                elif norm_lang == "yue": friendly_title = "繁中"
-                elif norm_lang == "eng": friendly_title = "英语"
-                elif norm_lang == "jpn": friendly_title = "日语"
-                elif norm_lang == "kor": friendly_title = "韩语"
+        base_label = helpers.get_lang_display_label(norm_lang) if norm_lang else ""
+        display_lang = _format_label(base_label, stream_type)
 
-        # 3. 生成底层语言代码 (Language)
-        final_iso_lang = norm_lang
-        
-        # 修正：如果标题明确包含粤语/繁体关键字，修正底层 ISO (模糊匹配防漏)
-        title_lower = (raw_title or "").lower()
-        is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("yue", [])) or \
-                 any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
-                 
-        is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("chi", [])) or \
-                 any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
+        friendly_title = raw_title
+        if not utils.contains_chinese(raw_title) or \
+        raw_title.lower() in ["yue", "cn", "cht", "tc", "chi", "zho", "zh", "chs", "sc", "粵語", "國語", "粤语", "国语"] or \
+        friendly_title.lower() == raw_lang:
+            if display_lang and display_lang != "未知":
+                friendly_title = display_lang
 
-        # 如果明确包含粤语关键字，且没有国语关键字，则底层强制给 yue
-        if is_yue and not is_chi:
-            final_iso_lang = "yue"
-        # 如果包含国语关键字，或者既有国语又有粤语(如"国粤双语")，底层给 chi
-        elif is_chi:
-            final_iso_lang = "chi"
+        if not display_lang:
+            display_lang = "未知"
+        if not norm_lang:
+            norm_lang = raw_lang
 
-        # 4. 生成 UI 主标题 (DisplayLanguage)
-        display_lang = friendly_title if friendly_title else "未知"
-
-        # ★ 绝对不能清空 friendly_title！Emby 下拉框的第二行全靠它！
-        return final_iso_lang, display_lang, friendly_title
+        return norm_lang, display_lang, friendly_title
 
     def _channel_layout_label(self, channels, channel_layout=None):
         channel_layout = (channel_layout or "").lower()
@@ -2922,13 +2937,17 @@ class SmartOrganizer:
         is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
         lang_suffix = ""
         if is_sub:
-            lang_keywords = ['zh', 'cn', 'tw', 'hk', 'en', 'jp', 'kr', 'chs', 'cht', 'eng', 'jpn', 'kor', 'fre', 'spa', 'default', 'forced', 'tc', 'sc']
-            sub_parts = name_body.split('.')
-            if len(sub_parts) > 1 and (sub_parts[-1].lower() in lang_keywords or '-' in sub_parts[-1].lower()):
-                lang_suffix = f".{sub_parts[-1]}"
-            if not lang_suffix:
-                match = re.search(r'(?:\.|-|_|\s)(chs|cht|zh-cn|zh-tw|eng|jpn|kor|tc|sc)(?:\.|-|_|$)', name_body, re.IGNORECASE)
-                if match: lang_suffix = f".{match.group(1)}"
+            # ★ 核心修复：支持提取无限连击的复合语言标签 (如 .chs&eng, .zh-cn.default, _eng.forced)
+            lang_keywords = r'(?:chs|cht|zh\-cn|zh\-tw|zh|cn|tw|hk|tc|sc|eng|en|jpn|jp|kor|kr|fre|spa|ara|ger|cze|dan|fin|fil|glg|heb|hin|hun|ind|ita|kan|mal|may|nob|dut|pol|por|rum|rus|swe|tam|tel|tha|tur|ukr|vie|default|forced|sdh|cc)'
+            
+            # 匹配结尾由分隔符(.-_&)和语言代码组成的字符串，最多允许4个组合连击
+            match = re.search(rf'((?:[\.\-\_\&]+{lang_keywords}){{1,4}})$', name_body, re.IGNORECASE)
+            
+            if match:
+                lang_suffix = match.group(1)
+                # 统一将第一个分隔符替换为点，符合 Emby 规范 (例如 _chs&eng 变成 .chs&eng)
+                lang_suffix = '.' + re.sub(r'^[\.\-\_\&]+', '', lang_suffix)
+
             # ★★★ 强制基础名注入 (专为 MP 字幕挂起等待机制设计) ★★★
             forced_base_name = file_node.get('_forced_base_name')
             if forced_base_name:
@@ -3348,50 +3367,21 @@ class SmartOrganizer:
         is_batch = isinstance(root_item_or_items, list)
         
         if is_batch:
-            if not root_item_or_items: return True # 防御性检查：空列表直接返回
-            root_item = root_item_or_items[0]      # 取第一个元素作为代表项，供后续提取父目录ID使用
+            if not root_item_or_items: return True 
+            root_item = root_item_or_items[0]      
             root_name = "批量文件"
-            parse_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name', '') # ★ 用于提取季号
+            parse_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name', '') 
             source_root_id = root_item.get('pid') or root_item.get('parent_id')
             is_source_file = True
             dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
         else:
             root_item = root_item_or_items
-            # 兼容 OpenAPI 键名
             root_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name', '未知')
-            parse_name = root_name # ★ 用于提取季号
+            parse_name = root_name 
             source_root_id = root_item.get('fid') or root_item.get('file_id')
             fc_val = root_item.get('fc') if root_item.get('fc') is not None else root_item.get('type')
             is_source_file = str(fc_val) == '1'
             dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else (root_item.get('pid') or root_item.get('parent_id') or root_item.get('cid'))
-
-        # =================================================================
-        # ★★★ 动态修正目标目录 (解决 TG/影巢 无法触发连载检查的问题) ★★★
-        # =================================================================
-        if self.media_type == 'tv' and getattr(self, 'forced_season', None) is None:
-            m1 = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', parse_name, re.IGNORECASE)
-            m2 = re.search(r'Season\s*(\d{1,4})\b', parse_name, re.IGNORECASE)
-            m3 = re.search(r'第(\d{1,4})季', parse_name)
-            extracted_season = None
-            
-            if m1: extracted_season = int(m1.group(1))
-            elif m2: extracted_season = int(m2.group(1))
-            elif m3: extracted_season = int(m3.group(1))
-            else:
-                # 动漫或无季号命名兜底：只要看起来像是有集号的，统统按第一季算
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', parse_name, re.IGNORECASE):
-                    extracted_season = 1
-            
-            if extracted_season is not None:
-                self.forced_season = extracted_season
-                if not getattr(self, 'is_manual_correct', False):
-                    logger.info(f"  ➜ [动态修正] 从物理文件名 '{parse_name}' 中提取到季号 S{extracted_season:02d}，正在重新评估目标分类...")
-                    new_target_cid = self.get_target_cid()
-                    if new_target_cid and str(new_target_cid) != str(target_cid):
-                        logger.info(f"  ➜ [动态修正] 目标分类已修正 (成功触发连载状态检查)")
-                        target_cid = new_target_cid
-                        # 同步更新 dest_parent_cid，防止后面创建目录时用错
-                        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
 
         # =================================================================
         # 1. 拦截合集包 (Collection Breakdown) - 仅限单项传入时触发
@@ -3444,107 +3434,68 @@ class SmartOrganizer:
         if not candidates: return True
 
         # =================================================================
-        # ★★★ 智能物理时长嗅探 (解决短剧 TMDb 缺乏时长元数据的问题) ★★★
+        # ★★★ 3. 核心重构：提前提取物理视频流信息 (替代原有的冗余嗅探逻辑) ★★★
         # =================================================================
-        # 默认不嗅探
-        needs_runtime_check = False
+        # 无论是否配置了时长规则，我们都提前抓取第一个视频的真实媒体信息。
+        # 这样不仅代码更简洁，而且能确保后续所有的分类规则判定都基于最准确的数据。
+        known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+        first_video = next((c for c in candidates if (c.get('fn') or c.get('n') or c.get('file_name') or '').split('.')[-1].lower() in known_video_exts), None)
 
-        # 手动重组 / 记忆命中时，目标目录已确定，直接跳过嗅探
-        if not getattr(self, 'is_manual_correct', False) and not getattr(self, 'is_from_memory', False):
-            for r in self.rules:
-                if not r.get('enabled', True):
-                    continue
+        # 准备预取字典，供后续重命名主循环复用，避免重复查库/ffprobe
+        pre_fetched_mediainfo = {}
+        local_pre_fetched_mediainfo = {}
 
-                # 如果在遇到时长规则之前，已经命中了当前高优先级规则，就无需嗅探
-                if str(r.get('cid')) == str(target_cid):
-                    break
+        if first_video and not getattr(self, 'is_manual_correct', False) and not getattr(self, 'is_from_memory', False):
+            v_sha1 = first_video.get('sha1') or first_video.get('sha')
+            v_fid = first_video.get('fid') or first_video.get('file_id')
+            
+            if not v_sha1 and v_fid:
+                try:
+                    info_res = self.client.fs_get_info(v_fid)
+                    if info_res.get('state') and info_res.get('data'):
+                        v_sha1 = info_res['data'].get('sha1')
+                        first_video['sha1'] = v_sha1
+                except: pass
 
-                if r.get('runtime_min') or r.get('runtime_max'):
-                    needs_runtime_check = True
-                    break
-
-        if needs_runtime_check:
-            current_runtime = 0
-            if self.media_type == 'movie':
-                current_runtime = self.details.get('runtime') or 0
-            else:
-                runtimes = self.details.get('episode_run_time', [])
-                if runtimes and len(runtimes) > 0:
-                    current_runtime = runtimes[0]
-
-            # 如果 TMDb 缺乏时长数据，主动去物理文件里抓取
-            if current_runtime == 0:
-                known_video_exts_sniff = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
-                first_video = None
-                for c in candidates:
-                    fname = c.get('fn') or c.get('n') or c.get('file_name') or ''
-                    if fname.split('.')[-1].lower() in known_video_exts_sniff:
-                        first_video = c
-                        break
+            if v_sha1 or v_fid:
+                # 提前解析媒体信息 (内部会自动走本地缓存 -> 中心 -> ffprobe)
+                self._fetch_and_parse_mediainfo(
+                    v_sha1,
+                    guessed_info={},
+                    pre_fetched_mediainfo=pre_fetched_mediainfo,
+                    local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
+                    file_node=first_video,
+                    silent_log=True
+                )
                 
-                if first_video:
-                    logger.info("  ➜ [时长嗅探] TMDb 缺乏时长数据，且分类规则依赖时长，正在提取物理文件时长...")
-                    sniff_sha1 = first_video.get('sha1') or first_video.get('sha')
-                    sniff_fid = first_video.get('fid') or first_video.get('file_id')
-
-                    # 如果没有 sha1，主动请求一次 info 补齐
-                    if not sniff_sha1 and sniff_fid:
+                # 尝试补齐 TMDb 缺失的时长
+                if v_sha1:
+                    cached_text = P115CacheManager.get_mediainfo_cache_text(v_sha1)
+                    if cached_text:
                         try:
-                            info_res = self.client.fs_get_info(sniff_fid)
-                            if info_res.get('state') and info_res.get('data'):
-                                sniff_sha1 = info_res['data'].get('sha1')
-                                first_video['sha1'] = sniff_sha1
-                        except: pass
+                            mi_json = json.loads(cached_text)
+                            ticks = 0
+                            if isinstance(mi_json, list) and len(mi_json) > 0:
+                                ticks = mi_json[0].get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
+                            elif isinstance(mi_json, dict):
+                                ticks = mi_json.get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
 
-                    if sniff_sha1 or sniff_fid:
-                        # ★ 核心修复：先主动查一次本地数据库，避免已有缓存的文件重复跑 ffprobe
-                        cached_text = P115CacheManager.get_mediainfo_cache_text(sniff_sha1) if sniff_sha1 else None
-                        
-                        if not cached_text:
-                            # 只有本地真没有缓存时，才去调用解析流程 (跑 ffprobe)
-                            self._fetch_and_parse_mediainfo(
-                                sniff_sha1,
-                                guessed_info={},
-                                pre_fetched_mediainfo=None,
-                                local_pre_fetched_mediainfo=None,
-                                file_node=first_video,
-                                silent_log=True
-                            )
-                            # 跑完后再读一次刚写入的缓存
-                            cached_text = P115CacheManager.get_mediainfo_cache_text(sniff_sha1) if sniff_sha1 else None
-
-                        if cached_text:
-                            try:
-                                mi_json = json.loads(cached_text)
-                                ticks = 0
-                                if isinstance(mi_json, list) and len(mi_json) > 0:
-                                    ticks = mi_json[0].get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
-                                elif isinstance(mi_json, dict):
-                                    ticks = mi_json.get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
-
-                                if ticks > 0:
-                                    # Emby 的 RunTimeTicks 单位是 100纳秒，转换为分钟
-                                    physical_runtime = int(ticks / 10000000 / 60)
-                                    logger.info(f"  ➜ [时长嗅探] 成功获取物理时长: {physical_runtime} 分钟")
-
-                                    # 注入到 details 中，伪装成 TMDb 数据
-                                    if self.media_type == 'movie':
+                            if ticks > 0:
+                                physical_runtime = int(ticks / 10000000 / 60)
+                                if self.media_type == 'movie':
+                                    if not self.details.get('runtime'):
                                         self.details['runtime'] = physical_runtime
-                                    else:
+                                        logger.info(f"  ➜ [提前解析] 成功补齐电影物理时长: {physical_runtime} 分钟")
+                                else:
+                                    runtimes = self.details.get('episode_run_time', [])
+                                    if not runtimes or runtimes[0] == 0:
                                         self.details['episode_run_time'] = [physical_runtime]
-
-                                    # 重新评估目标目录！
-                                    new_target_cid = self.get_target_cid(ignore_memory=True)
-                                    if new_target_cid and str(new_target_cid) != str(target_cid):
-                                        logger.info(f"  ➜ [时长嗅探] 物理时长触发了新的分类规则，目标目录已修正！")
-                                        target_cid = new_target_cid
-                                        # 同步更新 dest_parent_cid，防止后面创建目录时用错
-                                        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
-                            except Exception as e:
-                                logger.debug(f"  ➜ 解析物理时长失败: {e}")
+                                        logger.info(f"  ➜ [提前解析] 成功补齐剧集物理时长: {physical_runtime} 分钟")
+                        except Exception:
+                            pass
 
         # =================================================================
-        # ★★★ 3. 智能类型纠错嗅探 (Movie -> TV) ★★★
+        # ★★★ 4. 智能类型纠错嗅探 (Movie -> TV) ★★★
         # =================================================================
         if self.media_type == 'movie' and not getattr(self, 'is_manual_correct', False):
             is_actually_tv = False
@@ -3552,19 +3503,14 @@ class SmartOrganizer:
                 c_name = c.get('fn') or c.get('n') or c.get('file_name', '')
                 rel_path = c.get('rel_path', '')
                 
-                # 1. 相对路径特征 (Season 1)
                 if re.search(r'(?:Season\s?\d+|S\d+|第[一二三四五六七八九十\d]+季)', rel_path, re.IGNORECASE):
                     is_actually_tv = True
                     break
-                
-                # 2. 标准特征 (EP01, S01E01)
                 if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\d{1,4}[集话話回]', c_name, re.IGNORECASE):
                     is_actually_tv = True
                     break
                 
-                # 3. 动漫特征 (剔除干扰后，寻找纯数字序号)
                 clean_c_name = re.sub(r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0', '', c_name)
-                # ★ 核心修复：严格匹配 [01] 或 【01】 或前后带空格的 - 01，防止误伤压制组编号
                 if re.search(r'(?:\s-\s+)(\d{2,4})(?:\s|$)|\[(\d{2,4})\]|【(\d{2,4})】', clean_c_name): 
                     is_actually_tv = True
                     break
@@ -3572,25 +3518,17 @@ class SmartOrganizer:
             if is_actually_tv:
                 logger.warning(f"  🕵️‍♂️ [智能纠错] 发现文件包含明显的剧集特征(如季目录/EP01)，但当前被错误识别为电影。正在尝试自动纠错...")
                 try:
-                    # ★ 核心修复：坚决保留原 TMDb ID，只切换类型重新拉取数据！
                     self.media_type = 'tv'
-                    
-                    # 强制清除旧的电影缓存数据，重新拉取剧集数据
                     cache_key = f"tv_{self.tmdb_id}"
                     if cache_key in _TMDB_METADATA_CACHE:
                         del _TMDB_METADATA_CACHE[cache_key]
                         
                     self.raw_metadata = self._fetch_raw_metadata()
                     
-                    # 如果拉取成功（说明这个 ID 确实有对应的剧集数据）
                     if self.raw_metadata and self.raw_metadata.get('title'):
                         self.details = self.raw_metadata
                         logger.info(f"  ➜ [智能纠错] 成功保留原 ID ({self.tmdb_id}) 并切换为剧集: {self.details.get('title')}")
-                        
-                        target_cid = self.get_target_cid()
-                        dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else (root_item.get('pid') or root_item.get('parent_id') or root_item.get('cid'))
                     else:
-                        # 只有在原 ID 作为剧集彻底查不到数据时，才迫不得已用名字重新搜索
                         logger.warning(f"  ➜ [智能纠错] 原 ID ({self.tmdb_id}) 作为剧集查询失败，尝试用名称重新搜索...")
                         search_title = self.original_title
                         clean_title = re.sub(r'\(\d{4}\)', '', search_title).strip()
@@ -3602,16 +3540,40 @@ class SmartOrganizer:
                             self.tmdb_id = new_tmdb_id
                             self.raw_metadata = self._fetch_raw_metadata()
                             self.details = self.raw_metadata
-                            
-                            target_cid = self.get_target_cid()
-                            dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else (root_item.get('pid') or root_item.get('parent_id') or root_item.get('cid'))
                         else:
                             logger.warning(f"  ➜ [智能纠错] 未能在 TMDb 找到对应的剧集，将强制按剧集格式重命名以防冲突。")
                 except Exception as e:
                     logger.error(f"  ➜ [智能纠错] 纠错失败: {e}")
 
         # =================================================================
-        # 4. 计算最终的目录名称和路径 (支持 / 多级目录)
+        # ★★★ 5. 提取季号并统一计算最终 Target CID ★★★
+        # =================================================================
+        if self.media_type == 'tv' and getattr(self, 'forced_season', None) is None:
+            m1 = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', parse_name, re.IGNORECASE)
+            m2 = re.search(r'Season\s*(\d{1,4})\b', parse_name, re.IGNORECASE)
+            m3 = re.search(r'第(\d{1,4})季', parse_name)
+            extracted_season = None
+            
+            if m1: extracted_season = int(m1.group(1))
+            elif m2: extracted_season = int(m2.group(1))
+            elif m3: extracted_season = int(m3.group(1))
+            else:
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', parse_name, re.IGNORECASE):
+                    extracted_season = 1
+            
+            if extracted_season is not None:
+                self.forced_season = extracted_season
+
+        # ★ 统一在这里获取最终的 target_cid！(因为 details 已经补齐了时长，media_type 也可能被纠错了，season 也提取了)
+        if not getattr(self, 'is_manual_correct', False):
+            new_target_cid = self.get_target_cid(season_num=getattr(self, 'forced_season', None))
+            if new_target_cid and str(new_target_cid) != str(target_cid):
+                logger.info(f"  ➜ [智能分类] 目标目录已根据最新元数据(时长/类型/连载状态)修正！")
+                target_cid = new_target_cid
+                dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
+
+        # =================================================================
+        # 6. 计算最终的目录名称和路径 (支持 / 多级目录)
         # =================================================================
         title = self.details.get('title') or self.original_title
         original_title = self.details.get('original_title') or title

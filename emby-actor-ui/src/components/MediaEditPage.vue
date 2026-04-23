@@ -52,14 +52,23 @@
                   </n-descriptions-item>
                 </n-descriptions>
                 
-                <!-- ★★★ 新增：编辑图像按钮 ★★★ -->
+                <!-- ★★★ 编辑图像按钮 ★★★ -->
                 <template #action>
-                  <n-button block type="primary" secondary @click="showImageEditor = true">
-                    <template #icon>
-                      <n-icon :component="ImagesIcon" />
-                    </template>
-                    编辑图像
-                  </n-button>
+                  <n-space vertical>
+                    <n-button block type="primary" secondary @click="showImageEditor = true">
+                      <template #icon>
+                        <n-icon :component="ImagesIcon" />
+                      </template>
+                      编辑图像
+                    </n-button>
+                    <!-- ▼▼▼ 编辑媒体信息按钮 ▼▼▼ -->
+                    <n-button block type="info" secondary @click="openMediaInfoEditor">
+                      <template #icon>
+                        <n-icon :component="DocumentTextIcon" />
+                      </template>
+                      编辑媒体信息 (音轨/字幕)
+                    </n-button>
+                  </n-space>
                 </template>
               </n-card>
 
@@ -381,11 +390,95 @@
         <n-button type="primary" @click="submitUrlImage" :loading="isUploadingImage">确定</n-button>
       </template>
     </n-modal>
+    <!-- ★★★ 媒体信息编辑模态框 ★★★ -->
+    <n-modal
+      v-model:show="showMediaInfoEditor"
+      preset="card"
+      style="width: 800px; max-width: 95vw;"
+      title="编辑媒体信息 (音轨/字幕)"
+      :bordered="false"
+      size="huge"
+    >
+      <n-alert type="info" style="margin-bottom: 16px;">
+        修改语言标签后保存，系统将自动覆盖底层指纹文件并通知 Emby 重新加载。
+      </n-alert>
+      
+      <!-- ★★★ 硬字幕标记按钮 ★★★ -->
+      <n-card title="标记硬字幕 (写入视频流 Title)" size="small" style="margin-bottom: 16px;">
+        <n-space>
+          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary>简中</n-button>
+          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary>繁中</n-button>
+          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary>简英</n-button>
+          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary>繁英</n-button>
+          <n-button @click="clearHardcodedSubtitle()" secondary>清除标记</n-button>
+        </n-space>
+      </n-card>
+      
+      <n-table :bordered="true" :single-line="false" size="small">
+        <thead>
+          <tr>
+            <th style="width: 80px;">类型</th>
+            <th>当前标题 (Title)</th>
+            <th style="width: 200px;">修正语言 (Language)</th>
+            <th style="width: 80px; text-align: center;">默认</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- ▼▼▼ 只显示音轨和字幕，隐藏视频流 ▼▼▼ -->
+          <tr v-for="(stream, index) in displayStreams" :key="index">
+            <td>
+              <n-tag 
+                :type="stream.Type === 'Audio' ? 'info' : 'success'" 
+                size="small"
+              >
+                {{ stream.Type === 'Audio' ? '音轨' : '字幕' }}
+              </n-tag>
+            </td>
+            <td>
+              <n-input 
+                v-model:value="stream.Title" 
+                placeholder="无标题" 
+                size="small" 
+              />
+            </td>
+            <td>
+              <n-select 
+                v-model:value="stream.Language" 
+                :options="languageOptions" 
+                placeholder="选择语言"
+                filterable
+                clearable
+                size="small"
+                @update:value="(val, option) => handleLanguageChange(stream, val, option)"
+              />
+            </td>
+            <td style="text-align: center;">
+              <n-checkbox 
+                v-model:checked="stream.IsDefault" 
+                @update:checked="(val) => handleDefaultChange(stream, val)"
+              />
+            </td>
+          </tr>
+          <tr v-if="displayStreams.length === 0">
+            <td colspan="4" style="text-align: center; padding: 20px;">
+              <n-text depth="3">未解析到媒体流</n-text>
+            </td>
+          </tr>
+        </tbody>
+      </n-table>
+      
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showMediaInfoEditor = false">取消</n-button>
+          <n-button type="primary" @click="saveMediaInfo" :loading="isSavingMediaInfo">保存并刷新</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
 </template>
 
 <script setup>
-import { ref, onMounted, watch, computed, nextTick } from 'vue';
+import { ref, shallowRef, onMounted, watch, computed, nextTick } from 'vue';
 import draggable from 'vuedraggable';
 import { NIcon, NInput, NGrid, NGridItem, NFormItem, NTag, NAvatar, NPopconfirm, NImage, NModal, NList, NListItem, NThing, NEmpty, NButtonGroup, NDropdown, NTooltip } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
@@ -401,7 +494,8 @@ import {
   ChevronDownOutline as ChevronDownIcon,
   CloudUploadOutline as CloudUploadIcon,
   LinkOutline as LinkIcon,
-  SearchOutline as SearchIcon
+  SearchOutline as SearchIcon,
+  DocumentTextOutline as DocumentTextIcon
 } from '@vicons/ionicons5';
 import { debounce } from 'lodash-es';
 
@@ -524,6 +618,160 @@ const uploadImagePayload = async (payload) => {
   }
 };
 // ★★★ 图像编辑逻辑结束 ★★★
+
+// =========================================================
+// ★★★ 媒体信息 (MediaInfo) 编辑相关状态与逻辑 ★★★
+// =========================================================
+const showMediaInfoEditor = ref(false);
+const isSavingMediaInfo = ref(false);
+const mediaInfoData = shallowRef(null); 
+const mediaStreams = ref([]);    
+const mediaInfoContext = ref({}); 
+const languageOptions = ref([]);
+
+// 1. 获取语言映射表
+const fetchLanguageMapping = async () => {
+  try {
+    const res = await axios.get('/api/custom_collections/config/language_mapping');
+    languageOptions.value = res.data.map(item => ({
+      label: item.label,
+      value: (item.aliases && item.aliases.length > 0) ? item.aliases[0] : item.value
+    }));
+    
+    if (!languageOptions.value.some(opt => opt.label.includes('双语'))) {
+      languageOptions.value.push({ label: '中英双语', value: 'mul' });
+    }
+  } catch (e) {
+    console.error("获取语言映射失败", e);
+  }
+};
+
+// 2. 打开编辑器并获取数据
+const openMediaInfoEditor = async () => {
+  if (languageOptions.value.length === 0) {
+    await fetchLanguageMapping();
+  }
+  
+  const loadingMsg = message.loading("正在读取底层媒体指纹...", { duration: 0 });
+  try {
+    const res = await axios.get(`/api/media_info/edit/${itemId.value}`);
+    mediaInfoContext.value = {
+      sha1: res.data.sha1,
+      media_path: res.data.media_path,
+      mediainfo_path: res.data.mediainfo_path
+    };
+    mediaInfoData.value = res.data.mediainfo;
+    
+    let streams = [];
+    if (Array.isArray(mediaInfoData.value) && mediaInfoData.value.length > 0) {
+      if (mediaInfoData.value[0].MediaSourceInfo) {
+        streams = mediaInfoData.value[0].MediaSourceInfo.MediaStreams || [];
+      } else {
+        streams = mediaInfoData.value[0].MediaStreams || [];
+      }
+    } else if (mediaInfoData.value && mediaInfoData.value.MediaStreams) {
+      streams = mediaInfoData.value.MediaStreams;
+    }
+    
+    // 过滤出视频、音轨和字幕
+    mediaStreams.value = streams.filter(s => s.Type === 'Video' || s.Type === 'Audio' || s.Type === 'Subtitle');
+    
+    showMediaInfoEditor.value = true;
+  } catch (e) {
+    message.error(e.response?.data?.error || "获取媒体信息失败");
+  } finally {
+    loadingMsg.destroy();
+  }
+};
+
+// 3. 保存修改
+const saveMediaInfo = async () => {
+  isSavingMediaInfo.value = true;
+  const loadingMsg = message.loading("正在覆盖指纹并通知 Emby 重新加载...", { duration: 0 });
+  
+  try {
+    const payload = {
+      ...mediaInfoContext.value,
+      mediainfo: mediaInfoData.value 
+    };
+    
+    const res = await axios.post(`/api/media_info/edit/${itemId.value}`, payload);
+    message.success(res.data.message || "媒体信息已更新！");
+    showMediaInfoEditor.value = false;
+  } catch (e) {
+    message.error(e.response?.data?.error || "保存失败，请检查后端日志");
+  } finally {
+    loadingMsg.destroy();
+    isSavingMediaInfo.value = false;
+  }
+};
+
+// 4. 处理语言选择变更，自动同步标题 (带智能转换)
+const handleLanguageChange = (stream, val, option) => {
+  if (option && option.label) {
+    let newTitle = option.label;
+    
+    if (stream.Type === 'Subtitle') {
+      // ★★★ 核心修复 2：获取原始标题，判断是否包含 Chs&Eng 等字眼 ★★★
+      const origTitle = (stream.Title || '').toLowerCase();
+      
+      if (origTitle.includes('chs&eng') || origTitle.includes('简英')) {
+        newTitle = '简英双语';
+      } else if (origTitle.includes('cht&eng') || origTitle.includes('繁英')) {
+        newTitle = '繁英双语';
+      } 
+      // 基础转换逻辑
+      else if (newTitle === '国语' || newTitle === '普通话') {
+        newTitle = '简中';
+      } else if (newTitle === '粤语' || newTitle === '广东话') {
+        newTitle = '繁中';
+      } else if (newTitle.endsWith('语')) {
+        newTitle = newTitle.slice(0, -1) + '文';
+      }
+    }
+    
+    stream.Title = newTitle;
+  } else if (!val) {
+    stream.Title = '';
+  }
+};
+
+// 5. 处理默认勾选变更（同类型单选互斥）
+const handleDefaultChange = (changedStream, isChecked) => {
+  if (isChecked) {
+    mediaStreams.value.forEach(s => {
+      if (s !== changedStream && s.Type === changedStream.Type) {
+        s.IsDefault = false;
+      }
+    });
+  }
+};
+
+// 6. 计算属性：只显示音轨和字幕（过滤掉视频流）
+const displayStreams = computed(() => {
+  return mediaStreams.value.filter(s => s.Type === 'Audio' || s.Type === 'Subtitle');
+});
+
+// 7. 设置硬字幕标记（写入视频流 Title）
+const setHardcodedSubtitle = (subtitleType) => {
+  // 找到视频流
+  const videoStream = mediaStreams.value.find(s => s.Type === 'Video');
+  if (videoStream) {
+    videoStream.Title = subtitleType;
+    message.success(`已设置硬字幕标记：${subtitleType}`);
+  } else {
+    message.warning('未找到视频流');
+  }
+};
+
+// 8. 清除硬字幕标记
+const clearHardcodedSubtitle = () => {
+  const videoStream = mediaStreams.value.find(s => s.Type === 'Video');
+  if (videoStream) {
+    videoStream.Title = '';
+    message.success('已清除硬字幕标记');
+  }
+};
 
 // ★★★ TMDb 选图相关状态 ★★★
 const showTmdbSelector = ref(false);

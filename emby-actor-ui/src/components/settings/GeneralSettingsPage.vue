@@ -67,9 +67,13 @@
                       <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">处理质量评分低于此值的项目将进入待复核列表。</n-text></template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="最大演员数" path="max_actors_to_process">
+                    <n-form-item-grid-item label="最大主要演员数" path="max_actors_to_process">
                       <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">处理后最终演员表数量，超过会截断，优先保留有头像演员。</n-text></template>
+                    </n-form-item-grid-item>
+                    <n-form-item-grid-item label="最大分集演员数" path="max_episode_actors_to_process">
+                      <n-input-number v-model:value="configModel.max_episode_actors_to_process" :min="0" :step="1" placeholder="例如: 5"/>
+                      <template #feedback><n-text depth="3" style="font-size:0.8em;">每集最多处理的演员数量，0代表不单独处理分集演员。</n-text></template>
                     </n-form-item-grid-item>
                     <n-form-item-grid-item label="为角色名添加前缀" path="actor_role_add_prefix">
                       <n-switch v-model:value="configModel.actor_role_add_prefix" />

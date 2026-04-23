@@ -2,7 +2,8 @@
 
 from flask import Blueprint, request, jsonify, Response, stream_with_context
 import logging
-
+import os
+import json
 import requests
 
 import handler.emby as emby
@@ -31,30 +32,47 @@ def api_search_emby_library():
         return jsonify({"error": "搜索词不能为空"}), 400
 
     try:
-        # ✨✨✨ 调用改造后的函数，并传入 search_term ✨✨✨
-        search_results = emby.get_emby_library_items(
-            base_url=extensions.media_processor_instance.emby_url,
-            api_key=extensions.media_processor_instance.emby_api_key,
-            user_id=extensions.media_processor_instance.emby_user_id,
-            media_type_filter="Movie,Series",
-            search_term=query
-        )
-        
-        if search_results is None:
-            return jsonify({"error": "搜索时发生服务器错误"}), 500
+        # ★★★ 核心修复：直接搜索本地数据库，并展开 asset_details_json 显示所有版本 ★★★
+        from database import connection
+        with connection.get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # 使用 LATERAL 展开 JSON 数组，让每个版本成为独立的一行
+            sql = """
+                SELECT 
+                    m.tmdb_id, 
+                    m.item_type, 
+                    m.title, 
+                    m.release_year,
+                    a.asset->>'emby_item_id' as emby_id,
+                    a.asset->>'resolution_display' as resolution,
+                    a.asset->>'quality_display' as quality
+                FROM media_metadata m
+                JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(m.asset_details_json) = 'array' THEN m.asset_details_json ELSE '[]'::jsonb END
+                ) AS a(asset) ON true
+                WHERE m.title ILIKE %s OR m.original_title ILIKE %s
+                LIMIT 50
+            """
+            search_term = f"%{query}%"
+            cursor.execute(sql, (search_term, search_term))
+            rows = cursor.fetchall()
 
-        # 将搜索结果转换为前端表格期望的格式 (这部分逻辑不变)
         formatted_results = []
-        for item in search_results:
+        for row in rows:
+            if not row['emby_id']: continue
+            
+            # 拼接版本信息到名字里，例如：阿凡达 [4k BluRay]
+            version_tag = f" [{row['resolution']} {row['quality']}]" if row['resolution'] else ""
+            
             formatted_results.append({
-                "item_id": item.get("Id"),
-                "item_name": item.get("Name"),
-                "item_type": item.get("Type"),
+                "item_id": row['emby_id'],
+                "item_name": f"{row['title']}{version_tag}",
+                "item_type": row['item_type'],
                 "failed_at": None,
-                "error_message": f"来自 Emby 库的搜索结果 (年份: {item.get('ProductionYear', 'N/A')})",
+                "error_message": f"本地数据库搜索结果 (年份: {row['release_year']})",
                 "score": None,
-                # ★★★ 核心修复：把 ProviderIds 也传递给前端 ★★★
-                "provider_ids": item.get("ProviderIds") 
+                "provider_ids": {"Tmdb": row['tmdb_id']} 
             })
         
         return jsonify({
@@ -820,3 +838,137 @@ def api_get_tmdb_images(item_id):
     except Exception as e:
         logger.error(f"API /tmdb_images 发生错误: {e}", exc_info=True)
         return jsonify({"error": "获取 TMDb 图片失败"}), 500
+    
+# ======================================================================
+# ★★★ 媒体信息 (MediaInfo) 编辑 API ★★★
+# ======================================================================
+@media_api_bp.route('/media_info/edit/<item_id>', methods=['GET'])
+@processor_ready_required
+def api_get_media_info_for_edit(item_id):
+    """获取指定媒体的底层 MediaInfo JSON 数据（直接从数据库查）"""
+    try:
+        item_id = str(item_id)
+
+        # 1. 直接从 media_metadata 查 asset_details_json + file_sha1_json
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT asset_details_json, file_sha1_json
+                    FROM media_metadata
+                    WHERE emby_item_ids_json @> %s::jsonb
+                    LIMIT 1
+                """, (json.dumps([item_id]),))
+                row = cursor.fetchone()
+
+        if not row:
+            return jsonify({"error": "数据库中未找到该媒体项"}), 404
+
+        asset_details = row.get("asset_details_json") or []
+        file_sha1_list = row.get("file_sha1_json") or []
+
+        # 2. 从 asset_details_json 中找到当前 emby_item_id 对应的媒体项
+        target_asset = None
+        target_index = -1
+
+        for i, asset in enumerate(asset_details):
+            if str(asset.get("emby_item_id", "")) == item_id:
+                target_asset = asset
+                target_index = i
+                break
+
+        if not target_asset:
+            return jsonify({"error": "asset_details_json 中未找到对应的媒体项路径"}), 404
+
+        media_path = target_asset.get("path")
+        if not media_path:
+            return jsonify({"error": "目标媒体项缺少路径信息"}), 404
+
+        # 3. 按同索引取 sha1
+        sha1 = None
+        if 0 <= target_index < len(file_sha1_list):
+            sha1 = file_sha1_list[target_index]
+
+        # 如果只有一个 sha1，也允许兜底拿它
+        if not sha1 and len(file_sha1_list) == 1:
+            sha1 = file_sha1_list[0]
+
+        # 4. 优先从数据库 mediainfo 指纹库获取
+        mediainfo_json = None
+        if sha1:
+            mediainfo_json = media_db.get_mediainfo_by_sha1(sha1)
+
+        # 5. 兜底本地 mediainfo.json
+        mediainfo_path = os.path.splitext(media_path)[0] + "-mediainfo.json"
+        if not mediainfo_json and os.path.exists(mediainfo_path):
+            try:
+                with open(mediainfo_path, 'r', encoding='utf-8') as f:
+                    mediainfo_json = json.load(f)
+            except Exception as e:
+                logger.warning(f"读取本地 mediainfo.json 失败: {e}")
+
+        if not mediainfo_json:
+            return jsonify({"error": "未找到该媒体的指纹信息或本地 JSON 文件"}), 404
+
+        return jsonify({
+            "sha1": sha1,
+            "media_path": media_path,
+            "mediainfo_path": mediainfo_path,
+            "mediainfo": mediainfo_json
+        })
+
+    except Exception as e:
+        logger.error(f"获取媒体信息失败: {e}", exc_info=True)
+        return jsonify({"error": "服务器内部错误"}), 500
+
+@media_api_bp.route('/media_info/edit/<item_id>', methods=['POST'])
+@admin_required
+@processor_ready_required
+def api_save_media_info_for_edit(item_id):
+    """保存修改后的 MediaInfo，更新数据库和文件，并触发 Emby 刷新"""
+    data = request.json
+    sha1 = data.get("sha1")
+    mediainfo_path = data.get("mediainfo_path")
+    media_path = data.get("media_path")
+    new_mediainfo = data.get("mediainfo")
+    
+    if not new_mediainfo or not mediainfo_path or not media_path:
+        return jsonify({"error": "参数不完整"}), 400
+        
+    try:
+        # 1. 更新数据库 p115_mediainfo_cache
+        if sha1:
+            from database import connection
+            with connection.get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE p115_mediainfo_cache SET mediainfo_json = %s WHERE sha1 = %s", 
+                    (json.dumps(new_mediainfo, ensure_ascii=False), sha1)
+                )
+                conn.commit()
+                
+        # 2. ★★★ 修正顺序：先调用神医接口清除 Emby 内部的媒体信息缓存 ★★★
+        # (神医在清除时会物理删除本地的 -mediainfo.json 文件)
+        emby.clear_item_media_info(
+            item_id, 
+            extensions.media_processor_instance.emby_url, 
+            extensions.media_processor_instance.emby_api_key
+        )
+
+        # 3. ★★★ 修正顺序：再覆盖写入物理文件 -mediainfo.json ★★★
+        # (确保我们新写入的文件不会被神医的清除操作误删)
+        with open(mediainfo_path, 'w', encoding='utf-8') as f:
+            json.dump(new_mediainfo, f, ensure_ascii=False, indent=4)
+            
+        # 4. 触发 Emby 局部目录扫描，重新加载刚刚写入的 -mediainfo.json
+        emby.notify_emby_file_changes(
+            [media_path], 
+            extensions.media_processor_instance.emby_url, 
+            extensions.media_processor_instance.emby_api_key
+        )
+        
+        return jsonify({"message": "媒体信息已更新，Emby 正在重新加载..."})
+        
+    except Exception as e:
+        logger.error(f"保存媒体信息失败: {e}", exc_info=True)
+        return jsonify({"error": f"保存失败: {str(e)}"}), 500

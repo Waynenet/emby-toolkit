@@ -74,7 +74,7 @@
           <div class="col-handle"></div>
           <div class="col-label">中文名称</div>
           <div class="col-en">ISO 代码 (如 US)</div>
-          <div class="col-extra">英文别名 (逗号分隔)</div>
+          <div class="col-extra">别名 (逗号分隔)</div>
           <div class="col-action">操作</div>
         </div>
         <div ref="countryListRef" class="sortable-list">
@@ -94,14 +94,14 @@
       <!-- Tab 4: 原语言 -->
       <n-tab-pane name="languages" tab="原语言">
         <n-alert type="info" :bordered="false" class="mb-4">
-          配置语言代码映射。用于筛选器的语言选项。<b>别名</b>可用于兼容TMDb的历史遗留代码（如 cn 和 yue）。
+          配置语言代码映射。用于筛选器的语言选项。<b>别名</b>可用于兼容TMDb的历史遗留代码（如 cn 和 yue），以及压制组各种不规范的参数用于格式化媒体信息，注意别名第一个必须用三位语言代码。
         </n-alert>
         <div class="list-header">
           <div class="col-handle"></div>
           <div class="col-label">中文名称</div>
           <div class="col-en">ISO 代码 (如 en)</div>
           <!-- ★★★ 核心修改：把 col-empty 换成别名输入框 ★★★ -->
-          <div class="col-extra">英文别名 (逗号分隔)</div>
+          <div class="col-extra">别名 (逗号分隔)</div>
           <div class="col-action">操作</div>
         </div>
         <div ref="languageListRef" class="sortable-list">

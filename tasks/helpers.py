@@ -18,16 +18,15 @@ logger = logging.getLogger(__name__)
 
 AUDIO_SUBTITLE_KEYWORD_MAP = {
     # 音轨：chi=国语, yue=粤语
-    # ★ 补充 guoyu, guo 等拼音匹配
-    "chi": ["Mandarin", "CHI", "ZHO", "国语","普通话", "国配", "国英双语", "公映", "台配", "京译", "上译", "央译", "guoyu", "guo"],
-    "yue": ["Cantonese", "YUE", "粤语", "粤配", "粤英双语", "港配", "粤语配音", "广东话", "yueyu", "yue"],
+    "chi": ["Mandarin", "CHI", "ZHO", "国语", "國語", "普通话", "国配", "國配", "国英双语", "公映", "台配", "京译", "上译", "央译", "guoyu", "guo"],
+    "yue": ["Cantonese", "YUE", "粤语", "粵語", "粤配", "粵配", "粤英双语", "港配", "粤语配音", "广东话", "廣東話", "yueyu", "yue"],
     "eng": ["English", "ENG", "英语"],
     "jpn": ["Japanese", "JPN", "日语"],
     "kor": ["Korean", "KOR", "韩语"],
 
     # 字幕：chi=简体, yue=繁体
-    "sub_chi": ["CHS", "SC", "GB", "简体", "简中", "Simplified"],
-    "sub_yue": ["CHT", "TC", "BIG5", "繁體", "繁体", "Traditional"],
+    "sub_chi": ["CHS", "SC", "GB", "简体", "簡體", "简中", "簡中", "Simplified"],
+    "sub_yue": ["CHT", "TC", "BIG5", "繁體", "繁体", "繁中", "Traditional"],
     "sub_eng": ["ENG", "英字"],
     "sub_jpn": ["JPN", "日字", "日文"],
     "sub_kor": ["KOR", "韩字", "韩文"],
@@ -98,7 +97,7 @@ RELEASE_GROUPS: Dict[str, List[str]] = {
     "others": ['B(?:MDru|eyondHD|TN)', 'C(?:fandora|trlhd|MRG)', 'DON', 'EVO', 'FLUX', 'HONE(?:yG|)',
                'N(?:oGroup|T(?:b|G))', 'PandaMoon', 'SMURF', 'T(?:EPES|aengoo|rollHD )'],
     "anime": [r'\bANi\b', r'\bHYSUB\b', r'\bKTXP\b', 'LoliHouse', r'\bMCE\b', 'Nekomoe kissaten', 'SweetSub', 'MingY',
-              '(?:Lilith|NC)-Raws', '织梦字幕组', '枫叶字幕组', '猎户手抄部', '喵萌奶茶屋', '漫猫字幕社',
+              '(?:Lilith|NC|AI)-Raws', 'VCB-Stuido', '织梦字幕组', '枫叶字幕组', '猎户手抄部', '喵萌奶茶屋', '漫猫字幕社',
               '霜庭云花Sub', '北宇治字幕组', '氢气烤肉架', '云歌字幕组', '萌樱字幕组', '极影字幕社',
               '悠哈璃羽字幕社',
               '❀拨雪寻春❀', '沸羊羊(?:制作|字幕组)', '(?:桜|樱)都字幕组'],
@@ -305,30 +304,77 @@ def _get_resolution_tier(width: int, height: int) -> tuple[int, str]:
 
 def normalize_lang_code(lang_str: str) -> str:
     """
-    统一语言代码标准化：
-    音轨：chi=国语, yue=粤语
-    字幕：chi=简体, yue=繁体
+    统一语言代码标准化 (动态映射版)：
+    读取用户配置的语言映射表，将各种奇葩的输入统一归一化为 3 位 ISO 代码。
+    如果匹配不到，返回原字符串的小写。
     """
     if not lang_str:
         return ""
 
     lang_str = str(lang_str).lower().strip()
 
-    # 中文相关：明确拆分
-    if lang_str in ['chi', 'guo', 'guoyu', 'zho', 'zh', 'chs', 'Zh-cn' 'zh-cn', 'zh-sg', 'zh-hans', 'cmn', 'mandarin', '国语', '普通话', '中文', '简体', '简中']:
+    # 1. 优先处理硬编码的常见中文别名 (防止用户把映射表删空导致核心逻辑崩溃)
+    if lang_str in ['guo', 'guoyu', 'chs', 'zh-cn', 'zh-sg', 'zh-hans', 'cmn', 'mandarin', '国语', '普通话', '中文', '简体', '简中']:
         return 'chi'
-    if lang_str in ['yue', 'cht', 'cn', 'zh-hk', 'zh-tw', 'hk', 'tw', 'cantonese', '粤语', '繁体', '繁中', '粤配', '粤英双语', '港配', '粤语配音', '广东话']:
+    if lang_str in ['cht', 'zh-hk', 'zh-tw', 'hk', 'tw', 'cantonese', '粤语', '繁体', '繁中', '粤配', '粤英双语', '港配', '粤语配音', '广东话']:
         return 'yue'
 
-    # 其他语言
-    if lang_str in ['eng', 'en', 'english', '英语', '英文']:
-        return 'eng'
-    if lang_str in ['jpn', 'ja', 'jp', 'japanese', '日语', '日文']:
-        return 'jpn'
-    if lang_str in ['kor', 'ko', 'kr', 'korean', '韩语', '韩文']:
-        return 'kor'
+    # 2. 动态读取用户配置的语言映射表
+    from database import settings_db
+    import utils
+    lang_mapping = settings_db.get_setting('language_mapping')
+    if not lang_mapping:
+        lang_mapping = utils.DEFAULT_LANGUAGE_MAPPING
 
+    # 3. 遍历映射表进行匹配
+    for item in lang_mapping:
+        val = (item.get('value') or '').lower() # 2位代码
+        aliases = item.get('aliases', [])       # 3位代码/别名
+        if isinstance(aliases, str):
+            aliases = [a.strip().lower() for a in aliases.split(',')]
+        else:
+            aliases = [str(a).lower() for a in aliases]
+
+        # 如果匹配到了 2位代码、3位别名，或者是中文标签本身
+        if lang_str == val or lang_str in aliases or lang_str == item.get('label', '').lower():
+            # 优先返回 3 位代码 (从别名里找长度为 3 的)
+            three_letter_aliases = [a for a in aliases if len(a) == 3]
+            if three_letter_aliases:
+                return three_letter_aliases[0]
+            # 如果没有 3 位代码，返回 2 位代码
+            if val:
+                return val
+
+    # 兜底：如果都没匹配上，返回原字符串
     return lang_str
+
+def get_lang_display_label(lang_code: str) -> str:
+    """
+    根据标准化的语言代码，反查其对应的中文显示标签。
+    """
+    if not lang_code:
+        return "未知"
+        
+    lang_code = lang_code.lower().strip()
+    
+    from database import settings_db
+    import utils
+    lang_mapping = settings_db.get_setting('language_mapping')
+    if not lang_mapping:
+        lang_mapping = utils.DEFAULT_LANGUAGE_MAPPING
+        
+    for item in lang_mapping:
+        val = (item.get('value') or '').lower()
+        aliases = item.get('aliases', [])
+        if isinstance(aliases, str):
+            aliases = [a.strip().lower() for a in aliases.split(',')]
+        else:
+            aliases = [str(a).lower() for a in aliases]
+            
+        if lang_code == val or lang_code in aliases:
+            return item.get('label', '未知')
+            
+    return lang_code.upper()
 
 def _get_detected_languages_from_streams(
     media_streams: List[dict],
@@ -586,12 +632,73 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
             
     # 生成前端展示用的 display 标签
     fake_details_for_analysis = item_details.copy()
-    fake_details_for_analysis['MediaStreams'] = media_streams 
-    
+
+    analysis_streams = list(media_streams)
+
+    video_stream = next((s for s in media_streams if s.get("Type") == "Video"), None)
+    if video_stream:
+        hard_sub_stream = _build_hardsub_for_analysis(video_stream.get("Title"))
+        if hard_sub_stream:
+            analysis_streams.append(hard_sub_stream)
+
+    fake_details_for_analysis['MediaStreams'] = analysis_streams
+
     display_tags = analyze_media_asset(fake_details_for_analysis)
     asset.update(display_tags)
     
     return asset
+
+# --- 从视频标题构建硬字幕流（仅用于分析，不会实际添加到媒体信息中） ---
+def _build_hardsub_for_analysis(video_title: str):
+    text = str(video_title or "").strip().lower()
+    if not text:
+        return None
+
+    if "简中" in text or text == "chs":
+        return {
+            "Type": "Subtitle",
+            "Language": "chi",
+            "Title": "简中",
+            "DisplayTitle": "简中",
+            "IsForced": False,
+            "Codec": "hardsub",
+            "IsExternal": False
+        }
+
+    if "繁中" in text or text == "cht":
+        return {
+            "Type": "Subtitle",
+            "Language": "yue",
+            "Title": "繁中",
+            "DisplayTitle": "繁中",
+            "IsForced": False,
+            "Codec": "hardsub",
+            "IsExternal": False
+        }
+
+    if "简英" in text or "chs&eng" in text:
+        return {
+            "Type": "Subtitle",
+            "Language": "chi",
+            "Title": "简英",
+            "DisplayTitle": "简英",
+            "IsForced": False,
+            "Codec": "hardsub",
+            "IsExternal": False
+        }
+
+    if "繁英" in text or "cht&eng" in text:
+        return {
+            "Type": "Subtitle",
+            "Language": "yue",
+            "Title": "繁英",
+            "DisplayTitle": "繁英",
+            "IsForced": False,
+            "Codec": "hardsub",
+            "IsExternal": False
+        }
+
+    return None
 
 # --- 判断电影是否满足订阅条件 ---
 def is_movie_subscribable(movie_id: int, api_key: str, config: dict) -> bool:
@@ -1611,21 +1718,28 @@ def translate_tmdb_metadata_recursively(
         if translate_title_enabled and specific_item_type in ['Movie', 'Series']:
             tagline = data_dict.get('tagline')
             if not tagline or not utils.contains_chinese(tagline):
-                if not tagline and tmdb_api_key:
-                    try:
-                        if specific_item_type == 'Movie':
-                            en_data = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                            data_dict['tagline'] = en_data.get('tagline', '')
-                        elif specific_item_type == 'Series':
-                            en_data = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                            data_dict['tagline'] = en_data.get('tagline', '')
-                    except Exception:
-                        pass
-
-                if data_dict.get('tagline'):
-                    needs_tagline = True
+                # 先用本地缓存回填，避免重复翻译
+                if local_info and local_info.get('tagline') and utils.contains_chinese(local_info['tagline']):
+                    data_dict['tagline'] = local_info['tagline']
                     stats['tagline_pending_count'] += 1
-                    stats['tagline_needs_translation'] += 1
+                    stats['tagline_cache_hits'] += 1
+                else:
+                    # 本地没有中文标语，再去补英文原文，准备送翻译
+                    if not tagline and tmdb_api_key:
+                        try:
+                            if specific_item_type == 'Movie':
+                                en_data = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
+                                data_dict['tagline'] = en_data.get('tagline', '')
+                            elif specific_item_type == 'Series':
+                                en_data = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
+                                data_dict['tagline'] = en_data.get('tagline', '')
+                        except Exception:
+                            pass
+
+                    if data_dict.get('tagline'):
+                        needs_tagline = True
+                        stats['tagline_pending_count'] += 1
+                        stats['tagline_needs_translation'] += 1
 
         if needs_title or needs_overview or needs_tagline:
             pending_items[tmdb_id_str] = {
@@ -1648,35 +1762,41 @@ def translate_tmdb_metadata_recursively(
                         pending_persons.add(name)
 
             max_actors = config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
+            max_ep_actors = config.get(constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS, 0) # 读取新配置
+            
             try:
                 limit = int(max_actors)
-                if limit <= 0:
-                    limit = 30
+                if limit <= 0: limit = 30
             except Exception:
                 limit = 30
+                
+            try:
+                ep_limit = int(max_ep_actors)
+            except Exception:
+                ep_limit = 0
 
             def _smart_truncate(actor_list, max_limit):
-                if not actor_list:
-                    return []
-
+                if not actor_list: return []
                 stats['original_cast_count'] += len(actor_list)
-
-                if remove_no_avatar:
-                    valid_actors = [a for a in actor_list if a.get('profile_path')]
-                else:
-                    valid_actors = actor_list
-
+                valid_actors = [a for a in actor_list if a.get('profile_path')] if remove_no_avatar else actor_list
                 valid_actors.sort(key=lambda x: x.get('order') if x.get('order') is not None else 999)
                 truncated = valid_actors[:max_limit]
-
                 stats['truncated_cast_count'] += len(truncated)
                 return truncated
 
-            if 'cast' in credits_data:
-                credits_data['cast'] = _smart_truncate(credits_data['cast'], limit)
-
-            if 'guest_stars' in credits_data:
-                credits_data['guest_stars'] = _smart_truncate(credits_data['guest_stars'], 10)
+            # ★★★ 核心优化：如果是分集，且配置为 0，直接清空演员表，不送去翻译 ★★★
+            if specific_item_type == 'Episode' and ep_limit == 0:
+                if 'cast' in credits_data: credits_data['cast'] = []
+                if 'guest_stars' in credits_data: credits_data['guest_stars'] = []
+            else:
+                # 动态决定当前层级的限制人数
+                current_limit = ep_limit if specific_item_type == 'Episode' else limit
+                guest_limit = ep_limit if specific_item_type == 'Episode' else 10
+                
+                if 'cast' in credits_data:
+                    credits_data['cast'] = _smart_truncate(credits_data['cast'], current_limit)
+                if 'guest_stars' in credits_data:
+                    credits_data['guest_stars'] = _smart_truncate(credits_data['guest_stars'], guest_limit)
 
             all_actors = credits_data.get('cast', []) + credits_data.get('guest_stars', [])
             for actor in all_actors:
