@@ -15,10 +15,12 @@
       :class="['glass-sider', { 'mobile-sider': isMobile }]"
     >
       <div class="sider-content-wrapper">
+        <!-- 顶部 Logo (固定) -->
         <div class="sider-logo" :class="{ 'collapsed': collapsed && !isMobile }">
           <img :src="logo" alt="Logo" class="logo-img" />
         </div>
 
+        <!-- 中间 导航菜单 (可滚动) -->
         <div class="sider-menu-container">
           <n-menu
             :collapsed="collapsed"
@@ -30,6 +32,7 @@
           />
         </div>
 
+        <!-- 底部 工具栏与用户信息 (固定) -->
         <div class="sider-bottom-tools" v-show="!collapsed || isMobile">
           <n-divider style="margin: 0 0 16px 0; opacity: 0.3;" />
           <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" placement="right-end" :options="userOptions" @select="handleUserSelect">
@@ -210,19 +213,26 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   height: calc(100vh - 32px) !important; 
 }
 
-.n-layout-sider-scroll-container { border-right: none !important; }
+/* ★★★ 强制覆盖 Naive UI 侧边栏内部容器，实现 Flex 布局 ★★★ */
+:deep(.n-layout-sider-scroll-container) {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  overflow: hidden !important; /* 隐藏外层滚动，交由中间菜单滚动 */
+  border-right: none !important;
+}
 
-/* ★★★ 修复侧边栏 Flex 布局，确保底部固定 ★★★ */
 .sider-content-wrapper {
   display: flex;
   flex-direction: column;
   height: 100%;
+  width: 100%;
 }
 
 .sider-logo {
   padding: 30px 0 20px 0;
   display: flex; justify-content: center; align-items: center;
-  flex-shrink: 0; /* 防止被压缩 */
+  flex-shrink: 0; /* 保证 Logo 不被压缩 */
 }
 .sider-logo.collapsed { padding: 30px 0 20px 0; }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
@@ -230,7 +240,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 
 .sider-menu-container {
   flex: 1; /* 占据中间所有剩余空间 */
-  overflow-y: auto;
+  overflow-y: auto; /* 允许菜单滚动 */
   overflow-x: hidden;
   padding: 0 12px; 
 }
@@ -244,7 +254,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   display: flex;
   flex-direction: column;
   gap: 12px;
-  flex-shrink: 0; /* 确保不被压缩，固定在底部 */
+  flex-shrink: 0; /* 保证底部不被压缩，固定在最下 */
 }
 .user-profile-btn {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;

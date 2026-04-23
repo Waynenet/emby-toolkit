@@ -31,23 +31,23 @@ onMounted(() => {
 </script>
 
 <style>
-/* ==================== 1. 动态主题变量 (修复白天黑夜切换) ==================== */
+/* ==================== 1. 动态主题变量 (修复白天模式通透感) ==================== */
 :root {
-  /* 默认(白天)变量 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2564&auto=format&fit=crop'); /* 明亮清新的壁纸 */
-  --glass-bg: rgba(255, 255, 255, 0.6); 
-  --glass-bg-hover: rgba(255, 255, 255, 0.8);
-  --glass-border: rgba(255, 255, 255, 0.5); 
-  --glass-border-light: rgba(255, 255, 255, 0.8);
-  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
-  --glass-blur: blur(20px); 
+  /* 默认(白天)变量 - 增加通透感 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2564&auto=format&fit=crop');
+  --glass-bg: rgba(255, 255, 255, 0.25); /* 降低不透明度，更通透 */
+  --glass-bg-hover: rgba(255, 255, 255, 0.4);
+  --glass-border: rgba(255, 255, 255, 0.4); 
+  --glass-border-light: rgba(255, 255, 255, 0.7);
+  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); /* 阴影放轻 */
+  --glass-blur: blur(24px); 
   --text-primary: rgba(0, 0, 0, 0.85);
   --text-secondary: rgba(0, 0, 0, 0.6);
 }
 
 html.dark {
   /* 暗色模式变量 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop'); /* 暗色高级壁纸 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop');
   --glass-bg: rgba(20, 25, 35, 0.45); 
   --glass-bg-hover: rgba(30, 35, 45, 0.6);
   --glass-border: rgba(255, 255, 255, 0.1); 
@@ -141,6 +141,4 @@ html, body {
 /* ==================== 3. 彻底隐藏滚动条 ==================== */
 * { scrollbar-width: none; -ms-overflow-style: none; }
 ::-webkit-scrollbar { display: none; width: 0; height: 0; }
-/* 隐藏 Naive UI 自带的滚动条轨道 */
-.n-scrollbar-rail { display: none !important; }
 </style>
