@@ -1,10 +1,8 @@
 <!-- src/MainLayout.vue -->
 <template>
   <n-layout has-sider class="app-main-layout">
-    <!-- 移动端侧边栏遮罩 -->
     <div v-if="isMobile && !collapsed" class="mobile-sider-mask" @click="collapsed = true"></div>
 
-    <!-- 侧边栏 (玻璃拟态) -->
     <n-layout-sider
       :bordered="false"
       collapse-mode="width"
@@ -17,12 +15,10 @@
       :class="['glass-sider', { 'mobile-sider': isMobile }]"
     >
       <div class="sider-content-wrapper">
-        <!-- 顶部 Logo -->
         <div class="sider-logo" :class="{ 'collapsed': collapsed && !isMobile }">
           <img :src="logo" alt="Logo" class="logo-img" />
         </div>
 
-        <!-- 中间 导航菜单 -->
         <div class="sider-menu-container">
           <n-menu
             :collapsed="collapsed"
@@ -34,11 +30,8 @@
           />
         </div>
 
-        <!-- 底部 工具栏与用户信息 -->
         <div class="sider-bottom-tools" v-show="!collapsed || isMobile">
           <n-divider style="margin: 0 0 16px 0; opacity: 0.3;" />
-          
-          <!-- 用户名下拉 -->
           <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" placement="right-end" :options="userOptions" @select="handleUserSelect">
             <div class="user-profile-btn" style="margin-bottom: 16px;">
               <n-icon size="20" :component="UserCenterIcon" />
@@ -53,11 +46,7 @@
                 <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
               </n-switch>
             </div>
-
-            <div class="action-center">
-              <span class="app-version">v{{ appVersion }}</span>
-            </div>
-
+            <div class="action-center"><span class="app-version">v{{ appVersion }}</span></div>
             <div class="action-right">
               <n-button-group v-if="authStore.isAdmin" size="small">
                 <n-tooltip><template #trigger><n-button @click="isRealtimeLogVisible = true" circle ghost :bordered="false"><template #icon><n-icon :component="ReaderOutline" /></template></n-button></template>实时日志</n-tooltip>
@@ -69,29 +58,17 @@
       </div>
     </n-layout-sider>
 
-    <!-- 右侧内容区 -->
-    <n-layout-content
-      class="app-main-content"
-      content-style="padding: 24px;"
-      :native-scrollbar="false"
-    >
-      <!-- 移动端汉堡菜单悬浮按钮 -->
+    <n-layout-content class="app-main-content" content-style="padding: 24px;" :native-scrollbar="false">
       <n-button v-if="isMobile" circle class="mobile-menu-btn" @click="collapsed = !collapsed">
         <template #icon><n-icon :component="MenuOutline" /></template>
       </n-button>
 
-      <!-- 桌面端悬浮任务状态胶囊 -->
       <transition name="fade">
-        <div 
-          v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'"
-          class="floating-task-pill"
-        >
+        <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="floating-task-pill">
           <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
           <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
           <div class="pill-text-area">
-            <strong :style="{ color: props.taskStatus.is_running ? 'var(--accent-color)' : 'inherit' }">
-              {{ props.taskStatus.current_action }}
-            </strong>
+            <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
             <span class="pill-divider">-</span>
             <span class="pill-msg">{{ props.taskStatus.message }}</span>
           </div>
@@ -108,7 +85,6 @@
       </div>
     </n-layout-content>
     
-    <!-- 日志 Modal -->
     <n-modal v-model:show="isRealtimeLogVisible" preset="card" style="width: 95%; max-width: 900px;" title="实时任务日志" class="modal-card-lite">
        <n-log ref="logRef" :log="logContent" trim class="log-panel" style="height: 60vh; font-size: 13px; line-height: 1.6;"/>
     </n-modal>
@@ -128,35 +104,27 @@ import logo from './assets/logo.png';
 
 const message = useMessage();
 const isMobile = ref(false);
-
 const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
 onMounted(() => { checkMobile(); window.addEventListener('resize', checkMobile); });
 onUnmounted(() => { window.removeEventListener('resize', checkMobile); });
 
 const triggerStopTask = async () => {
-  try {
-    await axios.post('/api/trigger_stop_task');
-    message.info('已发送停止任务请求。');
-  } catch (error) { message.error(error.response?.data?.error || '请求失败。'); }
+  try { await axios.post('/api/trigger_stop_task'); message.info('已发送停止任务请求。'); } catch (error) { message.error(error.response?.data?.error || '请求失败。'); }
 };
 
 const props = defineProps({ isDark: Boolean, taskStatus: Object });
 const emit = defineEmits(['update:is-dark']);
-
 const router = useRouter(); 
 const route = useRoute(); 
 const authStore = useAuthStore();
-
 const collapsed = ref(false); 
 const activeMenuKey = computed(() => route.name);
 const appVersion = ref(__APP_VERSION__);
-
 const isRealtimeLogVisible = ref(false);
 const isHistoryLogVisible = ref(false);
 const logRef = ref(null);
 
 watch(() => route.path, () => { if (isMobile.value) collapsed.value = true; });
-
 const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(iconComponent) });
 const logContent = computed(() => props.taskStatus?.logs?.join('\n') || '等待任务日志...');
 
@@ -174,10 +142,7 @@ watch([() => props.taskStatus?.logs, isRealtimeLogVisible], async ([newLogs, isV
 }, { deep: true });
 
 const userOptions = computed(() => [{ label: '退出登录', key: 'logout', icon: renderIcon(LogoutIcon) }]);
-
-const handleUserSelect = async (key) => {
-  if (key === 'logout') { await authStore.logout(); router.push({ name: 'Login' }); }
-};
+const handleUserSelect = async (key) => { if (key === 'logout') { await authStore.logout(); router.push({ name: 'Login' }); } };
 
 const menuOptions = computed(() => {
   const discoveryGroup = { label: '发现', key: 'group-discovery', icon: renderIcon(CompassOutline), children: [] };
@@ -218,7 +183,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 </script>
 
 <style>
-/* ★★★ 核心布局修改：四周留白，悬浮感 ★★★ */
 .app-main-layout {
   height: 100vh;
   background: transparent !important;
@@ -229,58 +193,49 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .app-main-content {
   background: transparent !important;
   position: relative;
-  margin-left: 16px; /* 侧边栏和内容区的间距 */
+  margin-left: 16px; 
   border-radius: 16px;
 }
 
 .page-content-inner-wrapper { height: 100%; overflow-y: auto; }
 
-/* 玻璃拟态侧边栏 */
 .glass-sider {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
-  border-radius: 16px; /* 圆角 */
+  border-radius: 16px; 
   box-shadow: var(--glass-shadow);
   z-index: 10;
-  height: calc(100vh - 32px) !important; /* 配合外层 padding */
+  height: calc(100vh - 32px) !important; 
 }
 
-/* 去掉原生右边框 */
-.n-layout-sider-scroll-container {
-  border-right: none !important; 
-}
+.n-layout-sider-scroll-container { border-right: none !important; }
 
+/* ★★★ 修复侧边栏 Flex 布局，确保底部固定 ★★★ */
 .sider-content-wrapper {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
 
-/* 侧边栏 Logo 区域 */
 .sider-logo {
   padding: 30px 0 20px 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  transition: all 0.3s ease;
+  display: flex; justify-content: center; align-items: center;
+  flex-shrink: 0; /* 防止被压缩 */
 }
 .sider-logo.collapsed { padding: 30px 0 20px 0; }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
 .sider-menu-container {
-  flex: 1;
+  flex: 1; /* 占据中间所有剩余空间 */
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0 12px; /* 菜单左右留白 */
+  padding: 0 12px; 
 }
-.n-menu-item {
-  margin-top: 4px;
-}
-
-.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.5); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
+.n-menu-item { margin-top: 4px; }
+.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
 /* 底部工具栏 */
@@ -289,50 +244,27 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex-shrink: 0; /* 确保不被压缩，固定在底部 */
 }
 .user-profile-btn {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.2s;
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: var(--glass-border); border-radius: 8px; cursor: pointer; transition: background 0.2s;
 }
-.user-profile-btn:hover { background: rgba(255, 255, 255, 0.1); }
-.username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+.user-profile-btn:hover { background: var(--glass-border-light); }
+.username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
 
-.bottom-action-bar {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  width: 100%;
-}
+.bottom-action-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; width: 100%; }
 .action-left { justify-self: start; }
 .action-center { justify-self: center; }
 .action-right { justify-self: end; display: flex; gap: 4px; }
+.app-version { font-size: 12px; color: var(--text-secondary); font-family: monospace; }
 
-.app-version { font-size: 12px; color: rgba(255,255,255,0.5); font-family: monospace; }
-
-/* 悬浮任务胶囊 */
 .floating-task-pill {
-  position: absolute; 
-  top: 20px; 
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 50; 
-  display: flex; 
-  align-items: center;
-  background: rgba(30, 35, 45, 0.85); 
-  backdrop-filter: blur(12px); 
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255,255,255,0.1); 
-  border-radius: 30px; 
-  padding: 6px 16px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.3); 
-  max-width: 400px;
-  color: #fff;
+  position: absolute; top: 20px; left: 50%; transform: translateX(-50%); z-index: 50; 
+  display: flex; align-items: center;
+  background: var(--glass-bg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); border-radius: 30px; padding: 6px 16px;
+  box-shadow: var(--glass-shadow); max-width: 400px; color: var(--text-primary);
 }
 .pill-icon { margin-right: 8px; }
 .pill-text-area { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 13px; margin-right: 8px;}
@@ -340,11 +272,9 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .pill-msg { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
 .pill-stop-btn { margin-left: 4px; }
 
-/* 动画过渡 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s, transform 0.3s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; transform: translateY(-10px); }
 
-/* 移动端适配 */
 @media (max-width: 768px) {
   .app-main-layout { padding: 0; }
   .app-main-content { margin-left: 0; border-radius: 0; }
@@ -352,7 +282,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; box-shadow: 2px 0 12px rgba(0,0,0,0.5); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 16px !important; padding-top: 60px !important; }
-  .mobile-menu-btn { position: absolute; top: 16px; left: 16px; z-index: 90; box-shadow: 0 2px 8px rgba(0,0,0,0.3); background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; }
+  .mobile-menu-btn { position: absolute; top: 16px; left: 16px; z-index: 90; box-shadow: 0 2px 8px rgba(0,0,0,0.3); background: var(--glass-bg); border: 1px solid var(--glass-border); color: var(--text-primary); }
   .floating-task-pill { top: 12px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>
