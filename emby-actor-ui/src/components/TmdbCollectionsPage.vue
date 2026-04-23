@@ -215,7 +215,11 @@
     <n-modal 
       v-model:show="showModal" 
       preset="card" 
-      class="collection-details-modal"
+      :style="{
+        width: isMobile ? '95%' : '85%',
+        maxWidth: isMobile ? 'none' : '1000px',
+        height: isMobile ? '85vh' : '80vh'
+      }"
       content-style="padding: 0; overflow: hidden; display: flex; flex-direction: column;"
       :title="selectedCollection ? `详情 - ${selectedCollection.name}` : ''" 
       :bordered="false" 
@@ -884,13 +888,6 @@ const extractYear = (dateStr) => {
    ▼▼▼ 模态框及内部电影海报墙样式 ▼▼▼
    ========================================= */
 
-/* 模态框尺寸控制：缩小宽度 */
-.collection-details-modal {
-  width: 85%; /* 从 90% 缩小到 85% */
-  max-width: 1000px; /* 从 1200px 缩小到 1000px */
-  height: 80vh;
-}
-
 /* 1. 强制 Tabs 的内容包装器占满剩余高度 */
 :deep(.n-tabs-pane-wrapper) {
   flex: 1;
@@ -910,12 +907,8 @@ const extractYear = (dateStr) => {
   box-sizing: border-box;
 }
 
-/* 手机端模态框及内部边距适配：保留优化 */
+/* 手机端模态框内部边距适配 */
 @media (max-width: 600px) {
-  .collection-details-modal {
-    width: 95% !important; /* 手机端加宽模态框 */
-    height: 85vh !important;
-  }
   :deep(.n-tabs-nav) {
     padding: 0 12px; /* 减小导航栏边距 */
   }
