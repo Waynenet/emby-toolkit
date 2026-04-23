@@ -384,7 +384,6 @@
 
           <!-- 3. AI 推荐 -->
           <div v-if="['ai_recommendation', 'ai_recommendation_global'].includes(currentCollection.type)">
-            <!-- (保持不变) -->
              <div class="ai-hero-section" :class="{ global: currentCollection.type === 'ai_recommendation_global' }">
                 <div class="ai-icon-large">
                   <n-icon :component="SparklesIcon" />
@@ -508,7 +507,7 @@
       </template>
     </n-modal>
     
-    <!-- (剩余部分保持不变...) -->
+    <!-- 详情模态框 -->
     <n-modal v-model:show="showDetailsModal" preset="card" style="width: 90%; max-width: 1200px;" :title="detailsModalTitle" :bordered="false" size="huge">
       <div v-if="isLoadingDetails" class="center-container"><n-spin size="large" /></div>
       <div v-else-if="selectedCollectionDetails">
@@ -680,7 +679,7 @@
 </template>
 
 <script setup>
-// =========== 代码保持原有逻辑不变 ===========
+// 这里的 script 逻辑完全保持你原来的代码不变
 import { ref, onMounted, h, computed, watch, nextTick } from 'vue';
 import axios from 'axios';
 import { useConfig } from '../composables/useConfig.js';
@@ -1486,7 +1485,7 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 .grid-item { position: relative; touch-action: none; }
 
 /* 卡片样式 */
-.collection-card { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; cursor: grab; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); transition: transform 0.2s, box-shadow 0.2s, filter 0.3s; background-color: var(--card-bg-color); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.05); }
+.collection-card { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; cursor: grab; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); transition: transform 0.2s, box-shadow 0.2s, filter 0.3s; background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
 .collection-card:active { cursor: grabbing; }
 .collection-card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3); z-index: 2; }
 .collection-card.is-paused { filter: grayscale(100%); opacity: 0.8; }
@@ -1516,7 +1515,7 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 
 .center-container { display: flex; justify-content: center; align-items: center; height: 400px; }
 
-.movie-card { border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; background-color: var(--card-bg-color); transition: transform 0.2s, box-shadow 0.2s; cursor: default; }
+.movie-card { border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); transition: transform 0.2s, box-shadow 0.2s; cursor: default; }
 .movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
 .movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
 .movie-card:hover .movie-poster { transform: scale(1.05); }

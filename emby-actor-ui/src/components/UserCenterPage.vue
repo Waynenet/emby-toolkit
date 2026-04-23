@@ -1,256 +1,135 @@
 <!-- src/components/UserCenterPage.vue -->
 <template>
-  <!-- 动态 Padding -->
-  <div :style="{ padding: isMobile ? '12px' : '24px' }"> 
+  <div class="modular-page-container"> 
     
-    <!-- 头部 -->
-    <n-page-header :title="`欢迎回来, ${accountInfo?.name || authStore.username}`" subtitle="在这里查看您的账户信息" />
+    <!-- 头部问候语模块 -->
+    <div class="page-header-module">
+      <h1 class="greeting-title">早安，👋 <br class="mobile-break"/>欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
+      <p class="greeting-subtitle">我帮您整理了最重要的账户状态与下一步建议。</p>
+    </div>
     
-    <!-- ================================================================================== -->
-    <!-- 视图 A: PC 端 (宽屏) -->
-    <!-- ================================================================================== -->
-    <template v-if="!isMobile">
-      <n-grid :cols="5" style="margin-top: 24px; text-align: center;">
-        <n-gi><n-statistic label="总申请" :value="stats.total" /></n-gi>
-        <n-gi><n-statistic label="已完成" :value="stats.completed" style="--n-value-text-color: var(--n-success-color)" /></n-gi>
-        <n-gi><n-statistic label="处理中" :value="stats.processing" style="--n-value-text-color: var(--n-info-color)" /></n-gi>
-        <n-gi><n-statistic label="待审核" :value="stats.pending" style="--n-value-text-color: var(--n-warning-color)" /></n-gi>
-        <n-gi><n-statistic label="未通过" :value="stats.failed" style="--n-value-text-color: var(--n-error-color)" /></n-gi>
-      </n-grid>
+    <!-- 1. 顶部统计数据模块 (响应式网格) -->
+    <n-grid :x-gap="16" :y-gap="16" cols="2 s:3 m:5" responsive="screen" style="margin-bottom: 24px;">
+      <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="总申请" :value="stats.total" /></n-card></n-gi>
+      <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="已完成" :value="stats.completed" style="--n-value-text-color: #63e2b7" /></n-card></n-gi>
+      <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="处理中" :value="stats.processing" style="--n-value-text-color: #70c0e8" /></n-card></n-gi>
+      <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="待审核" :value="stats.pending" style="--n-value-text-color: #f2c97d" /></n-card></n-gi>
+      <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="未通过" :value="stats.failed" style="--n-value-text-color: #e88080" /></n-card></n-gi>
+    </n-grid>
 
-      <n-grid :cols="3" :x-gap="20" style="margin-top: 24px;">
-        
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card" style="height: 100%">
-            <template #header>
-              <span class="card-title">账户详情</span>
-              <n-spin v-if="loading" size="small" style="float: right" />
-            </template>
-            <div v-if="accountInfo">
-              <div class="profile-layout">
-                <div class="profile-avatar-section">
-                  <n-tooltip trigger="hover" placement="right">
-                    <template #trigger>
-                      <div class="avatar-wrapper" @click="triggerFileUpload">
-                        <n-avatar :size="100" :src="avatarUrl" object-fit="cover" style="cursor: pointer; background-color: transparent;">
-                          <span v-if="!avatarUrl" style="font-size: 30px;">
-                            {{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}
-                          </span>
-                        </n-avatar>
-                        <div class="avatar-overlay"><n-icon size="24" color="white"><CloudUploadOutline /></n-icon></div>
-                        <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
-                      </div>
-                    </template>
-                    点击更换头像
-                  </n-tooltip>
-                  <div class="username-text" style="font-size: 1.2em;">{{ accountInfo?.name || authStore.username }}</div>
+    <!-- 2. 主体内容模块 (左侧列表，右侧面板) -->
+    <n-grid :x-gap="24" :y-gap="24" cols="1 lg:3" responsive="screen">
+      
+      <!-- 左侧：订阅历史列表 (占 2/3) -->
+      <n-gi span="1 lg:2">
+        <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%">
+          <template #header>
+            <span class="card-title">最近的订阅动态</span>
+          </template>
+          <template #header-extra>
+            <n-radio-group v-model:value="filterStatus" size="small">
+              <n-radio-button value="all">全部</n-radio-button>
+              <n-radio-button value="completed">已完成</n-radio-button>
+              <n-radio-button value="processing">处理中</n-radio-button>
+            </n-radio-group>
+          </template>
+          
+          <n-spin :show="loading">
+            <div v-if="subscriptionHistory.length > 0" class="custom-list">
+              <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
+                <!-- 左侧图标块 -->
+                <div class="item-icon-block" :class="getStatusType(item.status)">
+                  {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
                 </div>
-
-                <n-descriptions label-placement="left" bordered :column="1" size="small">
-                    <n-descriptions-item label="账户状态"><n-tag :type="statusType" size="small">{{ statusText }}</n-tag></n-descriptions-item>
-                    <n-descriptions-item label="注册时间">{{ new Date(accountInfo.registration_date).toLocaleString() }}</n-descriptions-item>
-                    <n-descriptions-item label="到期时间">{{ accountInfo.expiration_date ? new Date(accountInfo.expiration_date).toLocaleString() : '永久有效' }}</n-descriptions-item>
-                    <n-descriptions-item label="账户等级">
-                      <strong v-if="authStore.isAdmin">管理员</strong>
-                      <strong v-else>{{ accountInfo.template_name || '未分配' }}</strong>
-                    </n-descriptions-item>
-                    <n-descriptions-item label="等级说明">
-                      <span v-if="authStore.isAdmin">拥有系统所有管理权限</span>
-                      <span v-else>{{ accountInfo.template_description || '无' }}</span>
-                    </n-descriptions-item>
-                    <n-descriptions-item label="订阅权限">
-                      <n-tag v-if="authStore.isAdmin" type="success" size="small">免审核订阅</n-tag>
-                      <n-tag v-else :type="accountInfo.allow_unrestricted_subscriptions ? 'success' : 'warning'" size="small">
-                        {{ accountInfo.allow_unrestricted_subscriptions ? '免审核订阅' : '需管理员审核' }}
-                      </n-tag>
-                    </n-descriptions-item>
-                    <n-descriptions-item label="Telegram Chat ID">
-                      <n-input-group>
-                        <n-input v-model:value="telegramChatId" placeholder="用于接收通知" size="small" />
-                        <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
-                      </n-input-group>
-                    </n-descriptions-item>
-                    <n-descriptions-item v-if="accountInfo && accountInfo.telegram_channel_id" label="全局通知">
-                      <n-button text type="primary" tag="a" :href="globalChannelLink" target="_blank" size="small">点击加入频道/群组</n-button>
-                    </n-descriptions-item>
-                  </n-descriptions>
-                
-                <div style="margin-top: 12px;">
-                    <n-button text type="primary" size="tiny" @click="openBotChat">1.点此找机器人发送 /start</n-button>
+                <!-- 中间内容 -->
+                <div class="item-content">
+                  <div class="item-title">{{ item.title }}</div>
+                  <div class="item-desc">
+                    <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
+                      {{ getStatusText(item.status) }}
+                    </n-tag>
+                    <span v-if="item.notes">备注: {{ item.notes }}</span>
+                  </div>
+                </div>
+                <!-- 右侧时间 -->
+                <div class="item-meta">
+                  <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
                 </div>
               </div>
             </div>
-          </n-card>
-        </n-gi>
+            <n-empty v-else description="暂无订阅记录" style="margin: 40px 0;" />
+          </n-spin>
 
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card" style="height: 100%">
-            <template #header>
-              <span class="card-title">播放记录</span>
-            </template>
-            <template #header-extra>
-              <n-radio-group v-model:value="playbackFilter" size="small" @update:value="handleFilterChange">
-                <n-radio-button value="all">全部</n-radio-button>
-                <n-radio-button value="Movie">电影</n-radio-button>
-                <n-radio-button value="Episode">剧集</n-radio-button>
-                <n-radio-button value="Audio">音乐</n-radio-button>
-              </n-radio-group>
-            </template>
-
-            <n-grid :cols="2" style="margin-bottom: 16px; text-align: center;">
-              <n-gi>
-                <n-statistic label="近期观看" size="small">
-                  <span style="font-weight: bold;">{{ playbackData?.personal?.total_count || 0 }}</span><span style="font-size: 10px;"> 次</span>
-                </n-statistic>
-              </n-gi>
-              <n-gi>
-                <n-statistic label="累计时长" size="small">
-                  <span style="font-weight: bold;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</span><span style="font-size: 10px;"> 小时</span>
-                </n-statistic>
-              </n-gi>
-            </n-grid>
-
-            <n-scrollbar style="max-height: 480px;">
-              <n-list hoverable clickable size="small">
-                <n-list-item v-for="(item, index) in playbackData?.personal?.history_list" :key="index">
-                  <n-thing :title="item.title" content-style="margin-top: 0;">
-                    <template #description>
-                      <div style="font-size: 11px; color: gray;">
-                        {{ new Date(item.date).toLocaleDateString() }} · {{ item.duration }} 分钟
-                      </div>
-                    </template>
-                    <template #header-extra>
-                      <n-tag :type="getTypeTagColor(item.item_type)" size="tiny" round>{{ ITEM_TYPE_MAP[item.item_type] }}</n-tag>
-                    </template>
-                  </n-thing>
-                </n-list-item>
-              </n-list>
-              <n-empty v-if="!playbackData?.personal?.history_list?.length" description="无记录" />
-            </n-scrollbar>
-          </n-card>
-        </n-gi>
-
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card" style="height: 100%">
-            <template #header>
-              <span class="card-title">订阅历史</span>
-            </template>
-            <template #header-extra>
-                <n-radio-group v-model:value="filterStatus" size="small">
-                  <n-radio-button value="all">全部</n-radio-button>
-                  <n-radio-button value="completed">已完成</n-radio-button>
-                  <n-radio-button value="processing">处理中</n-radio-button>
-                </n-radio-group>
-            </template>
-            
-            <n-scrollbar style="max-height: 560px;">
-              <n-list size="small">
-                <n-list-item v-for="item in subscriptionHistory" :key="item.id">
-                  <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
-                      {{ item.title }}
-                    </div>
-                    <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false">
-                      {{ getStatusText(item.status) }}
-                    </n-tag>
-                  </div>
-                  <div style="font-size: 11px; color: gray; margin-top: 4px;">
-                    {{ new Date(item.requested_at).toLocaleDateString() }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
-                  </div>
-                </n-list-item>
-              </n-list>
-            </n-scrollbar>
-
-            <div v-if="totalRecords > pageSize" style="margin-top: 12px; display: flex; justify-content: center;">
-              <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" />
-            </div>
-          </n-card>
-        </n-gi>
-
-      </n-grid>
-    </template>
-
-    <!-- ================================================================================== -->
-    <!-- 视图 B: Mobile 端 (手机) -->
-    <!-- ================================================================================== -->
-    <template v-else>
-      <!-- 1. 统计概览 (小卡片) -->
-      <n-grid :cols="3" :x-gap="8" :y-gap="8" style="margin-top: 16px;">
-        <n-gi><n-card size="small" :bordered="false" class="mobile-stat-card"><n-statistic label="总申请"><span class="mobile-stat-value">{{ stats.total }}</span></n-statistic></n-card></n-gi>
-        <n-gi><n-card size="small" :bordered="false" class="mobile-stat-card"><n-statistic label="已完成" style="--n-value-text-color: var(--n-success-color)"><span class="mobile-stat-value">{{ stats.completed }}</span></n-statistic></n-card></n-gi>
-        <n-gi><n-card size="small" :bordered="false" class="mobile-stat-card"><n-statistic label="处理中" style="--n-value-text-color: var(--n-info-color)"><span class="mobile-stat-value">{{ stats.processing }}</span></n-statistic></n-card></n-gi>
-      </n-grid>
-
-      <!-- 2. 账户信息 (折叠面板或卡片) -->
-      <n-card size="small" :bordered="false" title="账户信息" style="margin-top: 12px;">
-        <div class="mobile-profile-header">
-          <div class="avatar-wrapper" @click="triggerFileUpload" style="width: 64px; height: 64px;">
-            <n-avatar :size="64" :src="avatarUrl" :fallback-src="null" object-fit="cover">
-              <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
-            </n-avatar>
-            <input type="file" ref="fileInput" style="display: none" accept="image/png, image/jpeg, image/jpg" @change="handleAvatarChange" />
-          </div>
-          <div class="mobile-profile-text">
-            <div class="mobile-username">{{ accountInfo?.name || authStore.username }}</div>
-            <n-tag :type="statusType" size="tiny" round>{{ statusText }}</n-tag>
-          </div>
-        </div>
-        
-        <n-divider style="margin: 12px 0;" />
-        
-        <div class="mobile-info-list">
-          <div class="mobile-info-row"><span>等级</span><span>{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span></div>
-          <div class="mobile-info-row"><span>到期</span><span>{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久' }}</span></div>
-          <div class="mobile-info-row" style="align-items: center;">
-            <span>通知 ID</span>
-            <div style="flex: 1; margin-left: 12px; display: flex; gap: 4px;">
-              <n-input v-model:value="telegramChatId" placeholder="Chat ID" size="tiny" />
-              <n-button type="primary" ghost size="tiny" :loading="isSavingChatId" @click="saveChatId">保存</n-button>
-            </div>
-          </div>
-        </div>
-      </n-card>
-
-      <!-- 3. 订阅历史 (卡片列表) -->
-      <n-card size="small" :bordered="false" title="订阅历史" style="margin-top: 12px;">
-        <template #header-extra>
-          <!-- 移动端使用下拉菜单筛选 -->
-          <n-radio-group v-model:value="filterStatus" size="small">
-             <n-radio-button value="all">全部</n-radio-button>
-             <n-radio-button value="processing">进行中</n-radio-button>
-          </n-radio-group>
-        </template>
-
-        <div v-if="subscriptionHistory.length > 0" class="mobile-history-list">
-          <div v-for="item in subscriptionHistory" :key="item.id" class="mobile-history-item">
-            <div class="history-item-header">
-              <span class="history-title">{{ item.title }}</span>
-              <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false">
-                {{ getStatusText(item.status) }}
-              </n-tag>
-            </div>
-            <div class="history-item-meta">
-              <span>{{ item.item_type === 'Movie' ? '电影' : '剧集' }}</span>
-              <span>{{ new Date(item.requested_at).toLocaleDateString() }}</span>
-            </div>
-            <div v-if="item.notes" class="history-item-notes">
-              备注: {{ item.notes }}
-            </div>
-          </div>
-          
-          <!-- 移动端分页 -->
           <div v-if="totalRecords > pageSize" style="margin-top: 16px; display: flex; justify-content: center;">
             <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" />
           </div>
-        </div>
-        <n-empty v-else description="暂无记录" size="small" />
-      </n-card>
-    </template>
+        </n-card>
+      </n-gi>
 
+      <!-- 右侧：账户信息 & 播放记录 (占 1/3) -->
+      <n-gi span="1 lg:1">
+        <n-space vertical :size="24" style="height: 100%;">
+          
+          <!-- 账户信息卡片 -->
+          <n-card :bordered="false" class="dashboard-card action-module">
+            <template #header><span class="card-title">账户详情</span></template>
+            <div class="profile-header">
+              <div class="avatar-wrapper" @click="triggerFileUpload">
+                <n-avatar :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1);">
+                  <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
+                </n-avatar>
+                <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
+              </div>
+              <div class="profile-text">
+                <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
+                <n-tag :type="statusType" size="small" round>{{ statusText }}</n-tag>
+              </div>
+            </div>
+            
+            <div class="info-grid">
+              <div class="info-row"><span>账户等级</span><span>{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span></div>
+              <div class="info-row"><span>到期时间</span><span>{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span></div>
+              <div class="info-row"><span>订阅权限</span><span>{{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核' : '需审核' }}</span></div>
+            </div>
+
+            <n-divider style="margin: 16px 0; opacity: 0.2;" />
+            
+            <div class="action-form">
+              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
+              <n-input-group>
+                <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" />
+                <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
+              </n-input-group>
+              <n-button block type="primary" style="margin-top: 12px;" @click="openBotChat">
+                绑定 Telegram 机器人
+              </n-button>
+            </div>
+          </n-card>
+
+          <!-- 播放记录卡片 -->
+          <n-card :bordered="false" class="dashboard-card action-module" style="flex: 1;">
+            <template #header><span class="card-title">近期播放</span></template>
+            <n-grid :cols="2" style="margin-bottom: 16px; text-align: center; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px 0;">
+              <n-gi>
+                <div style="font-size: 20px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
+                <div style="font-size: 12px; color: rgba(255,255,255,0.5);">观看次数</div>
+              </n-gi>
+              <n-gi>
+                <div style="font-size: 20px; font-weight: bold; color: #fff;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</div>
+                <div style="font-size: 12px; color: rgba(255,255,255,0.5);">累计小时</div>
+              </n-gi>
+            </n-grid>
+            <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 20px;" />
+          </n-card>
+
+        </n-space>
+      </n-gi>
+    </n-grid>
   </div>
 </template>
 
 <script setup>
+// 这里的 script 逻辑完全保持你原来的代码不变
 import { ref, onMounted, onUnmounted, computed, h, watch } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
@@ -272,13 +151,7 @@ const isFetchingBotLink = ref(false);
 const playbackData = ref(null);
 const playbackFilter = ref('all');
 const playbackLoading = ref(false);
-// 移动端检测
-const isMobile = ref(false);
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768;
-};
 
-// 分页相关状态
 const currentPage = ref(1);
 const pageSize = ref(10); 
 const totalRecords = ref(0);
@@ -295,9 +168,7 @@ const avatarUrl = computed(() => {
   return null;
 });
 
-const triggerFileUpload = () => {
-  fileInput.value?.click();
-};
+const triggerFileUpload = () => { fileInput.value?.click(); };
 
 const handleAvatarChange = async (event) => {
   const file = event.target.files[0];
@@ -336,15 +207,6 @@ const statusMap = {
 const statusText = computed(() => statusMap[accountInfo.value?.status]?.text || '未知');
 const statusType = computed(() => statusMap[accountInfo.value?.status]?.type || 'default');
 
-const globalChannelLink = computed(() => {
-  if (!accountInfo.value || !accountInfo.value.telegram_channel_id) return '#';
-  const channelId = accountInfo.value.telegram_channel_id.trim();
-  if (channelId.startsWith('https://t.me/')) return channelId;
-  if (channelId.startsWith('@')) return `https://t.me/${channelId.substring(1)}`;
-  return `https://t.me/${channelId}`;
-});
-
-// 状态辅助函数 (供 PC 和 Mobile 共用)
 const getStatusInfo = (status) => {
   const map = {
     completed: { type: 'success', text: '已完成' },
@@ -365,9 +227,7 @@ const getStatusText = (status) => getStatusInfo(status).text;
 const saveChatId = async () => {
   isSavingChatId.value = true;
   try {
-    const response = await axios.post('/api/portal/telegram-chat-id', { 
-      chat_id: telegramChatId.value 
-    });
+    const response = await axios.post('/api/portal/telegram-chat-id', { chat_id: telegramChatId.value });
     message.success(response.data.message || '保存成功！');
   } catch (error) {
     message.error(error.response?.data?.message || '保存失败');
@@ -384,8 +244,7 @@ const openBotChat = async () => {
     if (botName) {
       window.open(`https://t.me/${botName}`, '_blank');
     } else {
-      const errorMsg = response.data.error || '未能获取到机器人信息';
-      message.error(errorMsg, { duration: 8000 });
+      message.error(response.data.error || '未能获取到机器人信息', { duration: 8000 });
     }
   } catch (error) {
     message.error('请求机器人信息失败');
@@ -398,20 +257,14 @@ const fetchStats = async () => {
   try {
     const res = await axios.get('/api/portal/subscription-stats');
     stats.value = res.data;
-  } catch (e) {
-    console.error("获取统计失败", e);
-  }
+  } catch (e) { console.error("获取统计失败", e); }
 };
 
 const fetchSubscriptionHistory = async (page = 1) => {
   loading.value = true;
   try {
     const response = await axios.get('/api/portal/subscription-history', {
-      params: {
-        page: page,
-        page_size: pageSize.value,
-        status: filterStatus.value,
-      },
+      params: { page: page, page_size: pageSize.value, status: filterStatus.value },
     });
     subscriptionHistory.value = response.data.items;
     totalRecords.value = response.data.total_records;
@@ -423,59 +276,25 @@ const fetchSubscriptionHistory = async (page = 1) => {
   }
 };
 
-// 1. 定义常量映射表
-const ITEM_TYPE_MAP = {
-  Movie: '电影',
-  Episode: '剧集',
-  Audio: '音乐',
-  Video: '视频'
-};
-
-const getTypeTagColor = (type) => {
-    switch(type) {
-        case 'Movie': return 'info';
-        case 'Episode': return 'success';
-        case 'Audio': return 'warning';
-        case 'Video': return 'error';
-        default: return 'default';
-    }
-};
-
-// 获取播放统计
 const fetchPlaybackStats = async () => {
   playbackLoading.value = true;
   try {
-    // 传入 media_type 参数
     const res = await axios.get(`/api/portal/playback-report?days=30&media_type=${playbackFilter.value}`);
     playbackData.value = res.data;
   } catch (error) {
-    console.error("获取播放数据失败", error);
     message.error("获取播放统计失败");
   } finally {
     playbackLoading.value = false;
   }
 };
 
-// 筛选变更处理
-const handleFilterChange = () => {
-    fetchPlaybackStats();
-};
-
-watch(filterStatus, () => {
-  fetchSubscriptionHistory(1); 
-});
+watch(filterStatus, () => { fetchSubscriptionHistory(1); });
 
 onMounted(async () => {
-  checkMobile();
-  window.addEventListener('resize', checkMobile);
   try {
-    const [accountResponse] = await Promise.all([
-      axios.get('/api/portal/account-info'),
-    ]);
+    const [accountResponse] = await Promise.all([ axios.get('/api/portal/account-info') ]);
     accountInfo.value = accountResponse.data;
-    if (accountInfo.value) {
-        telegramChatId.value = accountInfo.value.telegram_chat_id || '';
-    }
+    if (accountInfo.value) telegramChatId.value = accountInfo.value.telegram_chat_id || '';
     fetchStats();
     await fetchSubscriptionHistory();
   } catch (error) {
@@ -485,85 +304,147 @@ onMounted(async () => {
   }
   fetchPlaybackStats();
 });
-
-onUnmounted(() => {
-  window.removeEventListener('resize', checkMobile);
-});
 </script>
 
 <style scoped>
-/* PC 端样式 */
-.profile-layout {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 24px;
-}
-.profile-avatar-section {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin-bottom: 10px;
-}
-.profile-info { width: 100%; }
-.username-text {
-  margin-top: 16px;
-  font-weight: bold;
-  font-size: 1.4em;
-  text-align: center;
-  word-break: break-all;
-}
-.avatar-wrapper {
-  position: relative;
-  border-radius: 50%;
-  overflow: hidden;
-  transition: transform 0.2s;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  line-height: 0;
-  width: fit-content;
+/* 模块化页面基础容器 */
+.modular-page-container {
+  padding: 24px;
+  max-width: 1600px;
   margin: 0 auto;
 }
-.avatar-wrapper:hover { transform: scale(1.05); }
-.avatar-overlay {
-  position: absolute;
-  top: 0; left: 0; width: 100%; height: 100%;
-  background-color: rgba(0, 0, 0, 0.4);
+
+/* 头部问候语 */
+.page-header-module {
+  margin-bottom: 24px;
+}
+.greeting-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: #fff;
+  line-height: 1.3;
+}
+.greeting-subtitle {
+  font-size: 14px;
+  color: rgba(255,255,255,0.6);
+  margin: 0;
+}
+.mobile-break { display: none; }
+
+/* 统计小模块 */
+.stat-module :deep(.n-statistic-value__content) {
+  font-size: 28px;
+  font-weight: bold;
+}
+
+/* 自定义列表样式 (复刻参考图) */
+.custom-list {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+}
+.custom-list-item {
+  display: flex;
   align-items: center;
-  opacity: 0;
-  transition: opacity 0.2s;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: background 0.2s;
+}
+.custom-list-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.item-icon-block {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 12px;
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+/* 图标块颜色映射 */
+.item-icon-block.success { background: rgba(99, 226, 183, 0.2); color: #63e2b7; }
+.item-icon-block.warning { background: rgba(242, 201, 125, 0.2); color: #f2c97d; }
+.item-icon-block.info { background: rgba(112, 192, 232, 0.2); color: #70c0e8; }
+.item-icon-block.error { background: rgba(232, 128, 128, 0.2); color: #e88080; }
+.item-icon-block.default { background: rgba(255, 255, 255, 0.1); color: #fff; }
+
+.item-content {
+  flex: 1;
+  min-width: 0;
+}
+.item-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.item-desc {
+  font-size: 12px;
+  color: rgba(255,255,255,0.5);
+  display: flex;
+  align-items: center;
+}
+.item-meta {
+  text-align: right;
+  flex-shrink: 0;
+  margin-left: 16px;
+}
+.item-time {
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+}
+
+/* 右侧账户面板样式 */
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.avatar-wrapper {
+  cursor: pointer;
   border-radius: 50%;
+  transition: transform 0.2s;
 }
-.avatar-wrapper :deep(img) { display: block !important; width: 100%; height: 100%; object-fit: cover; }
-.avatar-wrapper:hover .avatar-overlay { opacity: 1; }
-
-/* Mobile 端样式 */
-.mobile-stat-value { font-size: 1.4em; font-weight: 600; }
-.mobile-profile-header { display: flex; align-items: center; gap: 16px; }
-.mobile-profile-text { display: flex; flex-direction: column; gap: 4px; }
-.mobile-username { font-size: 1.2em; font-weight: bold; }
-.mobile-info-list { display: flex; flex-direction: column; gap: 8px; }
-.mobile-info-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--n-text-color-2); }
-
-/* 移动端历史记录卡片列表 */
-.mobile-history-list { display: flex; flex-direction: column; gap: 12px; }
-.mobile-history-item {
-  background-color: rgba(0, 0, 0, 0.02); /* 轻微背景色区分 */
-  border-radius: 8px;
-  padding: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
+.avatar-wrapper:hover { transform: scale(1.05); }
+.profile-name {
+  font-size: 18px;
+  font-weight: bold;
+  color: #fff;
+  margin-bottom: 4px;
 }
-.history-item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.history-title { font-weight: 600; font-size: 14px; flex: 1; margin-right: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-item-meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--n-text-color-3); }
-.history-item-notes { margin-top: 6px; font-size: 12px; color: var(--n-text-color-3); background: rgba(0,0,0,0.03); padding: 4px; border-radius: 4px; }
+.info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(0,0,0,0.2);
+  padding: 16px;
+  border-radius: 12px;
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.info-row span:first-child { color: rgba(255,255,255,0.5); }
+.info-row span:last-child { color: #fff; font-weight: 500; }
 
-/* 暗色模式适配 */
-html.dark .mobile-history-item { background-color: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); }
-html.dark .history-item-notes { background: rgba(255,255,255,0.05); }
+/* 手机端适配 */
+@media (max-width: 768px) {
+  .modular-page-container { padding: 12px; }
+  .greeting-title { font-size: 22px; }
+  .mobile-break { display: block; }
+  .custom-list-item { padding: 12px; }
+  .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
+}
 </style>

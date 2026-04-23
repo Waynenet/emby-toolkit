@@ -33,7 +33,24 @@ onMounted(() => {
 </script>
 
 <style>
-/* ==================== 1. 全局静态基础布局 ==================== */
+/* ==================== 1. 全局静态基础布局 & 壁纸 ==================== */
+:root {
+  /* 核心壁纸：你可以换成你喜欢的任意高清图片URL */
+  --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop');
+  
+  /* 毛玻璃核心参数 */
+  --glass-bg: rgba(20, 25, 35, 0.45); 
+  --glass-bg-hover: rgba(30, 35, 45, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.12); 
+  --glass-border-light: rgba(255, 255, 255, 0.25);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  --glass-blur: blur(24px); 
+  
+  /* 文字颜色 */
+  --text-primary: rgba(255, 255, 255, 0.95);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+}
+
 html, body { 
   height: 100vh; 
   margin: 0; 
@@ -41,10 +58,12 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
   overflow: hidden; 
   
-  /* 使用 CSS 变量接管全局渐变背景 */
-  background: var(--global-bg, linear-gradient(135deg, #f5f7fa 0%, #e3eeff 100%)); 
+  /* 使用全屏背景图 */
+  background-image: var(--global-bg-image);
+  background-size: cover;
+  background-position: center;
   background-attachment: fixed;
-  transition: background 0.5s ease;
+  color: var(--text-primary);
 }
 
 .fullscreen-container { 
@@ -56,15 +75,15 @@ html, body {
   background: transparent; 
 }
 
-/* ==================== 2. 全局卡片 (玻璃拟态) 样式 ==================== */
+/* ==================== 2. 全局卡片 (高级毛玻璃拟态) 样式 ==================== */
 .n-card.dashboard-card {
-  background: var(--card-bg-color) !important;
-  border: 1px solid var(--card-border-color) !important;
-  box-shadow: 0 4px 12px var(--card-shadow-color), 0 0 20px -5px var(--accent-glow-color) !important;
-  color: var(--text-color) !important;
-  border-radius: 12px !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow) !important;
+  color: var(--text-primary) !important;
+  border-radius: 16px !important;
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
   height: 100%;
   display: flex !important;
@@ -76,8 +95,10 @@ html, body {
 }
 
 .n-card.dashboard-card:hover {
-  transform: translateY(-5px) !important;
-  box-shadow: 0 8px 24px var(--card-shadow-color), 0 0 35px var(--accent-glow-color) !important;
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
+  transform: translateY(-4px) !important;
+  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4) !important;
 }
 
 .dashboard-card > .n-card__content {
@@ -87,11 +108,16 @@ html, body {
   justify-content: space-between !important;
 }
 
+.dashboard-card .n-card-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+  padding-bottom: 12px !important;
+}
+
 .dashboard-card .card-title {
-  color: var(--accent-color) !important; 
+  color: var(--text-primary) !important; 
   font-weight: 600 !important;
+  font-size: 1.1rem;
   letter-spacing: 0.5px;
-  text-shadow: 0 0 12px var(--accent-glow-color);
 }
 
 /* 纵向转横向的列表卡片 */
@@ -119,15 +145,13 @@ html, body {
 
 /* ==================== 3. 模态框 (日志弹窗) 轻量版样式 ==================== */
 .modal-card-lite {
-  background-color: var(--modal-solid-bg-color) !important;
-  border: 1px solid var(--card-border-color) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25) !important;
-  animation: none !important;
-  transition: none !important;
-}
-.modal-card-lite:hover {
-  transform: none !important;
+  background: rgba(30, 35, 45, 0.85) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4) !important;
+  color: #fff !important;
 }
 
 /* ==================== 4. 瀑布流入场动画 ==================== */
@@ -139,21 +163,13 @@ html, body {
 .dashboard-card:nth-child(5) { animation-delay: 0.25s; }
 
 /* ==================== 5. 全局滚动条隐藏 (保留滚动功能) ==================== */
-/* 1. Firefox 浏览器 */
 * {
-  scrollbar-width: none; /* 关键：将滚动条宽度设为无 */
-}
-
-/* 2. IE 和旧版 Edge (Legacy) */
-* {
+  scrollbar-width: none; 
   -ms-overflow-style: none; 
 }
-
-/* 3. Chrome, Safari, Edge (Chromium), Opera */
-/* 注意：这里使用 ::-webkit-scrollbar 伪元素 */
 ::-webkit-scrollbar {
-  display: none; /* 关键：直接不显示滚动条轨道和滑块 */
-  width: 0;      /* 兜底：确保不占位 */
-  height: 0;     /* 兜底：确保横向也不占位 */
+  display: none; 
+  width: 0;      
+  height: 0;     
 }
 </style>

@@ -22,13 +22,11 @@ import { useRoute } from 'vue-router';
 import { NSpin } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import MainLayout from './MainLayout.vue';
-import { modernTheme } from './theme.js';
 import axios from 'axios';
 
 const route = useRoute();
 const authStore = useAuthStore();
 
-// 路由判断：如果是 public 页面（如登录），就不显示主框架
 const showMainLayout = computed(() => !route.meta.public);
 
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
@@ -38,21 +36,69 @@ let statusIntervalId = null;
 
 const app = document.getElementById('app');
 
+// ★★★ 核心：Naive UI 毛玻璃主题覆盖配置 ★★★
+const glassmorphismOverrides = {
+  common: {
+    baseColor: '#fff',
+    primaryColor: '#8a2be2', // 紫色系主色调
+    primaryColorHover: '#9b4dec',
+    textColor1: 'rgba(255, 255, 255, 0.95)',
+    textColor2: 'rgba(255, 255, 255, 0.75)',
+    textColor3: 'rgba(255, 255, 255, 0.5)',
+    dividerColor: 'rgba(255, 255, 255, 0.1)',
+    bodyColor: 'transparent',
+    cardColor: 'transparent',
+    modalColor: 'rgba(30, 35, 45, 0.85)',
+    popoverColor: 'rgba(30, 35, 45, 0.85)',
+  },
+  Card: {
+    color: 'transparent',
+    borderColor: 'transparent',
+  },
+  Input: {
+    color: 'rgba(255, 255, 255, 0.05)',
+    colorFocus: 'rgba(255, 255, 255, 0.1)',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
+    borderFocus: '1px solid rgba(255, 255, 255, 0.3)',
+    textColor: '#fff',
+    borderRadius: '8px'
+  },
+  Select: {
+    peers: {
+      InternalSelection: {
+        color: 'rgba(255, 255, 255, 0.05)',
+        colorActive: 'rgba(255, 255, 255, 0.1)',
+        border: '1px solid rgba(255, 255, 255, 0.1)',
+        borderActive: '1px solid rgba(255, 255, 255, 0.3)',
+        textColor: '#fff',
+        borderRadius: '8px'
+      }
+    }
+  },
+  Button: {
+    colorOpacitySecondary: '0.1',
+    colorOpacitySecondaryHover: '0.2',
+    textColor: '#fff',
+    borderRadius: '8px'
+  },
+  Menu: {
+    itemColorHover: 'rgba(255, 255, 255, 0.1)',
+    itemColorActive: 'rgba(255, 255, 255, 0.15)',
+    itemTextColor: 'rgba(255, 255, 255, 0.75)',
+    itemTextColorActive: '#fff',
+    itemIconColor: 'rgba(255, 255, 255, 0.75)',
+    itemIconColorActive: '#fff',
+    borderRadius: '12px'
+  }
+};
+
 const applyTheme = (isDark) => {
   const root = document.documentElement;
-  const themeMode = isDark ? 'dark' : 'light';
-  const themeConfig = modernTheme[themeMode];
-
-  // 1. 发送 Naive UI 的主题配置
-  app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: themeConfig.naive }));
+  // 发送毛玻璃配置给 App.vue
+  app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: glassmorphismOverrides }));
   
-  // 2. 仅仅向 :root 注入 CSS 变量，具体的渲染工作交给 App.vue 的 <style> 去完成
-  for (const key in themeConfig.custom) {
-    root.style.setProperty(key, themeConfig.custom[key]);
-  }
-
   root.classList.remove('dark', 'light');
-  root.classList.add(themeMode);
+  root.classList.add('dark'); // 强制暗色模式底色
 };
 
 const handleModeChange = (isDark) => {
@@ -61,12 +107,10 @@ const handleModeChange = (isDark) => {
   app.dispatchEvent(new CustomEvent('update-dark-mode', { detail: isDark }));
 };
 
-// 监听明暗模式变化
 watch(isDarkTheme, (isDark) => {
   applyTheme(isDark);
 }, { deep: true });
 
-// 监听任务状态 (登录后开始轮询)
 watch(() => authStore.isLoggedIn, (isLoggedIn) => {
   if (isLoggedIn) {
     if (!statusIntervalId) {
@@ -95,12 +139,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 保证初始化加载动画时的背景平滑 */
 .loader-container {
   position: absolute;
   top: 0;
   left: 0;
   z-index: 9999;
-  background: var(--global-bg);
+  background: transparent;
+  backdrop-filter: blur(20px);
 }
 </style>

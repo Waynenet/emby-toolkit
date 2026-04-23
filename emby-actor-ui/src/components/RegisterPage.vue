@@ -195,13 +195,14 @@ onMounted(validateToken);
 </script>
 
 <style scoped>
-/* 复用 Login 页面的布局样式 */
-.register-layout {
+/* 登录/注册页底部 style 替换 */
+.login-layout, .register-layout {
   height: 100vh;
   width: 100vw;
+  /* 背景由 App.vue 接管 */
 }
 
-.register-container {
+.login-container, .register-container {
   display: flex;
   justify-content: center;
   align-items: center;
@@ -210,53 +211,56 @@ onMounted(validateToken);
   padding: 20px;
 }
 
-.register-card {
+.login-card, .register-card {
   width: 100%;
-  max-width: 420px;
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  max-width: 400px; 
+  border-radius: 20px !important; 
+  
+  /* 强制应用毛玻璃 */
+  background: rgba(20, 25, 35, 0.5) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4) !important;
+  
   height: auto !important;
   min-height: auto !important;
   flex: none !important;
+  color: #fff !important;
 }
 
-/* 暗色模式适配 */
-:deep(.n-card.n-card--bordered) {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-}
-
-.register-header {
+.login-header, .register-header {
   text-align: center;
   margin-bottom: 30px;
 }
 
-.register-logo {
-  height: 60px;
-  margin-bottom: 10px;
+.login-logo, .register-logo {
+  height: 64px;
+  margin-bottom: 16px;
+  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
 }
 
-.register-title {
+.login-title, .register-title {
   font-size: 24px;
-  font-weight: 600;
+  font-weight: 700;
   margin: 0 0 8px 0;
+  color: #fff;
 }
 
-.register-subtitle {
+.login-subtitle, .register-subtitle {
   font-size: 14px;
-  color: #999;
+  color: rgba(255,255,255,0.6);
   margin: 0;
 }
 
-.register-btn {
-  margin-top: 10px;
+.login-btn, .register-btn {
+  margin-top: 16px;
   font-weight: bold;
+  border-radius: 8px;
 }
 
-.status-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 20px 0;
+.footer-links {
+  margin-top: 24px;
+  text-align: center;
 }
 </style>

@@ -268,7 +268,6 @@ watch(() => props.show, (newVal) => {
 </script>
 
 <style scoped>
-/* 保持之前的 CSS 样式不变，这里是完美的 */
 .drawer-inner-wrapper {
   height: 100%;
   display: flex;
@@ -276,65 +275,34 @@ watch(() => props.show, (newVal) => {
   padding: 15px;
   box-sizing: border-box;
 }
-
 .header-section { flex-shrink: 0; }
-
-.flex-spin {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-}
-
-:deep(.n-spin-content) {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.view-container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.toolbar {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.tip { font-size: 12px; color: #999; }
-
+.flex-spin { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+:deep(.n-spin-content) { height: 100%; display: flex; flex-direction: column; }
+.view-container { flex: 1; display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.toolbar { flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.tip { font-size: 12px; color: rgba(255,255,255,0.5); }
 .iframe-wrapper {
   flex: 1;
-  border: 1px solid #333;
-  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
   overflow: hidden;
-  background-color: #1e1e1e;
+  background-color: rgba(0, 0, 0, 0.3); /* 半透明黑 */
   height: 100%;
   display: flex;
 }
-
 iframe { flex: 1; display: block; }
-
 .log-text-area {
   flex: 1;
-  background-color: #282c34;
+  background-color: rgba(0, 0, 0, 0.3); /* 半透明黑 */
+  border: 1px solid rgba(255,255,255,0.1);
   font-family: 'Courier New', Courier, monospace;
   font-size: 13px;
   padding: 10px 15px;
-  border-radius: 4px;
+  border-radius: 8px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
 }
-
 .log-line { line-height: 1.6; padding: 1px 0; color: #abb2bf; }
 .log-line.info { color: #98c379; }
 .log-line.warning { color: #e5c07b; }

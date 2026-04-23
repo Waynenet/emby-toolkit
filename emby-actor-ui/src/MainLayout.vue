@@ -17,12 +17,12 @@
       :class="['glass-sider', { 'mobile-sider': isMobile }]"
     >
       <div class="sider-content-wrapper">
-        <!-- 顶部 Logo (纯图标/简约文字) -->
+        <!-- 顶部 Logo -->
         <div class="sider-logo" :class="{ 'collapsed': collapsed && !isMobile }">
           <img :src="logo" alt="Logo" class="logo-img" />
         </div>
 
-        <!-- 中间 导航菜单 (支持滚动但隐藏滚动条) -->
+        <!-- 中间 导航菜单 -->
         <div class="sider-menu-container">
           <n-menu
             :collapsed="collapsed"
@@ -147,7 +147,7 @@ const router = useRouter();
 const route = useRoute(); 
 const authStore = useAuthStore();
 
-const collapsed = ref(false); // 默认展开
+const collapsed = ref(false); 
 const activeMenuKey = computed(() => route.name);
 const appVersion = ref(__APP_VERSION__);
 
@@ -218,32 +218,44 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 </script>
 
 <style>
-/* 全局布局与背景 */
+/* ★★★ 核心布局修改：四周留白，悬浮感 ★★★ */
 .app-main-layout {
   height: 100vh;
   background: transparent !important;
+  padding: 16px; 
+  box-sizing: border-box;
 }
 
 .app-main-content {
   background: transparent !important;
   position: relative;
+  margin-left: 16px; /* 侧边栏和内容区的间距 */
+  border-radius: 16px;
 }
 
 .page-content-inner-wrapper { height: 100%; overflow-y: auto; }
 
 /* 玻璃拟态侧边栏 */
 .glass-sider {
-  background: var(--sider-bg) !important;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-right: 1px solid var(--card-border-color);
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px; /* 圆角 */
+  box-shadow: var(--glass-shadow);
   z-index: 10;
+  height: calc(100vh - 32px) !important; /* 配合外层 padding */
+}
+
+/* 去掉原生右边框 */
+.n-layout-sider-scroll-container {
+  border-right: none !important; 
 }
 
 .sider-content-wrapper {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
 }
 
 /* 侧边栏 Logo 区域 */
@@ -258,14 +270,17 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
-/* ★★★ 菜单区支持滚动 ★★★ */
 .sider-menu-container {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 0 12px; /* 菜单左右留白 */
+}
+.n-menu-item {
+  margin-top: 4px;
 }
 
-.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: #8e8e93; padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
+.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.5); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
 /* 底部工具栏 */
@@ -280,42 +295,27 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  background: rgba(120, 120, 120, 0.1);
+  background: rgba(255, 255, 255, 0.05);
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.2s;
 }
-.user-profile-btn:hover { background: rgba(120, 120, 120, 0.2); }
-.username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-profile-btn:hover { background: rgba(255, 255, 255, 0.1); }
+.username-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
 
-/* ★★★ 底部工具行全新网格布局 ★★★ */
 .bottom-action-bar {
   display: grid;
-  /* 左边1份，中间根据内容自适应，右边1份（保证中间的永远在正中央） */
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   width: 100%;
 }
-.action-left { 
-  justify-self: start; 
-}
-.action-center { 
-  justify-self: center; 
-}
-.action-right { 
-  justify-self: end; 
-  display: flex; 
-  gap: 4px; 
-}
+.action-left { justify-self: start; }
+.action-center { justify-self: center; }
+.action-right { justify-self: end; display: flex; gap: 4px; }
 
-.app-version { 
-  font-size: 12px; 
-  color: var(--n-text-color-3); 
-  opacity: 0.6; 
-  font-family: monospace; 
-}
+.app-version { font-size: 12px; color: rgba(255,255,255,0.5); font-family: monospace; }
 
-/* 悬浮任务胶囊 (上方居中) */
+/* 悬浮任务胶囊 */
 .floating-task-pill {
   position: absolute; 
   top: 20px; 
@@ -324,14 +324,15 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   z-index: 50; 
   display: flex; 
   align-items: center;
-  background: var(--card-bg-color); 
+  background: rgba(30, 35, 45, 0.85); 
   backdrop-filter: blur(12px); 
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--card-border-color); 
+  border: 1px solid rgba(255,255,255,0.1); 
   border-radius: 30px; 
   padding: 6px 16px;
-  box-shadow: 0 4px 20px var(--card-shadow-color); 
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3); 
   max-width: 400px;
+  color: #fff;
 }
 .pill-icon { margin-right: 8px; }
 .pill-text-area { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 13px; margin-right: 8px;}
@@ -345,16 +346,13 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 
 /* 移动端适配 */
 @media (max-width: 768px) {
-  .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; box-shadow: 2px 0 12px rgba(0,0,0,0.15); }
-  .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.4); z-index: 999; backdrop-filter: blur(2px); }
-  .n-layout-content .page-content-inner-wrapper { padding: 16px !important; padding-top: 60px !important; /* 留出悬浮按钮空间 */ }
-  .mobile-menu-btn { position: absolute; top: 16px; left: 16px; z-index: 90; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-  /* 确保手机端也是居中，且离顶部适当距离 */
-  .floating-task-pill { 
-    top: 12px; 
-    left: 50%; 
-    transform: translateX(-50%);
-    max-width: 85%; /* 手机上可以稍微宽一点，防止文字被挤没 */
-  }
+  .app-main-layout { padding: 0; }
+  .app-main-content { margin-left: 0; border-radius: 0; }
+  .glass-sider { height: 100vh !important; border-radius: 0; }
+  .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; box-shadow: 2px 0 12px rgba(0,0,0,0.5); }
+  .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
+  .n-layout-content .page-content-inner-wrapper { padding: 16px !important; padding-top: 60px !important; }
+  .mobile-menu-btn { position: absolute; top: 16px; left: 16px; z-index: 90; box-shadow: 0 2px 8px rgba(0,0,0,0.3); background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; }
+  .floating-task-pill { top: 12px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>
