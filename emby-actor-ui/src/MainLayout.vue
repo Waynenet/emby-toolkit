@@ -16,12 +16,12 @@
       :class="['glass-sider', { 'mobile-sider': isMobile }]"
     >
       <div class="sider-content-wrapper">
-        <!-- 顶部 Logo (模块化透明) -->
-        <div class="sider-logo-module" :class="{ 'collapsed': collapsed && !isMobile }">
+        <!-- 顶部 Logo -->
+        <div class="sider-logo" :class="{ 'collapsed': collapsed && !isMobile }">
           <img :src="logo" alt="Logo" class="logo-img" />
         </div>
 
-        <!-- 中间 导航菜单 (可滚动) -->
+        <!-- 中间 导航菜单 -->
         <div class="sider-menu-container">
           <n-menu
             :collapsed="collapsed"
@@ -33,9 +33,11 @@
           />
         </div>
 
-        <!-- 底部 版本号 (固定小模块) -->
-        <div class="sider-bottom-module" v-show="!collapsed || isMobile">
-          <div class="version-pill">v{{ appVersion }}</div>
+        <!-- 底部 版本号模块 -->
+        <div class="sider-bottom-tools" v-show="!collapsed || isMobile">
+          <div class="version-module">
+            <span class="app-version">v{{ appVersion }}</span>
+          </div>
         </div>
       </div>
     </n-layout-sider>
@@ -43,69 +45,62 @@
     <!-- 右侧内容区 -->
     <n-layout-content class="app-main-content" :native-scrollbar="true">
       
-      <!-- ★★★ 右上角模块化工具栏 ★★★ -->
+      <!-- ★★★ 新增：顶部模块化操作栏 ★★★ -->
       <div class="top-header-bar">
+        <!-- 左侧：移动端菜单按钮 -->
         <div class="header-left">
-          <n-button v-if="isMobile" circle class="glass-btn" @click="collapsed = !collapsed">
-            <template #icon><n-icon :component="MenuOutline" /></template>
-          </n-button>
+          <div v-if="isMobile" class="header-module icon-module" @click="collapsed = !collapsed">
+            <n-icon :component="MenuOutline" size="20" />
+          </div>
         </div>
-        
+
+        <!-- 右侧：操作模块 -->
         <div class="header-right">
-          <!-- 任务状态胶囊 -->
-          <transition name="fade">
-            <div v-if="authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="glass-module task-pill">
-              <n-spin v-if="props.taskStatus.is_running" size="small" style="margin-right: 8px;" />
-              <n-icon v-else :component="SchedulerIcon" style="margin-right: 8px; opacity: 0.6;" />
-              <span class="task-text">{{ props.taskStatus.current_action }} - {{ props.taskStatus.message }}</span>
-              <div class="action-icon-btn" v-if="props.taskStatus.is_running" @click="triggerStopTask" style="margin-left: 8px; color: #e88080;">
-                <n-icon :component="StopIcon" size="18" />
-              </div>
-            </div>
-          </transition>
-
-          <!-- 主题切换 -->
-          <div class="glass-module icon-module">
-            <n-switch :value="props.isDark" @update:value="newValue => emit('update:is-dark', newValue)" size="small">
-              <template #checked-icon><n-icon :component="MoonIcon" /></template>
-              <template #unchecked-icon><n-icon :component="SunnyIcon" /></template>
-            </n-switch>
+          <!-- 主题切换模块 -->
+          <div class="header-module icon-module" @click="emit('update:is-dark', !props.isDark)">
+            <n-icon :component="props.isDark ? MoonIcon : SunnyIcon" size="18" />
           </div>
 
-          <!-- ★★★ 修复：日志按钮，改用原生 div 绑定 click 防止事件被吞 ★★★ -->
-          <div v-if="authStore.isAdmin" class="glass-module icon-module">
-            <n-tooltip>
-              <template #trigger>
-                <div class="action-icon-btn" @click="isRealtimeLogVisible = true">
-                  <n-icon size="20" :component="ReaderOutline" />
-                </div>
-              </template>
-              实时日志
-            </n-tooltip>
-            
-            <n-divider vertical style="margin: 0 8px; opacity: 0.3;" />
-            
-            <n-tooltip>
-              <template #trigger>
-                <div class="action-icon-btn" @click="isHistoryLogVisible = true">
-                  <n-icon size="20" :component="ArchiveOutline" />
-                </div>
-              </template>
-              历史日志
-            </n-tooltip>
+          <!-- 日志模块 -->
+          <div v-if="authStore.isAdmin" class="header-module log-module">
+            <n-button text @click="isRealtimeLogVisible = true" style="color: inherit;">
+              <template #icon><n-icon :component="ReaderOutline" /></template>
+              <span v-if="!isMobile">实时</span>
+            </n-button>
+            <div class="module-divider"></div>
+            <n-button text @click="isHistoryLogVisible = true" style="color: inherit;">
+              <template #icon><n-icon :component="ArchiveOutline" /></template>
+              <span v-if="!isMobile">历史</span>
+            </n-button>
           </div>
 
-          <!-- 用户中心 -->
+          <!-- 用户模块 -->
           <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" placement="bottom-end" :options="userOptions" @select="handleUserSelect">
-            <div class="glass-module user-module">
-              <n-icon size="18" :component="UserCenterIcon" style="margin-right: 6px;" />
-              <span>{{ authStore.username }}</span>
+            <div class="header-module user-module">
+              <n-icon size="18" :component="UserCenterIcon" />
+              <span v-if="!isMobile" class="username-text">{{ authStore.username }}</span>
             </div>
           </n-dropdown>
         </div>
       </div>
 
-      <!-- 路由页面内容 -->
+      <!-- 悬浮任务状态胶囊 -->
+      <transition name="fade">
+        <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="floating-task-pill">
+          <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
+          <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
+          <div class="pill-text-area">
+            <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
+            <span class="pill-divider">-</span>
+            <span class="pill-msg">{{ props.taskStatus.message }}</span>
+          </div>
+          <n-button v-if="props.taskStatus.is_running" type="error" size="tiny" circle secondary @click="triggerStopTask" class="pill-stop-btn">
+            <template #icon><n-icon :component="StopIcon" /></template>
+          </n-button>
+        </div>
+      </transition>
+
+      <!-- 路由视图 -->
       <div class="page-content-inner-wrapper">
         <router-view v-slot="slotProps">
           <component :is="slotProps.Component" :task-status="props.taskStatus" />
@@ -123,7 +118,7 @@
 <script setup>
 import { ref, computed, h, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { NLayout, NLayoutSider, NLayoutContent, NMenu, NSwitch, NIcon, NModal, NDropdown, NButton, NTooltip, NLog, useMessage, NDivider, NSpin } from 'naive-ui';
+import { NLayout, NLayoutSider, NLayoutContent, NMenu, NSwitch, NIcon, NModal, NDropdown, NButton, NTooltip, NProgress, NButtonGroup, NLog, useMessage, NDivider, NSpin } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import LogViewer from './components/LogViewer.vue';
 import { AnalyticsOutline as StatsIcon, ListOutline as ReviewListIcon, TimerOutline as SchedulerIcon, OptionsOutline as GeneralIcon, LogOutOutline as LogoutIcon, HeartOutline as WatchlistIcon, AlbumsOutline as CollectionsIcon, PeopleOutline as ActorSubIcon, CreateOutline as CustomCollectionsIcon, ColorPaletteOutline as PaletteIcon, Stop as StopIcon, SparklesOutline as ResubscribeIcon, TrashBinOutline as CleanupIcon, PeopleCircleOutline as UserManagementIcon, PersonCircleOutline as UserCenterIcon, FilmOutline as DiscoverIcon, ArchiveOutline as UnifiedSubIcon, PricetagOutline as TagIcon, CompassOutline, ReaderOutline, LibraryOutline, BookmarksOutline, SettingsOutline, ArchiveOutline, MenuOutline, Moon as MoonIcon, Sunny as SunnyIcon, PieChartOutline as EmbyStatsIcon } from '@vicons/ionicons5';
@@ -227,6 +222,11 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   flex-direction: column;
 }
 
+.page-content-inner-wrapper { 
+  flex: 1;
+  overflow-y: auto; 
+}
+
 .glass-sider {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur);
@@ -238,6 +238,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   height: calc(100vh - 32px) !important; 
 }
 
+/* 强制覆盖 Naive UI 侧边栏内部容器，实现 Flex 布局 */
 :deep(.n-layout-sider-scroll-container) {
   display: flex !important;
   flex-direction: column !important;
@@ -253,14 +254,14 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   width: 100%;
 }
 
-.sider-logo-module {
-  padding: 24px 0;
+.sider-logo {
+  padding: 30px 0 20px 0;
   display: flex; justify-content: center; align-items: center;
   flex-shrink: 0; 
 }
-.sider-logo-module.collapsed { padding: 24px 0; }
-.logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.2)); transition: height 0.3s; }
-.sider-logo-module.collapsed .logo-img { height: 32px; }
+.sider-logo.collapsed { padding: 30px 0 20px 0; }
+.logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
+.sider-logo.collapsed .logo-img { height: 32px; }
 
 .sider-menu-container {
   flex: 1; 
@@ -270,90 +271,100 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .n-menu-item { margin-top: 4px; }
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
+.n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
-.sider-bottom-module {
+/* 底部版本号模块 */
+.sider-bottom-tools {
   padding: 16px;
   display: flex;
   justify-content: center;
   flex-shrink: 0; 
 }
-.version-pill {
+.version-module {
   background: var(--glass-border);
   padding: 4px 12px;
   border-radius: 20px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-family: monospace;
   border: 1px solid var(--glass-border-light);
 }
+.app-version { font-size: 12px; color: var(--text-secondary); font-family: monospace; font-weight: bold; }
 
-/* ★★★ 右上角工具栏 ★★★ */
+/* ★★★ 顶部模块化操作栏 ★★★ */
 .top-header-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 0 16px 0;
+  padding: 0 24px 16px 24px;
   flex-shrink: 0;
 }
-.header-right {
+.header-left, .header-right {
   display: flex;
-  gap: 12px;
   align-items: center;
-  margin-left: auto;
+  gap: 12px;
 }
-
-.glass-module {
+.header-module {
   background: var(--glass-bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  padding: 6px 12px;
-  display: flex;
-  align-items: center;
   box-shadow: var(--glass-shadow);
-  color: var(--text-primary);
-}
-.icon-module { padding: 6px 10px; }
-.user-module { cursor: pointer; font-weight: 500; font-size: 14px; transition: background 0.2s; }
-.user-module:hover { background: var(--glass-bg-hover); }
-
-/* ★★★ 修复：自定义图标按钮，防止事件被吞 ★★★ */
-.action-icon-btn {
-  cursor: pointer;
+  border-radius: 12px;
   display: flex;
   align-items: center;
+  color: var(--text-primary);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+.header-module:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-light);
+  transform: translateY(-2px);
+}
+.icon-module {
+  padding: 8px;
   justify-content: center;
-  padding: 4px;
-  border-radius: 6px;
-  transition: background-color 0.2s;
 }
-.action-icon-btn:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+.log-module {
+  padding: 4px 12px;
+  gap: 8px;
+}
+.module-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--glass-border-light);
+}
+.user-module {
+  padding: 6px 12px;
+  gap: 8px;
+}
+.username-text {
+  font-size: 13px;
+  font-weight: 600;
 }
 
-.task-pill { max-width: 300px; }
-.task-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-
-.glass-btn {
-  background: var(--glass-bg) !important;
-  border: 1px solid var(--glass-border) !important;
-  color: var(--text-primary) !important;
-  backdrop-filter: var(--glass-blur);
+.floating-task-pill {
+  position: absolute; top: 60px; left: 50%; transform: translateX(-50%); z-index: 50; 
+  display: flex; align-items: center;
+  background: var(--glass-bg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); border-radius: 30px; padding: 6px 16px;
+  box-shadow: var(--glass-shadow); max-width: 400px; color: var(--text-primary);
 }
-
-.page-content-inner-wrapper { flex: 1; overflow-y: auto; }
+.pill-icon { margin-right: 8px; }
+.pill-text-area { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 13px; margin-right: 8px;}
+.pill-divider { margin: 0 6px; opacity: 0.4; }
+.pill-msg { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
+.pill-stop-btn { margin-left: 4px; }
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s, transform 0.3s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; transform: translateY(-10px); }
 
 @media (max-width: 768px) {
   .app-main-layout { padding: 0; }
-  .app-main-content { margin-left: 0; border-radius: 0; padding: 12px !important; }
+  .app-main-content { margin-left: 0; border-radius: 0; }
   .glass-sider { height: 100vh !important; border-radius: 0; }
   .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; box-shadow: 2px 0 12px rgba(0,0,0,0.5); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
-  .top-header-bar { padding-bottom: 12px; }
-  .task-pill { display: none; }
+  .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
+  .top-header-bar { padding: 16px 12px; }
+  .floating-task-pill { top: 70px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>
