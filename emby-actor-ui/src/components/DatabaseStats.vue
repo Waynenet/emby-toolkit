@@ -18,54 +18,43 @@
 
     <n-spin :show="loading.core || loading.library || loading.system || loading.subscription || loading.rankings">
       
-      <!-- ★★★ 1. 媒体库分布 (拆分为 5 个独立模块，应用多彩色) ★★★ -->
-      <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
-        <!-- 左侧：图表模块 -->
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card tint-blue" style="height: 100%;">
-            <template #header><span class="card-title">媒体库分布</span></template>
+      <!-- ★★★ 1. 媒体库分布 (置顶，左右结构) ★★★ -->
+      <n-card :bordered="false" class="dashboard-card tint-blue" style="margin-bottom: 16px;">
+        <template #header><span class="card-title">媒体库分布</span></template>
+        <n-grid cols="1 lg:2" :x-gap="24" :y-gap="24" responsive="screen" style="align-items: center;">
+          <n-gi>
             <v-chart class="chart-container" :option="resolutionChartOptions" autoresize style="height: 220px; width: 100%;" />
-          </n-card>
-        </n-gi>
-        
-        <!-- 右侧：4个小数据模块 (2行2列) -->
-        <n-gi>
-          <n-grid cols="2" :x-gap="16" :y-gap="16" style="height: 100%;">
-            <n-gi>
-              <n-card :bordered="false" class="dashboard-card tint-green" style="height: 100%; justify-content: center;">
-                <div class="mini-stat-box-content">
+          </n-gi>
+          <n-gi>
+            <n-grid cols="2" :x-gap="16" :y-gap="16" style="text-align: center;">
+              <n-gi>
+                <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.movies_in_library }}</div>
                   <div class="mini-stat-label">电影</div>
                 </div>
-              </n-card>
-            </n-gi>
-            <n-gi>
-              <n-card :bordered="false" class="dashboard-card tint-purple" style="height: 100%; justify-content: center;">
-                <div class="mini-stat-box-content">
+              </n-gi>
+              <n-gi>
+                <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.series_in_library }}</div>
                   <div class="mini-stat-label">剧集</div>
                 </div>
-              </n-card>
-            </n-gi>
-            <n-gi>
-              <n-card :bordered="false" class="dashboard-card tint-orange" style="height: 100%; justify-content: center;">
-                <div class="mini-stat-box-content">
+              </n-gi>
+              <n-gi>
+                <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.episodes_in_library }}</div>
                   <div class="mini-stat-label">总集数</div>
                 </div>
-              </n-card>
-            </n-gi>
-            <n-gi>
-              <n-card :bordered="false" class="dashboard-card tint-red" style="height: 100%; justify-content: center;">
-                <div class="mini-stat-box-content">
+              </n-gi>
+              <n-gi>
+                <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.system.actor_mappings_linked }}</div>
                   <div class="mini-stat-label">演员关联</div>
                 </div>
-              </n-card>
-            </n-gi>
-          </n-grid>
-        </n-gi>
-      </n-grid>
+              </n-gi>
+            </n-grid>
+          </n-gi>
+        </n-grid>
+      </n-card>
 
       <!-- ★★★ 2. 其他数据模块 (一行四个，应用多彩色) ★★★ -->
       <n-grid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
@@ -74,9 +63,9 @@
           <n-card :bordered="false" class="dashboard-card auto-task-block tint-orange">
             <div class="auto-task-title">基础缓存</div>
             <div class="auto-task-stats">
-              <span>已缓存媒体: <b>{{ stats.media_library.cached_total }}</b></span>
-              <span>已缓存人员: <b>{{ stats.system.actor_mappings_total }}</b></span>
-              <span>翻译缓存: <b>{{ stats.system.translation_cache_count }}</b></span>
+              <span>媒体缓存数: <b>{{ stats.media_library.cached_total }}</b></span>
+              <span>人员缓存数: <b>{{ stats.system.actor_mappings_total }}</b></span>
+              <span>翻译缓存数: <b>{{ stats.system.translation_cache_count }}</b></span>
             </div>
           </n-card>
         </n-gi>
@@ -156,7 +145,7 @@
       </n-grid>
 
       <!-- ★★★ 3. 发布组排行 (底部并列) ★★★ -->
-      <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen">
+      <n-grid cols="1 lg:2" :x-gap="16" :y-gap="16" responsive="screen">
         <!-- 左侧：今日排行 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
@@ -167,6 +156,7 @@
             <div v-else class="ranking-list">
               <div v-for="(group, index) in stats.release_group_ranking.slice(0, 10)" :key="group.release_group" class="ranking-item">
                 <div class="ranking-index" :class="{'top-3': index < 3}">{{ index + 1 }}</div>
+                <!-- 恢复图标兜底逻辑 -->
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
@@ -188,6 +178,7 @@
             <div v-else class="ranking-list">
               <div v-for="(group, index) in stats.historical_release_group_ranking.slice(0, 10)" :key="group.release_group" class="ranking-item">
                 <div class="ranking-index" :class="{'top-3': index < 3}">{{ index + 1 }}</div>
+                <!-- 恢复图标兜底逻辑 -->
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
@@ -282,7 +273,8 @@ const resolutionChartOptions = computed(() => {
     return { series: [{ type: 'pie', radius: ['40%', '70%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
   }
   return {
-    color: ['#fff', '#e0e0e0', '#c0c0c0', '#a0a0a0', '#808080', '#606060'], // 配合多彩底色，图表用纯白/灰白系更高级
+    // ★★★ 恢复彩色图表 ★★★
+    color: ['#8a2be2', '#18a058', '#f0a020', '#d03050', '#999', '#73C0DE'], 
     tooltip: { trigger: 'item', backgroundColor: 'rgba(20, 25, 35, 0.85)', borderColor: 'rgba(255,255,255,0.1)', textStyle: { color: '#fff' } },
     legend: { show: true, bottom: '0', textStyle: { color: 'var(--text-primary)' } },
     series: [{
@@ -297,7 +289,23 @@ const resolutionChartOptions = computed(() => {
 });
 
 const getIconPath = (groupName) => groupName ? `/icons/site/${groupName}.png` : '';
-const handleIconError = (e) => { e.target.style.display = 'none'; };
+
+// ★★★ 恢复图标兜底逻辑 ★★★
+const handleIconError = (e) => {
+  const img = e.target;
+  const currentSrc = img.src;
+  const defaultIcon = '/icons/site/pt.ico';
+  if (currentSrc.match(/\.png($|\?)/i)) {
+    img.src = currentSrc.replace(/\.png/i, '.ico');
+    return;
+  }
+  if (currentSrc.includes('pt.ico')) {
+    img.style.display = 'none';
+  } else {
+    img.src = defaultIcon;
+    img.style.display = 'inline-block';
+  }
+};
 
 onMounted(() => {
   fetchData();
