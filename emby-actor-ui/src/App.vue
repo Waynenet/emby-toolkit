@@ -63,32 +63,32 @@ onMounted(() => {
 }
 
 html.dark {
-  /* 黑夜模式：灰黑极简 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2564&auto=format&fit=crop'); 
+  /* 黑夜模式：真正的灰黑极简暗纹 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1614850523459-c2f4c699c52e?q=80&w=2564&auto=format&fit=crop'); 
   --global-bg-color: #121212;
-  --glass-bg: rgba(20, 25, 35, 0.2); 
-  --glass-bg-hover: rgba(30, 35, 45, 0.35);
-  --glass-border: rgba(255, 255, 255, 0.08); 
-  --glass-border-light: rgba(255, 255, 255, 0.2);
-  --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.4);
+  --glass-bg: rgba(20, 25, 35, 0.15); 
+  --glass-bg-hover: rgba(30, 35, 45, 0.25);
+  --glass-border: rgba(255, 255, 255, 0.05); 
+  --glass-border-light: rgba(255, 255, 255, 0.15);
+  --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.3);
   --glass-blur: blur(0px); 
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
   
   /* 多彩模块基色 (黑夜模式) */
-  --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.2) 0%, rgba(54, 162, 235, 0.35) 100%);
+  --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(54, 162, 235, 0.45) 100%);
   
-  --tint-green: linear-gradient(135deg, rgba(20,25,35,0.2) 0%, rgba(75, 192, 192, 0.35) 100%);
+  --tint-green: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(99,226,183,0.08) 100%);
   --tint-green-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(75, 192, 192, 0.45) 100%);
   
-  --tint-purple: linear-gradient(135deg, rgba(20,25,35,0.2) 0%, rgba(153, 102, 255, 0.35) 100%);
+  --tint-purple: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(138,43,226,0.08) 100%);
   --tint-purple-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(153, 102, 255, 0.45) 100%);
   
-  --tint-orange: linear-gradient(135deg, rgba(20,25,35,0.2) 0%, rgba(255, 159, 64, 0.35) 100%);
+  --tint-orange: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(242,201,125,0.08) 100%);
   --tint-orange-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 159, 64, 0.45) 100%);
   
-  --tint-red: linear-gradient(135deg, rgba(20,25,35,0.2) 0%, rgba(255, 99, 132, 0.35) 100%);
+  --tint-red: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(232,128,128,0.08) 100%);
   --tint-red-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 99, 132, 0.45) 100%);
 }
 
@@ -104,7 +104,6 @@ html, body {
   background-position: center;
   background-attachment: fixed;
   color: var(--text-primary);
-  /* 仅保留背景图和颜色的过渡，避免影响卡片 */
   transition: background-image 0.5s ease, color 0.3s ease;
 }
 
@@ -122,17 +121,13 @@ html, body {
   box-shadow: var(--glass-shadow) !important;
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  
-  /* ★★★ 核心修复：绝对禁止对 background 和 border-color 使用过渡，彻底解决模糊延迟闪烁问题 ★★★ */
   transition: transform 0.2s, box-shadow 0.2s !important;
-  
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px; 
 }
 
-/* 基础卡片 Hover：瞬间改变背景和边框，平滑改变位移和阴影 */
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
@@ -140,22 +135,16 @@ html, body {
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
 }
 
-/* ★★★ 多彩模块辅助类及 Hover 状态 (瞬间变色) ★★★ */
 .n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
 .n-card.dashboard-card.tint-blue:hover { background: var(--tint-blue-hover) !important; }
-
 .n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
 .n-card.dashboard-card.tint-green:hover { background: var(--tint-green-hover) !important; }
-
 .n-card.dashboard-card.tint-purple { background: var(--tint-purple) !important; }
 .n-card.dashboard-card.tint-purple:hover { background: var(--tint-purple-hover) !important; }
-
 .n-card.dashboard-card.tint-orange { background: var(--tint-orange) !important; }
 .n-card.dashboard-card.tint-orange:hover { background: var(--tint-orange-hover) !important; }
-
 .n-card.dashboard-card.tint-red { background: var(--tint-red) !important; }
 .n-card.dashboard-card.tint-red:hover { background: var(--tint-red-hover) !important; }
-
 
 .dashboard-card > .n-card__content {
   flex-grow: 1 !important;
