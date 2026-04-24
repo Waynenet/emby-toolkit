@@ -2,77 +2,53 @@
 <template>
   <div class="modular-page-container">
     
-    <div class="page-header-module" style="display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px;">
+    <div class="page-header-module" style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 16px;">
       <div>
         <h1 class="greeting-title" style="display: flex; align-items: center; gap: 12px;">
           <n-icon color="#8a2be2"><StatsChart /></n-icon> 数据看板
         </h1>
         <p class="greeting-subtitle">了解您媒体库的核心数据统计与运行状态。</p>
       </div>
-      <div class="filter-section">
-        <n-button circle size="small" type="primary" ghost @click="fetchData" :loading="loading.core">
-          <template #icon><n-icon><Refresh /></n-icon></template>
-        </n-button>
-      </div>
+      <n-button circle size="small" type="primary" ghost @click="fetchData" :loading="loading.core">
+        <template #icon><n-icon><Refresh /></n-icon></template>
+      </n-button>
     </div>
 
     <n-spin :show="loading.core || loading.library || loading.system || loading.subscription || loading.rankings">
       
-      <!-- 1. 核心数据 (响应式网格: 手机2列, 电脑4列) -->
-      <n-grid :cols="2" m:cols="4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 24px;">
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card stat-module">
-            <n-statistic label="已缓存媒体" :value="stats.media_library.cached_total" />
-          </n-card>
-        </n-gi>
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card stat-module">
-            <n-statistic label="已归档演员" :value="stats.system.actor_mappings_total" />
-          </n-card>
-        </n-gi>
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card stat-module">
-            <n-statistic label="追剧中" :value="stats.subscriptions_card.watchlist.watching" style="--n-value-text-color: #63e2b7" />
-          </n-card>
-        </n-gi>
-        <n-gi>
-          <n-card :bordered="false" class="dashboard-card stat-module">
-            <n-statistic label="待洗版" :value="stats.subscriptions_card.resubscribe.pending" style="--n-value-text-color: #f2c97d" />
-          </n-card>
-        </n-gi>
-      </n-grid>
-
-      <!-- 2. 媒体库分布 (拆分左右) -->
-      <n-card :bordered="false" class="dashboard-card" style="margin-bottom: 24px;">
+      <!-- ================= 1. 顶部：媒体库分布 (左图右字) ================= -->
+      <n-card :bordered="false" class="dashboard-card" style="margin-bottom: 16px;">
         <template #header><span class="card-title">媒体库分布</span></template>
-        <n-grid :cols="1" lg:cols="2" :x-gap="24" :y-gap="24" responsive="screen" style="align-items: center;">
-          <n-gi>
-            <v-chart class="chart-container" :option="resolutionChartOptions" autoresize style="height: 260px; width: 100%;" />
+        <n-grid :cols="1" lg:cols="3" :x-gap="24" :y-gap="24" responsive="screen" style="align-items: center;">
+          <!-- 左侧饼图 -->
+          <n-gi span="1">
+            <v-chart class="chart-container" :option="resolutionChartOptions" autoresize style="height: 220px; width: 100%;" />
           </n-gi>
-          <n-gi>
-            <n-grid :cols="2" :x-gap="16" :y-gap="16" style="text-align: center;">
+          <!-- 右侧 4 个数据块 -->
+          <n-gi span="2">
+            <n-grid :cols="2" m:cols="4" :x-gap="16" :y-gap="16" style="text-align: center;">
               <n-gi>
                 <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.movies_in_library }}</div>
-                  <div class="mini-stat-label">电影</div>
+                  <div class="mini-stat-label">电影总数</div>
                 </div>
               </n-gi>
               <n-gi>
                 <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.series_in_library }}</div>
-                  <div class="mini-stat-label">剧集</div>
+                  <div class="mini-stat-label">剧集总数</div>
                 </div>
               </n-gi>
               <n-gi>
                 <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.media_library.episodes_in_library }}</div>
-                  <div class="mini-stat-label">总集数</div>
+                  <div class="mini-stat-label">单集总数</div>
                 </div>
               </n-gi>
               <n-gi>
                 <div class="mini-stat-box">
                   <div class="mini-stat-val">{{ stats.system.actor_mappings_linked }}</div>
-                  <div class="mini-stat-label">演员</div>
+                  <div class="mini-stat-label">关联演员</div>
                 </div>
               </n-gi>
             </n-grid>
@@ -80,32 +56,35 @@
         </n-grid>
       </n-card>
 
-      <!-- 3. 自动化任务状态 & 系统日志 (4列便当盒) -->
-      <n-grid :cols="1" s:cols="2" lg:cols="4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 24px;">
+      <!-- ================= 2. 中间：核心数据 & 自动化 (4列便当盒) ================= -->
+      <n-grid :cols="1" s:cols="2" lg:cols="4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
+        
+        <!-- Row 1 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card auto-task-block">
-            <div class="auto-task-title">原生合集</div>
+            <div class="auto-task-title">核心缓存</div>
             <div class="auto-task-stats">
-              <span>总数: <b>{{ stats.subscriptions_card.native_collections.total }}</b></span>
-              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.native_collections.count }}</b></span>
+              <span>媒体缓存: <b>{{ stats.media_library.cached_total }}</b></span>
+              <span>翻译缓存: <b style="color: #70c0e8">{{ stats.system.translation_cache_count }}</b></span>
             </div>
           </n-card>
         </n-gi>
         <n-gi>
           <n-card :bordered="false" class="dashboard-card auto-task-block">
-            <div class="auto-task-title">自建合集</div>
+            <div class="auto-task-title">智能追剧</div>
             <div class="auto-task-stats">
-              <span>总数: <b>{{ stats.subscriptions_card.custom_collections.total }}</b></span>
-              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.custom_collections.count }}</b></span>
+              <span>追剧中: <b style="color: #63e2b7">{{ stats.subscriptions_card.watchlist.watching }}</b></span>
+              <span>暂停: <b style="color: #f2c97d">{{ stats.subscriptions_card.watchlist.paused }}</b></span>
+              <span>完结: <b>{{ stats.subscriptions_card.watchlist.completed }}</b></span>
             </div>
           </n-card>
         </n-gi>
         <n-gi>
           <n-card :bordered="false" class="dashboard-card auto-task-block">
-            <div class="auto-task-title">MP 订阅配额</div>
+            <div class="auto-task-title">演员订阅</div>
             <div class="auto-task-stats">
-              <span>已用: <b>{{ stats.subscriptions_card.quota.mp.consumed }}</b></span>
-              <span>剩余: <b style="color: #63e2b7">{{ stats.subscriptions_card.quota.mp.available }}</b></span>
+              <span>已订阅: <b>{{ stats.subscriptions_card.actors.subscriptions }}</b></span>
+              <span>作品入库: <b style="color: #63e2b7">{{ stats.subscriptions_card.actors.tracked_in_library }}</b></span>
             </div>
           </n-card>
         </n-gi>
@@ -118,10 +97,49 @@
             </div>
           </n-card>
         </n-gi>
+
+        <!-- Row 2 -->
+        <n-gi>
+          <n-card :bordered="false" class="dashboard-card auto-task-block">
+            <div class="auto-task-title">原生合集</div>
+            <div class="auto-task-stats">
+              <span>总数: <b>{{ stats.subscriptions_card.native_collections.total }}</b></span>
+              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.native_collections.count }}</b></span>
+              <span>缺失: <b style="color: #e88080">{{ stats.subscriptions_card.native_collections.missing_items }}</b></span>
+            </div>
+          </n-card>
+        </n-gi>
+        <n-gi>
+          <n-card :bordered="false" class="dashboard-card auto-task-block">
+            <div class="auto-task-title">自建合集</div>
+            <div class="auto-task-stats">
+              <span>总数: <b>{{ stats.subscriptions_card.custom_collections.total }}</b></span>
+              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.custom_collections.count }}</b></span>
+              <span>缺失: <b style="color: #e88080">{{ stats.subscriptions_card.custom_collections.missing_items }}</b></span>
+            </div>
+          </n-card>
+        </n-gi>
+        <n-gi>
+          <n-card :bordered="false" class="dashboard-card auto-task-block">
+            <div class="auto-task-title">MP 订阅配额</div>
+            <div class="auto-task-stats">
+              <span>今日已用: <b>{{ stats.subscriptions_card.quota.mp.consumed }}</b></span>
+              <span>今日剩余: <b style="color: #63e2b7">{{ stats.subscriptions_card.quota.mp.available }}</b></span>
+            </div>
+          </n-card>
+        </n-gi>
+        <n-gi>
+          <n-card :bordered="false" class="dashboard-card auto-task-block">
+            <div class="auto-task-title">媒体洗版</div>
+            <div class="auto-task-stats">
+              <span>待洗版任务: <b style="color: #f2c97d">{{ stats.subscriptions_card.resubscribe.pending }}</b></span>
+            </div>
+          </n-card>
+        </n-gi>
       </n-grid>
 
-      <!-- 4. 发布组排行 (左右并排) -->
-      <n-grid :cols="1" lg:cols="2" :x-gap="24" :y-gap="24" responsive="screen">
+      <!-- ================= 3. 底部：发布组排行 (左右并排) ================= -->
+      <n-grid :cols="1" lg:cols="2" :x-gap="16" :y-gap="16" responsive="screen">
         <!-- 左侧：今日排行 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
@@ -172,7 +190,7 @@
 <script setup>
 import { ref, onMounted, computed, reactive } from 'vue';
 import axios from 'axios';
-import { NGrid, NGi, NCard, NStatistic, NSpin, NIcon, NProgress, NEmpty, NButton } from 'naive-ui';
+import { NGrid, NGi, NCard, NSpin, NIcon, NProgress, NEmpty, NButton } from 'naive-ui';
 import { StatsChart, Refresh } from '@vicons/ionicons5';
 import { use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
@@ -229,7 +247,6 @@ const fetchSubscription = async () => {
 const fetchRankings = async () => {
   loading.rankings = true;
   try {
-    // 移除了 days 参数，获取全部数据
     const res = await axios.get(`/api/database/stats/rankings`);
     if (res.data.status === 'success') {
       stats.release_group_ranking = res.data.data.release_group_ranking;
@@ -271,12 +288,9 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.modular-page-container { padding: 24px; max-width: 1600px; margin: 0 auto; }
-.page-header-module { margin-bottom: 24px; }
-.greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: var(--text-primary); }
-.greeting-subtitle { font-size: 14px; color: var(--text-secondary); margin: 0; }
-
-.stat-module :deep(.n-statistic-value__content) { font-size: 28px; font-weight: bold; }
+.modular-page-container { max-width: 1600px; margin: 0 auto; }
+.greeting-title { font-size: 24px; font-weight: 700; margin: 0 0 4px 0; color: var(--text-primary); }
+.greeting-subtitle { font-size: 13px; color: var(--text-secondary); margin: 0; }
 
 /* 媒体库分布右侧的小方块 */
 .mini-stat-box {
@@ -290,16 +304,16 @@ onMounted(() => {
 
 /* 自动化任务便当盒 */
 .auto-task-block {
-  padding: 20px;
+  padding: 16px;
 }
 .auto-task-title { font-size: 15px; font-weight: bold; color: var(--text-primary); margin-bottom: 12px; }
 .auto-task-stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); }
-.auto-task-stats b { color: var(--text-primary); font-size: 16px; margin-left: 4px; }
+.auto-task-stats b { color: var(--text-primary); font-size: 15px; margin-left: 4px; }
 
 /* 排行榜列表 */
-.ranking-list { display: flex; flex-direction: column; gap: 12px; }
+.ranking-list { display: flex; flex-direction: column; gap: 10px; }
 .ranking-item {
-  display: flex; align-items: center; padding: 12px 16px;
+  display: flex; align-items: center; padding: 10px 16px;
   background: var(--glass-border); border-radius: 12px; border: 1px solid var(--glass-border-light);
 }
 .ranking-index { width: 24px; font-weight: bold; color: var(--text-secondary); }
@@ -310,8 +324,7 @@ onMounted(() => {
 .ranking-count { width: 50px; text-align: right; font-size: 13px; color: var(--text-secondary); }
 
 @media (max-width: 768px) {
-  .modular-page-container { padding: 12px; }
-  .greeting-title { font-size: 22px; }
+  .greeting-title { font-size: 20px; }
   .ranking-name { width: 80px; }
 }
 </style>
