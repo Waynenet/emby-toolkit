@@ -45,7 +45,7 @@ onMounted(() => {
   --text-primary: rgba(255, 255, 255, 0.95); 
   --text-secondary: rgba(255, 255, 255, 0.75);
   
-  /* 多彩模块基色 (白天模式更亮) */
+  /* 多彩模块基色 (白天模式) */
   --tint-blue: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(112,192,232,0.15) 100%);
   --tint-green: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(99,226,183,0.15) 100%);
   --tint-purple: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(138,43,226,0.15) 100%);
@@ -54,8 +54,8 @@ onMounted(() => {
 }
 
 html.dark {
-  /* 黑夜模式：灰黑极简 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2564&auto=format&fit=crop'); 
+  /* 黑夜模式：真正的灰黑极简暗纹 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop'); 
   --global-bg-color: #121212;
   --glass-bg: rgba(20, 25, 35, 0.15); 
   --glass-bg-hover: rgba(30, 35, 45, 0.25);
@@ -66,7 +66,7 @@ html.dark {
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
   
-  /* 多彩模块基色 (黑夜模式更深) */
+  /* 多彩模块基色 (黑夜模式) */
   --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
   --tint-green: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(99,226,183,0.08) 100%);
   --tint-purple: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(138,43,226,0.08) 100%);
@@ -86,6 +86,7 @@ html, body {
   background-position: center;
   background-attachment: fixed;
   color: var(--text-primary);
+  /* 仅保留背景图和颜色的过渡，避免影响卡片 */
   transition: background-image 0.5s ease, color 0.3s ease;
 }
 
@@ -103,7 +104,8 @@ html, body {
   box-shadow: var(--glass-shadow) !important;
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  transition: background 0.3s, border-color 0.3s, transform 0.2s, box-shadow 0.2s !important;
+  /* ★★★ 核心修复：移除 background 和 border-color 的 transition，彻底解决模糊延迟 ★★★ */
+  transition: transform 0.2s, box-shadow 0.2s !important;
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
@@ -118,6 +120,8 @@ html, body {
 .n-card.dashboard-card.tint-red { background: var(--tint-red) !important; }
 
 .n-card.dashboard-card:hover {
+  /* hover 时直接改变颜色，不使用过渡动画，避免重绘导致模糊闪烁 */
+  background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
   transform: translateY(-2px) !important;
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
