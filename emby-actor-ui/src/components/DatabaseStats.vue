@@ -19,9 +19,9 @@
     <n-spin :show="loading.core || loading.library || loading.system || loading.subscription || loading.rankings">
       
       <!-- 1. 媒体库分布 (置顶，左右结构) -->
-      <n-card :bordered="false" class="dashboard-card" style="margin-bottom: 24px;">
+      <n-card :bordered="false" class="dashboard-card tint-blue" style="margin-bottom: 24px;">
         <template #header><span class="card-title">媒体库分布</span></template>
-        <n-grid cols="1 m:2" :x-gap="24" :y-gap="24" responsive="screen" style="align-items: center;">
+        <n-grid cols="1 lg:2" :x-gap="24" :y-gap="24" responsive="screen" style="align-items: center;">
           <n-gi>
             <v-chart class="chart-container" :option="resolutionChartOptions" autoresize style="height: 260px; width: 100%;" />
           </n-gi>
@@ -56,21 +56,22 @@
         </n-grid>
       </n-card>
 
-      <!-- 2. 其他数据模块 (一行四个) -->
+      <!-- 2. 其他数据模块 (一行四个，应用多彩基色) -->
       <n-grid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 24px;">
         
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-green">
             <div class="auto-task-title">基础缓存</div>
             <div class="auto-task-stats">
               <span>已缓存媒体: <b>{{ stats.media_library.cached_total }}</b></span>
+              <span>已缓存人员: <b>{{ stats.system.actor_mappings_total }}</b></span>
               <span>翻译缓存: <b>{{ stats.system.translation_cache_count }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-red">
             <div class="auto-task-title">系统日志</div>
             <div class="auto-task-stats">
               <span>已处理: <b>{{ stats.system.processed_log_count }}</b></span>
@@ -80,7 +81,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-purple">
             <div class="auto-task-title">智能追剧</div>
             <div class="auto-task-stats">
               <span>追剧中: <b>{{ stats.subscriptions_card.watchlist.watching }}</b></span>
@@ -91,7 +92,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-orange">
             <div class="auto-task-title">演员订阅</div>
             <div class="auto-task-stats">
               <span>已订阅: <b>{{ stats.subscriptions_card.actors.subscriptions }}</b></span>
@@ -101,7 +102,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-blue">
             <div class="auto-task-title">原生合集</div>
             <div class="auto-task-stats">
               <span>总数: <b>{{ stats.subscriptions_card.native_collections.total }}</b></span>
@@ -112,7 +113,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-green">
             <div class="auto-task-title">自建合集</div>
             <div class="auto-task-stats">
               <span>总数: <b>{{ stats.subscriptions_card.custom_collections.total }}</b></span>
@@ -123,7 +124,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-purple">
             <div class="auto-task-title">MP 订阅配额</div>
             <div class="auto-task-stats">
               <span>今日已用: <b>{{ stats.subscriptions_card.quota.mp.consumed }}</b></span>
@@ -133,7 +134,7 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-red">
             <div class="auto-task-title">洗版任务</div>
             <div class="auto-task-stats">
               <span>待洗版: <b style="color: #f2c97d">{{ stats.subscriptions_card.resubscribe.pending }}</b></span>
@@ -144,7 +145,7 @@
       </n-grid>
 
       <!-- 3. 发布组排行 (底部并列) -->
-      <n-grid cols="1 m:2" :x-gap="24" :y-gap="24" responsive="screen">
+      <n-grid cols="1 lg:2" :x-gap="24" :y-gap="24" responsive="screen">
         <!-- 左侧：今日排行 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
