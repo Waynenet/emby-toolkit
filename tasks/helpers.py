@@ -26,7 +26,7 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
 
     # 字幕：chi=简体, yue=繁体
     "sub_chi": ["CHS", "SC", "GB", "简体", "簡體", "简中", "簡中", "Simplified"],
-    "sub_yue": ["CHT", "TC", "BIG5", "繁體", "繁体", "繁中", "Traditional"],
+    "sub_yue": ["CHT", "TC", "BIG5", "繁體", "繁体", "繁中", "Traditional", "tw", "hk", "ZH-HANT"],
     "sub_eng": ["ENG", "英字"],
     "sub_jpn": ["JPN", "日字", "日文"],
     "sub_kor": ["KOR", "韩字", "韩文"],
@@ -313,7 +313,7 @@ def normalize_lang_code(lang_str: str) -> str:
 
     lang_str = str(lang_str).lower().strip()
 
-    # 1. 优先处理硬编码的常见中文别名 (防止用户把映射表删空导致核心逻辑崩溃)
+    # 1. 优先处理硬编码的常见中文别名
     if lang_str in ['guo', 'guoyu', 'chs', 'zh-cn', 'zh-sg', 'zh-hans', 'cmn', 'mandarin', '国语', '普通话', '中文', '简体', '简中']:
         return 'chi'
     if lang_str in ['cht', 'zh-hk', 'zh-tw', 'hk', 'tw', 'cantonese', '粤语', '繁体', '繁中', '粤配', '粤英双语', '港配', '粤语配音', '广东话']:
@@ -1761,8 +1761,8 @@ def translate_tmdb_metadata_recursively(
                     if name and not utils.contains_chinese(name):
                         pending_persons.add(name)
 
-            max_actors = config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
-            max_ep_actors = config.get(constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS, 0) # 读取新配置
+            max_actors = config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)  # 最大演员数配置，默认30
+            max_ep_actors = config.get(constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS, 0) # 最大分集演员数配置，默认0（即分集不处理演员）
             
             try:
                 limit = int(max_actors)

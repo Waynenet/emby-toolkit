@@ -117,29 +117,37 @@ class P115OpenAPIClient:
         }
 
     def _do_request(self, method, url, **kwargs):
-        try:
-            current_token = self.access_token # 记录当前请求使用的 token
-            
-            # 支持自定义 headers 覆盖 (用于透传播放器 UA)
-            req_headers = self.headers.copy()
-            if 'headers' in kwargs:
-                req_headers.update(kwargs.pop('headers'))
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                current_token = self.access_token # 记录当前请求使用的 token
                 
-            resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs).json()
-            
-            if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
-                logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
+                # 支持自定义 headers 覆盖 (用于透传播放器 UA)
+                req_headers = self.headers.copy()
+                if 'headers' in kwargs:
+                    req_headers.update(kwargs.pop('headers'))
+                    
+                resp = requests.request(method, url, headers=req_headers, timeout=30, **kwargs).json()
                 
-                # ★ 传入 current_token 进行比对
-                if refresh_115_token(current_token):
-                    logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
-                    return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
-                else:
-                    logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
-            
-            return resp
-        except Exception as e:
-            return {"state": False, "error_msg": str(e)}
+                if not resp.get("state") and resp.get("code") in [40140123, 40140124, 40140125, 40140126]:
+                    logger.warning("  ➜ [115] 检测到 Token 已过期，正在触发自动续期...")
+                    
+                    # ★ 传入 current_token 进行比对
+                    if refresh_115_token(current_token):
+                        logger.info("  ➜ [115] 续期完成，重新发送刚才失败的请求...")
+                        return requests.request(method, url, headers=self.headers, timeout=30, **kwargs).json()
+                    else:
+                        logger.error("  ➜ [115] 续期彻底失败，Token 已死亡，请前往 WebUI 重新扫码！")
+                
+                return resp
+            except Exception as e:
+                err_str = str(e)
+                # ★ 核心修复：遇到 DNS解析失败、连接重置、超时等纯网络错误时，自动休眠重试
+                if "NameResolutionError" in err_str or "Connection" in err_str or "Timeout" in err_str:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                return {"state": False, "error_msg": err_str}
 
     def get_user_info(self):
         url = f"{self.base_url}/open/user/info"
@@ -2014,71 +2022,130 @@ class SmartOrganizer:
         raw_lang = str(raw_lang or "").strip()
         raw_title = str(raw_title or "").strip()
 
-        def _format_label(label, s_type):
-            if not label or label == "未知":
-                return label
-            if s_type == "Subtitle":
-                if label in ["国语", "普通话", "中文"]:
-                    return "简中"
-                if label in ["粤语", "广东话"]:
-                    return "繁中"
-                if label.endswith("语") and label != "无语言":
-                    return label[:-1] + "文"
-            return label
-
         norm_lang = helpers.normalize_lang_code(raw_lang)
         title_lower = raw_title.lower()
+        lang_lower = raw_lang.lower()
 
-        # 先处理复合字幕标题
+        combined_text = f"{title_lower} {lang_lower}"
+        clean_text = re.sub(r'[\.\-_+/|]+', ' ', combined_text)
+
+        display_lang = ""
+
+        # ==========================================
+        # ★ 核心重构：回归正道，字幕统统用 chi，靠 Title 区分简繁
+        # ==========================================
         if stream_type == "Subtitle":
-            text = re.sub(r'[\.\-_+/|]+', ' ', title_lower)
-
-            has_chs = any(x in text for x in ["chs", "sc", "gb", "zh-cn", "zh-hans", "简中", "简体", "简英"])
-            has_cht = any(x in text for x in ["cht", "tc", "big5", "zh-tw", "zh-hant", "繁中", "繁体", "繁英"])
-            has_eng = any(x in text for x in ["eng", "english", "英文", "英语", "英字"])
+            has_chs = any(x in clean_text for x in ["chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "简英"])
+            has_cht = any(x in clean_text for x in ["cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁英"])
+            has_eng = any(x in clean_text for x in ["eng", "english", "英文", "英语", "英字"])
 
             if has_chs and has_eng and not has_cht:
-                return "chi", "简英双语", "简英双语"
-            if has_cht and has_eng and not has_chs:
-                return "yue", "繁英双语", "繁英双语"
-
-            # ★ 字幕流只看字幕关键词，不看音轨关键词
-            is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
-            is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
-        else:
-            # 音轨流只看音轨关键词
-            is_yue = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("yue", []))
-            is_chi = any(k.lower() in title_lower for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("chi", []))
-
-        if is_yue and not is_chi:
-            norm_lang = "yue"
-        elif is_chi and not is_yue:
-            norm_lang = "chi"
-        elif stream_type == "Subtitle":
-            # 字幕流里若同时出现，繁中优先于简中，可按你的偏好调整
-            if is_yue:
-                norm_lang = "yue"
-            elif is_chi:
                 norm_lang = "chi"
+                display_lang = "简英双语"
+            elif has_cht and has_eng and not has_chs:
+                norm_lang = "chi"
+                display_lang = "繁英双语"
+            elif has_cht and not has_chs:
+                norm_lang = "chi" # 繁体字幕底层依然是中文
+                display_lang = "繁体"
+            elif has_chs and not has_cht:
+                norm_lang = "chi"
+                display_lang = "简体"
+            elif has_cht and has_chs:
+                norm_lang = "chi"
+                display_lang = "简体"
+            else:
+                # 兜底：走 AUDIO_SUBTITLE_KEYWORD_MAP
+                is_yue = any(k.lower() in combined_text for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
+                is_chi = any(k.lower() in combined_text for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
+                
+                if "台配" in combined_text or "台灣" in combined_text or "台湾" in combined_text:
+                    norm_lang = "chi"
+                    display_lang = "繁体"
+                elif is_yue:
+                    norm_lang = "chi" # 即使是粤语压制组，字幕也是繁体中文
+                    display_lang = "繁体"
+                elif is_chi:
+                    norm_lang = "chi"
+                    display_lang = "简体"
         else:
-            for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
-                if stream_type == "Subtitle" and not key.startswith("sub_"):
-                    continue
-                if stream_type != "Subtitle" and key.startswith("sub_"):
-                    continue
-                if any(k.lower() in title_lower for k in keywords):
-                    norm_lang = key.replace('sub_', '')
-                    break
+            # ==========================================
+            # 音轨流：保留 yue，专门用于标识粤语发音
+            # ==========================================
+            is_yue = any(k.lower() in combined_text for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("yue", []))
+            is_chi = any(k.lower() in combined_text for k in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("chi", []))
 
-        base_label = helpers.get_lang_display_label(norm_lang) if norm_lang else ""
-        display_lang = _format_label(base_label, stream_type)
+            if is_yue and not is_chi:
+                norm_lang = "yue"
+            elif is_chi and not is_yue:
+                norm_lang = "chi"
+            else:
+                for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                    if key.startswith("sub_"):
+                        continue
+                    if any(k.lower() in combined_text for k in keywords):
+                        norm_lang = key.replace('sub_', '')
+                        break
+
+        # 格式化兜底的 display_lang
+        if not display_lang:
+            base_label = helpers.get_lang_display_label(norm_lang) if norm_lang else ""
+            if not base_label or base_label == "未知":
+                display_lang = base_label
+            else:
+                if stream_type == "Subtitle":
+                    if base_label in ["国语", "普通话", "中文"]:
+                        display_lang = "简体"
+                    elif base_label in ["粤语", "广东话"]:
+                        display_lang = "繁体"
+                    elif base_label.endswith("语") and base_label != "无语言":
+                        display_lang = base_label[:-1] + "文"
+                    else:
+                        display_lang = base_label
+                else:
+                    display_lang = base_label
 
         friendly_title = raw_title
-        if not utils.contains_chinese(raw_title) or \
-        raw_title.lower() in ["yue", "cn", "cht", "tc", "chi", "zho", "zh", "chs", "sc", "粵語", "國語", "粤语", "国语"] or \
-        friendly_title.lower() == raw_lang:
-            if display_lang and display_lang != "未知":
-                friendly_title = display_lang
+        
+        # ==========================================
+        # ★ 智能标题处理：保留有用信息，替换不规范词，追加缺失属性
+        # ==========================================
+        # 抹杀冗余标题，强制使用我们精简的 display_lang
+        if stream_type == "Subtitle" and display_lang == "简英双语":
+            friendly_title = "简英双语（简体）"
+        elif stream_type == "Subtitle" and display_lang == "繁英双语":
+            friendly_title = "繁英双语（繁体）"
+        redundant_exact_matches = {
+            "yue", "cn", "cht", "tc", "chi", "zho", "zh", "chs", "sc", 
+            "粵語", "國語", "粤语", "国语", "简中", "繁中", "简体", "繁体", 
+            "中文", "英语", "英文", "english", "korean", "韩语", "韩文",
+            "中文(简体)", "中文（简体）", "简体中文", 
+            "中文(繁体)", "中文（繁體）", "繁体中文", "繁體中文",
+            "simplified", "traditional", "simplified(简体)", "traditional(繁体)"
+        }
+        
+        if not friendly_title or friendly_title.lower().replace(" ", "") in redundant_exact_matches or friendly_title.lower() == raw_lang:
+            friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
+        elif not (stream_type == "Subtitle" and display_lang in ["简英双语", "繁英双语"]):
+            # 2. 有实质内容的标题，进行智能替换和追加
+            if stream_type == "Subtitle":
+                # 替换不规范的简繁称呼，确保能触发 Emby 的 Simplified/Traditional 机制
+                replace_map = {
+                    "简中": "简体", "简体中文": "简体", "中文(简体)": "简体", "中文（简体）": "简体",
+                    "繁中": "繁体", "繁体中文": "繁体", "中文(繁体)": "繁体", "中文（繁體）": "繁体"
+                }
+                for old, new in replace_map.items():
+                    friendly_title = friendly_title.replace(old, new)
+
+                # 修复“双语双语”的叠加 Bug
+                friendly_title = friendly_title.replace("简英双语", "简英").replace("简英", "简英双语")
+                friendly_title = friendly_title.replace("繁英双语", "繁英").replace("繁英", "繁英双语")
+
+                # 如果推导出了明确的简繁属性，且标题里没有，则在末尾追加
+                if display_lang in ["简体", "繁体", "简英双语", "繁英双语"]:
+                    core_keyword = display_lang.replace("双语", "") # 变成 简体, 繁体, 简英, 繁英
+                    if core_keyword not in friendly_title:
+                        friendly_title = f"{friendly_title} ({display_lang})"
 
         if not display_lang:
             display_lang = "未知"
@@ -2499,54 +2566,156 @@ class SmartOrganizer:
                     "ExtendedVideoSubTypeDescription": "None"
                 })
 
-        # 归一化默认轨道：避免 MKV 多条字幕都带 default flag，导致显示一堆“默认”
-        config = get_config()
-        pref_language_code = config.get(constants.CONFIG_OPTION_115_DEFAULT_LANGUAGE, "")
+        # =================================================================
+        # ★★★ 终极智能默认轨道选择算法 (独立配置 + 拖拽优先级 + 智能跟随) ★★★
+        # =================================================================
+        def _set_smart_default_streams(streams):
+            # 1. 从独立数据库读取用户配置
+            stream_config = settings_db.get_setting('p115_default_stream_config') or {
+                "audio_lang": "",
+                "subtitle_lang": "",
+                "audio_features": ["国配", "上译", "京译", "长译", "八一", "台配", "粤语", "评论", "导评"],
+                "sub_priority": ["effect", "chs_eng", "cht_eng", "chs", "cht"]
+            }
+            audio_pref_code = stream_config.get("audio_lang", "")
+            subtitle_pref = stream_config.get("subtitle_lang", "")
+            audio_features_config = stream_config.get("audio_features", [])
+            sub_priority = stream_config.get("sub_priority", [])
 
-        def _force_default_track(streams, stream_type, pref_code):
-            type_streams = [s for s in streams if s.get("Type") == stream_type]
-            if not type_streams: return
+            audio_streams = [s for s in streams if s.get("Type") == "Audio"]
+            sub_streams = [s for s in streams if s.get("Type") == "Subtitle"]
 
-            best_track = None
+            default_audio = None
             
-            # 1. 强权模式：大道至简，直接精准匹配底层 Language 代码！
-            if pref_code:
-                for s in type_streams:
-                    if s.get("Language") == pref_code:
-                        best_track = s
-                        break
-            
-            # 2. 兜底模式 1：如果没有配置，或者没找到目标语言，尊重文件原有的默认轨
-            if not best_track:
-                for s in type_streams:
-                    if s.get("IsDefault"):
-                        best_track = s
-                        break
-            
-            # 3. 兜底模式 2：如果连原文件都没有默认轨，强行把第一条轨设为默认
-            if not best_track:
-                best_track = type_streams[0]
+            # -----------------------------------------
+            # 1. 决出默认音轨 (真太子)
+            # -----------------------------------------
+            if audio_streams:
+                candidates = audio_streams
 
-            # 开始执行篡改
-            for s in type_streams:
-                is_target = (s == best_track)
-                s["IsDefault"] = is_target
+                if audio_pref_code:
+                    lang_matched = [s for s in candidates if s.get("Language") == audio_pref_code]
+                    if lang_matched:
+                        candidates = lang_matched
+
+                # 在候选者中，优先选原本就是默认的；如果候选里没有默认，就选第一条
+                default_audio = next((s for s in candidates if s.get("IsDefault")), candidates[0])
+
+                for s in audio_streams:
+                    is_target = (s == default_audio)
+                    s["IsDefault"] = is_target
+
+                    import re
+                    dt = re.sub(r'\(默认\s*', '(', s.get("DisplayTitle", ""))
+                    dt = dt.replace('(默认)', '').replace('默认', '').replace('()', '').strip()
+                    if is_target:
+                        dt += " (默认)"
+                    s["DisplayTitle"] = dt.replace("  ", " ")
+
+            # -----------------------------------------
+            # 2. 决出默认字幕 (智能跟随最高优 + 用户自定义优先级打分)
+            # -----------------------------------------
+            if sub_streams:
+                default_sub = None
+                audio_title = (default_audio.get("Title", "") + " " + default_audio.get("DisplayTitle", "")) if default_audio else ""
+                audio_title_lower = audio_title.lower()
                 
-                # 暴力清洗原有的 "(默认)" 字符串，防止出现 "(默认) (默认)" 的尴尬情况
-                import re
-                dt = s.get("DisplayTitle", "")
-                dt = re.sub(r'\(默认\s*', '(', dt)
-                dt = dt.replace('(默认)', '').replace('默认', '').replace('()', '').strip()
-                
-                # 为真太子打上思想钢印
-                if is_target:
-                    dt += " (默认)"
-                    
-                s["DisplayTitle"] = dt.replace("  ", " ")
+                # 提取真太子音轨命中的特征词
+                active_audio_features = []
+                for kw in audio_features_config:
+                    if kw.lower() in audio_title_lower:
+                        active_audio_features.append(kw.lower())
 
-        # 执行音轨和字幕的强权篡改
-        _force_default_track(media_streams, "Audio", pref_language_code)
-        _force_default_track(media_streams, "Subtitle", pref_language_code)
+                # ★ 核心打分函数
+                def get_sub_score(sub):
+                    score = 0
+                    sub_title = (sub.get("Title", "") + " " + sub.get("DisplayTitle", "")).lower()
+                    codec = sub.get("Codec", "").upper()
+
+                    # 统一特征判断
+                    is_effect = (
+                        "特效" in sub_title
+                        or "effect" in sub_title
+                        or "effects" in sub_title
+                    )
+
+                    is_chs_eng = (
+                        "简英" in sub_title
+                        or "中英" in sub_title
+                        or "chs/eng" in sub_title
+                        or "chs&eng" in sub_title
+                        or "chs.eng" in sub_title
+                    )
+
+                    is_cht_eng = (
+                        "繁英" in sub_title
+                        or "cht/eng" in sub_title
+                        or "cht&eng" in sub_title
+                        or "cht.eng" in sub_title
+                    )
+
+                    is_chs = (
+                        "简体" in sub_title
+                        or "简中" in sub_title
+                        or "chs" in sub_title
+                    ) and not is_chs_eng
+
+                    is_cht = (
+                        "繁体" in sub_title
+                        or "繁中" in sub_title
+                        or "cht" in sub_title
+                    ) and not is_cht_eng
+
+                    # 优先级 1: 智能跟随音轨特征
+                    if active_audio_features and any(f in sub_title for f in active_audio_features):
+                        score += 100000
+
+                    # 优先级 2: 用户拖拽顺序
+                    priority_score = 0
+                    for idx, p_type in enumerate(reversed(sub_priority)):
+                        weight = (idx + 1) * 1000
+
+                        if p_type == "effect" and is_effect:
+                            priority_score = max(priority_score, weight)
+                        elif p_type == "chs_eng" and is_chs_eng:
+                            priority_score = max(priority_score, weight)
+                        elif p_type == "cht_eng" and is_cht_eng:
+                            priority_score = max(priority_score, weight)
+                        elif p_type == "chs" and is_chs:
+                            priority_score = max(priority_score, weight)
+                        elif p_type == "cht" and is_cht:
+                            priority_score = max(priority_score, weight)
+
+                    score += priority_score
+
+                    # 字幕简繁偏好只能做小加分，不能推翻拖拽排序
+                    if subtitle_pref:
+                        if subtitle_pref == "chs" and (is_chs or is_chs_eng):
+                            score += 50
+                        elif subtitle_pref == "cht" and (is_cht or is_cht_eng):
+                            score += 50
+
+                    # 原本默认只做极小兜底，不能压过用户排序
+                    if sub.get("IsDefault"):
+                        score += 1
+
+                    return score
+
+                # 按分数降序排列，取最高分作为默认字幕
+                sorted_subs = sorted(sub_streams, key=get_sub_score, reverse=True)
+                default_sub = sorted_subs[0]
+
+                for s in sub_streams:
+                    is_target = (s == default_sub)
+                    s["IsDefault"] = is_target
+                    import re
+                    dt = re.sub(r'\(默认\s*', '(', s.get("DisplayTitle", ""))
+                    dt = dt.replace('(默认)', '').replace('默认', '').replace('()', '').strip()
+                    if is_target: dt += " (默认)"
+                    s["DisplayTitle"] = dt.replace("  ", " ")
+
+        # 执行智能篡改 (不再需要传 pref_language_code)
+        _set_smart_default_streams(media_streams)
 
         if not media_streams:
             return None
@@ -2764,18 +2933,6 @@ class SmartOrganizer:
         except Exception as e:
             logger.warning(f"  ➜ 解析真实媒体信息失败: {e}")
 
-        # ★★★ 纠错日志：遍历真理字典中的每一个键进行对比 ★★★
-        if guessed_info is not None and info and not silent_log:
-            corrected_items = []
-            for k in info.keys():
-                old_v = guessed_info.get(k, '')
-                new_v = info.get(k, '')
-                if old_v != new_v:
-                    corrected_items.append(f"{k}: '{old_v or '空'}' -> '{new_v or '空'}'")
-            
-            if corrected_items:
-                logger.info(f"  ➜ [智能重命名] 成功利用 {data_source} 补全/纠错文件参数: {', '.join(corrected_items)}")
-
         return info, is_center
 
     def _build_name_from_format(self, format_array, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None):
@@ -2926,9 +3083,9 @@ class SmartOrganizer:
     def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
         
-        # ★ 修复 1：无后缀文件的提前返回，补齐为 7 个返回值
+        # ★ 修复 1：无后缀文件的提前返回，补齐为 8 个返回值
         if '.' not in original_name: 
-            return original_name, None, None, None, False, {}, False
+            return original_name, None, None, None, False, {}, False, None
 
         parts = original_name.rsplit('.', 1)
         name_body = parts[0]
@@ -2967,8 +3124,8 @@ class SmartOrganizer:
                     )
                     if not s_name: s_name = f"Season {season_num:02d}"
                 
-                # ★ 修复 2：字幕文件的提前返回，补齐为 7 个返回值 (追加 {}, False)
-                return new_name, season_num, episode_num, s_name, False, {}, False
+                # ★ 修复 2：字幕文件的提前返回，补齐为 8 个返回值
+                return new_name, season_num, episode_num, s_name, False, {}, False, None
 
         cfg = self.rename_config
         
@@ -3150,7 +3307,15 @@ class SmartOrganizer:
         # 兜底：如果轨道配空了，用原名
         if not core_name: core_name = name_body
 
-        new_name = f"{core_name}{lang_suffix}.{ext}"
+        # ★★★ 提取 Part/CD 上下集信息，符合 Emby 规范 ★★★
+        part_num = None
+        part_suffix = ""
+        part_match = re.search(r'(?i)[ \.\-\_\[\(]*(part|pt|cd)[ \.\-\_]*(\d{1,2})\b', original_name)
+        if part_match:
+            part_num = int(part_match.group(2))
+            part_suffix = f" - pt{part_num}"
+
+        new_name = f"{core_name}{part_suffix}{lang_suffix}.{ext}"
         
         # ★★★ 核心修复：在这里利用齐全的 video_info 生成季目录名称 ★★★
         s_name = None
@@ -3166,7 +3331,7 @@ class SmartOrganizer:
             )
             if not s_name: s_name = f"Season {season_num:02d}"
 
-        return new_name, season_num, episode_num, s_name, is_center_cached, video_info, bool(real_info)
+        return new_name, season_num, episode_num, s_name, is_center_cached, video_info, bool(real_info), part_num
 
     def _scan_files_recursively(self, cid, depth=0, max_depth=3, current_rel_path=""):
         all_files = []
@@ -3458,6 +3623,15 @@ class SmartOrganizer:
                 except: pass
 
             if v_sha1 or v_fid:
+                # ★★★ 核心修复：提前解析前，先主动查一次本地缓存，防止 ffprobe 击穿！
+                if v_sha1:
+                    cached_text = P115CacheManager.get_mediainfo_cache_text(v_sha1)
+                    if cached_text:
+                        try:
+                            local_pre_fetched_mediainfo[v_sha1] = json.loads(cached_text)
+                            logger.debug(f"  ➜ [提前解析] 命中本地媒体信息缓存: {v_sha1[:8]}")
+                        except: pass
+
                 # 提前解析媒体信息 (内部会自动走本地缓存 -> 中心 -> ffprobe)
                 self._fetch_and_parse_mediainfo(
                     v_sha1,
@@ -3771,10 +3945,20 @@ class SmartOrganizer:
                     with conn.cursor() as cursor:
                         # ★ 核心优化：直接把 json 也查出来放进内存！
                         cursor.execute("SELECT sha1, mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = ANY(%s)", (list(video_sha1s),))
-                        for row in cursor.fetchall():
-                            local_cached_sha1s.add(row['sha1'])
-                            if row['mediainfo_json']:
-                                local_pre_fetched_mediainfo[row['sha1']] = row['mediainfo_json'] if isinstance(row['mediainfo_json'], list) else json.loads(row['mediainfo_json'])
+                        rows = cursor.fetchall()
+                        if rows:
+                            hit_sha1s = []
+                            for row in rows:
+                                local_cached_sha1s.add(row['sha1'])
+                                hit_sha1s.append(row['sha1'])
+                                if row['mediainfo_json']:
+                                    val = row['mediainfo_json']
+                                    local_pre_fetched_mediainfo[row['sha1']] = val if isinstance(val, (list, dict)) else json.loads(val)
+                            
+                            # 批量更新命中计数
+                            if hit_sha1s:
+                                cursor.execute("UPDATE p115_mediainfo_cache SET hit_count = hit_count + 1 WHERE sha1 = ANY(%s)", (hit_sha1s,))
+                                conn.commit()
             except Exception: pass
             
             missing_sha1s = list(set(video_sha1s) - local_cached_sha1s)
@@ -3818,7 +4002,7 @@ class SmartOrganizer:
         # =================================================================
         # ★★★ 同批次字幕完美对齐视频命名 (解决 MP 单文件上传分离问题) ★★★
         # =================================================================
-        batch_video_names = {} # key: (season, episode) -> base_name
+        batch_video_names = {} # key: (season, episode, part) -> base_name
         if not keep_original and is_batch:
             # 1. 预扫描视频，生成标准命名
             for file_item in candidates:
@@ -3826,13 +4010,13 @@ class SmartOrganizer:
                 ext = fn.split('.')[-1].lower() if '.' in fn else ''
                 if ext in known_video_exts:
                     # 临时调用重命名获取名字
-                    v_name, v_s, v_e, _, _, _, _ = self._rename_file_node(
+                    v_name, v_s, v_e, _, _, _, _, v_part = self._rename_file_node(
                         file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), 
                         original_title=original_title, pre_fetched_mediainfo=pre_fetched_mediainfo, 
                         local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
                         silent_log=True  # ★ 开启静默，防止预扫描时重复打印日志
                     )
-                    key = (v_s, v_e) if self.media_type == 'tv' else 'movie'
+                    key = (v_s, v_e, v_part) if self.media_type == 'tv' else ('movie', v_part)
                     # 电影只保留第一个视频作为基准 (通常电影只有一个正片)
                     if key not in batch_video_names:
                         batch_video_names[key] = v_name.rsplit('.', 1)[0]
@@ -3846,10 +4030,19 @@ class SmartOrganizer:
                         s_num = file_item.get('_forced_season')
                         e_num = file_item.get('_forced_episode')
                         
-                        # ★ 电影无脑匹配逻辑：只要是电影，且批次里有视频，无脑重命名成视频的形状！
-                        if self.media_type == 'movie' and 'movie' in batch_video_names:
-                            file_item['_forced_base_name'] = batch_video_names['movie']
-                            logger.debug(f"  ➜ [字幕对齐] 电影无脑绑定: 字幕 '{fn}' -> 视频 '{batch_video_names['movie']}'")
+                        # 提取字幕的 Part 信息
+                        sub_part_num = None
+                        sub_part_match = re.search(r'(?i)[ \.\-\_\[\(]*(part|pt|cd)[ \.\-\_]*(\d{1,2})\b', fn)
+                        if sub_part_match:
+                            sub_part_num = int(sub_part_match.group(2))
+                        
+                        # ★ 电影无脑匹配逻辑
+                        if self.media_type == 'movie':
+                            m_key = ('movie', sub_part_num)
+                            if m_key in batch_video_names:
+                                file_item['_forced_base_name'] = batch_video_names[m_key]
+                            elif ('movie', None) in batch_video_names:
+                                file_item['_forced_base_name'] = batch_video_names[('movie', None)]
                             continue
 
                         # ★ 剧集匹配逻辑：使用强大的正则和纯数字兜底提取集号
@@ -3889,12 +4082,19 @@ class SmartOrganizer:
                             if s_num is None:
                                 s_num = getattr(self, 'forced_season', 1)
                         
-                        key = (s_num, e_num)
+                        key = (s_num, e_num, sub_part_num)
+                        fallback_key = (s_num, e_num, None)
+                        
                         if key in batch_video_names:
                             file_item['_forced_base_name'] = batch_video_names[key]
                             file_item['_forced_season'] = s_num
                             file_item['_forced_episode'] = e_num
                             logger.debug(f"  ➜ [字幕对齐] 剧集精准绑定: 字幕 '{fn}' -> 视频 '{batch_video_names[key]}'")
+                        elif fallback_key in batch_video_names:
+                            file_item['_forced_base_name'] = batch_video_names[fallback_key]
+                            file_item['_forced_season'] = s_num
+                            file_item['_forced_episode'] = e_num
+                            logger.debug(f"  ➜ [字幕对齐] 剧集降级绑定: 字幕 '{fn}' -> 视频 '{batch_video_names[fallback_key]}'")
                         else:
                             logger.warning(f"  ➜ [字幕对齐] 警告：字幕 '{fn}' 提取到 S{s_num}E{e_num}，但未找到对应的视频文件！")
 
@@ -4010,7 +4210,7 @@ class SmartOrganizer:
                             break
                     real_target_cid = current_parent
             else:
-                new_filename, season_num, episode_num, s_name, is_center_cached, video_info, has_real_info = self._rename_file_node(
+                new_filename, season_num, episode_num, s_name, is_center_cached, video_info, has_real_info, part_num = self._rename_file_node(
                     file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), original_title=original_title,
                     pre_fetched_mediainfo=pre_fetched_mediainfo,
                     local_pre_fetched_mediainfo=local_pre_fetched_mediainfo 
@@ -4402,6 +4602,8 @@ class SmartOrganizer:
                             logger.info(f"  ➜ [重命名] {old_name} -> {new_name}")
                         else:
                             logger.warning(f"  ➜ [重命名失败] {old_name} -> {new_name}, 原因: {ren_res.get('error_msg', ren_res)}")
+                            # ★ 核心修复：如果 115 API 重命名失败，强制退回原名，确保后续生成的 STRM 挂载路径 100% 准确！
+                            item['_new_filename'] = old_name
                 
                 # -----------------------------------------------------------
                 # ★ 5. 生成 STRM 和记录日志
