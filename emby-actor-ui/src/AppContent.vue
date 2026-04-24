@@ -32,7 +32,6 @@ const backgroundTaskStatus = ref({ is_running: false, current_action: '空闲' }
 let statusIntervalId = null;
 const app = document.getElementById('app');
 
-// 动态生成 Naive UI 覆盖配置 (强制白字)
 const getThemeOverrides = (isDark) => {
   const textColor = 'rgba(255, 255, 255, 0.95)';
   const textColor2 = 'rgba(255, 255, 255, 0.75)';
@@ -82,7 +81,7 @@ const applyTheme = (isDark) => {
   const root = document.documentElement;
   app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: getThemeOverrides(isDark) }));
   root.classList.remove('dark', 'light');
-  root.classList.add('dark'); // 强制暗色模式底色以保证白字清晰
+  root.classList.add(isDark ? 'dark' : 'light'); 
 };
 
 const handleModeChange = (isDark) => {
