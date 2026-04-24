@@ -19,56 +19,49 @@ const currentNaiveTheme = ref({});
 
 onMounted(() => {
     const app = document.getElementById('app');
-    app.addEventListener('update-naive-theme', (event) => {
-        currentNaiveTheme.value = event.detail;
-    });
-    app.addEventListener('update-dark-mode', (event) => {
-        isDarkTheme.value = event.detail;
-    });
+    app.addEventListener('update-naive-theme', (event) => { currentNaiveTheme.value = event.detail; });
+    app.addEventListener('update-dark-mode', (event) => { isDarkTheme.value = event.detail; });
 });
 </script>
 
 <style>
-/* ==================== 1. 动态主题变量 (极致通透) ==================== */
+/* ==================== 1. 动态主题变量 ==================== */
 :root {
-  /* 白天模式：极低不透明度，高斯模糊，细白边 */
+  /* 白天模式 - 增加通透感 */
   --global-bg-image: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2564&auto=format&fit=crop');
-  --glass-bg: rgba(255, 255, 255, 0.15); 
-  --glass-bg-hover: rgba(255, 255, 255, 0.3);
-  --glass-border: rgba(255, 255, 255, 0.3); 
-  --glass-border-light: rgba(255, 255, 255, 0.6);
-  --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.05);
+  --glass-bg: rgba(255, 255, 255, 0.25); 
+  --glass-bg-hover: rgba(255, 255, 255, 0.4);
+  --glass-border: rgba(255, 255, 255, 0.4); 
+  --glass-border-light: rgba(255, 255, 255, 0.7);
+  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
   --glass-blur: blur(24px); 
   --text-primary: rgba(0, 0, 0, 0.85);
-  --text-secondary: rgba(0, 0, 0, 0.5);
+  --text-secondary: rgba(0, 0, 0, 0.6);
 }
 
 html.dark {
-  /* 暗色模式：深色半透明 */
+  /* 暗色模式 */
   --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop');
-  --glass-bg: rgba(20, 25, 35, 0.4); 
+  --glass-bg: rgba(20, 25, 35, 0.45); 
   --glass-bg-hover: rgba(30, 35, 45, 0.6);
-  --glass-border: rgba(255, 255, 255, 0.08); 
-  --glass-border-light: rgba(255, 255, 255, 0.2);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  --glass-border: rgba(255, 255, 255, 0.1); 
+  --glass-border-light: rgba(255, 255, 255, 0.25);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
   --text-primary: rgba(255, 255, 255, 0.95);
-  --text-secondary: rgba(255, 255, 255, 0.6);
+  --text-secondary: rgba(255, 255, 255, 0.65);
 }
 
 html, body { 
   height: 100vh; margin: 0; padding: 0; 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
-  overflow: hidden !important; 
+  overflow: hidden; 
   background-image: var(--global-bg-image);
   background-size: cover; background-position: center; background-attachment: fixed;
   color: var(--text-primary);
   transition: background-image 0.5s ease, color 0.3s ease;
 }
 
-.fullscreen-container { 
-  display: flex; justify-content: center; align-items: center; 
-  height: 100vh; width: 100%; background: transparent; 
-}
+.fullscreen-container { display: flex; justify-content: center; align-items: center; height: 100vh; width: 100%; background: transparent; }
 
 /* ==================== 2. 全局卡片 (毛玻璃) ==================== */
 .n-card.dashboard-card {
@@ -88,7 +81,7 @@ html, body {
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
-  transform: translateY(-2px) !important;
+  transform: translateY(-4px) !important;
 }
 
 .dashboard-card > .n-card__content { flex-grow: 1 !important; display: flex !important; flex-direction: column !important; justify-content: space-between !important; }
@@ -109,9 +102,10 @@ html, body {
 .dashboard-card:nth-child(2) { animation-delay: 0.10s; }
 .dashboard-card:nth-child(3) { animation-delay: 0.15s; }
 
-/* ==================== 3. 彻底消灭滚动条 ==================== */
+/* ==================== 3. 彻底隐藏滚动条 ==================== */
+/* 强制隐藏所有原生和 Naive UI 的滚动条，但保留滚动能力 */
+::-webkit-scrollbar { width: 0px !important; height: 0px !important; background: transparent !important; display: none !important; }
 * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
-::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
-.n-scrollbar-rail { display: none !important; opacity: 0 !important; width: 0 !important; }
 .n-scrollbar { display: none !important; }
+.n-scrollbar-rail { display: none !important; }
 </style>
