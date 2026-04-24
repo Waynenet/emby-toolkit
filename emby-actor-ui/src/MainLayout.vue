@@ -13,7 +13,7 @@
       :native-scrollbar="true" 
       :collapsed="collapsed"
       @update:collapsed="val => collapsed = val"
-      :class="['glass-sider', { 'mobile-sider': isMobile }]"
+      :class="['glass-sider', { 'mobile-sider': isMobile, 'mobile-sider-collapsed': isMobile && collapsed }]"
     >
       <div class="sider-content-wrapper">
         <!-- 顶部 Logo -->
@@ -24,6 +24,7 @@
         <!-- 中间 导航菜单 -->
         <div class="sider-menu-container">
           <n-menu
+            :indent="18"
             :collapsed="collapsed"
             :collapsed-width="64"
             :collapsed-icon-size="20"
@@ -273,14 +274,35 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.6); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
-/* 强制覆盖菜单文字颜色为白色 */
-.glass-sider .n-menu .n-menu-item-content__title,
-.glass-sider .n-menu .n-menu-item-content__icon {
-  color: rgba(255, 255, 255, 0.85) !important;
+/* 利用 Naive UI 的 CSS 变量彻底接管所有交互状态的颜色，防止在 Hover 或 Active 时变黑 */
+.glass-sider .n-menu {
+  --n-item-text-color: rgba(255, 255, 255, 0.85) !important;
+  --n-item-text-color-hover: #ffffff !important;
+  --n-item-text-color-active: #ffffff !important;
+  --n-item-text-color-active-hover: #ffffff !important;
+  --n-item-text-color-child-active: #ffffff !important;
+  --n-item-text-color-child-active-hover: #ffffff !important;
+  
+  --n-item-icon-color: rgba(255, 255, 255, 0.85) !important;
+  --n-item-icon-color-hover: #ffffff !important;
+  --n-item-icon-color-active: #ffffff !important;
+  --n-item-icon-color-active-hover: #ffffff !important;
+  --n-item-icon-color-child-active: #ffffff !important;
+  --n-item-icon-color-child-active-hover: #ffffff !important;
+
+  --n-arrow-color: rgba(255, 255, 255, 0.85) !important;
+  --n-arrow-color-hover: #ffffff !important;
+  --n-arrow-color-active: #ffffff !important;
+  --n-arrow-color-active-hover: #ffffff !important;
+  --n-arrow-color-child-active: #ffffff !important;
+  --n-arrow-color-child-active-hover: #ffffff !important;
 }
-.glass-sider .n-menu .n-menu-item--selected .n-menu-item-content__title,
-.glass-sider .n-menu .n-menu-item--selected .n-menu-item-content__icon {
-  color: #fff !important;
+
+/* 针对箭头和内部文字的兜底 */
+.glass-sider .n-menu .n-menu-item-content__title,
+.glass-sider .n-menu .n-menu-item-content__icon,
+.glass-sider .n-menu .n-menu-item-content__arrow {
+  color: inherit !important;
 }
 
 .sider-bottom-tools {
@@ -383,7 +405,26 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .app-main-layout { padding: 0; }
   .app-main-content { margin-left: 0; border-radius: 0; }
   .glass-sider { height: 100vh !important; border-radius: 0; }
-  .mobile-sider { position: absolute; left: 0; top: 0; bottom: 0; z-index: 1000; box-shadow: 2px 0 12px rgba(0,0,0,0.5); }
+  
+  .mobile-sider { 
+    position: absolute; 
+    left: 0; 
+    top: 0; 
+    bottom: 0; 
+    z-index: 1000; 
+    box-shadow: 2px 0 12px rgba(0,0,0,0.5); 
+    border-right: 1px solid var(--glass-border) !important; /* 展开时保留右侧边线 */
+    border-top: none !important;
+    border-bottom: none !important;
+    border-left: none !important;
+  }
+  
+  /* ★ 修复手机端左侧白线问题：当菜单折叠时，彻底干掉边框和阴影 */
+  .mobile-sider-collapsed {
+    border: none !important;
+    box-shadow: none !important;
+  }
+  
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
