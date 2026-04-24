@@ -33,8 +33,8 @@ onMounted(() => {
 <style>
 /* ==================== 1. 动态主题变量 ==================== */
 :root {
-  /* 白天模式：山水风景，高通透，多彩基色 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=2564&auto=format&fit=crop'); /* 绝美山水 */
+  /* 白天模式：山水风景 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=2564&auto=format&fit=crop'); 
   --global-bg-color: #4a6b82;
   --glass-bg: rgba(255, 255, 255, 0.1); 
   --glass-bg-hover: rgba(255, 255, 255, 0.2);
@@ -42,22 +42,36 @@ onMounted(() => {
   --glass-border-light: rgba(255, 255, 255, 0.4);
   --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1); 
   --glass-blur: blur(12px); 
-  --text-primary: rgba(255, 255, 255, 0.95); /* 强制白字 */
+  --text-primary: rgba(255, 255, 255, 0.95); 
   --text-secondary: rgba(255, 255, 255, 0.75);
+  
+  /* 多彩模块基色 (白天模式更亮) */
+  --tint-blue: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(112,192,232,0.15) 100%);
+  --tint-green: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(99,226,183,0.15) 100%);
+  --tint-purple: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(138,43,226,0.15) 100%);
+  --tint-orange: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(242,201,125,0.15) 100%);
+  --tint-red: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(232,128,128,0.15) 100%);
 }
 
 html.dark {
-  /* 黑夜模式：灰黑极简，无模糊 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2564&auto=format&fit=crop'); /* 灰黑暗纹 */
+  /* 黑夜模式：灰黑极简 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2564&auto=format&fit=crop'); 
   --global-bg-color: #121212;
   --glass-bg: rgba(20, 25, 35, 0.15); 
   --glass-bg-hover: rgba(30, 35, 45, 0.25);
   --glass-border: rgba(255, 255, 255, 0.05); 
   --glass-border-light: rgba(255, 255, 255, 0.15);
   --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.3);
-  --glass-blur: blur(0px); /* 0模糊 */
+  --glass-blur: blur(0px); 
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
+  
+  /* 多彩模块基色 (黑夜模式更深) */
+  --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
+  --tint-green: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(99,226,183,0.08) 100%);
+  --tint-purple: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(138,43,226,0.08) 100%);
+  --tint-orange: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(242,201,125,0.08) 100%);
+  --tint-red: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(232,128,128,0.08) 100%);
 }
 
 html, body { 
@@ -94,11 +108,16 @@ html, body {
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px; 
-  /* 删除了 opacity: 0 和 animation，彻底解决模糊延迟问题 */
 }
 
+/* 多彩模块辅助类 */
+.n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
+.n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
+.n-card.dashboard-card.tint-purple { background: var(--tint-purple) !important; }
+.n-card.dashboard-card.tint-orange { background: var(--tint-orange) !important; }
+.n-card.dashboard-card.tint-red { background: var(--tint-red) !important; }
+
 .n-card.dashboard-card:hover {
-  background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
   transform: translateY(-2px) !important;
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
