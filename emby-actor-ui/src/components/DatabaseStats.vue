@@ -83,7 +83,8 @@
 
         <n-gi>
           <n-card :bordered="false" class="dashboard-card auto-task-block tint-red">
-            <div class="auto-task-title">系统日志</div>
+            <!-- ★ 修改点：系统日志 -> 媒体处理 ★ -->
+            <div class="auto-task-title">媒体处理</div>
             <div class="auto-task-stats">
               <span>已处理: <b>{{ stats.system.processed_log_count }}</b></span>
               <span>待复核: <b style="color: #ffcccc">{{ stats.system.failed_log_count }}</b></span>
@@ -170,7 +171,8 @@
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
-                  <n-progress type="line" :percentage="(group.count / (stats.release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#fff" />
+                  <!-- ★ 修改点：更改颜色并增加 rail-color 增加辨识度 ★ -->
+                  <n-progress type="line" :percentage="(group.count / (stats.release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#8a2be2" rail-color="rgba(150, 150, 150, 0.2)" />
                 </div>
                 <div class="ranking-count">{{ group.count }} 部</div>
               </div>
@@ -191,7 +193,8 @@
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
-                  <n-progress type="line" :percentage="(group.count / (stats.historical_release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#fff" />
+                  <!-- ★ 修改点：更改颜色并增加 rail-color 增加辨识度 ★ -->
+                  <n-progress type="line" :percentage="(group.count / (stats.historical_release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#8a2be2" rail-color="rgba(150, 150, 150, 0.2)" />
                 </div>
                 <div class="ranking-count">{{ group.count }} 部</div>
               </div>
@@ -297,7 +300,6 @@ const resolutionChartOptions = computed(() => {
 });
 
 const getIconPath = (groupName) => groupName ? `/icons/site/${groupName}.png` : '';
-// ★★★ 恢复图标兜底逻辑 ★★★
 const handleIconError = (e) => {
   const img = e.target;
   const currentSrc = img.src;
@@ -325,7 +327,6 @@ onMounted(() => {
 .greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: var(--text-primary); }
 .greeting-subtitle { font-size: 14px; color: var(--text-secondary); margin: 0; }
 
-/* 媒体库分布右侧的小方块内容居中 */
 .mini-stat-box-content {
   display: flex;
   flex-direction: column;
@@ -336,7 +337,6 @@ onMounted(() => {
 .mini-stat-val { font-size: 28px; font-weight: bold; color: var(--text-primary); }
 .mini-stat-label { font-size: 13px; color: var(--text-primary); margin-top: 4px; opacity: 0.8; }
 
-/* 自动化任务便当盒 */
 .auto-task-block {
   padding: 16px;
   height: 100%;
@@ -349,22 +349,33 @@ onMounted(() => {
 .auto-task-stats span { display: flex; justify-content: space-between; }
 .auto-task-stats b { color: var(--text-primary); font-size: 14px; font-weight: 900; }
 
-/* 排行榜列表 */
 .ranking-list { display: flex; flex-direction: column; gap: 12px; }
 .ranking-item {
   display: flex; align-items: center; padding: 12px 16px;
   background: var(--glass-border); border-radius: 12px; border: 1px solid var(--glass-border-light);
 }
-.ranking-index { width: 24px; font-weight: bold; color: var(--text-secondary); }
+.ranking-index { width: 24px; font-weight: bold; color: var(--text-secondary); flex-shrink: 0; }
 .ranking-index.top-3 { color: #fff; text-shadow: 0 0 8px rgba(255,255,255,0.8); }
-.site-icon { width: 20px; height: 20px; margin-right: 12px; border-radius: 4px; }
-.ranking-name { width: 100px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ranking-bar-container { flex: 1; margin: 0 16px; }
-.ranking-count { width: 50px; text-align: right; font-size: 13px; color: var(--text-secondary); }
+.site-icon { width: 20px; height: 20px; margin-right: 12px; border-radius: 4px; flex-shrink: 0; }
 
+/* ★ 修改点：减少固定宽度，避免短名称站点后留有大片空白 */
+.ranking-name { width: 90px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+
+/* ★ 修改点：缩窄左右间距，让进度条尽可能长 */
+.ranking-bar-container { flex: 1; margin: 0 10px; min-width: 50px; }
+
+.ranking-count { width: 50px; text-align: right; font-size: 13px; color: var(--text-secondary); flex-shrink: 0; }
+
+/* ★ 修改点：专门优化移动端，极度压缩其他元素的空间，拉长进度条 */
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
-  .ranking-name { width: 80px; }
+  
+  .ranking-item { padding: 10px 12px; }
+  .ranking-index { width: 18px; font-size: 13px; }
+  .site-icon { margin-right: 8px; width: 16px; height: 16px; }
+  .ranking-name { width: 65px; font-size: 13px; }
+  .ranking-bar-container { margin: 0 6px; }
+  .ranking-count { width: 45px; font-size: 12px; }
 }
 </style>
