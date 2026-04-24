@@ -18,7 +18,7 @@
 
     <n-spin :show="loading.core || loading.library || loading.system || loading.subscription || loading.rankings">
       
-      <!-- ★★★ 1. 媒体库分布 (拆分为 5 个独立模块) ★★★ -->
+      <!-- ★★★ 1. 媒体库分布 (拆分为 5 个独立模块，应用多彩色) ★★★ -->
       <n-grid cols="1 lg:2" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
         <!-- 左侧：图表模块 -->
         <n-gi>
@@ -67,11 +67,11 @@
         </n-gi>
       </n-grid>
 
-      <!-- ★★★ 2. 其他数据模块 (一行四个) ★★★ -->
+      <!-- ★★★ 2. 其他数据模块 (一行四个，应用多彩色) ★★★ -->
       <n-grid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
         
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-orange">
             <div class="auto-task-title">基础缓存</div>
             <div class="auto-task-stats">
               <span>已缓存媒体: <b>{{ stats.media_library.cached_total }}</b></span>
@@ -82,73 +82,73 @@
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-red">
             <div class="auto-task-title">系统日志</div>
             <div class="auto-task-stats">
               <span>已处理: <b>{{ stats.system.processed_log_count }}</b></span>
-              <span>待复核: <b style="color: #e88080">{{ stats.system.failed_log_count }}</b></span>
+              <span>待复核: <b style="color: #ffcccc">{{ stats.system.failed_log_count }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-purple">
             <div class="auto-task-title">智能追剧</div>
             <div class="auto-task-stats">
               <span>追剧中: <b>{{ stats.subscriptions_card.watchlist.watching }}</b></span>
-              <span>已暂停: <b style="color: #f2c97d">{{ stats.subscriptions_card.watchlist.paused }}</b></span>
-              <span>已完结: <b style="color: #63e2b7">{{ stats.subscriptions_card.watchlist.completed }}</b></span>
+              <span>已暂停: <b style="color: #ffe4b5">{{ stats.subscriptions_card.watchlist.paused }}</b></span>
+              <span>已完结: <b style="color: #c1f0c1">{{ stats.subscriptions_card.watchlist.completed }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-blue">
             <div class="auto-task-title">演员订阅</div>
             <div class="auto-task-stats">
               <span>已订阅: <b>{{ stats.subscriptions_card.actors.subscriptions }}</b></span>
-              <span>作品入库: <b style="color: #63e2b7">{{ stats.subscriptions_card.actors.tracked_in_library }}</b></span>
+              <span>作品入库: <b style="color: #c1f0c1">{{ stats.subscriptions_card.actors.tracked_in_library }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-green">
             <div class="auto-task-title">原生合集</div>
             <div class="auto-task-stats">
               <span>总数: <b>{{ stats.subscriptions_card.native_collections.total }}</b></span>
-              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.native_collections.count }}</b></span>
-              <span>缺失: <b style="color: #e88080">{{ stats.subscriptions_card.native_collections.missing_items }}</b></span>
+              <span>待补: <b style="color: #ffe4b5">{{ stats.subscriptions_card.native_collections.count }}</b></span>
+              <span>缺失: <b style="color: #ffcccc">{{ stats.subscriptions_card.native_collections.missing_items }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-orange">
             <div class="auto-task-title">自建合集</div>
             <div class="auto-task-stats">
               <span>总数: <b>{{ stats.subscriptions_card.custom_collections.total }}</b></span>
-              <span>待补: <b style="color: #f2c97d">{{ stats.subscriptions_card.custom_collections.count }}</b></span>
-              <span>缺失: <b style="color: #e88080">{{ stats.subscriptions_card.custom_collections.missing_items }}</b></span>
+              <span>待补: <b style="color: #ffe4b5">{{ stats.subscriptions_card.custom_collections.count }}</b></span>
+              <span>缺失: <b style="color: #ffcccc">{{ stats.subscriptions_card.custom_collections.missing_items }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-purple">
             <div class="auto-task-title">MP 订阅配额</div>
             <div class="auto-task-stats">
               <span>今日已用: <b>{{ stats.subscriptions_card.quota.mp.consumed }}</b></span>
-              <span>今日剩余: <b style="color: #63e2b7">{{ stats.subscriptions_card.quota.mp.available }}</b></span>
+              <span>今日剩余: <b style="color: #c1f0c1">{{ stats.subscriptions_card.quota.mp.available }}</b></span>
             </div>
           </n-card>
         </n-gi>
 
         <n-gi>
-          <n-card :bordered="false" class="dashboard-card auto-task-block">
+          <n-card :bordered="false" class="dashboard-card auto-task-block tint-blue">
             <div class="auto-task-title">洗版任务</div>
             <div class="auto-task-stats">
-              <span>待洗版: <b style="color: #f2c97d">{{ stats.subscriptions_card.resubscribe.pending }}</b></span>
+              <span>待洗版: <b style="color: #ffe4b5">{{ stats.subscriptions_card.resubscribe.pending }}</b></span>
             </div>
           </n-card>
         </n-gi>
@@ -170,7 +170,7 @@
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
-                  <n-progress type="line" :percentage="(group.count / (stats.release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#8a2be2" />
+                  <n-progress type="line" :percentage="(group.count / (stats.release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#fff" />
                 </div>
                 <div class="ranking-count">{{ group.count }} 部</div>
               </div>
@@ -191,7 +191,7 @@
                 <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
                 <div class="ranking-name">{{ group.release_group }}</div>
                 <div class="ranking-bar-container">
-                  <n-progress type="line" :percentage="(group.count / (stats.historical_release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#63e2b7" />
+                  <n-progress type="line" :percentage="(group.count / (stats.historical_release_group_ranking[0]?.count || 1)) * 100" :show-indicator="false" :height="6" color="#fff" />
                 </div>
                 <div class="ranking-count">{{ group.count }} 部</div>
               </div>
@@ -282,14 +282,14 @@ const resolutionChartOptions = computed(() => {
     return { series: [{ type: 'pie', radius: ['40%', '70%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
   }
   return {
-    color: ['#8a2be2', '#18a058', '#f0a020', '#d03050', '#999', '#73C0DE'],
+    color: ['#fff', '#e0e0e0', '#c0c0c0', '#a0a0a0', '#808080', '#606060'], // 配合多彩底色，图表用纯白/灰白系更高级
     tooltip: { trigger: 'item', backgroundColor: 'rgba(20, 25, 35, 0.85)', borderColor: 'rgba(255,255,255,0.1)', textStyle: { color: '#fff' } },
-    legend: { show: true, bottom: '0', textStyle: { color: 'var(--text-secondary)' } },
+    legend: { show: true, bottom: '0', textStyle: { color: 'var(--text-primary)' } },
     series: [{
       type: 'pie',
       radius: ['45%', '75%'],
       center: ['50%', '40%'],
-      itemStyle: { borderRadius: 8, borderColor: 'rgba(20,25,35,0.8)', borderWidth: 2 },
+      itemStyle: { borderRadius: 8, borderColor: 'rgba(255,255,255,0.2)', borderWidth: 2 },
       label: { show: false },
       data: chartData.map(item => ({ value: item.count, name: item.resolution || '未知' }))
     }]
@@ -319,7 +319,7 @@ onMounted(() => {
   text-align: center;
 }
 .mini-stat-val { font-size: 28px; font-weight: bold; color: var(--text-primary); }
-.mini-stat-label { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+.mini-stat-label { font-size: 13px; color: var(--text-primary); margin-top: 4px; opacity: 0.8; }
 
 /* 自动化任务便当盒 */
 .auto-task-block {
@@ -330,9 +330,9 @@ onMounted(() => {
   justify-content: center;
 }
 .auto-task-title { font-size: 15px; font-weight: bold; color: var(--text-primary); margin-bottom: 12px; }
-.auto-task-stats { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.auto-task-stats { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-primary); opacity: 0.9; }
 .auto-task-stats span { display: flex; justify-content: space-between; }
-.auto-task-stats b { color: var(--text-primary); font-size: 14px; }
+.auto-task-stats b { color: var(--text-primary); font-size: 14px; font-weight: 900; }
 
 /* 排行榜列表 */
 .ranking-list { display: flex; flex-direction: column; gap: 12px; }
@@ -341,7 +341,7 @@ onMounted(() => {
   background: var(--glass-border); border-radius: 12px; border: 1px solid var(--glass-border-light);
 }
 .ranking-index { width: 24px; font-weight: bold; color: var(--text-secondary); }
-.ranking-index.top-3 { color: #f2c97d; }
+.ranking-index.top-3 { color: #fff; text-shadow: 0 0 8px rgba(255,255,255,0.8); }
 .site-icon { width: 20px; height: 20px; margin-right: 12px; border-radius: 4px; }
 .ranking-name { width: 100px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ranking-bar-container { flex: 1; margin: 0 16px; }
