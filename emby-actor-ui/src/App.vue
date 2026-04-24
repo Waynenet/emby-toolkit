@@ -33,26 +33,29 @@ onMounted(() => {
 <style>
 /* ==================== 1. 动态主题变量 ==================== */
 :root {
-  /* 白天模式 - 增加通透感 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2564&auto=format&fit=crop');
-  --glass-bg: rgba(255, 255, 255, 0.25); 
-  --glass-bg-hover: rgba(255, 255, 255, 0.4);
-  --glass-border: rgba(255, 255, 255, 0.4); 
-  --glass-border-light: rgba(255, 255, 255, 0.7);
-  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); 
-  --glass-blur: blur(24px); 
-  --text-primary: rgba(0, 0, 0, 0.85);
-  --text-secondary: rgba(0, 0, 0, 0.6);
+  /* 白天模式：山水风景，高通透，多彩基色 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=2564&auto=format&fit=crop'); /* 绝美山水 */
+  --global-bg-color: #4a6b82;
+  --glass-bg: rgba(255, 255, 255, 0.1); 
+  --glass-bg-hover: rgba(255, 255, 255, 0.2);
+  --glass-border: rgba(255, 255, 255, 0.2); 
+  --glass-border-light: rgba(255, 255, 255, 0.4);
+  --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1); 
+  --glass-blur: blur(12px); 
+  --text-primary: rgba(255, 255, 255, 0.95); /* 强制白字 */
+  --text-secondary: rgba(255, 255, 255, 0.75);
 }
 
 html.dark {
-  /* 暗色模式 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop');
-  --glass-bg: rgba(20, 25, 35, 0.45); 
-  --glass-bg-hover: rgba(30, 35, 45, 0.6);
-  --glass-border: rgba(255, 255, 255, 0.1); 
-  --glass-border-light: rgba(255, 255, 255, 0.25);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+  /* 黑夜模式：灰黑极简，无模糊 */
+  --global-bg-image: url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2564&auto=format&fit=crop'); /* 灰黑暗纹 */
+  --global-bg-color: #121212;
+  --glass-bg: rgba(20, 25, 35, 0.15); 
+  --glass-bg-hover: rgba(30, 35, 45, 0.25);
+  --glass-border: rgba(255, 255, 255, 0.05); 
+  --glass-border-light: rgba(255, 255, 255, 0.15);
+  --glass-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.3);
+  --glass-blur: blur(0px); /* 0模糊 */
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
 }
@@ -63,6 +66,7 @@ html, body {
   padding: 0; 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
   overflow: hidden; 
+  background-color: var(--global-bg-color);
   background-image: var(--global-bg-image);
   background-size: cover;
   background-position: center;
@@ -85,20 +89,19 @@ html, body {
   box-shadow: var(--glass-shadow) !important;
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+  transition: background 0.3s, border-color 0.3s, transform 0.2s, box-shadow 0.2s !important;
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
-  opacity: 0;
   font-size: 14px; 
-  transform: translateY(20px); 
-  animation: card-fade-in 0.5s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
+  /* 删除了 opacity: 0 和 animation，彻底解决模糊延迟问题 */
 }
 
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
-  transform: translateY(-4px) !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
 }
 
 .dashboard-card > .n-card__content {
@@ -133,22 +136,8 @@ html, body {
   color: var(--text-primary) !important;
 }
 
-@keyframes card-fade-in { to { opacity: 1; transform: translateY(0); } }
-.dashboard-card:nth-child(1) { animation-delay: 0.05s; }
-.dashboard-card:nth-child(2) { animation-delay: 0.10s; }
-.dashboard-card:nth-child(3) { animation-delay: 0.15s; }
-
 /* ==================== 3. 彻底隐藏滚动条 ==================== */
-/* 强制隐藏所有原生滚动条 */
-* { 
-  scrollbar-width: none !important; 
-  -ms-overflow-style: none !important; 
-}
-::-webkit-scrollbar { 
-  display: none !important; 
-  width: 0 !important; 
-  height: 0 !important; 
-}
-/* 隐藏 Naive UI 模拟的滚动条轨道 */
+* { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
 .n-scrollbar-rail { display: none !important; }
 </style>

@@ -32,13 +32,13 @@ const backgroundTaskStatus = ref({ is_running: false, current_action: '空闲' }
 let statusIntervalId = null;
 const app = document.getElementById('app');
 
-// 动态生成 Naive UI 覆盖配置
+// 动态生成 Naive UI 覆盖配置 (强制白字)
 const getThemeOverrides = (isDark) => {
-  const textColor = isDark ? 'rgba(255, 255, 255, 0.95)' : 'rgba(0, 0, 0, 0.85)';
-  const textColor2 = isDark ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)';
-  const inputBg = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
-  const inputBgActive = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
-  const borderColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+  const textColor = 'rgba(255, 255, 255, 0.95)';
+  const textColor2 = 'rgba(255, 255, 255, 0.75)';
+  const inputBg = 'rgba(255, 255, 255, 0.05)';
+  const inputBgActive = 'rgba(255, 255, 255, 0.1)';
+  const borderColor = 'rgba(255, 255, 255, 0.15)';
   
   return {
     common: {
@@ -46,12 +46,12 @@ const getThemeOverrides = (isDark) => {
       primaryColorHover: '#9b4dec',
       textColor1: textColor,
       textColor2: textColor2,
-      textColor3: isDark ? 'rgba(255, 255, 255, 0.5)' : 'rgba(0, 0, 0, 0.4)',
+      textColor3: 'rgba(255, 255, 255, 0.5)',
       dividerColor: borderColor,
       bodyColor: 'transparent',
       cardColor: 'transparent',
-      modalColor: isDark ? 'rgba(30, 35, 45, 0.85)' : 'rgba(255, 255, 255, 0.85)',
-      popoverColor: isDark ? 'rgba(30, 35, 45, 0.85)' : 'rgba(255, 255, 255, 0.85)',
+      modalColor: isDark ? 'rgba(20, 25, 35, 0.9)' : 'rgba(0, 0, 0, 0.6)',
+      popoverColor: isDark ? 'rgba(20, 25, 35, 0.9)' : 'rgba(0, 0, 0, 0.6)',
     },
     Card: { color: 'transparent', borderColor: 'transparent' },
     Input: {
@@ -81,9 +81,8 @@ const getThemeOverrides = (isDark) => {
 const applyTheme = (isDark) => {
   const root = document.documentElement;
   app.dispatchEvent(new CustomEvent('update-naive-theme', { detail: getThemeOverrides(isDark) }));
-  
   root.classList.remove('dark', 'light');
-  root.classList.add(isDark ? 'dark' : 'light');
+  root.classList.add('dark'); // 强制暗色模式底色以保证白字清晰
 };
 
 const handleModeChange = (isDark) => {
