@@ -19,7 +19,7 @@
     <n-spin :show="loading.core || loading.library || loading.system || loading.subscription || loading.rankings">
       
       <!-- ★★★ 1. 媒体库分布 (拆分为 5 个独立模块，应用多彩色) ★★★ -->
-      <n-grid cols="1 lg:2" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
+      <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
         <!-- 左侧：图表模块 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card tint-blue" style="height: 100%;">
@@ -156,7 +156,7 @@
       </n-grid>
 
       <!-- ★★★ 3. 发布组排行 (底部并列) ★★★ -->
-      <n-grid cols="1 lg:2" :x-gap="16" :y-gap="16" responsive="screen">
+      <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen">
         <!-- 左侧：今日排行 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
