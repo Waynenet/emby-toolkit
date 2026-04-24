@@ -61,7 +61,7 @@
             <n-icon :component="props.isDark ? MoonIcon : SunnyIcon" size="18" />
           </div>
 
-          <!-- ★★★ 修复：日志模块图标对齐 ★★★ -->
+          <!-- 日志模块 -->
           <div v-if="authStore.isAdmin" class="header-module log-module">
             <div class="log-btn" @click="isRealtimeLogVisible = true">
               <n-icon :component="ReaderOutline" size="18" />
@@ -262,7 +262,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
-/* ★★★ 修复手机端菜单字体颜色 ★★★ */
+/* ★★★ 强制覆盖侧边栏所有文字颜色为纯白 ★★★ */
 .sider-menu-container {
   flex: 1; 
   overflow-y: auto; 
@@ -270,11 +270,16 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   padding: 0 12px; 
 }
 .n-menu-item { margin-top: 4px; }
-.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
+.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.6); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
-/* 强制覆盖手机端菜单文字颜色为白色 */
-.mobile-sider .n-menu .n-menu-item-content__title,
-.mobile-sider .n-menu .n-menu-item-content__icon {
+
+/* 强制覆盖菜单文字颜色为白色 */
+.glass-sider .n-menu .n-menu-item-content__title,
+.glass-sider .n-menu .n-menu-item-content__icon {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+.glass-sider .n-menu .n-menu-item--selected .n-menu-item-content__title,
+.glass-sider .n-menu .n-menu-item--selected .n-menu-item-content__icon {
   color: #fff !important;
 }
 
@@ -290,7 +295,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border-radius: 20px;
   border: 1px solid var(--glass-border-light);
 }
-.app-version { font-size: 12px; color: var(--text-secondary); font-family: monospace; font-weight: bold; }
+.app-version { font-size: 12px; color: rgba(255,255,255,0.6); font-family: monospace; font-weight: bold; }
 
 /* 顶部模块化操作栏 */
 .top-header-bar {
@@ -317,7 +322,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   color: var(--text-primary);
   transition: all 0.2s;
   cursor: pointer;
-  height: 36px; /* 统一高度 */
+  height: 36px; 
 }
 .header-module:hover {
   background: var(--glass-bg-hover);
@@ -329,7 +334,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   justify-content: center;
 }
 
-/* ★★★ 修复日志模块样式，使其与旁边图标对齐 ★★★ */
 .log-module {
   padding: 0 12px;
   gap: 8px;
