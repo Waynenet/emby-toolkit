@@ -5,6 +5,8 @@ import extensions
 import requests
 import logging
 import ipaddress
+import urllib.parse
+import re
 from datetime import datetime
 from config_manager import APP_CONFIG, get_proxies_for_requests
 from database import media_db
@@ -86,8 +88,27 @@ def _format_ticks_to_time(ticks: int) -> str:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
+def _translate_to_chinese(text: str) -> str:
+    """利用 Google Translate 免费接口将英文地理位置翻译为中文"""
+    if not text:
+        return ""
+    try:
+        encoded_text = urllib.parse.quote(text)
+        # 使用 gtx 客户端可免 Key 调用
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q={encoded_text}"
+        proxies = get_proxies_for_requests()
+        response = requests.get(url, timeout=3, proxies=proxies)
+        if response.status_code == 200:
+            data = response.json()
+            # 拼接翻译结果（应对多段句子）
+            translated = "".join([sentence[0] for sentence in data[0]])
+            return translated
+    except Exception as e:
+        logger.debug(f"  ➜ 地理位置翻译失败 '{text}': {e}")
+    return text
+
 def _get_ip_location(clean_ip: str) -> str:
-    """请求外部接口获取纯净 IP 的物理地理位置 (国内精准版)"""
+    """请求 IP.SB 接口获取 IP 的物理地理位置并翻译为中文"""
     if not clean_ip:
         return ""
 
@@ -99,43 +120,45 @@ def _get_ip_location(clean_ip: str) -> str:
     except ValueError:
         pass 
 
-    # 1. 优先使用国内最准的“太平洋网络”接口
     try:
-        url_pc = f"https://whois.pconline.com.cn/ipJson.jsp?ip={clean_ip}&json=true"
-        # 注意：查国内接口最好不走代理，所以这里直接 requests.get
-        response_pc = requests.get(url_pc, timeout=3)
-        if response_pc.status_code == 200:
-            # 太平洋网络返回的是 GBK 编码，必须手动指定否则中文会乱码
-            response_pc.encoding = 'GBK'
-            data_pc = response_pc.json()
-            addr = data_pc.get('addr', '').strip()
-            if addr:
-                return addr
-    except Exception as e:
-        logger.debug(f"  ➜ 太平洋网络 IP 查询失败，准备降级兜底: {e}")
-
-    # 2. 如果太平洋网络挂了，降级使用 ip-api 作为兜底 (对海外IP也有效)
-    try:
-        url_api = f"http://ip-api.com/json/{clean_ip}?lang=zh-CN"
+        url = f"https://api.ip.sb/geoip/{clean_ip}"
+        headers = {"User-Agent": "Mozilla/5.0"}
         proxies = get_proxies_for_requests()
-        response_api = requests.get(url_api, timeout=3, proxies=proxies)
+        response = requests.get(url, headers=headers, timeout=5, proxies=proxies)
         
-        if response_api.status_code == 200:
-            data_api = response_api.json()
-            if data_api.get('status') == 'success':
-                country = data_api.get('country', '')
-                region = data_api.get('regionName', '')
-                city = data_api.get('city', '')
-                
-                # 组装并去重 (例如 "中国 上海 上海" 变为 "中国 上海")
-                parts = []
-                for loc in [country, region, city]:
-                    if loc and loc not in parts:
-                        parts.append(loc)
-                if parts:
-                    return " ".join(parts)
+        if response.status_code == 200:
+            data = response.json()
+            country = data.get('country', '')
+            region = data.get('region', '')
+            city = data.get('city', '')
+            isp = data.get('organization', '')
+            
+            # 组装地理位置并去重
+            loc_parts = []
+            for loc in [country, region, city]:
+                if loc and loc not in loc_parts:
+                    loc_parts.append(loc)
+            
+            final_str = ""
+            if loc_parts:
+                english_loc = ", ".join(loc_parts)
+                # 将英文的 国家,省份,城市 翻译为中文
+                chinese_loc = _translate_to_chinese(english_loc)
+                # 清理翻译后可能出现的逗号，让格式更紧凑
+                chinese_loc = chinese_loc.replace(", ", " ").replace("，", " ")
+                final_str += chinese_loc
+            
+            if isp:
+                # 去掉 ISP 字符串开头可能附带的 ASN 号 (如 "AS13335 Cloudflare, Inc." -> "Cloudflare, Inc.")
+                isp_clean = re.sub(r'^AS\d+\s+', '', isp)
+                if final_str:
+                    final_str += f" ({isp_clean})"
+                else:
+                    final_str = isp_clean
+                    
+            return final_str
     except Exception as e:
-        logger.debug(f"  ➜ 备用 IP 归属地查询也失败了 ({clean_ip}): {e}")
+        logger.debug(f"  ➜ IP.SB 归属地查询失败 ({clean_ip}): {e}")
         
     return ""
 
@@ -387,7 +410,7 @@ def send_playback_notification(data: dict):
         # --- 获取 IP 地理位置 ---
         ip_location = _get_ip_location(ip_address_raw)
         
-        # 组装最终展示的 IP (等宽显示 IP，非等宽显示位置信息并带个图钉图标)
+        # 组装最终展示的 IP (等宽显示 IP，非等宽显示位置信息)
         display_ip = f"`{escape_markdown(ip_address_raw)}`"
         if ip_location:
             display_ip += f" {escape_markdown(ip_location)}"
@@ -464,9 +487,6 @@ def send_playback_notification(data: dict):
 # ======================================================================
 # ★★★ Telegram 机器人交互监听 (长轮询) ★★★
 # ======================================================================
-import re
-import time
-import threading
 
 # 全局变量控制轮询线程
 _tg_polling_thread = None
