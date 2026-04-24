@@ -45,7 +45,7 @@
     <!-- 右侧内容区 -->
     <n-layout-content class="app-main-content" :native-scrollbar="true">
       
-      <!-- ★★★ 新增：顶部模块化操作栏 ★★★ -->
+      <!-- 顶部模块化操作栏 -->
       <div class="top-header-bar">
         <!-- 左侧：移动端菜单按钮 -->
         <div class="header-left">
@@ -61,17 +61,17 @@
             <n-icon :component="props.isDark ? MoonIcon : SunnyIcon" size="18" />
           </div>
 
-          <!-- 日志模块 -->
+          <!-- ★★★ 修复：日志模块图标对齐 ★★★ -->
           <div v-if="authStore.isAdmin" class="header-module log-module">
-            <n-button text @click="isRealtimeLogVisible = true" style="color: inherit;">
-              <template #icon><n-icon :component="ReaderOutline" /></template>
+            <div class="log-btn" @click="isRealtimeLogVisible = true">
+              <n-icon :component="ReaderOutline" size="18" />
               <span v-if="!isMobile">实时</span>
-            </n-button>
+            </div>
             <div class="module-divider"></div>
-            <n-button text @click="isHistoryLogVisible = true" style="color: inherit;">
-              <template #icon><n-icon :component="ArchiveOutline" /></template>
+            <div class="log-btn" @click="isHistoryLogVisible = true">
+              <n-icon :component="ArchiveOutline" size="18" />
               <span v-if="!isMobile">历史</span>
-            </n-button>
+            </div>
           </div>
 
           <!-- 用户模块 -->
@@ -238,7 +238,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   height: calc(100vh - 32px) !important; 
 }
 
-/* 强制覆盖 Naive UI 侧边栏内部容器，实现 Flex 布局 */
 :deep(.n-layout-sider-scroll-container) {
   display: flex !important;
   flex-direction: column !important;
@@ -263,6 +262,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
+/* ★★★ 修复手机端菜单字体颜色 ★★★ */
 .sider-menu-container {
   flex: 1; 
   overflow-y: auto; 
@@ -272,8 +272,12 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .n-menu-item { margin-top: 4px; }
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
+/* 强制覆盖手机端菜单文字颜色为白色 */
+.mobile-sider .n-menu .n-menu-item-content__title,
+.mobile-sider .n-menu .n-menu-item-content__icon {
+  color: #fff !important;
+}
 
-/* 底部版本号模块 */
 .sider-bottom-tools {
   padding: 16px;
   display: flex;
@@ -288,7 +292,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .app-version { font-size: 12px; color: var(--text-secondary); font-family: monospace; font-weight: bold; }
 
-/* ★★★ 顶部模块化操作栏 ★★★ */
+/* 顶部模块化操作栏 */
 .top-header-bar {
   display: flex;
   justify-content: space-between;
@@ -313,6 +317,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   color: var(--text-primary);
   transition: all 0.2s;
   cursor: pointer;
+  height: 36px; /* 统一高度 */
 }
 .header-module:hover {
   background: var(--glass-bg-hover);
@@ -320,20 +325,33 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   transform: translateY(-2px);
 }
 .icon-module {
-  padding: 8px;
+  padding: 0 10px;
   justify-content: center;
 }
+
+/* ★★★ 修复日志模块样式，使其与旁边图标对齐 ★★★ */
 .log-module {
-  padding: 4px 12px;
+  padding: 0 12px;
   gap: 8px;
+}
+.log-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: inherit;
+}
+.log-btn:hover {
+  opacity: 0.8;
 }
 .module-divider {
   width: 1px;
   height: 14px;
   background: var(--glass-border-light);
 }
+
 .user-module {
-  padding: 6px 12px;
+  padding: 0 12px;
   gap: 8px;
 }
 .username-text {
