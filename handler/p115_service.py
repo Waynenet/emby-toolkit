@@ -655,16 +655,20 @@ class P115Service:
                         time.sleep(1.5 - elapsed)
                     
                     try:
-                        # ★ 核心修复：使用独立线程池强制设置 15 秒超时，防止第三方库底层 Socket 死锁！
+                        # ★ 核心修复：抛弃 with 语法，防止 wait=True 导致主线程死锁！
                         from concurrent.futures import ThreadPoolExecutor, TimeoutError
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(self._cookie.download_url, pick_code, user_agent)
-                            try:
-                                res = future.result(timeout=15)
-                            except TimeoutError:
-                                logger.error(f"  🛑 [超时拦截] 获取直链网络卡死超过 15 秒，已强制切断！")
-                                P115Service._last_downurl_time = time.time()
-                                return None
+                        executor = ThreadPoolExecutor(max_workers=1)
+                        future = executor.submit(self._cookie.download_url, pick_code, user_agent)
+                        try:
+                            res = future.result(timeout=15)
+                            executor.shutdown(wait=False) # 正常结束，清理线程池
+                        except TimeoutError:
+                            logger.error(f"  🛑 [超时拦截] 获取直链网络卡死超过 15 秒，已强制切断！")
+                            P115Service._last_downurl_time = time.time()
+                            executor.shutdown(wait=False) # ★ 关键：不等卡死的线程，直接跑路！
+                            # ★ 终极自愈：重置 Cookie 客户端，丢弃底层卡死的 Socket 连接池
+                            P115Service.reset_cookie_client()
+                            return None
 
                         P115Service._last_downurl_time = time.time()
                         
@@ -2016,17 +2020,39 @@ class SmartOrganizer:
 
     def _get_friendly_display_info(self, raw_lang, raw_title, stream_type):
         """
-        返回: (底层ISO代码, UI主标题, UI副标题)
-        Title 才是真理！强制纠错底层语言标签，并智能转换“语/文”。
+        返回：(底层 ISO 代码，UI 主标题，UI 副标题)
+        Title 才是真理！强制纠错底层语言标签，并智能转换"语/文"。
         """
+        # 防御性检查，防止 language_map 未初始化导致报错
+        if not hasattr(self, 'language_map') or not self.language_map:
+            self.language_map = settings_db.get_setting('language_mapping') or utils.DEFAULT_LANGUAGE_MAPPING
+        
         raw_lang = str(raw_lang or "").strip()
         raw_title = str(raw_title or "").strip()
 
-        norm_lang = helpers.normalize_lang_code(raw_lang)
         title_lower = raw_title.lower()
         lang_lower = raw_lang.lower()
+        title_clean = re.sub(r'[\.\-_+/|]+', ' ', title_lower)
 
-        combined_text = f"{title_lower} {lang_lower}"
+        # ==========================================
+        # ★ 贯彻“以 Title 为准”：如果 Title 中包含明确的语言关键字，则屏蔽底层 Lang 的干扰
+        # ==========================================
+        title_has_lang = False
+        if any(x in title_clean for x in ["chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "简英", "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁英", "eng", "english", "英文", "英语", "英字", "台配", "台灣", "台湾"]):
+            title_has_lang = True
+        else:
+            for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                if any(k.lower() in title_clean for k in keywords):
+                    title_has_lang = True
+                    break
+
+        if title_has_lang:
+            lang_lower = "" # Title 已经有语言信息，完全忽略 raw_lang，防止冲突
+            norm_lang = helpers.normalize_lang_code(raw_title) # 尝试从 title 提取底层代码
+        else:
+            norm_lang = helpers.normalize_lang_code(raw_lang)
+
+        combined_text = f"{title_lower} {lang_lower}".strip()
         clean_text = re.sub(r'[\.\-_+/|]+', ' ', combined_text)
 
         display_lang = ""
@@ -2068,6 +2094,13 @@ class SmartOrganizer:
                 elif is_chi:
                     norm_lang = "chi"
                     display_lang = "简体"
+                else:
+                    # ★ 补充：如果 Title 是纯外语（如 English, Japanese），也应该能推导出 norm_lang
+                    for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                        if any(k.lower() in combined_text for k in keywords):
+                            norm_lang = key.replace('sub_', '')
+                            break
+
         else:
             # ==========================================
             # 音轨流：保留 yue，专门用于标识粤语发音
@@ -2089,7 +2122,15 @@ class SmartOrganizer:
 
         # 格式化兜底的 display_lang
         if not display_lang:
-            base_label = helpers.get_lang_display_label(norm_lang) if norm_lang else ""
+            base_label = ""
+            if norm_lang:
+                for item in self.language_map:
+                    if item.get('value') == norm_lang or norm_lang in item.get('aliases', []):
+                        base_label = item.get('label')
+                        break
+                if not base_label:
+                    base_label = norm_lang.upper()
+                    
             if not base_label or base_label == "未知":
                 display_lang = base_label
             else:
@@ -2106,6 +2147,65 @@ class SmartOrganizer:
                     display_lang = base_label
 
         friendly_title = raw_title
+        # 非中文 Title 用格式化后的 display_lang 覆盖，例如 Japanese -> 日文
+        if display_lang and display_lang != "未知":
+            if not friendly_title or not utils.contains_chinese(friendly_title):
+                friendly_title = display_lang
+
+        # ★ Audio Title 净化：语言头中文化 + 清理 DD5.1 / DD2.0 / 640Kbps 这类纯技术标题
+        if stream_type == "Audio":
+            # 1. 先把英文语言名替换成中文
+            audio_replace_map = {
+                "Mandarin Chinese": "国语",
+                "Mandarin": "国语",
+                "Chinese": "国语",
+                "Cantonese": "粤语",
+                "English": "英语",
+                "Japanese": "日语",
+                "Korean": "韩语",
+                "Director's Commentary": "导评",
+                "Audio Commentary": "导评",
+                "Commentary": "导评",
+            }
+
+            for old, new in audio_replace_map.items():
+                friendly_title = re.sub(rf'\b{re.escape(old)}\b', new, friendly_title, flags=re.IGNORECASE)
+
+            # 2. 判断 Title 是否只是纯技术参数
+            title_compact = re.sub(r'[\s\.\-_]+', '', friendly_title.lower())
+
+            is_pure_audio_tech_title = bool(re.fullmatch(
+                r'(dd|ddp|ac3|eac3|dts|dtshdma|truehd|aac|flac)?'
+                r'(\d{1,2}(\.\d)?)?'
+                r'(\d+)?'
+                r'(kbps|mbps|k)?',
+                title_compact
+            ))
+
+            # 更宽松处理：DD5.1 640Kbps / DD2.0 192Kbps / AC3 stereo
+            if re.fullmatch(
+                r'(?i)\s*(dd|ddp|ac3|eac3|dts|dts[-\s]?hd(\s?ma)?|truehd|aac|flac)?'
+                r'[\s\.\-]*(\d{1,2}(\.\d)?)?'
+                r'[\s\.\-]*(stereo|mono|kbps|mbps|k|bps|\d+\s?kbps)?\s*',
+                raw_title or ""
+            ):
+                is_pure_audio_tech_title = True
+
+            # 3. 纯技术标题直接覆盖成语言名
+            if is_pure_audio_tech_title and display_lang and display_lang != "未知":
+                friendly_title = display_lang
+            else:
+                # 4. 非纯技术标题，去掉重复编码/声道，只保留有意义的特色词
+                friendly_title = re.sub(
+                    r'\b(AC3|EAC3|DTS|DTS[- ]?HD|DTS[- ]?HD MA|TRUEHD|ATMOS|AAC|FLAC|DDP|DD|5\.1|7\.1|2\.0|stereo|mono|\d+\s?kbps|\d+\s?mbps)\b',
+                    '',
+                    friendly_title,
+                    flags=re.IGNORECASE
+                )
+                friendly_title = re.sub(r'\s+', ' ', friendly_title).strip(" -_/()（）")
+
+                if not friendly_title and display_lang and display_lang != "未知":
+                    friendly_title = display_lang
         
         # ==========================================
         # ★ 智能标题处理：保留有用信息，替换不规范词，追加缺失属性
@@ -2132,7 +2232,11 @@ class SmartOrganizer:
                 # 替换不规范的简繁称呼，确保能触发 Emby 的 Simplified/Traditional 机制
                 replace_map = {
                     "简中": "简体", "简体中文": "简体", "中文(简体)": "简体", "中文（简体）": "简体",
-                    "繁中": "繁体", "繁体中文": "繁体", "中文(繁体)": "繁体", "中文（繁體）": "繁体"
+                    "繁中": "繁体", "繁体中文": "繁体", "中文(繁体)": "繁体", "中文（繁體）": "繁体",
+                    "Director's Commentary": "导评",
+                    "Audio Commentary": "导评",
+                    "Commentary": "导评",
+                    "commentary": "导评"
                 }
                 for old, new in replace_map.items():
                     friendly_title = friendly_title.replace(old, new)
@@ -2604,6 +2708,10 @@ class SmartOrganizer:
                 for s in audio_streams:
                     is_target = (s == default_audio)
                     s["IsDefault"] = is_target
+                    
+                    # ★★★ 核心修复：剥夺落选者的强制特权，防止造反 ★★★
+                    if not is_target:
+                        s["IsForced"] = False
 
                     import re
                     dt = re.sub(r'\(默认\s*', '(', s.get("DisplayTitle", ""))
@@ -2708,6 +2816,11 @@ class SmartOrganizer:
                 for s in sub_streams:
                     is_target = (s == default_sub)
                     s["IsDefault"] = is_target
+                    
+                    # ★★★ 核心修复：剥夺落选者的强制特权，防止造反 ★★★
+                    if not is_target:
+                        s["IsForced"] = False
+                        
                     import re
                     dt = re.sub(r'\(默认\s*', '(', s.get("DisplayTitle", ""))
                     dt = dt.replace('(默认)', '').replace('默认', '').replace('()', '').strip()

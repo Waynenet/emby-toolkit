@@ -25,8 +25,8 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "kor": ["Korean", "KOR", "韩语"],
 
     # 字幕：chi=简体, yue=繁体
-    "sub_chi": ["CHS", "SC", "GB", "简体", "簡體", "简中", "簡中", "Simplified"],
-    "sub_yue": ["CHT", "TC", "BIG5", "繁體", "繁体", "繁中", "Traditional", "tw", "hk", "ZH-HANT"],
+    "sub_chi": ["CHS", "SC", "GB", "ZHS", "简体", "簡體", "简中", "簡中", "Simplified"],
+    "sub_yue": ["CHT", "TC", "BIG5", "ZHT", "繁體", "繁体", "繁中", "Traditional", "tw", "hk", "ZH-HANT"],
     "sub_eng": ["ENG", "英字"],
     "sub_jpn": ["JPN", "日字", "日文"],
     "sub_kor": ["KOR", "韩字", "韩文"],
@@ -347,34 +347,6 @@ def normalize_lang_code(lang_str: str) -> str:
 
     # 兜底：如果都没匹配上，返回原字符串
     return lang_str
-
-def get_lang_display_label(lang_code: str) -> str:
-    """
-    根据标准化的语言代码，反查其对应的中文显示标签。
-    """
-    if not lang_code:
-        return "未知"
-        
-    lang_code = lang_code.lower().strip()
-    
-    from database import settings_db
-    import utils
-    lang_mapping = settings_db.get_setting('language_mapping')
-    if not lang_mapping:
-        lang_mapping = utils.DEFAULT_LANGUAGE_MAPPING
-        
-    for item in lang_mapping:
-        val = (item.get('value') or '').lower()
-        aliases = item.get('aliases', [])
-        if isinstance(aliases, str):
-            aliases = [a.strip().lower() for a in aliases.split(',')]
-        else:
-            aliases = [str(a).lower() for a in aliases]
-            
-        if lang_code == val or lang_code in aliases:
-            return item.get('label', '未知')
-            
-    return lang_code.upper()
 
 def _get_detected_languages_from_streams(
     media_streams: List[dict],
