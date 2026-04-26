@@ -17,62 +17,17 @@
       <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="未通过" :value="stats.failed" style="--n-value-text-color: #e88080" /></n-card></n-gi>
     </n-grid>
 
-    <!-- 2. 主体内容模块 (左侧列表，右侧面板) -->
-    <n-grid :x-gap="24" :y-gap="24" cols="1 lg:3" responsive="screen">
+    <!-- 2. 中部模块：账户信息 & 播放记录 (电脑端并列显示) -->
+    <n-grid :x-gap="24" :y-gap="24" cols="1 m:2" responsive="screen" style="margin-bottom: 24px;">
       
-      <!-- 左侧：订阅历史列表 (占 2/3) -->
-      <n-gi span="1 lg:2">
-        <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%">
-          <template #header>
-            <span class="card-title">最近的订阅动态</span>
-          </template>
-          <template #header-extra>
-            <n-radio-group v-model:value="filterStatus" size="small">
-              <n-radio-button value="all">全部</n-radio-button>
-              <n-radio-button value="completed">已完成</n-radio-button>
-              <n-radio-button value="processing">处理中</n-radio-button>
-            </n-radio-group>
-          </template>
+      <!-- 左侧/上方：账户信息卡片 -->
+      <n-gi>
+        <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
+          <template #header><span class="card-title">账户详情</span></template>
           
-          <n-spin :show="loading">
-            <div v-if="subscriptionHistory.length > 0" class="custom-list">
-              <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
-                <!-- 左侧图标块 -->
-                <div class="item-icon-block" :class="getStatusType(item.status)">
-                  {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
-                </div>
-                <!-- 中间内容 -->
-                <div class="item-content">
-                  <div class="item-title">{{ item.title }}</div>
-                  <div class="item-desc">
-                    <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
-                      {{ getStatusText(item.status) }}
-                    </n-tag>
-                    <span v-if="item.notes">备注: {{ item.notes }}</span>
-                  </div>
-                </div>
-                <!-- 右侧时间 -->
-                <div class="item-meta">
-                  <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
-                </div>
-              </div>
-            </div>
-            <n-empty v-else description="暂无订阅记录" style="margin: 40px 0;" />
-          </n-spin>
-
-          <div v-if="totalRecords > pageSize" style="margin-top: 16px; display: flex; justify-content: center;">
-            <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" />
-          </div>
-        </n-card>
-      </n-gi>
-
-      <!-- 右侧：账户信息 & 播放记录 (占 1/3) -->
-      <n-gi span="1 lg:1">
-        <n-space vertical :size="24" style="height: 100%;">
-          
-          <!-- 账户信息卡片 -->
-          <n-card :bordered="false" class="dashboard-card action-module">
-            <template #header><span class="card-title">账户详情</span></template>
+          <!-- 用户信息与等级信息同行显示 -->
+          <div class="account-info-horizontal">
+            <!-- 头像与昵称 -->
             <div class="profile-header">
               <div class="avatar-wrapper" @click="triggerFileUpload">
                 <n-avatar :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1);">
@@ -82,54 +37,111 @@
               </div>
               <div class="profile-text">
                 <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
-                <n-tag :type="statusType" size="small" round>{{ statusText }}</n-tag>
+                <n-tag :type="statusType" size="small" round :bordered="false">{{ statusText }}</n-tag>
               </div>
             </div>
             
+            <!-- 等级与权限信息 (背景透明，分散居中) -->
             <div class="info-grid">
-              <div class="info-row"><span>账户等级</span><span>{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span></div>
-              <div class="info-row"><span>到期时间</span><span>{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span></div>
-              <div class="info-row"><span>订阅权限</span><span>{{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核' : '需审核' }}</span></div>
+              <div class="info-row">
+                <span class="info-label">账户等级</span>
+                <span class="info-value">{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">到期时间</span>
+                <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">订阅权限</span>
+                <span class="info-value">{{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核' : '需审核' }}</span>
+              </div>
             </div>
+          </div>
 
-            <n-divider style="margin: 16px 0; opacity: 0.2;" />
-            
-            <div class="action-form">
-              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
-              <n-input-group>
-                <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" />
-                <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
-              </n-input-group>
-              <n-button block type="primary" style="margin-top: 12px;" @click="openBotChat">
-                绑定 Telegram 机器人
-              </n-button>
-            </div>
-          </n-card>
+          <n-divider style="margin: 16px 0; opacity: 0.2;" />
+          
+          <!-- Telegram 绑定区域 -->
+          <div class="action-form">
+            <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
+            <n-input-group>
+              <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
+              <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
+            </n-input-group>
+            <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
+              绑定 Telegram 机器人
+            </n-button>
+          </div>
+        </n-card>
+      </n-gi>
 
-          <!-- 播放记录卡片 -->
-          <n-card :bordered="false" class="dashboard-card action-module" style="flex: 1;">
-            <template #header><span class="card-title">近期播放</span></template>
-            <n-grid :cols="2" style="margin-bottom: 16px; text-align: center; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px 0;">
-              <n-gi>
-                <div style="font-size: 20px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
-                <div style="font-size: 12px; color: rgba(255,255,255,0.5);">观看次数</div>
-              </n-gi>
-              <n-gi>
-                <div style="font-size: 20px; font-weight: bold; color: #fff;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</div>
-                <div style="font-size: 12px; color: rgba(255,255,255,0.5);">累计小时</div>
-              </n-gi>
-            </n-grid>
-            <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 20px;" />
-          </n-card>
-
-        </n-space>
+      <!-- 右侧/下方：播放记录卡片 -->
+      <n-gi>
+        <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
+          <template #header><span class="card-title">近期播放</span></template>
+          <!-- 播放数据 (去除了黑色背景，改为透明) -->
+          <n-grid :cols="2" style="margin-bottom: 16px; text-align: center; padding: 12px 0;">
+            <n-gi>
+              <div style="font-size: 28px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
+              <div style="font-size: 13px; color: rgba(255,255,255,0.5); margin-top: 4px;">观看次数</div>
+            </n-gi>
+            <n-gi>
+              <div style="font-size: 28px; font-weight: bold; color: #fff;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</div>
+              <div style="font-size: 13px; color: rgba(255,255,255,0.5); margin-top: 4px;">累计小时</div>
+            </n-gi>
+          </n-grid>
+          <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 30px;" />
+        </n-card>
       </n-gi>
     </n-grid>
+
+    <!-- 3. 底部模块：订阅历史列表 (独占一行) -->
+    <n-card :bordered="false" class="dashboard-card list-module">
+      <template #header>
+        <span class="card-title">最近的订阅动态</span>
+      </template>
+      <template #header-extra>
+        <n-radio-group v-model:value="filterStatus" size="small" class="custom-radio-group">
+          <n-radio-button value="all">全部</n-radio-button>
+          <n-radio-button value="completed">已完成</n-radio-button>
+          <n-radio-button value="processing">处理中</n-radio-button>
+        </n-radio-group>
+      </template>
+      
+      <n-spin :show="loading">
+        <div v-if="subscriptionHistory.length > 0" class="custom-list">
+          <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
+            <!-- 左侧图标块 -->
+            <div class="item-icon-block" :class="getStatusType(item.status)">
+              {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
+            </div>
+            <!-- 中间内容 -->
+            <div class="item-content">
+              <div class="item-title">{{ item.title }}</div>
+              <div class="item-desc">
+                <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
+                  {{ getStatusText(item.status) }}
+                </n-tag>
+                <span v-if="item.notes">备注: {{ item.notes }}</span>
+              </div>
+            </div>
+            <!-- 右侧时间 -->
+            <div class="item-meta">
+              <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
+            </div>
+          </div>
+        </div>
+        <n-empty v-else description="暂无订阅记录" style="margin: 40px 0;" />
+      </n-spin>
+
+      <div v-if="totalRecords > pageSize" style="margin-top: 20px; display: flex; justify-content: center;">
+        <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" class="custom-pagination" />
+      </div>
+    </n-card>
+
   </div>
 </template>
 
 <script setup>
-// 这里的 script 逻辑完全保持你原来的代码不变
 import { ref, onMounted, onUnmounted, computed, h, watch } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
@@ -332,13 +344,81 @@ onMounted(async () => {
 }
 .mobile-break { display: none; }
 
-/* 统计小模块 */
+/* 强制统计模块字体为白色 */
+.stat-module :deep(.n-statistic__label) {
+  color: rgba(255, 255, 255, 0.7) !important; 
+}
 .stat-module :deep(.n-statistic-value__content) {
+  color: var(--n-value-text-color, #ffffff) !important; 
   font-size: 28px;
   font-weight: bold;
 }
 
-/* 自定义列表样式 (复刻参考图) */
+/* 优化纯白按钮为暗色玻璃态 */
+.custom-radio-group :deep(.n-radio-button) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+.custom-radio-group :deep(.n-radio-button.n-radio-button--checked) {
+  background-color: rgba(255, 255, 255, 0.15) !important;
+  color: #fff !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+}
+.custom-pagination :deep(.n-pagination-item) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  color: rgba(255, 255, 255, 0.8) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+.custom-pagination :deep(.n-pagination-item:hover) {
+  background-color: rgba(255, 255, 255, 0.15) !important;
+  color: #fff !important;
+}
+
+/* 账户信息同行显示布局 */
+.account-info-horizontal {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.avatar-wrapper {
+  cursor: pointer;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.avatar-wrapper:hover { transform: scale(1.05); }
+.profile-name {
+  font-size: 18px;
+  font-weight: bold;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+/* 账户等级信息网格 (去背景，分散居中) */
+.info-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr); /* 内部三列平分 */
+  gap: 16px;
+  align-items: center; /* 垂直居中 */
+}
+.info-row {
+  display: flex;
+  flex-direction: column; 
+  align-items: center; /* 水平居中，实现分散居中效果 */
+  gap: 4px;
+}
+.info-label { color: rgba(255,255,255,0.5); font-size: 12px; }
+.info-value { color: #fff; font-weight: 500; font-size: 14px; }
+
+
+/* 自定义列表样式 */
 .custom-list {
   display: flex;
   flex-direction: column;
@@ -404,46 +484,17 @@ onMounted(async () => {
   color: rgba(255,255,255,0.4);
 }
 
-/* 右侧账户面板样式 */
-.profile-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.avatar-wrapper {
-  cursor: pointer;
-  border-radius: 50%;
-  transition: transform 0.2s;
-}
-.avatar-wrapper:hover { transform: scale(1.05); }
-.profile-name {
-  font-size: 18px;
-  font-weight: bold;
-  color: #fff;
-  margin-bottom: 4px;
-}
-.info-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  background: rgba(0,0,0,0.2);
-  padding: 16px;
-  border-radius: 12px;
-}
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 13px;
-}
-.info-row span:first-child { color: rgba(255,255,255,0.5); }
-.info-row span:last-child { color: #fff; font-weight: 500; }
-
 /* 手机端适配 */
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
   .mobile-break { display: block; }
+  
+  /* 手机端账户信息改为上下折行，并恢复左右对齐以节省空间 */
+  .account-info-horizontal { flex-direction: column; align-items: flex-start; gap: 16px; }
+  .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
+  .info-row { flex-direction: row; justify-content: space-between; align-items: center; }
+  
   .custom-list-item { padding: 12px; }
   .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
 }
