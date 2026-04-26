@@ -472,4 +472,38 @@ body,
 .n-empty__description {
   color: rgba(255, 255, 255, 0.7) !important;
 }
+
+/* ==================== 6. n-alert 毛玻璃化 ==================== */
+
+/* alert 整体背景透明 */
+.n-alert {
+  background-color: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 8px !important;
+  box-shadow: var(--glass-shadow) !important;
+}
+
+/* alert 各种 type 的左侧色条保留，但背景透明 */
+.n-alert.n-alert--info-type    { border-left: 4px solid #2080f0 !important; }
+.n-alert.n-alert--success-type { border-left: 4px solid #18a058 !important; }
+.n-alert.n-alert--warning-type { border-left: 4px solid #f0a020 !important; }
+.n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
+
+/* alert 标题与正文文字颜色白色化 */
+.n-alert .n-alert-body__title,
+.n-alert .n-alert-body__content,
+.n-alert .n-alert-body,
+.n-alert li {
+  color: var(--text-primary) !important;
+}
+
+/* alert 图标颜色跟随 type（Naive UI 默认已有，但防止被覆盖） */
+.n-alert .n-base-icon { opacity: 0.9; }
+
+/* 强制 n-text 跟随全局白色 */
+.n-text {
+  color: var(--text-primary) !important;
+}
 </style>
