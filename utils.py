@@ -338,24 +338,124 @@ DEFAULT_COUNTRY_MAPPING = [
     {"label": "波兰", "value": "PL", "aliases": ["Poland"]},
 ]
 
+# --- 音视频流/字幕流特色标签映射 ---
+# 用于识别 DYSY、TX、Latin America、Brazil、SDH 这类“不是语言”的标题信息
+DEFAULT_STREAM_FEATURE_MAPPING = [
+    {
+        "label": "东影上译",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])DYSY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])CH-DYSY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])GP-DYSY(?![A-Za-z0-9])",
+        ],
+    },
+    {
+        "label": "特效",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])TX(?![A-Za-z0-9])",
+            r"特效",
+        ],
+    },
+    {
+        "label": "拉美",
+        "types": ["Subtitle", "Audio"],
+        "patterns": [
+            r"\bLatin\s*America\b",
+            r"\bLATAM\b",
+            r"拉美",
+        ],
+    },
+    {
+        "label": "巴西",
+        "types": ["Subtitle", "Audio"],
+        "patterns": [
+            r"\bBrazil\b",
+            r"\bBrasil\b",
+            r"巴西",
+        ],
+    },
+    {
+        "label": "听障",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])SDH(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])CC(?![A-Za-z0-9])",
+            r"hearing impaired",
+            r"hard of hearing",
+            r"听障",
+        ],
+    },
+    {
+        "label": "导评",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"Director'?s Commentary",
+            r"Audio Commentary",
+            r"Commentary",
+            r"导评",
+        ],
+    },
+    {
+    "label": "人人影视",
+    "types": ["Subtitle"],
+    "patterns": [r"(?<![A-Za-z0-9])YYeTs(?![A-Za-z0-9])"],
+    },
+]
+
 # --- 语言预设表 ---
 DEFAULT_LANGUAGE_MAPPING = [
-    {"label": "国语", "value": "zh", "aliases": ["chi", "guo", "guoyu", "zho", "zh", "chs", "Zh-cn", "zh-cn", "zh-sg", "zh-hans", "cmn", "mandarin", "国语", "普通话", "中文", "简体", "简中"]}, 
-    {"label": "粤语", "value": "cn", "aliases": ["yue", "cht", "cn", "zh-hk", "zh-tw", "hk", "tw", "cantonese", "粤语", "繁体", "繁中", "粤配", "港配", "粤语配音", "广东话"]},
-    {"label": "英语", "value": "en", "aliases": ["eng", "english"]},
-    {"label": "日语", "value": "ja", "aliases": ["jpn", "japanese"]},
-    {"label": "韩语", "value": "ko", "aliases": ["kor", "korean"]},
-    {"label": "法语", "value": "fr", "aliases": ["fre", "fra", "french"]},
-    {"label": "德语", "value": "de", "aliases": ["ger", "deu", "german"]},
-    {"label": "西班牙语", "value": "es", "aliases": ["spa", "spanish"]},
-    {"label": "意大利语", "value": "it", "aliases": ["ita", "italian"]},
-    {"label": "俄语", "value": "ru", "aliases": ["rus", "russian"]},
-    {"label": "泰语", "value": "th", "aliases": ["tha", "thai"]},
-    {"label": "印地语", "value": "hi", "aliases": ["hin", "hindi"]},
-    {"label": "葡萄牙语", "value": "pt", "aliases": ["por", "portuguese"]},
-    {"label": "阿拉伯语", "value": "ar", "aliases": ["ara", "arabic"]},
-    {"label": "拉丁语", "value": "la", "aliases": ["lat", "latin"]},
-    {"label": "无语言", "value": "xx", "aliases": ["und", "undefined", "unknown", "none"]},
+    {"label": "国语", "value": "zh", "aliases": ["chi", "zho", "zh", "chs", "zh-cn", "zh-sg", "zh-hans", "cmn", "mandarin", "guo", "guoyu", "国语", "普通话", "中文", "简体", "简中"]},
+    {"label": "粤语", "value": "cn", "aliases": ["yue", "cht", "cn", "zh-hk", "zh-tw", "zh-hant", "hk", "tw", "cantonese", "粤语", "繁体", "繁中", "粤配", "港配", "粤语配音", "广东话"]},
+
+    {"label": "英语", "value": "en", "aliases": ["eng", "en", "english", "英语", "英文"]},
+    {"label": "日语", "value": "ja", "aliases": ["jpn", "ja", "japanese", "日语", "日文"]},
+    {"label": "韩语", "value": "ko", "aliases": ["kor", "ko", "korean", "韩语", "韩文"]},
+    {"label": "法语", "value": "fr", "aliases": ["fre", "fra", "fr", "french", "法语", "法文"]},
+    {"label": "德语", "value": "de", "aliases": ["ger", "deu", "de", "german", "Deutsch", "德语", "德文"]},
+    {"label": "西班牙语", "value": "es", "aliases": ["spa", "es", "spanish", "西班牙语", "西班牙文"]},
+    {"label": "意大利语", "value": "it", "aliases": ["ita", "it", "italian", "意大利语", "意大利文"]},
+    {"label": "俄语", "value": "ru", "aliases": ["rus", "ru", "russian", "俄语", "俄文"]},
+    {"label": "泰语", "value": "th", "aliases": ["tha", "th", "thai", "泰语", "泰文"]},
+    {"label": "印地语", "value": "hi", "aliases": ["hin", "hi", "hindi", "印地语", "印度语"]},
+    {"label": "葡萄牙语", "value": "pt", "aliases": ["por", "pt", "portuguese", "葡萄牙语", "葡萄牙文"]},
+    {"label": "阿拉伯语", "value": "ar", "aliases": ["ara", "ar", "arabic", "阿拉伯语", "阿拉伯文"]},
+
+    # --- Netflix 等多语字幕常见补充 ---
+    {"label": "加泰罗尼亚语", "value": "ca", "aliases": ["cat", "CAT", "ca", "catalan", "català", "加泰罗尼亚语", "加泰隆语"]},
+    {"label": "捷克语", "value": "cs", "aliases": ["cze", "CZE", "ces", "cs", "czech", "捷克语", "捷克文"]},
+    {"label": "丹麦语", "value": "da", "aliases": ["dan", "DAN", "da", "danish", "丹麦语", "丹麦文"]},
+    {"label": "希腊语", "value": "el", "aliases": ["gre", "GRE", "ell", "el", "greek", "希腊语", "希腊文"]},
+    {"label": "巴斯克语", "value": "eu", "aliases": ["baq", "BAQ", "eus", "eu", "basque", "巴斯克语", "巴斯克文"]},
+    {"label": "芬兰语", "value": "fi", "aliases": ["fin", "FIN", "fi", "finnish", "芬兰语", "芬兰文"]},
+    {"label": "菲律宾语", "value": "fil", "aliases": ["fil", "FIL", "tl", "tag", "tagalog", "filipino", "菲律宾语", "他加禄语"]},
+    {"label": "加利西亚语", "value": "gl", "aliases": ["glg", "GLG", "gl", "galician", "加利西亚语", "加里西亚语"]},
+    {"label": "希伯来语", "value": "he", "aliases": ["heb", "HEB", "he", "iw", "hebrew", "希伯来语", "希伯来文"]},
+    {"label": "克罗地亚语", "value": "hr", "aliases": ["hrv", "HRV", "hr", "croatian", "克罗地亚语", "克罗地亚文"]},
+    {"label": "匈牙利语", "value": "hu", "aliases": ["hun", "HUN", "hu", "hungarian", "匈牙利语", "匈牙利文"]},
+    {"label": "印度尼西亚语", "value": "id", "aliases": ["ind", "IND", "id", "in", "indonesian", "印度尼西亚语", "印尼语"]},
+    {"label": "马来语", "value": "ms", "aliases": ["may", "MAY", "msa", "ms", "malay", "马来语", "马来文"]},
+    {"label": "挪威语", "value": "nb", "aliases": ["nob", "NOB", "nb", "no", "nor", "norwegian bokmal", "norwegian bokmål", "bokmal", "bokmål", "挪威语", "挪威文", "书面挪威语"]},
+    {"label": "荷兰语", "value": "nl", "aliases": ["dut", "DUT", "nld", "nl", "dutch", "flemish", "荷兰语", "荷兰文", "弗拉芒语"]},
+    {"label": "波兰语", "value": "pl", "aliases": ["pol", "POL", "pl", "polish", "波兰语", "波兰文"]},
+    {"label": "罗马尼亚语", "value": "ro", "aliases": ["rum", "RUM", "ron", "ro", "romanian", "罗马尼亚语", "罗马尼亚文"]},
+    {"label": "瑞典语", "value": "sv", "aliases": ["swe", "SWE", "sv", "swedish", "瑞典语", "瑞典文"]},
+    {"label": "土耳其语", "value": "tr", "aliases": ["tur", "TUR", "tr", "turkish", "土耳其语", "土耳其文"]},
+    {"label": "乌克兰语", "value": "uk", "aliases": ["ukr", "UKR", "uk", "ukrainian", "乌克兰语", "乌克兰文"]},
+    {"label": "越南语", "value": "vi", "aliases": ["vie", "VIE", "vi", "vietnamese", "越南语", "越南文"]},
+    {"label": "保加利亚语", "value": "bg", "aliases": ["bul", "BUL", "bg", "bulgarian", "保加利亚语", "保加利亚文"]},
+    {"label": "爱沙尼亚语", "value": "et", "aliases": ["est", "EST", "et", "estonian", "爱沙尼亚语", "爱沙尼亚文"]},
+    {"label": "立陶宛语", "value": "lt", "aliases": ["lit", "LIT", "lt", "lithuanian", "立陶宛语", "立陶宛文"]},
+    {"label": "拉脱维亚语", "value": "lv", "aliases": ["lav", "LAV", "lv", "latvian", "拉脱维亚语", "拉脱维亚文"]},
+    {"label": "斯洛伐克语", "value": "sk", "aliases": ["slo", "SLO", "slk", "sk", "slovak", "斯洛伐克语", "斯洛伐克文"]},
+    {"label": "斯洛文尼亚语", "value": "sl", "aliases": ["slv", "SLV", "sl", "slovenian", "斯洛文尼亚语", "斯洛文尼亚文"]},
+    {"label": "泰米尔语", "value": "ta", "aliases": ["tam", "TAM", "ta", "tamil", "泰米尔语", "泰米尔文"]},
+    {"label": "泰卢固语", "value": "te", "aliases": ["tel", "TEL", "te", "telugu", "泰卢固语", "泰卢固文"]},
+    {"label": "拉丁语", "value": "la", "aliases": ["lat", "la", "latin", "拉丁语", "拉丁文"]},
+    {"label": "卡纳达语", "value": "kn", "aliases": ["kan", "KAN", "kn", "kannada", "卡纳达语", "卡纳达文", "康纳达语"]},
+    {"label": "马拉雅拉姆语", "value": "ml", "aliases": ["mal", "MAL", "ml", "malayalam", "马拉雅拉姆语", "马拉雅拉姆文"]},
+    {"label": "无语言", "value": "xx", "aliases": ["und", "undefined", "unknown", "none", "无语言", "未知"]},
 ]
 
 # --- ★★★ AI 默认提示词 (中文优化版) ★★★ ---
@@ -717,13 +817,61 @@ DEFAULT_TG_REGEX = {
         r'TMDB(?:\s*ID)?[:：\s]*(\d+)'
     ],
     "title_year": [
-        r'(?:电视剧|电影|名称)[:：\s]*([^\n]+?)\s*\((\d{4})\)',
+        r'(?:电视剧 | 电影 | 名称)[:：\s]*([^\n]+?)\s*\((\d{4})\)',
         r'^([^\n]+?)\s*\((\d{4})\)'
     ],
     "password_url": [
         r'(?:password|pwd)=([a-zA-Z0-9]{4})'
     ],
     "password_text": [
-        r'(?:password=|访问码|提取码|密码)[:：=\s]*([a-zA-Z0-9]{4})'
+        r'(?:password=|访问码 | 提取码 | 密码)[:：=\s]*([a-zA-Z0-9]{4})'
     ]
 }
+
+def clean_non_chinese_chars(text: Optional[str]) -> str:
+    """
+    清理字符串，只保留中文字符和中文括号。
+    
+    移除所有非中文字符，包括：
+    - 英文字母、数字
+    - 标点符号（除中文括号外）
+    - 特殊符号、表情符号
+    - 空白字符
+    - 其他非汉字字符
+    
+    保留的字符范围：
+    - 基本汉字：\u4e00-\u9fff
+    - 扩展 A 区：\u3400-\u4dbf
+    - 扩展 B-F 区：\u20000-\u2a6df, \u2a700-\u2b73f, \u2b740-\u2b81f, \u2b820-\u2ceaf, \u2ceb0-\u2ebef
+    - 兼容汉字：\uf900-\ufaff
+    - 中文括号：（）
+    
+    Args:
+        text: 输入字符串
+        
+    Returns:
+        只包含中文字符和中文括号的字符串
+    """
+    if not text:
+        return ""
+    
+    result = []
+    for char in str(text):
+        code_point = ord(char)
+        # 基本汉字
+        if 0x4e00 <= code_point <= 0x9fff:
+            result.append(char)
+        # 扩展 A 区
+        elif 0x3400 <= code_point <= 0x4dbf:
+            result.append(char)
+        # 兼容汉字
+        elif 0xf900 <= code_point <= 0xfaff:
+            result.append(char)
+        # 扩展 B-F 区（代理对）
+        elif 0x20000 <= code_point <= 0x2ebef:
+            result.append(char)
+        # 中文括号
+        elif char in '（）':
+            result.append(char)
+    
+    return ''.join(result)
