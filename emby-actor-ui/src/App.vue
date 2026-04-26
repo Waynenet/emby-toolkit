@@ -282,6 +282,13 @@ body::before {
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
 }
 
+.n-card.dashboard-card.no-hover:hover {
+  transform: none !important;
+  box-shadow: var(--glass-shadow) !important;
+  background: var(--glass-bg) !important;
+  border-color: var(--glass-border) !important;
+}
+
 .n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
 .n-card.dashboard-card.tint-blue:hover { background: var(--tint-blue-hover) !important; }
 .n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
@@ -529,5 +536,26 @@ body,
 .n-card[embedded],
 .n-card--embedded {
   background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* ==================== n-table 毛玻璃化 ==================== */
+.n-table {
+  background: transparent !important;
+}
+
+.n-table th {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--glass-border) !important;
+}
+
+.n-table td {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+  border-color: var(--glass-border) !important;
+}
+
+.n-table tr:hover td {
+  background: var(--glass-bg-hover) !important;
 }
 </style>

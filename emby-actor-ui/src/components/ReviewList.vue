@@ -1,7 +1,7 @@
 <!-- src/components/ReviewList.vue -->
 <template>
   <div content-style="padding: 24px;">
-  <n-card class="dashboard-card" :bordered="false" size="small">
+  <n-card class="dashboard-card no-hover" :bordered="false" size="small">
     
     <n-alert title="手动处理操作提示" type="info" style="margin-top: 24px;">
           可在下方搜索框输入片名直接搜索处理，也可以搜索存量剧集点击 <n-icon :component="AddToWatchlistIcon" /> 加入智能追剧 <br />
