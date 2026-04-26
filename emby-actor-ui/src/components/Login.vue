@@ -156,11 +156,9 @@ async function verifyToken() {
 </script>
 
 <style scoped>
-/* 登录/注册页底部 style 替换 */
 .login-layout, .register-layout {
   height: 100vh;
   width: 100vw;
-  /* 背景由 App.vue 接管 */
 }
 
 .login-container, .register-container {
@@ -176,11 +174,9 @@ async function verifyToken() {
   width: 100%;
   max-width: 400px; 
   border-radius: 20px !important;
-  
   height: auto !important;
   min-height: auto !important;
   flex: none !important;
-  color: #fff !important;
 }
 
 /* 登录框不需要上浮动画 */
@@ -196,19 +192,16 @@ async function verifyToken() {
 .login-logo, .register-logo {
   height: 64px;
   margin-bottom: 16px;
-  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
 }
 
 .login-title, .register-title {
   font-size: 24px;
   font-weight: 700;
   margin: 0 0 8px 0;
-  color: #fff;
 }
 
 .login-subtitle, .register-subtitle {
   font-size: 14px;
-  color: rgba(255,255,255,0.6);
   margin: 0;
 }
 
