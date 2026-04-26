@@ -175,7 +175,7 @@
       <!-- 左侧：今日排行 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
-          <template #header><span class="card-title">今日发布组 Top 10</span></template>
+          <template #header><span class="card-title">今日发布组 Top 5</span></template>
           
           <!-- 排行榜骨架屏 -->
           <div v-if="loading.rankings" class="ranking-list">
@@ -191,7 +191,7 @@
           </div>
           
           <div v-else class="ranking-list">
-            <div v-for="(group, index) in stats.release_group_ranking.slice(0, 10)" :key="group.release_group" class="ranking-item">
+            <div v-for="(group, index) in stats.release_group_ranking.slice(0, 5)" :key="group.release_group" class="ranking-item">
               <div class="ranking-index" :class="{'top-3': index < 3}">{{ index + 1 }}</div>
               <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
               <div class="ranking-name">{{ group.release_group }}</div>
@@ -207,7 +207,7 @@
       <!-- 右侧：历史排行 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
-          <template #header><span class="card-title">历史总排行 Top 10</span></template>
+          <template #header><span class="card-title">历史总排行 Top 5</span></template>
           
           <!-- 排行榜骨架屏 -->
           <div v-if="loading.rankings" class="ranking-list">
@@ -223,7 +223,7 @@
           </div>
           
           <div v-else class="ranking-list">
-            <div v-for="(group, index) in stats.historical_release_group_ranking.slice(0, 10)" :key="group.release_group" class="ranking-item">
+            <div v-for="(group, index) in stats.historical_release_group_ranking.slice(0, 5)" :key="group.release_group" class="ranking-item">
               <div class="ranking-index" :class="{'top-3': index < 3}">{{ index + 1 }}</div>
               <img :src="getIconPath(group.release_group)" class="site-icon" @error="handleIconError" />
               <div class="ranking-name">{{ group.release_group }}</div>
@@ -403,8 +403,9 @@ onMounted(() => {
 .ranking-index.top-3 { color: #fff; text-shadow: 0 0 8px rgba(255,255,255,0.8); }
 .site-icon { width: 20px; height: 20px; margin-right: 12px; border-radius: 4px; flex-shrink: 0; }
 
-.ranking-name { width: 90px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
-.ranking-bar-container { flex: 1; margin: 0 10px; min-width: 50px; }
+/* 缩小名称宽度，减小进度条左侧 margin，使它们靠得更近、更紧凑 */
+.ranking-name { width: 75px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+.ranking-bar-container { flex: 1; margin: 0 12px 0 4px; min-width: 50px; }
 .ranking-count { width: 50px; text-align: right; font-size: 13px; color: var(--text-secondary); flex-shrink: 0; }
 
 @media (max-width: 768px) {
@@ -414,8 +415,10 @@ onMounted(() => {
   .ranking-item { padding: 10px 12px; }
   .ranking-index { width: 18px; font-size: 13px; }
   .site-icon { margin-right: 8px; width: 16px; height: 16px; }
-  .ranking-name { width: 65px; font-size: 13px; }
-  .ranking-bar-container { margin: 0 6px; }
+  
+  /* 移动端同样调整宽度和边距 */
+  .ranking-name { width: 55px; font-size: 13px; }
+  .ranking-bar-container { margin: 0 8px 0 2px; }
   .ranking-count { width: 45px; font-size: 12px; }
 }
 </style>
