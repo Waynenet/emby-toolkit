@@ -1,5 +1,13 @@
 <!-- src/App.vue -->
 <template>
+  <!-- ★ 把 canvas 用 Teleport 直接挂到 body，脱离 #app 的层叠上下文 -->
+  <Teleport to="body">
+    <canvas
+      v-if="isDarkTheme"
+      id="starfield"
+    />
+  </Teleport>
+
   <n-config-provider :theme="isDarkTheme ? darkTheme : undefined" :theme-overrides="currentNaiveTheme" :locale="zhCN" :date-locale="dateZhCN">
     <n-message-provider placement="bottom-right">
       <n-dialog-provider>
@@ -10,23 +18,131 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui';
 import AppContent from './AppContent.vue';
 
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
 const currentNaiveTheme = ref({});
 
-onMounted(() => {
-    const app = document.getElementById('app');
-    
-    app.addEventListener('update-naive-theme', (event) => {
-        currentNaiveTheme.value = event.detail;
-    });
+// ========== 星空逻辑 ==========
+let animFrameId = null; // 用于取消 requestAnimationFrame
 
-    app.addEventListener('update-dark-mode', (event) => {
-        isDarkTheme.value = event.detail;
-    });
+function setupStarfield() {
+  // 等 Vue 把 canvas 渲染到 DOM 之后再拿
+  const canvas = document.getElementById('starfield');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+  let width, height, starsArr, initialBurst = true;
+
+  const STAR_COUNT = () => Math.floor(0.3 * width);
+  const COLORS = { giant: '180,184,240', star: '226,225,142', comet: '225,225,225' };
+
+  function randomChance(p) { return Math.random() * 1000 < p * 10; }
+  function randomRange(min, max) { return Math.random() * (max - min) + min; }
+
+  class Star {
+    constructor() { this.reset(); }
+    reset() {
+      this.isGiant = randomChance(3);
+      this.isComet = !this.isGiant && !initialBurst && randomChance(20);
+      this.x = randomRange(0, width); this.y = randomRange(0, height);
+      this.size = randomRange(1.1, 2.6);
+      this.dx = randomRange(0.05, 0.3) + (this.isComet ? randomRange(2.5, 6) : 0.05);
+      this.dy = -randomRange(0.05, 0.3) - (this.isComet ? randomRange(2.5, 6) : 0.05);
+      this.opacity = 0; this.opacityTarget = randomRange(0.2, this.isComet ? 0.6 : 1);
+      this.fadeSpeed = randomRange(0.0005, 0.002) + (this.isComet ? 0.001 : 0);
+      this.fadingIn = true; this.fadingOut = false;
+    }
+    fadeIn() { if (this.fadingIn) { this.opacity += this.fadeSpeed; if (this.opacity >= this.opacityTarget) this.fadingIn = false; } }
+    fadeOut() { if (this.fadingOut) { this.opacity -= this.fadeSpeed / 2; if (this.opacity <= 0) this.reset(); } }
+    move() { this.x += this.dx; this.y += this.dy; if (!this.fadingOut && (this.x > width - width / 4 || this.y < 0)) this.fadingOut = true; }
+    draw() {
+      ctx.beginPath();
+      if (this.isGiant) {
+        ctx.fillStyle = `rgba(${COLORS.giant},${this.opacity})`;
+        ctx.arc(this.x, this.y, 2, 0, 2 * Math.PI);
+      } else if (this.isComet) {
+        ctx.fillStyle = `rgba(${COLORS.comet},${this.opacity})`;
+        ctx.arc(this.x, this.y, 2, 0, 2 * Math.PI);
+        for (let i = 0; i < 30; i++) {
+          const trailOpacity = this.opacity - (this.opacity / 20 * i);
+          if (trailOpacity <= 0) break;
+          ctx.fillStyle = `rgba(${COLORS.comet},${trailOpacity})`;
+          ctx.rect(this.x - this.dx / 4 * i, this.y - this.dy / 4 * i - 2, 2, 2);
+          ctx.fill();
+        }
+        return;
+      } else {
+        ctx.fillStyle = `rgba(${COLORS.star},${this.opacity})`;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+      }
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  function resizeCanvas() {
+    width = window.innerWidth; height = window.innerHeight;
+    canvas.width = width; canvas.height = height;
+  }
+
+  function update() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let s of starsArr) { s.move(); s.fadeIn(); s.fadeOut(); s.draw(); }
+    animFrameId = requestAnimationFrame(update); // ★ 保存 id 以便取消
+  }
+
+  function init() {
+    resizeCanvas();
+    starsArr = Array.from({ length: STAR_COUNT() }, () => new Star());
+    update();
+    setTimeout(() => initialBurst = false, 50);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  init();
+}
+
+function destroyStarfield() {
+  if (animFrameId) {
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
+}
+
+// ========== 监听暗色模式，动态启停星空 ==========
+watch(isDarkTheme, async (val) => {
+  if (val) {
+    // canvas 由 v-if 渲染，需要等下一个 tick DOM 就绪
+    await nextTick();
+    setupStarfield();
+  } else {
+    destroyStarfield();
+  }
+}, { immediate: false });
+
+// ========== 生命周期 ==========
+onMounted(() => {
+  const app = document.getElementById('app');
+
+  app.addEventListener('update-naive-theme', (event) => {
+    currentNaiveTheme.value = event.detail;
+  });
+
+  app.addEventListener('update-dark-mode', (event) => {
+    isDarkTheme.value = event.detail;
+  });
+
+  // 初始如果已经是暗色模式，立即启动星空
+  if (isDarkTheme.value) {
+    setupStarfield();
+  }
+});
+
+onUnmounted(() => {
+  destroyStarfield();
 });
 </script>
 
@@ -64,9 +180,9 @@ onMounted(() => {
 }
 
 html.dark {
-  /* 黑夜模式：真正的灰黑极简暗纹 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1614850523459-c2f4c699c52e?q=80&w=2564&auto=format&fit=crop'); 
-  --global-bg-color: #121212;
+  /* 黑夜模式 */
+  --global-bg-image: none;
+  --global-bg-color: #090a14;
   --glass-bg: rgba(20, 25, 35, 0.15); 
   --glass-bg-hover: rgba(30, 35, 45, 0.25);
   --glass-border: rgba(255, 255, 255, 0.05); 
@@ -124,6 +240,18 @@ body::before {
 #app {
   position: relative;
   z-index: 1;
+}
+
+/* ★ 星空 canvas 样式 */
+#starfield {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;          /* 在 body::before(z:0) 同层，但 #app(z:1) 之下 */
+  pointer-events: none; /* 不拦截鼠标事件 */
+  display: block;
 }
 
 .fullscreen-container { 
