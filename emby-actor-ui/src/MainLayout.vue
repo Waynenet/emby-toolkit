@@ -68,17 +68,26 @@
               <n-icon :component="ReaderOutline" size="18" />
               <span v-if="!isMobile">实时</span>
             </div>
-            <div class="module-divider"></div>
-            <div class="log-btn" @click="isHistoryLogVisible = true">
+            <!-- 手机端隐藏分割线和历史按钮 -->
+            <div v-if="!isMobile" class="module-divider"></div>
+            <div v-if="!isMobile" class="log-btn" @click="isHistoryLogVisible = true">
               <n-icon :component="ArchiveOutline" size="18" />
-              <span v-if="!isMobile">历史</span>
+              <span>历史</span>
             </div>
           </div>
 
           <!-- 用户模块 -->
           <n-dropdown v-if="authStore.isLoggedIn" trigger="hover" placement="bottom-end" :options="userOptions" @select="handleUserSelect">
             <div class="header-module user-module">
-              <n-icon size="18" :component="UserCenterIcon" />
+              <!-- 优先显示 Emby 头像，如果没有则显示默认图标 -->
+              <n-avatar 
+                v-if="authStore.avatar" 
+                :src="authStore.avatar" 
+                round 
+                :size="22" 
+                style="margin-right: 4px;"
+              />
+              <n-icon v-else size="18" :component="UserCenterIcon" />
               <span v-if="!isMobile" class="username-text">{{ authStore.username }}</span>
             </div>
           </n-dropdown>
@@ -119,7 +128,8 @@
 <script setup>
 import { ref, computed, h, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { NLayout, NLayoutSider, NLayoutContent, NMenu, NSwitch, NIcon, NModal, NDropdown, NButton, NTooltip, NProgress, NButtonGroup, NLog, useMessage, NDivider, NSpin } from 'naive-ui';
+// 引入了 NAvatar
+import { NLayout, NLayoutSider, NLayoutContent, NMenu, NSwitch, NIcon, NModal, NDropdown, NButton, NTooltip, NProgress, NButtonGroup, NLog, useMessage, NDivider, NSpin, NAvatar } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import LogViewer from './components/LogViewer.vue';
 import { AnalyticsOutline as StatsIcon, ListOutline as ReviewListIcon, TimerOutline as SchedulerIcon, OptionsOutline as GeneralIcon, LogOutOutline as LogoutIcon, HeartOutline as WatchlistIcon, AlbumsOutline as CollectionsIcon, PeopleOutline as ActorSubIcon, CreateOutline as CustomCollectionsIcon, ColorPaletteOutline as PaletteIcon, Stop as StopIcon, SparklesOutline as ResubscribeIcon, TrashBinOutline as CleanupIcon, PeopleCircleOutline as UserManagementIcon, PersonCircleOutline as UserCenterIcon, FilmOutline as DiscoverIcon, ArchiveOutline as UnifiedSubIcon, PricetagOutline as TagIcon, CompassOutline, ReaderOutline, LibraryOutline, BookmarksOutline, SettingsOutline, ArchiveOutline, MenuOutline, Moon as MoonIcon, Sunny as SunnyIcon, PieChartOutline as EmbyStatsIcon } from '@vicons/ionicons5';
@@ -263,19 +273,36 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
 .sider-logo.collapsed .logo-img { height: 32px; }
 
-/* ★★★ 强制覆盖侧边栏所有文字颜色为纯白 ★★★ */
 .sider-menu-container {
   flex: 1; 
   overflow-y: auto; 
   overflow-x: hidden;
   padding: 0 12px; 
 }
+
+/* ★ 修复侧边栏缩小后图标偏右的问题 */
+.n-layout-sider--collapsed .sider-menu-container {
+  padding: 0 6px; /* 缩小内边距 */
+}
+.n-layout-sider--collapsed .n-menu-item-content {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  justify-content: center !important;
+}
+.n-layout-sider--collapsed .n-menu-item-content__icon {
+  margin-right: 0 !important; /* 移除图标右侧的默认边距 */
+}
+
 .n-menu-item { margin-top: 4px; }
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.6); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
-/* 利用 Naive UI 的 CSS 变量彻底接管所有交互状态的颜色，防止在 Hover 或 Active 时变黑 */
+/* ★ 菜单交互颜色优化：悬停和激活状态改为淡淡的青绿色 */
 .glass-sider .n-menu {
+  --n-item-color-hover: rgba(0, 190, 150, 0.15) !important;
+  --n-item-color-active: rgba(0, 190, 150, 0.25) !important;
+  --n-item-color-active-hover: rgba(0, 190, 150, 0.3) !important;
+  
   --n-item-text-color: rgba(255, 255, 255, 0.85) !important;
   --n-item-text-color-hover: #ffffff !important;
   --n-item-text-color-active: #ffffff !important;
@@ -298,11 +325,27 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   --n-arrow-color-child-active-hover: #ffffff !important;
 }
 
-/* 针对箭头和内部文字的兜底 */
 .glass-sider .n-menu .n-menu-item-content__title,
 .glass-sider .n-menu .n-menu-item-content__icon,
 .glass-sider .n-menu .n-menu-item-content__arrow {
   color: inherit !important;
+}
+
+/* ★ 弹出菜单（退出登录下拉框、折叠菜单悬浮框）背景优化 */
+.n-dropdown-menu,
+.n-menu-popover {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow) !important;
+  border-radius: 12px !important;
+}
+
+/* 弹出菜单悬停颜色，保持与侧边栏一致的青绿色 */
+.n-dropdown-option-body:hover,
+.n-menu-popover .n-menu-item-content:hover {
+  background-color: rgba(0, 190, 150, 0.15) !important;
 }
 
 .sider-bottom-tools {
@@ -413,13 +456,12 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
     bottom: 0; 
     z-index: 1000; 
     box-shadow: 2px 0 12px rgba(0,0,0,0.5); 
-    border-right: 1px solid var(--glass-border) !important; /* 展开时保留右侧边线 */
+    border-right: 1px solid var(--glass-border) !important;
     border-top: none !important;
     border-bottom: none !important;
     border-left: none !important;
   }
   
-  /* ★ 修复手机端左侧白线问题：当菜单折叠时，彻底干掉边框和阴影 */
   .mobile-sider-collapsed {
     border: none !important;
     box-shadow: none !important;
