@@ -128,7 +128,6 @@
 <script setup>
 import { ref, computed, h, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-// 引入了 NAvatar
 import { NLayout, NLayoutSider, NLayoutContent, NMenu, NSwitch, NIcon, NModal, NDropdown, NButton, NTooltip, NProgress, NButtonGroup, NLog, useMessage, NDivider, NSpin, NAvatar } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import LogViewer from './components/LogViewer.vue';
@@ -280,24 +279,14 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   padding: 0 12px; 
 }
 
-/* ★ 修复侧边栏缩小后图标偏右的问题 */
 .n-layout-sider--collapsed .sider-menu-container {
-  padding: 0 6px; /* 缩小内边距 */
-}
-.n-layout-sider--collapsed .n-menu-item-content {
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-  justify-content: center !important;
-}
-.n-layout-sider--collapsed .n-menu-item-content__icon {
-  margin-right: 0 !important; /* 移除图标右侧的默认边距 */
+  padding: 0; 
 }
 
 .n-menu-item { margin-top: 4px; }
 .n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.6); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
 .n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
 
-/* ★ 菜单交互颜色优化：悬停和激活状态改为淡淡的青绿色 */
 .glass-sider .n-menu {
   --n-item-color-hover: rgba(0, 190, 150, 0.15) !important;
   --n-item-color-active: rgba(0, 190, 150, 0.25) !important;
@@ -331,7 +320,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   color: inherit !important;
 }
 
-/* ★ 弹出菜单（退出登录下拉框、折叠菜单悬浮框）背景优化 */
 .n-dropdown-menu,
 .n-menu-popover {
   background: var(--glass-bg) !important;
@@ -342,7 +330,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border-radius: 12px !important;
 }
 
-/* 弹出菜单悬停颜色，保持与侧边栏一致的青绿色 */
 .n-dropdown-option-body:hover,
 .n-menu-popover .n-menu-item-content:hover {
   background-color: rgba(0, 190, 150, 0.15) !important;
@@ -362,12 +349,12 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .app-version { font-size: 12px; color: rgba(255,255,255,0.6); font-family: monospace; font-weight: bold; }
 
-/* 顶部模块化操作栏 */
+/* ★ 修复：给顶部操作栏增加 4px 的 padding-top，防止按钮上移时被裁剪 */
 .top-header-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 24px 16px 24px;
+  padding: 4px 24px 16px 24px; 
   flex-shrink: 0;
 }
 .header-left, .header-right {
