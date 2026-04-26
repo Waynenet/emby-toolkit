@@ -363,7 +363,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 
 .n-dropdown-option-body:hover,
 .n-menu-popover .n-menu-item-content:hover {
-  background-color: rgba(0, 190, 150, 0.15) !important;
+  background-color: rgba(34, 247, 201, 0.705) !important;
 }
 
 .sider-bottom-tools {
