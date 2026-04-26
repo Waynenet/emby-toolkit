@@ -33,8 +33,7 @@ onMounted(() => {
 <style>
 /* ==================== 1. 动态主题变量 ==================== */
 :root {
-  /* 白天模式：山水风景 */
-  --global-bg-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=2564&auto=format&fit=crop'); 
+  --global-bg-image: url('https://60s.748541.xyz/v2/bing?encoding=image'); 
   --global-bg-color: #4a6b82;
   --glass-bg: rgba(255, 255, 255, 0.1); 
   --glass-bg-hover: rgba(255, 255, 255, 0.2);
