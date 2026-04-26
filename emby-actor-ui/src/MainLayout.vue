@@ -269,7 +269,16 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   flex-shrink: 0; 
 }
 .sider-logo.collapsed { padding: 30px 0 20px 0; }
-.logo-img { height: 48px; width: auto; max-width: 80%; object-fit: contain; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); transition: height 0.3s; }
+
+/* ★ 修复：同步 Logo 缩放的动画曲线 */
+.logo-img { 
+  height: 48px; 
+  width: auto; 
+  max-width: 80%; 
+  object-fit: contain; 
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.1)); 
+  transition: height 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+}
 .sider-logo.collapsed .logo-img { height: 32px; }
 
 .sider-menu-container {
@@ -277,6 +286,8 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   overflow-y: auto; 
   overflow-x: hidden;
   padding: 0 12px; 
+  /* ★ 核心修复1：让 padding 的变化与侧边栏宽度的动画保持完全一致的贝塞尔曲线，消除左右跳动 */
+  transition: padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .n-layout-sider--collapsed .sider-menu-container {
@@ -284,8 +295,28 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 
 .n-menu-item { margin-top: 4px; }
-.n-menu .n-menu-item-group-title { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.6); padding-left: 24px; margin-top: 12px; margin-bottom: 4px; }
-.n-menu .n-menu-item-group:first-child .n-menu-item-group-title { margin-top: 0; }
+
+/* ★ 核心修复2：给分组标题添加高度和边距的过渡，消除上下跳动 */
+.n-menu .n-menu-item-group-title { 
+  font-size: 12px; 
+  font-weight: 500; 
+  color: rgba(255,255,255,0.6); 
+  padding-left: 24px; 
+  margin-top: 12px; 
+  margin-bottom: 4px; 
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+/* 折叠时平滑隐藏分组标题 */
+.n-menu.n-menu--collapsed .n-menu-item-group-title {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  height: 0;
+  opacity: 0;
+}
 
 .glass-sider .n-menu {
   --n-item-color-hover: rgba(0, 190, 150, 0.15) !important;
@@ -349,7 +380,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .app-version { font-size: 12px; color: rgba(255,255,255,0.6); font-family: monospace; font-weight: bold; }
 
-/* ★ 修复：给顶部操作栏增加 4px 的 padding-top，防止按钮上移时被裁剪 */
 .top-header-bar {
   display: flex;
   justify-content: space-between;
