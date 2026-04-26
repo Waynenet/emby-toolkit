@@ -12,7 +12,7 @@
             新增规则
           </n-button>
         </template>
-        <p style="margin-top: 0; color: #888;">
+        <p style="margin-top: 0;">
           规则不仅用于洗版，也可以用于自动化清理低质量或低评分的媒体。如果同一个媒体项符合多个规则，则以排在上面的规则为准。
         </p>
       </n-card>
@@ -66,7 +66,7 @@
           <!-- 1. 顶部：基础信息与模式选择 -->
           <n-grid :x-gap="24" :y-gap="24" :cols="2">
             <n-gi :span="2">
-              <n-card size="small" embedded :bordered="false" style="background: var(--n-action-color);">
+              <n-card size="small" embedded :bordered="false">
                 <n-grid :cols="2" :x-gap="24">
                   <n-gi>
                     <n-form-item path="name" label="规则名称">
@@ -750,18 +750,16 @@ onMounted(loadData);
 .rules-list { display: flex; flex-direction: column; gap: 12px; }
 .rule-card { cursor: move; }
 .rule-content { display: flex; align-items: center; gap: 16px; }
-.drag-handle { cursor: grab; color: #888; }
+.drag-handle { cursor: grab; color: var(--text-secondary); }   /* 用变量 */
 .rule-details { flex-grow: 1; }
 .rule-name { font-weight: bold; font-size: 1.05em; }
 .rule-actions { margin-left: auto; }
 
-/* Filter Styles */
-.filter-item { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #eee; }
+.filter-item { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed var(--glass-border); }  /* 用变量 */
 .filter-item:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
 .filter-content { margin-top: 8px; margin-left: 24px; }
-.tip { font-size: 12px; color: #999; margin-top: 4px; }
+.tip { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }  /* 用变量 */
 
-/* Scope Rules */
 .rules-container { display: flex; flex-direction: column; gap: 8px; }
 .rule-row { display: flex; gap: 8px; align-items: center; }
 .rule-field { width: 120px !important; flex-shrink: 0; }

@@ -506,4 +506,28 @@ body,
 .n-text {
   color: var(--text-primary) !important;
 }
+
+/* ==================== 弹窗内所有 n-card 毛玻璃化 ==================== */
+.n-card {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: var(--text-primary) !important;
+}
+
+/* 卡片 header/content/footer 区域穿透背景 */
+.n-card-header,
+.n-card__content,
+.n-card__footer,
+.n-card-header__main {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+}
+
+/* 修复嵌套 embedded card 的背景 (第69行那个) */
+.n-card[embedded],
+.n-card--embedded {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
 </style>

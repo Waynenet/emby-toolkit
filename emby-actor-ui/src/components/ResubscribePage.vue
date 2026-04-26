@@ -17,28 +17,33 @@
           <li>按住 Shift 键可以进行多选。</li>
         </n-alert>
         <template #extra>
-          <n-space>
-            <n-dropdown 
+          <n-space align="center">
+            <n-dropdown
               trigger="click"
               :options="batchActions"
               @select="handleBatchAction"
             >
-              <n-button>
+              <n-button size="small">
                 批量操作 ({{ selectedItems.size }})
               </n-button>
             </n-dropdown>
-
+          
             <n-radio-group v-model:value="filter" size="small">
               <n-radio-button value="all">全部</n-radio-button>
               <n-radio-button value="needed">需处理</n-radio-button>
               <n-radio-button value="subscribed">处理中</n-radio-button>
               <n-radio-button value="ignored">已忽略</n-radio-button>
             </n-radio-group>
-            <n-button @click="showSettingsModal = true">规则设定</n-button>
-            <n-button type="warning" @click="triggerResubscribeAll" :loading="isTaskRunning('全库媒体洗版')">一键整理全部</n-button>
+          
+            <n-button size="small" @click="showSettingsModal = true">规则设定</n-button>
+          
+            <n-button size="small" type="warning" @click="triggerResubscribeAll" :loading="isTaskRunning('全库媒体洗版')">
+              一键整理全部
+            </n-button>
+          
             <n-tooltip trigger="hover">
               <template #trigger>
-                <n-button type="primary" @click="triggerRefreshStatus" :loading="isTaskRunning('刷新媒体整理')" circle>
+                <n-button size="small" type="primary" @click="triggerRefreshStatus" :loading="isTaskRunning('刷新媒体整理')" circle>
                   <template #icon><n-icon :component="SyncOutline" /></template>
                 </n-button>
               </template>
@@ -235,7 +240,7 @@
       <div v-else class="center-container"><n-empty description="缓存为空，或当前筛选条件下无项目。" size="huge" /></div>
     </div>
 
-    <n-modal v-model:show="showSettingsModal" preset="card" style="width: 90%; max-width: 800px;" title="规则设定">
+    <n-modal v-model:show="showSettingsModal" preset="card" class="modal-card-lite" style="width: 90%; max-width: 800px;" title="规则设定">
       <ResubscribeSettingsPage @saved="handleSettingsSaved" />
     </n-modal>
   </div>
