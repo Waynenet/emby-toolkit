@@ -175,19 +175,17 @@ async function verifyToken() {
 .login-card, .register-card {
   width: 100%;
   max-width: 400px; 
-  border-radius: 20px !important; 
-  
-  /* 强制应用毛玻璃 */
-  background: rgba(20, 25, 35, 0.5) !important;
-  backdrop-filter: blur(24px) !important;
-  -webkit-backdrop-filter: blur(24px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.15) !important;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4) !important;
+  border-radius: 20px !important;
   
   height: auto !important;
   min-height: auto !important;
   flex: none !important;
   color: #fff !important;
+}
+
+/* 登录框不需要上浮动画 */
+.login-card:hover, .register-card:hover {
+  transform: none !important;
 }
 
 .login-header, .register-header {
