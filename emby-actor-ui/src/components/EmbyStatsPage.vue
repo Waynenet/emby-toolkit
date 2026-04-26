@@ -25,7 +25,7 @@
 
     <n-spin :show="loading">
       <!-- 1. 核心指标卡片 (响应式: 手机2列, 电脑4列) -->
-      <n-grid :cols="2" m:cols="4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 24px;">
+      <n-grid cols="2 m:4" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 24px;">
         <n-gi v-for="(item, index) in summaryCards" :key="index">
           <n-card :bordered="false" class="dashboard-card stat-module">
             <div style="display: flex; align-items: center; gap: 16px;">
@@ -44,7 +44,7 @@
       </n-grid>
 
       <!-- 2. 图表区域 (响应式: 手机1列, 电脑2列) -->
-      <n-grid :cols="1" lg:cols="2" :x-gap="24" :y-gap="24" responsive="screen" style="margin-bottom: 24px;">
+      <n-grid cols="1 m:2" :x-gap="24" :y-gap="24" responsive="screen" style="margin-bottom: 24px;">
         <!-- 左侧：播放趋势 -->
         <n-gi>
           <n-card :bordered="false" class="dashboard-card chart-module" style="height: 100%;">
@@ -68,7 +68,7 @@
       <!-- 3. 热门媒体 (海报墙) -->
       <n-card :bordered="false" class="dashboard-card">
         <template #header><span class="card-title">热门媒体 (Top 20)</span></template>
-        <n-grid :cols="3" s:cols="4" m:cols="6" l:cols="8" xl:cols="10" :x-gap="12" :y-gap="16" responsive="screen">
+        <n-grid cols="3 s:4 m:6 l:8 xl:10" :x-gap="12" :y-gap="16" responsive="screen">
           <n-gi v-for="(item, index) in statsData.media_rank" :key="item.id">
            <div class="poster-wrapper" @click="openEmbyItem(item.id)">
               <div class="rank-badge" :class="'rank-' + (index + 1)">{{ index + 1 }}</div>
