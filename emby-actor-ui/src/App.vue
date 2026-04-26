@@ -45,6 +45,8 @@ onMounted(() => {
   --text-secondary: rgba(255, 255, 255, 0.75);
   
   /* 多彩模块基色 (白天模式) */
+  --overlay-color: rgba(0, 0, 0, 0.4);
+
   --tint-blue: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(54, 162, 235, 0.45) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(54, 162, 235, 0.55) 100%);
   
@@ -75,6 +77,8 @@ html.dark {
   --text-secondary: rgba(255, 255, 255, 0.65);
   
   /* 多彩模块基色 (黑夜模式) */
+  --overlay-color: transparent;
+
   --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(54, 162, 235, 0.45) 100%);
   
@@ -104,6 +108,22 @@ html, body {
   background-attachment: fixed;
   color: var(--text-primary);
   transition: background-image 0.5s ease, color 0.3s ease;
+}
+
+/* 背景遮罩：白天半透明黑色，黑夜透明 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-color);
+  pointer-events: none;
+  z-index: 0;
+  transition: background 0.3s ease;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
 }
 
 .fullscreen-container { 
