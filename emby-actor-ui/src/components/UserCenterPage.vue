@@ -354,27 +354,6 @@ onMounted(async () => {
   font-weight: bold;
 }
 
-/* 优化纯白按钮为暗色玻璃态 */
-.custom-radio-group :deep(.n-radio-button) {
-  background-color: rgba(255, 255, 255, 0.05) !important;
-  color: rgba(255, 255, 255, 0.7) !important;
-  border-color: rgba(255, 255, 255, 0.1) !important;
-}
-.custom-radio-group :deep(.n-radio-button.n-radio-button--checked) {
-  background-color: rgba(255, 255, 255, 0.15) !important;
-  color: #fff !important;
-  border-color: rgba(255, 255, 255, 0.3) !important;
-}
-.custom-pagination :deep(.n-pagination-item) {
-  background-color: rgba(255, 255, 255, 0.05) !important;
-  color: rgba(255, 255, 255, 0.8) !important;
-  border-color: rgba(255, 255, 255, 0.1) !important;
-}
-.custom-pagination :deep(.n-pagination-item:hover) {
-  background-color: rgba(255, 255, 255, 0.15) !important;
-  color: #fff !important;
-}
-
 /* 账户信息同行显示布局 */
 .account-info-horizontal {
   display: flex;

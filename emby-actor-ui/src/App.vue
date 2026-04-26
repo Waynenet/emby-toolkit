@@ -181,4 +181,147 @@ html, body {
 * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
 ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
 .n-scrollbar-rail { display: none !important; }
+
+/* ==================== 4. 表单与交互组件毛玻璃化 (全局覆盖) ==================== */
+
+/* 1. 覆盖 Input, Select, InputNumber 等输入框 */
+.n-input, 
+.n-base-selection {
+  background-color: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 4px !important;
+  color: #ffffff !important;
+  transition: all 0.3s ease !important;
+}
+.n-input:hover, .n-input--focus,
+.n-base-selection:hover, .n-base-selection--active {
+  background-color: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
+}
+
+/* 修复 Select 下拉框原框是白色的问题：透明化内部的 label 和 tags 容器 */
+.n-base-selection-label,
+.n-base-selection-tags {
+  background-color: transparent !important;
+}
+
+/* 彻底移除 Naive UI 原生的状态边框层（这就是各种奇怪绿线和白底的罪魁祸首） */
+.n-base-selection__border,
+.n-base-selection__state-border,
+.n-input__border,
+.n-input__state-border,
+.n-radio-button__state-border {
+  display: none !important; 
+}
+
+/* 输入框内的文字颜色 */
+.n-input__input-el, 
+.n-input__placeholder,
+.n-base-selection-input__content,
+.n-base-selection-placeholder {
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* 2. 覆盖 Radio Button (解决绿线问题，选中状态改为全局主色绿) */
+.n-radio-group .n-radio-button {
+  background-color: var(--glass-bg) !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-left: none !important; /* 去除中间的多重边框 */
+  box-shadow: none !important;
+}
+/* 给第一个按钮补回左边框和圆角 */
+.n-radio-group .n-radio-button:first-child {
+  border-left: 1px solid var(--glass-border) !important;
+  border-top-left-radius: 4px !important;
+  border-bottom-left-radius: 4px !important;
+}
+/* 给最后一个按钮修复圆角 */
+.n-radio-group .n-radio-button:last-child {
+  border-top-right-radius: 4px !important;
+  border-bottom-right-radius: 4px !important;
+}
+.n-radio-group .n-radio-button:hover {
+  background-color: var(--glass-bg-hover) !important;
+  color: #ffffff !important;
+}
+
+/* 选中状态：变成类似 Primary 按钮的纯绿色填充 */
+.n-radio-group .n-radio-button.n-radio-button--checked {
+  background-color: #18a058 !important; /* Naive UI 默认的主色绿 */
+  color: #ffffff !important;
+  font-weight: bold !important;
+  border-color: #18a058 !important;
+  box-shadow: none !important; 
+}
+
+/* 3. 覆盖普通按钮 (如：排序按钮) */
+.n-button--default-type {
+  background: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: #ffffff !important;
+}
+.n-button--default-type:hover {
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
+}
+
+/* 4. 覆盖 Tag 标签 (如选择多个类型时的已选标签) */
+.n-tag {
+  background: rgba(255, 255, 255, 0.15) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: #ffffff !important;
+}
+.n-tag__close:hover {
+  color: #ff4d4f !important;
+}
+
+/* ==================== 5. 解决纯白背景与黑灰字体问题 ==================== */
+
+/* 解决下拉框变纯白的问题：Naive UI 的下拉框是包在 popover 里的 */
+.n-popover,
+.n-dropdown-menu,
+.n-base-select-menu {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow) !important;
+  border-radius: 8px !important;
+}
+/* 下拉菜单的选项文字与 Hover 状态 */
+.n-base-select-option, 
+.n-dropdown-option {
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+.n-base-select-option:hover, 
+.n-base-select-option--pending,
+.n-base-select-option--selected {
+  background: rgba(255, 255, 255, 0.2) !important;
+  color: #ffffff !important;
+}
+
+/* 暴力接管全局字体颜色：无论日夜模式，强制所有常见文本元素为白色 */
+body,
+.n-page-header__title,
+.n-page-header__subtitle,
+.n-thing-main__header,
+.n-thing-main__description,
+.n-form-item-label,
+.n-checkbox__label,
+.n-radio__label,
+.n-statistic-value__content,
+.n-statistic__label,
+.n-empty__description,
+.n-divider__title,
+.filter-label {
+  color: #ffffff !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); /* 增加一点文字阴影，防止在纯白背景图上看不清 */
+}
+
+/* 弱化次要文本的颜色（如：副标题、时间等） */
+.n-page-header__subtitle,
+.n-empty__description {
+  color: rgba(255, 255, 255, 0.7) !important;
+}
 </style>
