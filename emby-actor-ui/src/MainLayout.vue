@@ -81,14 +81,15 @@
             <div class="header-module user-module">
               <!-- 优先显示 Emby 头像，如果没有则显示默认图标 -->
               <n-avatar 
-                v-if="authStore.avatar" 
-                :src="authStore.avatar" 
+                v-if="avatarUrl" 
+                :src="avatarUrl" 
                 round 
                 :size="22" 
+                object-fit="cover"
                 style="margin-right: 4px;"
               />
-              <n-icon v-else size="18" :component="UserCenterIcon" />
-              <span v-if="!isMobile" class="username-text">{{ authStore.username }}</span>
+              <n-icon v-else size="18" :component="UserCenterIcon" style="margin-right: 4px;" />
+              <span v-if="!isMobile" class="username-text">{{ accountInfo?.name || authStore.username }}</span>
             </div>
           </n-dropdown>
         </div>
@@ -173,6 +174,37 @@ watch([() => props.taskStatus?.logs, isRealtimeLogVisible], async ([newLogs, isV
       }
     }
 }, { deep: true });
+
+// ====== 账户信息与头像逻辑 ======
+const accountInfo = ref(null);
+
+const avatarUrl = computed(() => {
+  const tag = accountInfo.value?.profile_image_tag;
+  const userId = accountInfo.value?.id;
+  if (userId && tag) {
+    return `/image_proxy/Users/${userId}/Images/Primary?tag=${tag}`;
+  }
+  return null;
+});
+
+const fetchAccountInfo = async () => {
+  if (!authStore.isLoggedIn) return;
+  try {
+    const res = await axios.get('/api/portal/account-info');
+    accountInfo.value = res.data;
+  } catch (error) {
+    console.error('无法获取账户信息以加载头像', error);
+  }
+};
+
+watch(() => authStore.isLoggedIn, (isLoggedIn) => {
+  if (isLoggedIn) {
+    fetchAccountInfo();
+  } else {
+    accountInfo.value = null;
+  }
+}, { immediate: true });
+// ===================================
 
 const userOptions = computed(() => [{ label: '退出登录', key: 'logout', icon: renderIcon(LogoutIcon) }]);
 const handleUserSelect = async (key) => { if (key === 'logout') { await authStore.logout(); router.push({ name: 'Login' }); } };
