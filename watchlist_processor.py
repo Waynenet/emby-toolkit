@@ -904,7 +904,7 @@ class WatchlistProcessor:
                         if not enable_sync_sub:
                             logger.debug("  ➜ 自动补订开关关闭，跳过自动补订。")
                             continue
-                        logger.info(f"  ➜ [MP同步] 发现《{series_name}》最新季 S{s_num} 在 MoviePilot 中无活跃订阅，正在自动补订...")
+                        logger.info(f"  ➜ [MP同步] 发现《{series_name}》 第 {s_num} 季 在 MoviePilot 中无活跃订阅，正在自动补订...")
                         sub_success = moviepilot.subscribe_series_to_moviepilot(
                             series_info={'title': series_name, 'tmdb_id': tmdb_id},
                             season_number=s_num,
@@ -913,7 +913,7 @@ class WatchlistProcessor:
                         if not sub_success:
                             logger.warning(f"  ➜ [MP同步] 补订 S{s_num} 失败，跳过。")
                             continue
-                        logger.info(f"  ➜ [MP同步] 《{series_name}》S{s_num} 补订成功。")
+                        logger.info(f"  ➜ [MP同步] 《{series_name}》 第 {s_num} 季 补订成功。")
                     else:
                         # 旧季不存在，直接跳过，不打扰
                         continue
@@ -952,7 +952,7 @@ class WatchlistProcessor:
                         should_log = True
                         reason = "重新补订" if not exists else "解除待定"
                         ep_msg = f", 集数修正->{current_target_total}" if current_target_total else ""
-                        log_msg = f"  ➜ [MP同步] 《{series_name}》S{s_num} -> 恢复订阅(R){ep_msg} (原因: {reason})"
+                        log_msg = f"  ➜ [MP同步] 《{series_name}》 第 {s_num} 季 -> 恢复订阅(R){ep_msg} (原因: {reason})"
 
                     if should_log:
                         logger.info(log_msg)
@@ -1008,14 +1008,14 @@ class WatchlistProcessor:
                 # 获取唯一的那个规格，用于日志展示
                 res = list(resolutions)[0]
                 grp = list(groups)[0]
-                logger.info(f"  ➜ [一致性检查] S{season_number} 完美达标: [{res} / {grp}]，跳过洗版。")
+                logger.info(f"  ➜ [一致性检查] 第 {season_number} 季 完美达标: [{res} / {grp}]，跳过洗版。")
                 return True
             else:
-                logger.info(f"  ➜ [一致性检查] S{season_number} 版本混杂，需要洗版。分布: 分辨率{resolutions}, 制作组{groups}, 编码{codecs}")
+                logger.info(f"  ➜ [一致性检查] 第 {season_number} 季 版本混杂，需要洗版。分布: 分辨率{resolutions}, 制作组{groups}, 编码{codecs}")
                 return False
 
         except Exception as e:
-            logger.error(f"  ➜ 检查 S{season_number} 一致性时出错: {e}")
+            logger.error(f"  ➜ 检查 第 {season_number} 季 一致性时出错: {e}")
             return False # 出错默认不跳过，继续洗版以防万一
 
     def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
@@ -1068,16 +1068,33 @@ class WatchlistProcessor:
                 except Exception as e:
                     logger.error(f"  ➜ [自动清理] 执行删除逻辑时出错: {e}")
             
-            # 4. 删除整理记录 (MoviePilot) - 
-            related_hashes = []
-            if watchlist_cfg.get('auto_delete_mp_history', False):
-                logger.info(f"  ➜ [自动清理] 正在删除 MoviePilot 整理记录...")
-                related_hashes = moviepilot.delete_transfer_history(tmdb_id, season_number, series_name, self.config)
+            # 4. 清理 MoviePilot 整理记录 / 下载器旧任务
+            #    改用 smart_cleanup_mp_media 统一入口，避免旧接口只按 hash 盲删，漏掉同数据辅种。
+            delete_mp_history = bool(watchlist_cfg.get('auto_delete_mp_history', False))
+            delete_download_tasks = bool(watchlist_cfg.get('auto_delete_download_tasks', False))
 
-                # 4-1. 清理下载器中的旧任务 -
-                if watchlist_cfg.get('auto_delete_download_tasks', False):
-                    logger.info(f"  ➜ [自动清理] 正在删除下载器旧任务...")
-                    moviepilot.delete_download_tasks(series_name, self.config, hashes=related_hashes)
+            if delete_mp_history or delete_download_tasks:
+                cleanup_parts = []
+                if delete_mp_history:
+                    cleanup_parts.append("MoviePilot 整理记录")
+                if delete_download_tasks:
+                    cleanup_parts.append("下载器旧任务及源文件（含辅种）")
+
+                logger.info(f"  ➜ [自动清理] 正在清理 {'、'.join(cleanup_parts)}...")
+
+                cleanup_ok = moviepilot.smart_cleanup_mp_media(
+                    tmdb_id=str(tmdb_id),
+                    item_type='Series',
+                    season=season_number,
+                    episode=None,
+                    title=series_name,
+                    config=self.config,
+                    delete_history=delete_mp_history,
+                    delete_files=delete_download_tasks
+                )
+
+                if not cleanup_ok:
+                    logger.warning(f"  ➜ [自动清理] MoviePilot 智能清理未完全成功，将继续执行取消订阅和洗版订阅流程。")
 
             # 5. 取消旧订阅
             moviepilot.cancel_subscription(tmdb_id, 'Series', self.config, season=season_number)

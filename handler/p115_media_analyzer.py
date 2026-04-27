@@ -302,7 +302,6 @@ class P115MediaAnalyzerMixin:
 
         feature_map = (
             getattr(self, "stream_feature_map", None)
-            or settings_db.get_setting("stream_feature_mapping")
             or utils.DEFAULT_STREAM_FEATURE_MAPPING
         )
 
@@ -451,8 +450,8 @@ class P115MediaAnalyzerMixin:
         title_clean = _normalize_marker_text(raw_title)
 
         title_has_lang = _has_lang_marker(title_clean, [
-            "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "简英",
-            "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁英",
+            "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "簡體", "简英",
+            "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁體", "繁英",
             "eng", "english", "en", "英文", "英语", "英字",
             "台配", "台灣", "台湾"
         ])
@@ -464,7 +463,6 @@ class P115MediaAnalyzerMixin:
                     break
 
         if title_has_lang:
-            # Title 已经有语言信息，避免 raw_lang 干扰
             lang_lower_for_detect = ""
             norm_lang = helpers.normalize_lang_code(raw_title)
         else:
@@ -481,20 +479,20 @@ class P115MediaAnalyzerMixin:
         # =========================================================
         if stream_type == "Subtitle":
             has_chs = _has_lang_marker(clean_text, [
-                "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "简英", "中英", "中文", "中上英下", "英上中下"
+                "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "簡體", "简英", "中英", "中文", "中上英下", "英上中下", "简体英文"
             ])
 
             has_cht = _has_lang_marker(clean_text, [
-                "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁英",
-                "繁上英下", "英上繁下"
+                "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁體", "繁英",
+                "繁上英下", "英上繁下", "繁体英文"
             ])
 
             has_eng = _has_lang_marker(clean_text, [
                 "eng", "english", "en", "英文", "英语", "英字", "简英", "繁英", "中英", "双语",
-                "中上英下", "英上中下", "繁上英下", "英上繁下"
+                "中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"
             ])
 
-            is_dual = _has_lang_marker(clean_text, ["双语", "中上英下", "英上中下", "繁上英下", "英上繁下"])
+            is_dual = _has_lang_marker(clean_text, ["双语", "中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"])
 
             if (has_chs and has_eng and not has_cht) or (is_dual and not has_cht):
                 norm_lang = "chi"
@@ -602,20 +600,19 @@ class P115MediaAnalyzerMixin:
             # 1. 预处理：去掉“画面内简中（iTunes）”这种多余前缀
             friendly_title = re.sub(r"画面内.*?（.*?）", "", friendly_title)
             
-            # 2. 暴力净化：听从建议，直接使用 clean_non_chinese_chars 碾碎所有 SUP/ASS/Chs 等英文污染
+            # 2. 暴力净化：碾碎所有 SUP/ASS/Chs 等英文污染
             friendly_title = utils.clean_non_chinese_chars(friendly_title)
 
-            # 3. 替换常见词
+            # 3. 统一简繁字形，并替换常见冗余词
+            friendly_title = friendly_title.replace("繁體", "繁体").replace("簡體", "简体")
+            
             replace_map = {
-                "简中": "简体",
+                "中文简体": "简体",
                 "简体中文": "简体",
-                "中文(简体)": "简体",
-                "中文（简体）": "简体",
-                "繁中": "繁体",
+                "简中": "简体",
+                "中文繁体": "繁体",
                 "繁体中文": "繁体",
-                "繁體中文": "繁体",
-                "中文(繁体)": "繁体",
-                "中文（繁體）": "繁体",
+                "繁中": "繁体",
             }
             for old, new in replace_map.items():
                 friendly_title = friendly_title.replace(old, new)
@@ -626,16 +623,15 @@ class P115MediaAnalyzerMixin:
             friendly_title = friendly_title.replace("中英双语（简体）双语", "中英双语（简体）")
             friendly_title = friendly_title.replace("中英双语（繁体）双语", "中英双语（繁体）")
             friendly_title = friendly_title.replace("中上英下", "中英双语（简体）").replace("英上中下", "中英双语（简体）")
+            friendly_title = friendly_title.replace("简体英文", "中英双语（简体）").replace("繁体英文", "中英双语（繁体）")
             
             # 5. 兜底与组合
             if not friendly_title:
-                # 如果清理后变为空（例如原标题全是英文），靠特征词和 display_lang 兜底
                 if display_lang and display_lang != "未知" and stream_features:
                     friendly_title = self._format_stream_feature_title(display_lang, stream_features)
                 else:
                     friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
             else:
-                # 如果清理后还有内容（比如“国配简体特效对应中译公映”），完美保留！
                 if display_lang in ["简体", "繁体", "中英双语（简体）", "中英双语（繁体）"]:
                     check_kw = "简" if "简" in display_lang else ("繁" if "繁" in display_lang else "")
                     if check_kw and check_kw not in friendly_title:
@@ -1209,7 +1205,7 @@ class P115MediaAnalyzerMixin:
                 # ★ 新增：动态提取音轨中的中文特征词（解决“中译公映”无法匹配的问题）
                 if default_audio:
                     # 剔除常见无意义词汇，提取独特的中文描述
-                    clean_audio_title = re.sub(r"(国语|粤语|英语|日语|韩语|默认|特效|双语|简英|繁英|简体|繁体|中英|声道|音轨)", "", audio_title)
+                    clean_audio_title = re.sub(r"(默认|特效|双语|简英|繁英|简体|繁体|中英|声道|音轨)", "", audio_title)
                     chinese_chunks = re.findall(r'[\u4e00-\u9fa5]{2,}', clean_audio_title)
                     for chunk in chinese_chunks:
                         if chunk.lower() not in active_audio_features:
@@ -1348,40 +1344,36 @@ class P115MediaAnalyzerMixin:
 
     def _fetch_and_parse_mediainfo(self, sha1, guessed_info=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, file_node=None, silent_log=False):
         """
-        通过 SHA1 获取真实的媒体信息，并转换为乐高重命名参数
+        通过 SHA1 获取真实的媒体信息，并转换为乐高重命名参数。
+
+        唯一数据源策略：
+        1. 优先直读本地 p115_mediainfo_cache 数据库；
+        2. 本地没有时，才用 ffprobe 解析 115 直链；
+        3. 解析成功后写回 p115_mediainfo_cache。
+
+        pre_fetched_mediainfo / local_pre_fetched_mediainfo 参数仅为兼容旧调用保留，
+        不再参与事实判断，避免内存缓存与数据库状态不一致。
         """
-        if not sha1: return {}, False
-        
+        if not sha1:
+            return {}, False
+
+        sha1 = str(sha1).strip().upper()
         raw_json = None
         is_center = False
-        data_source = "本地缓存"
+        data_source = ""
 
-        # 1. ★ 核心优化：直接从内存字典读取本地缓存，彻底消除数据库 I/O 瓶颈！
-        if local_pre_fetched_mediainfo and sha1 in local_pre_fetched_mediainfo:
-            raw_json = local_pre_fetched_mediainfo[sha1]
+        # 1. 本地 DB 是唯一真理：每次按 SHA1 直读 p115_mediainfo_cache。
+        try:
+            cached_text = _get_p115_cache_manager().get_mediainfo_cache_text(sha1)
+            if cached_text:
+                raw_json = json.loads(cached_text) if isinstance(cached_text, str) else cached_text
+                data_source = "本地缓存(DB)"
+                if not silent_log:
+                    logger.debug(f"  ➜ [媒体信息] 命中本地 DB 缓存: {sha1[:8]}")
+        except Exception as e:
+            logger.warning(f"  ➜ 读取 p115_mediainfo_cache 失败: {sha1[:8]} -> {e}")
 
-        # 2. 本地没有，优先查批量预获取的字典 (瞬间读取，无网络延迟)
-        if not raw_json and pre_fetched_mediainfo and sha1 in pre_fetched_mediainfo:
-            raw_json = pre_fetched_mediainfo[sha1]
-            is_center = True
-            data_source = "中心服务器(批量)"
-
-        # 3. 尝试查 P115Center 中心服务器 (单次查询)
-        if not raw_json and pre_fetched_mediainfo is None:
-            try:
-                import extensions
-                processor = extensions.media_processor_instance
-                if processor and getattr(processor, 'p115_center', None):
-                    resp = processor.p115_center.download_emby_mediainfo_data([sha1])
-                    if resp and sha1 in resp:
-                        raw_json = resp[sha1]
-                        is_center = True
-                        data_source = "中心服务器(单次)"
-                        _get_p115_cache_manager().save_mediainfo_cache(sha1, raw_json)
-            except Exception:
-                pass
-
-        # 4. 本地和中心服务器都没有，最终用 ffprobe 解析 115 直链，并写入本地缓存
+        # 2. 本地 DB 没有，最后才 ffprobe。彻底移除中心服务器路径，保留 ETK 格式化结果。
         if not raw_json and file_node:
             raw_json = self._probe_mediainfo_with_ffprobe(
                 file_node,
@@ -1390,21 +1382,13 @@ class P115MediaAnalyzerMixin:
             )
 
             if raw_json:
-                is_center = False
                 data_source = "ffprobe解析"
-
-                # 写入 p115_mediainfo_cache，后续同 SHA1 直接走本地缓存
                 _get_p115_cache_manager().save_mediainfo_cache(sha1, raw_json)
-
-                # 同步塞回本轮预取字典，避免同一批里重复 probe
-                if local_pre_fetched_mediainfo is not None:
-                    local_pre_fetched_mediainfo[str(sha1).upper()] = raw_json
-                    local_pre_fetched_mediainfo[str(sha1)] = raw_json
 
         if not raw_json:
             return {}, False
 
-        # 5. 开始解析 Emby 的真实数据
+        # 3. 开始解析 Emby 的真实数据
         info = {}
         try:
             if isinstance(raw_json, list) and len(raw_json) > 0:

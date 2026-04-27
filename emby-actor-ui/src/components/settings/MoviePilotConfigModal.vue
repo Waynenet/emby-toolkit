@@ -20,6 +20,23 @@
             </n-text>
           </template>
         </n-form-item>
+        <n-divider title-placement="left" style="margin: 10px 0 20px 0;">联动删除</n-divider>
+        <n-form-item label="删除整理记录">
+          <n-switch v-model:value="formModel.link_delete_transfer_history" />
+          <template #feedback>
+            <n-text depth="3" style="font-size:0.8em;">
+              Emby删除媒体项时，同步删除 MoviePilot 中匹配的整理记录。
+            </n-text>
+          </template>
+        </n-form-item>
+        <n-form-item label="删除种子及源文件">
+          <n-switch v-model:value="formModel.link_delete_download_files" />
+          <template #feedback>
+            <n-text depth="3" style="font-size:0.8em;">
+              Emby删除媒体项时，同步删除下载器的种子和源文件（含辅种）。
+            </n-text>
+          </template>
+        </n-form-item>
         <n-divider title-placement="left" style="margin: 10px 0 20px 0;">每日订阅额度</n-divider>
         <n-form-item label="每日订阅上限">
           <n-input-number v-model:value="formModel.resubscribe_daily_cap" :min="1" style="width: 100%;" />
@@ -55,6 +72,8 @@ const formModel = ref({
   moviepilot_username: '',
   moviepilot_password: '',
   moviepilot_recognition: false,
+  link_delete_transfer_history: false,
+  link_delete_download_files: false,
   resubscribe_daily_cap: 10,
   resubscribe_delay_seconds: 2.0
 });

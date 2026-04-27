@@ -27,17 +27,31 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# 内存级缓存，防止同剧集/同系列疯狂重复请求 TMDb
-_TMDB_METADATA_CACHE = {}
-_TMDB_SEARCH_CACHE = {}
-_AI_PARSE_CACHE = {}
-_MP_PARSE_CACHE = {}
+from collections import OrderedDict
+
+class LimitedCache(OrderedDict):
+    """带容量限制的内存缓存，防止内存泄漏撑爆服务器"""
+    def __init__(self, maxsize=1000, *args, **kwds):
+        self.maxsize = maxsize
+        super().__init__(*args, **kwds)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.maxsize:
+            # 超过容量时，弹出最早插入的元素 (FIFO)
+            self.popitem(last=False)
+
+# 内存级缓存，防止同剧集/同系列疯狂重复请求 TMDb (限制容量)
+_TMDB_METADATA_CACHE = LimitedCache(maxsize=1000)
+_TMDB_SEARCH_CACHE = LimitedCache(maxsize=1000)
+_AI_PARSE_CACHE = LimitedCache(maxsize=1000)
+_MP_PARSE_CACHE = LimitedCache(maxsize=1000)
 
 # 全局直链缓存池，供反向代理和Web路由共享 
-_DIRECT_URL_CACHE = {}
+_DIRECT_URL_CACHE = LimitedCache(maxsize=2000)
 
 # 全局目录缓存池
-_GLOBAL_DIR_CACHE = {}
+_GLOBAL_DIR_CACHE = LimitedCache(maxsize=5000)
 _GLOBAL_DIR_LOCK = threading.Lock()
 
 def get_115_tokens():
@@ -2068,7 +2082,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 if last_ep_data and last_ep_data.get('episode_number') == episode_num:
                     season_num = last_ep_data.get('season_number', 1)
                     if not silent_log:
-                        logger.info(f"  ➜ [动漫分季修正] 命中最新集，自动修正为第 {season_num} 季")
+                        logger.info(f"  ➜ [分季修正] 命中最新集，自动修正为第 {season_num} 季")
                 elif seasons_data:
                     # 累加算法：排除第 0 季(SP)，按顺序累加集数，推算所属季
                     valid_seasons = sorted([s for s in seasons_data if s.get('season_number', 0) > 0], key=lambda x: x['season_number'])
@@ -2078,7 +2092,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if episode_num <= cumulative:
                             season_num = s['season_number']
                             if not silent_log:
-                                logger.info(f"  ➜ [动漫分季修正] 绝对集数 {episode_num} 超出原季容量，已自动推算并修正为第 {season_num} 季！")
+                                logger.info(f"  ➜ [分季修正] 绝对集数 {episode_num} 超出原季容量，已自动推算并修正为第 {season_num} 季！")
                             break
 
         if hasattr(self, 'forced_season') and self.forced_season is not None:
@@ -2412,10 +2426,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
         first_video = next((c for c in candidates if (c.get('fn') or c.get('n') or c.get('file_name') or '').split('.')[-1].lower() in known_video_exts), None)
 
-        # 准备预取字典，供后续重命名主循环复用，避免重复查库/ffprobe
-        pre_fetched_mediainfo = {}
-        local_pre_fetched_mediainfo = {}
-
+        # 媒体信息缓存以 p115_mediainfo_cache 数据库为唯一真理。
+        # 这里保留变量仅兼容旧函数签名，不再使用内存预取字典。
+        pre_fetched_mediainfo = None
+        local_pre_fetched_mediainfo = None
         if first_video and not getattr(self, 'is_manual_correct', False) and not getattr(self, 'is_from_memory', False):
             v_sha1 = first_video.get('sha1') or first_video.get('sha')
             v_fid = first_video.get('fid') or first_video.get('file_id')
@@ -2429,16 +2443,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except: pass
 
             if v_sha1 or v_fid:
-                # ★★★ 核心修复：提前解析前，先主动查一次本地缓存，防止 ffprobe 击穿！
-                if v_sha1:
-                    cached_text = P115CacheManager.get_mediainfo_cache_text(v_sha1)
-                    if cached_text:
-                        try:
-                            local_pre_fetched_mediainfo[v_sha1] = json.loads(cached_text)
-                            logger.debug(f"  ➜ [提前解析] 命中本地媒体信息缓存: {v_sha1[:8]}")
-                        except: pass
-
-                # 提前解析媒体信息 (内部会自动走本地缓存 -> 中心 -> ffprobe)
+                # 提前解析媒体信息。内部会直读本地 DB；DB 没有时才 ffprobe。
                 self._fetch_and_parse_mediainfo(
                     v_sha1,
                     guessed_info={},
@@ -2712,21 +2717,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # ★ 新增：用于记录本批次已经生成的目标文件名，防止同名冲突
         seen_new_filenames = set()
 
-        # 批量预查询中心服务器与本地数据库
-        pre_fetched_mediainfo = {}
-        local_pre_fetched_mediainfo = {} # ★ 新增：本地预获取字典
-        
-        # ★ 核心修复：移除开关限制，强制批量预取真实媒体信息
-        video_sha1s = []
+        # 媒体信息缓存以 p115_mediainfo_cache 数据库为唯一真理。
+        # 不再批量查询中心服务器，也不再维护本轮内存媒体信息字典。
+        pre_fetched_mediainfo = None
+        local_pre_fetched_mediainfo = None
+
+        # 仅补齐候选视频缺失的 SHA1，供后续 _fetch_and_parse_mediainfo 直读 DB / ffprobe 使用。
         for file_item in candidates:
             file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
             ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
             if ext in known_video_exts:
                 sha1 = file_item.get('sha1') or file_item.get('sha')
-                
-                # =========================================================
-                # ★ 核心修复：在收集阶段，如果发现缺失 SHA1，提前主动请求补齐！
-                # =========================================================
                 if not sha1:
                     fid = file_item.get('fid') or file_item.get('file_id')
                     if fid:
@@ -2735,67 +2736,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             if info_res.get('state') and info_res.get('data'):
                                 sha1 = info_res['data'].get('sha1')
                                 if sha1:
-                                    file_item['sha1'] = sha1 # 存回字典，供后续主循环直接使用
+                                    file_item['sha1'] = sha1
                         except Exception:
                             pass
-                            
-                if sha1: 
-                    video_sha1s.append(sha1)
-        
-        if video_sha1s:
-            # 先查本地缓存，剔除已有的，只查缺失的
-            local_cached_sha1s = set()
-            try:
-                from database.connection import get_db_connection
-                with get_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        # ★ 核心优化：直接把 json 也查出来放进内存！
-                        cursor.execute("SELECT sha1, mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = ANY(%s)", (list(video_sha1s),))
-                        rows = cursor.fetchall()
-                        if rows:
-                            hit_sha1s = []
-                            for row in rows:
-                                local_cached_sha1s.add(row['sha1'])
-                                hit_sha1s.append(row['sha1'])
-                                if row['mediainfo_json']:
-                                    val = row['mediainfo_json']
-                                    local_pre_fetched_mediainfo[row['sha1']] = val if isinstance(val, (list, dict)) else json.loads(val)
-                            
-            except Exception: pass
-            
-            missing_sha1s = list(set(video_sha1s) - local_cached_sha1s)
-            if missing_sha1s:
-                req_count = len(missing_sha1s)
-                logger.info(f"  ➜ [批量查询] 准备向中心服务器查询 {req_count} 个文件的媒体信息...")
-                try:
-                    import extensions
-                    processor = extensions.media_processor_instance
-                    if processor and getattr(processor, 'p115_center', None):
-                        resp = processor.p115_center.download_emby_mediainfo_data(missing_sha1s)
-                        
-                        if isinstance(resp, dict):
-                            # ★ 核心优化：过滤掉可能返回的空值/None，只统计真正有数据的命中项
-                            valid_hits = {k: v for k, v in resp.items() if v}
-                            hit_count = len(valid_hits)
-                            
-                            if hit_count > 0:
-                                pre_fetched_mediainfo = valid_hits
-                                # ★ 核心修复：批量查询中心服务器后，立即写入本地缓存！
-                                for k_sha1, v_json in valid_hits.items():
-                                    P115CacheManager.save_mediainfo_cache(k_sha1, v_json)
-                                    local_pre_fetched_mediainfo[k_sha1] = v_json
-                                
-                                if hit_count == req_count:
-                                    logger.info(f"  ➜ [批量查询] 完美命中！成功获取全部 {hit_count} 个文件的媒体信息。")
-                                else:
-                                    logger.info(f"  ➜ [批量查询] 部分命中：成功获取 {hit_count}/{req_count} 个文件的媒体信息。")
-                            else:
-                                logger.info(f"  ➜ [批量查询] 中心服务器暂无这 {req_count} 个文件的媒体信息。")
-                        else:
-                            logger.warning(f"  ➜ [批量查询] 中心服务器返回数据格式异常。")
-                            
-                except Exception as e:
-                    logger.warning(f"  ➜ [批量查询] 中心服务器查询失败: {e}")
 
         # 确保 allowed_exts 有兜底，防止用户清空列表导致报错
         if not allowed_exts:
@@ -3821,6 +3764,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 with open(strm_filepath, "w", encoding="utf-8") as f:
                     f.write(strm_content)
                 logger.info(f"  ➜ [MP直出] STRM 已生成 -> {strm_filename}")
+
+                # ★★★ 主动推送给实时监控队列，防止底层文件系统事件丢失 ★★★
+                try:
+                    from monitor_service import enqueue_file_actively
+                    enqueue_file_actively(strm_filepath)
+                except Exception: 
+                    pass
 
                 # 生成 Mediainfo
                 if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):

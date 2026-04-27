@@ -592,7 +592,7 @@
                       </n-switch>
                       <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
-                              开启后生成 STRM 时，会同步生成 -mediainfo.json 文件，需清空神医'可选媒体信息 JSON 根目录'。
+                              同步生成 -mediainfo.json 文件，勿配置神医'可选媒体信息 JSON 根目录'。
                           </n-text>
                       </template>
                   </n-form-item>
@@ -2148,6 +2148,21 @@ const formRules = { trigger: ['input', 'blur'] };
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
 const message = useMessage();
 const dialog = useDialog();
+
+const enforceMediainfoExclusive = (preferred = 'center', notify = true) => {
+  if (!configModel.value) return;
+  const centerEnabled = !!configModel.value.p115_mediainfo_center;
+  const generateEnabled = !!configModel.value.p115_generate_mediainfo;
+  if (!centerEnabled || !generateEnabled) return;
+
+  if (preferred === 'generate') {
+    configModel.value.p115_mediainfo_center = false;
+    if (notify) message.info('已关闭“媒体信息中心化”，同步生成媒体信息与中心化只能二选一。');
+  } else {
+    configModel.value.p115_generate_mediainfo = false;
+    if (notify) message.info('已关闭“同步生成媒体信息”，媒体信息中心化与同步生成只能二选一。');
+  }
+};
 const isResettingMappings = ref(false);
 const resetMappingsModalVisible = ref(false);
 const availableLibraries = ref([]);
@@ -2393,6 +2408,20 @@ watch(() => configModel.value?.refresh_emby_after_update, (isRefreshEnabled) => 
     configModel.value.auto_lock_cast_after_update = false;
   }
 });
+watch(
+  () => [configModel.value?.p115_mediainfo_center, configModel.value?.p115_generate_mediainfo],
+  ([centerEnabled, generateEnabled], [oldCenterEnabled, oldGenerateEnabled] = []) => {
+    if (!configModel.value || !(centerEnabled && generateEnabled)) return;
+
+    if (generateEnabled && oldGenerateEnabled === false) {
+      enforceMediainfoExclusive('generate');
+    } else if (centerEnabled && oldCenterEnabled === false) {
+      enforceMediainfoExclusive('center');
+    } else {
+      enforceMediainfoExclusive('center');
+    }
+  }
+);
 watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_native_libraries, configModel.value?.emby_server_url, configModel.value?.emby_api_key, configModel.value?.emby_user_id], ([proxyEnabled, mergeNative, url, apiKey, userId]) => {
   if (proxyEnabled && mergeNative && url && apiKey && userId) {
     fetchNativeViewsSimple();
@@ -2992,6 +3021,11 @@ const save = async () => {
     if (configModel.value) {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
+    }
+    if (cleanConfigPayload.p115_mediainfo_center && cleanConfigPayload.p115_generate_mediainfo) {
+        cleanConfigPayload.p115_generate_mediainfo = false;
+        if (configModel.value) configModel.value.p115_generate_mediainfo = false;
+        message.warning('媒体信息中心化与同步生成媒体信息互斥，已自动关闭“同步生成媒体信息”。');
     }
     const restartNeeded = initialRestartableConfig.value && (cleanConfigPayload.proxy_port !== initialRestartableConfig.value.proxy_port || cleanConfigPayload.log_rotation_size_mb !== initialRestartableConfig.value.log_rotation_size_mb || cleanConfigPayload.log_rotation_backup_count !== initialRestartableConfig.value.log_rotation_backup_count || cleanConfigPayload.emby_server_url !== initialRestartableConfig.value.emby_server_url);
     const performSaveAndUpdateState = async () => {

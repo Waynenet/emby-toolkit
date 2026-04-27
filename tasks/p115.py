@@ -25,8 +25,14 @@ from handler.p115_service import (
     _parse_115_size,
     _identify_media_enhanced
 )
+from handler.p115_media_analyzer import P115MediaAnalyzerMixin
 
 logger = logging.getLogger(__name__)
+
+# ★ 构建一个轻量级的独立探测器，供增量/全量同步任务生成 mediainfo 使用
+class _StandaloneProber(P115MediaAnalyzerMixin):
+    def __init__(self, client):
+        self.client = client
 
 def task_scan_and_organize_115(processor=None):
     """
@@ -47,14 +53,6 @@ def task_scan_and_organize_115(processor=None):
 
     client = P115Service.get_client()
     if not client: raise Exception("无法初始化 115 客户端")
-
-    # 通知监控服务进入蓄水池模式
-    # try:
-    #     from monitor_service import pause_queue_processing, resume_queue_processing
-    #     pause_queue_processing()
-    # except Exception as e:
-    #     logger.warning(f"  ➜ 无法暂停监控队列: {e}")
-    #     resume_queue_processing = lambda: None
 
     config = get_config()
     cid_val = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID)
@@ -373,12 +371,6 @@ def task_scan_and_organize_115(processor=None):
     except Exception as e:
         logger.error(f"  ➜ 115 扫描任务异常: {e}", exc_info=True)
         update_progress(100, f"扫描异常结束: {e}")
-    finally:
-        pass
-        # try:
-        #     resume_queue_processing()
-        # except:
-        #     pass
 
 def task_sync_115_directory_tree(processor=None):
     """
@@ -766,11 +758,48 @@ def task_full_sync_strm_and_subs(processor=None):
                                     
                                 valid_local_files.add(os.path.abspath(strm_path))
                                 
+                                fid = item.get('fid') or item.get('file_id')
+                                sha1 = item.get('sha1') or item.get('sha')
+                                
+                                # ==================================================
+                                # ★ 生成 Mediainfo (等同 MP 直出逻辑)
+                                # ==================================================
+                                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                                    mediainfo_filename = os.path.splitext(name)[0] + "-mediainfo.json"
+                                    mediainfo_filepath = os.path.join(current_local_path, mediainfo_filename)
+                                    
+                                    if need_write or not os.path.exists(mediainfo_filepath):
+                                        try:
+                                            mediainfo_text = None
+                                            if sha1:
+                                                mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
+
+                                            if not mediainfo_text:
+                                                prober = _StandaloneProber(client)
+                                                probe_item = {'fid': fid, 'pc': pc, 'sha1': sha1, 'fn': name, 'fs': raw_size}
+                                                mediainfo_obj = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=sha1, silent_log=True)
+                                                if mediainfo_obj:
+                                                    probe_sha1 = sha1 or probe_item.get('sha1')
+                                                    if probe_sha1:
+                                                        probe_sha1 = str(probe_sha1).upper()
+                                                        P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                                        sha1 = probe_sha1
+                                                    mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
+
+                                            if mediainfo_text:
+                                                with open(mediainfo_filepath, "w", encoding="utf-8") as f:
+                                                    f.write(mediainfo_text)
+                                                logger.info(f"  ➜ [全量同步] 媒体信息已生成 -> {mediainfo_filename}")
+                                        except Exception as e:
+                                            logger.error(f"  ➜ [全量同步] 生成媒体信息失败: {e}")
+                                            
+                                    # 无论是否刚刚生成，只要开启了开关，就加入有效名单防止被删
+                                    if os.path.exists(mediainfo_filepath):
+                                        valid_local_files.add(os.path.abspath(mediainfo_filepath))
+
                                 # ==================================================
                                 # ★ 写入本地数据库缓存 (p115_filesystem_cache)
                                 # ==================================================
-                                fid = item.get('fid') or item.get('file_id')
-                                sha1 = item.get('sha1') or item.get('sha')
                                 if pc and fid:
                                     file_local_path = os.path.join(rel_dir, name).replace('\\', '/')
                                     P115CacheManager.save_file_cache(
@@ -828,11 +857,11 @@ def task_full_sync_strm_and_subs(processor=None):
                     target_local_dir = os.path.join(local_root, rel_path)
                     if not os.path.exists(target_local_dir): continue
                     
-                    # 1. 先清理失效的 STRM 和 字幕文件
+                    # 1. 先清理失效的 STRM、字幕文件和 mediainfo
                     for root_dir, dirs, files in os.walk(target_local_dir):
                         for file in files:
                             ext = file.split('.')[-1].lower()
-                            if ext in known_sub_exts or ext == 'strm':
+                            if ext in known_sub_exts or ext == 'strm' or file.endswith('-mediainfo.json'):
                                 file_path = os.path.abspath(os.path.join(root_dir, file))
                                 if file_path not in valid_local_files:
                                     try:
@@ -1277,6 +1306,13 @@ def task_monitor_115_life_events(processor=None):
                     deleted_count += 1
                     logger.info(f"  ➜ [事件] 删除失效 STRM: {os.path.basename(strm_full)}")
                     _notify_emby(strm_full)
+                    
+                # ★ 同步删除 Mediainfo
+                mi_full = os.path.splitext(full_local_path)[0] + "-mediainfo.json"
+                if os.path.exists(mi_full):
+                    os.remove(mi_full)
+                    logger.info(f"  ➜ [事件] 删除失效媒体信息: {os.path.basename(mi_full)}")
+                    
             elif db_ext in known_sub_exts:
                 if os.path.exists(full_local_path):
                     os.remove(full_local_path)
@@ -1362,6 +1398,12 @@ def task_monitor_115_life_events(processor=None):
                     if os.path.exists(old_strm): 
                         os.remove(old_strm)
                         _notify_emby(old_strm)
+                        
+                    # ★ 同步删除旧的 Mediainfo
+                    old_mi = os.path.splitext(old_full_path)[0] + "-mediainfo.json"
+                    if os.path.exists(old_mi):
+                        os.remove(old_mi)
+                        
                 elif old_ext in known_sub_exts:
                     if os.path.exists(old_full_path): os.remove(old_full_path)
                 elif is_folder:
@@ -1411,6 +1453,43 @@ def task_monitor_115_life_events(processor=None):
                     added_count += 1
                     action_str = "移动/改名" if old_local_path else "新增"
                     logger.info(f"  ➜ [事件] {action_str} STRM: {file_name}")
+                    
+                    # ==================================================
+                    # ★ 生成 Mediainfo (等同 MP 直出逻辑)
+                    # ==================================================
+                    if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                        try:
+                            mediainfo_filename = os.path.splitext(file_name)[0] + "-mediainfo.json"
+                            mediainfo_filepath = os.path.join(current_local_path, mediainfo_filename)
+                            
+                            mediainfo_text = None
+                            if file_sha1:
+                                mediainfo_text = P115CacheManager.get_mediainfo_cache_text(file_sha1)
+
+                            if not mediainfo_text:
+                                prober = _StandaloneProber(client)
+                                probe_item = {
+                                    'fid': file_id, 'file_id': file_id,
+                                    'pc': pick_code, 'pick_code': pick_code,
+                                    'sha1': file_sha1,
+                                    'fn': file_name, 'file_name': file_name,
+                                    'fs': file_size, 'size': file_size
+                                }
+                                mediainfo_obj = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=file_sha1, silent_log=False)
+                                if mediainfo_obj:
+                                    probe_sha1 = file_sha1 or probe_item.get('sha1') or probe_item.get('sha')
+                                    if probe_sha1:
+                                        probe_sha1 = str(probe_sha1).upper()
+                                        P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                        file_sha1 = probe_sha1
+                                    mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
+
+                            if mediainfo_text:
+                                with open(mediainfo_filepath, "w", encoding="utf-8") as f:
+                                    f.write(mediainfo_text)
+                                logger.info(f"  ➜ [事件] 媒体信息已生成 -> {mediainfo_filename}")
+                        except Exception as e:
+                            logger.error(f"  ➜ [事件] 生成媒体信息失败: {e}")
                     
                     try:
                         from monitor_service import enqueue_file_actively
