@@ -2,11 +2,11 @@
   <n-spin :show="loading">
     <n-space vertical :size="24">
       <!-- 头部说明 -->
-      <n-card :bordered="false" style="background-color: transparent;">
+      <n-card :bordered="false">
         <template #header>
           <span style="font-size: 1.2em; font-weight: bold;">媒体去重决策规则</span>
         </template>
-        <p style="margin-top: 0; color: #888;">
+        <p style="margin-top: 0;">
           当检测到重复项时，系统将按照以下规则顺序（从上到下）进行比较。<br>
           您可以拖拽调整<strong>优先规则</strong>的顺序。如果所有优先规则都无法区分优劣，将使用底部的<strong>兜底规则</strong>决定结果。
         </p>
@@ -67,11 +67,11 @@
 
       <!-- ★★★ 第二部分：固定的兜底规则区域 (UI重构) ★★★ -->
       <div v-if="fallbackRule">
-        <n-divider style="margin: 24px 0 12px 0; font-size: 0.9em; color: #999;">兜底策略 (固定)</n-divider>
+        <n-divider style="margin: 24px 0 12px 0; font-size: 0.9em;">兜底策略 (固定)</n-divider>
         
         <n-card class="rule-card fallback-card" size="small">
           <div class="rule-content">
-            <n-icon :component="LockIcon" size="20" style="color: #ccc;" />
+            <n-icon :component="LockIcon" size="20" />
             
             <div class="rule-details">
               <div class="rule-name">{{ getRuleDisplayName(fallbackRule.id) }}</div>
@@ -122,7 +122,7 @@
           指定媒体库
           <n-tooltip trigger="hover">
             <template #trigger>
-              <n-icon :component="HelpIcon" style="margin-left: 4px; cursor: help; color: #888;" />
+              <n-icon :component="HelpIcon" style="margin-left: 4px; cursor: help;" />
             </template>
             留空则扫描所有电影和剧集类型的媒体库。指定后，仅扫描选中的媒体库。
           </n-tooltip>
@@ -145,7 +145,7 @@
 
       <!-- 编辑优先级弹窗 -->
       <n-modal v-model:show="showEditModal" preset="card" style="width: 500px;" title="编辑优先级">
-        <p style="margin-top: 0; color: #888;">
+        <p style="margin-top: 0">
           拖拽下方的标签来调整关键字的优先级。排在越上面的关键字，代表版本越好。
         </p>
         <draggable
@@ -368,7 +368,6 @@ onMounted(fetchSettings);
 
 .drag-handle {
   cursor: grab;
-  color: #bbb;
   flex-shrink: 0;
 }
 .rule-card:active .drag-handle {
@@ -390,7 +389,6 @@ onMounted(fetchSettings);
 
 .rule-description {
   font-size: 0.85em;
-  color: #888;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -425,7 +423,6 @@ onMounted(fetchSettings);
 }
 .setting-desc {
   font-size: 0.9em;
-  color: #888;
   line-height: 1.4;
 }
 

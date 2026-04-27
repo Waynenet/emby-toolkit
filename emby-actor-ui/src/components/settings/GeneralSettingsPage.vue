@@ -1356,12 +1356,6 @@ onUnmounted(() => {
   margin-left: 4px;
   font-weight: normal;
 }
-.glass-section {
-  background-color: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
 .info-icon {
   color: var(--n-info-color);
   cursor: help;

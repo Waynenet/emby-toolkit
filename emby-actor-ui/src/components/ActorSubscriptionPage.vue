@@ -224,10 +224,7 @@ watch(loaderRef, (newEl) => {
   height: auto;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  background-color: #f0f2f5;
-}
-.dark-mode .actor-avatar {
-  background-color: #2c2c32;
+  background-color: var(--glass-bg);
 }
 .actor-name {
   font-weight: 600;

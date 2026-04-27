@@ -547,7 +547,7 @@
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
+                        <template #trigger><n-button circle @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
@@ -574,7 +574,7 @@
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
+                        <template #trigger><n-button circle @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
@@ -601,7 +601,7 @@
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
+                        <template #trigger><n-button circle @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
@@ -628,7 +628,7 @@
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
+                        <template #trigger><n-button circle @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
@@ -655,7 +655,7 @@
                   <div class="movie-actions-overlay">
                     <n-space>
                       <n-tooltip trigger="hover">
-                        <template #trigger><n-button circle color="#ffffff" text-color="#000000" @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
+                        <template #trigger><n-button circle @click="openTmdbSearch(media.title)"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                         TMDb 搜索
                       </n-tooltip>
                       <n-tooltip trigger="hover">
@@ -1485,7 +1485,7 @@ createRuleWatcher(() => currentCollection.value.definition.dynamic_rules);
 .grid-item { position: relative; touch-action: none; }
 
 /* 卡片样式 */
-.collection-card { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; cursor: grab; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); transition: transform 0.2s, box-shadow 0.2s, filter 0.3s; background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+.collection-card { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; cursor: grab; box-shadow: var(--glass-shadow); transition: transform 0.2s, box-shadow 0.2s, filter 0.3s; background-color: var(--glass-bg); backdrop-filter: var(--glass-blur); border: 1px solid var(--glass-border); }
 .collection-card:active { cursor: grabbing; }
 .collection-card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3); z-index: 2; }
 .collection-card.is-paused { filter: grayscale(100%); opacity: 0.8; }

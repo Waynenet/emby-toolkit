@@ -216,7 +216,7 @@
                     </div>
                     <div class="details-column">
                         <n-h3 style="margin-top: 0; margin-bottom: 8px;">{{ currentRecommendation.title }}</n-h3>
-                        <n-space align="center" size="small" style="color: #888; margin-bottom: 16px;">
+                        <n-space align="center" size="small" style="margin-bottom: 16px;">
                             <n-icon :component="StarIcon" color="#f7b824" />
                             <span>{{ currentRecommendation.vote_average?.toFixed(1) }}</span>
                             <span>·</span>
@@ -319,7 +319,7 @@
     <div v-if="isLoadingMore" style="text-align: center; padding: 20px;">
       <n-spin size="medium" />
     </div>
-    <div v-if="results.length > 0 && filters.page >= totalPages" style="text-align: center; padding: 20px; color: #888;">
+    <div v-if="results.length > 0 && filters.page >= totalPages" style="text-align: center; padding: 20px;">
       已经到底啦~
     </div>
 
@@ -328,7 +328,7 @@
     <!-- ★★★ 季选择模态框 ★★★ -->
     <n-modal v-model:show="showSeasonModal" preset="card" title="选择要订阅的季" style="width: 600px; max-width: 95%;">
       <n-spin :show="loadingSeasons">
-        <div v-if="seasonList.length === 0 && !loadingSeasons" style="text-align: center; color: #888; padding: 20px;">未找到季信息</div>
+        <div v-if="seasonList.length === 0 && !loadingSeasons" style="text-align: center; padding: 20px;">未找到季信息</div>
         <n-space vertical v-else>
           <n-card v-for="season in seasonList" :key="season.id" size="small" hoverable>
             <div style="display: flex; align-items: center; gap: 12px;">
@@ -336,7 +336,7 @@
               <div v-else style="width: 40px; height: 60px; background: #333; border-radius: 4px;"></div>
               <div style="flex-grow: 1;">
                 <div style="font-weight: bold;">{{ season.name }}</div>
-                <div style="font-size: 12px; color: #888;">{{ season.episode_count }} 集 <span v-if="season.air_date">· {{ season.air_date }}</span></div>
+                <div style="font-size: 12px;">{{ season.episode_count }} 集 <span v-if="season.air_date">· {{ season.air_date }}</span></div>
               </div>
               <div style="display: flex; gap: 8px; align-items: center;">
                 <n-tag v-if="season.in_library" type="success" size="small">已入库</n-tag>
@@ -875,7 +875,7 @@ onUnmounted(() => {
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
   overflow: hidden;
   height: 100%;
-  background-color: var(--card-bg-color); /* 替换原来的 #222 */
+  background-color: var(--card-bg-color);
   backdrop-filter: blur(10px); 
   display: flex;
   flex-direction: column;
@@ -1073,15 +1073,8 @@ onUnmounted(() => {
 .actor-list-container {
   display: flex;
   gap: 16px;
-  overflow-x: auto;
   padding-bottom: 10px;
-  scrollbar-width: thin;
-  scrollbar-color: #555 #333;
 }
-.actor-list-container::-webkit-scrollbar { height: 6px; }
-.actor-list-container::-webkit-scrollbar-track { background: #333; border-radius: 3px; }
-.actor-list-container::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
-.actor-list-container::-webkit-scrollbar-thumb:hover { background: #777; }
 
 .actor-card {
   flex-shrink: 0;
@@ -1094,7 +1087,7 @@ onUnmounted(() => {
   border-radius: 8px;
   object-fit: cover;
   margin-bottom: 8px;
-  background-color: var(--n-action-color); /* 替换原来的 #333 */
+  background-color: var(--n-action-color);
 }
 .actor-name {
   font-weight: bold;
@@ -1105,7 +1098,6 @@ onUnmounted(() => {
 }
 .actor-character {
   font-size: 0.8em;
-  color: #888;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

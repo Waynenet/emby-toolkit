@@ -259,6 +259,30 @@ body::before {
   height: 100vh; width: 100%; background: transparent; 
 }
 
+/* ==================== 弹窗内所有 n-card 毛玻璃化 ==================== */
+.n-card {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: var(--text-primary) !important;
+}
+
+/* 卡片 header/content/footer 区域穿透背景 */
+.n-card-header,
+.n-card__content,
+.n-card__footer,
+.n-card-header__main {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+}
+
+/* 修复嵌套 embedded card 的背景 (第69行那个) */
+.n-card[embedded],
+.n-card--embedded {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
 /* ==================== 2. 全局卡片 (毛玻璃) ==================== */
 .n-card.dashboard-card {
   background: var(--glass-bg) !important;
@@ -378,7 +402,7 @@ body::before {
 }
 
 /* 2. 覆盖 Radio Button (解决绿线问题，选中状态改为全局主色绿) */
-.n-radio-group .n-radio-button {
+.n-radio-button {
   background-color: var(--glass-bg) !important;
   color: rgba(255, 255, 255, 0.7) !important;
   border: 1px solid var(--glass-border) !important;
@@ -386,23 +410,23 @@ body::before {
   box-shadow: none !important;
 }
 /* 给第一个按钮补回左边框和圆角 */
-.n-radio-group .n-radio-button:first-child {
+.n-radio-button:first-child {
   border-left: 1px solid var(--glass-border) !important;
   border-top-left-radius: 4px !important;
   border-bottom-left-radius: 4px !important;
 }
 /* 给最后一个按钮修复圆角 */
-.n-radio-group .n-radio-button:last-child {
+.n-radio-button:last-child {
   border-top-right-radius: 4px !important;
   border-bottom-right-radius: 4px !important;
 }
-.n-radio-group .n-radio-button:hover {
+.n-radio-button:hover {
   background-color: var(--glass-bg-hover) !important;
   color: #ffffff !important;
 }
 
 /* 选中状态：变成类似 Primary 按钮的纯绿色填充 */
-.n-radio-group .n-radio-button.n-radio-button--checked {
+.n-radio-button.n-radio-button--checked {
   background-color: #18a058 !important; /* Naive UI 默认的主色绿 */
   color: #ffffff !important;
   font-weight: bold !important;
@@ -512,30 +536,6 @@ body,
 /* 强制 n-text 跟随全局白色 */
 .n-text {
   color: var(--text-primary) !important;
-}
-
-/* ==================== 弹窗内所有 n-card 毛玻璃化 ==================== */
-.n-card {
-  background: var(--glass-bg) !important;
-  backdrop-filter: var(--glass-blur) !important;
-  -webkit-backdrop-filter: var(--glass-blur) !important;
-  border: 1px solid var(--glass-border) !important;
-  color: var(--text-primary) !important;
-}
-
-/* 卡片 header/content/footer 区域穿透背景 */
-.n-card-header,
-.n-card__content,
-.n-card__footer,
-.n-card-header__main {
-  background: transparent !important;
-  color: var(--text-primary) !important;
-}
-
-/* 修复嵌套 embedded card 的背景 (第69行那个) */
-.n-card[embedded],
-.n-card--embedded {
-  background: rgba(255, 255, 255, 0.05) !important;
 }
 
 /* ==================== n-table 毛玻璃化 ==================== */
