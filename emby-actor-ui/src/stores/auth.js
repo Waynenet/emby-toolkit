@@ -1,21 +1,12 @@
 // src/stores/auth.js
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-// import axios from 'axios'; // 预览模式下不需要发请求，先注释掉
+import axios from 'axios';
 
 export const useAuthStore = defineStore('auth', () => {
-  // ★★★ 1. 强行将初始状态设为已登录 ★★★
-  const isLoggedIn = ref(true);
-  
-  // ★★★ 2. 强行塞入一个管理员用户数据 ★★★
-  const user = ref({ 
-    name: 'UI设计师', 
-    is_admin: true, 
-    user_type: 'admin',
-    allow_unrestricted_subscriptions: true 
-  }); 
-  
-  const systemStatus = ref('logged_in');
+  const isLoggedIn = ref(false);
+  const user = ref({}); 
+  const systemStatus = ref('unknown');
 
   const username = computed(() => {
     return user.value?.name || user.value?.username || '未登录';
@@ -23,38 +14,42 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAdmin = computed(() => user.value?.is_admin || false);
   
+  // 为了兼容旧代码，加一个 userType
   const userType = computed(() => user.value?.user_type || 'emby_user');
 
-  // ★★★ 3. 拦截检查状态的方法，直接返回成功 ★★★
   async function checkAuthStatus() {
-    // 模拟一下网络延迟
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    systemStatus.value = 'logged_in';
-    isLoggedIn.value = true;
-    user.value = { 
-      name: 'UI设计师', 
-      is_admin: true, 
-      user_type: 'admin',
-      allow_unrestricted_subscriptions: true 
-    };
-    return 'logged_in';
+    try {
+      const response = await axios.get('/api/auth/check_status');
+      const status = response.data.status;
+      systemStatus.value = status;
+
+      if (status === 'logged_in') {
+        isLoggedIn.value = true;
+        user.value = response.data.user || {};
+      } else {
+        isLoggedIn.value = false;
+        user.value = {};
+        // 这里可以抛出特定错误供路由守卫捕获，或者直接返回状态
+        if (status === 'setup_required') {
+           throw new Error('SETUP_REQUIRED');
+        }
+      }
+      return status;
+    } catch (error) {
+      isLoggedIn.value = false;
+      throw error;
+    }
   }
 
-  // ★★★ 4. 拦截登录方法，随便输入什么都直接成功 ★★★
   async function login(credentials) {
-    await new Promise(resolve => setTimeout(resolve, 300)); // 模拟 loading 动画
+    const response = await axios.post('/api/auth/login', credentials);
     isLoggedIn.value = true;
-    user.value = { 
-      name: credentials.username || 'UI设计师', 
-      is_admin: true, 
-      user_type: 'admin',
-      allow_unrestricted_subscriptions: true 
-    };
+    // 确保把后端返回的 user 对象完整存进去
+    user.value = response.data.user || {};
   }
 
-  // ★★★ 5. 拦截登出方法 ★★★
   async function logout() {
+    await axios.post('/api/auth/logout');
     isLoggedIn.value = false;
     user.value = {};
     systemStatus.value = 'login_required';
@@ -63,7 +58,7 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     isLoggedIn,
     user,
-    username, 
+    username, // 导出修复后的计算属性
     isAdmin,
     userType,
     systemStatus,
