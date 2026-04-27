@@ -20,8 +20,6 @@ jobs:
         include:
           - branch: main
             upstream_branch: main
-          - branch: dev
-            upstream_branch: main
 
     steps:
       - name: Checkout target branch
