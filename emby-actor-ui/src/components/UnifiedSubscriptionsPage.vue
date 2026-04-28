@@ -109,25 +109,29 @@
             :key="item.tmdb_id + item.item_type" 
             class="grid-item"
           >
-            <n-card class="dashboard-card series-card" :bordered="false">
-              <n-checkbox
-                :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
-                @update:checked="(checked, event) => toggleSelection(item, event, i)"
-                class="card-checkbox"
-              />
-              <div class="card-type-icon">
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
-                  </template>
-                  {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
-                </n-tooltip>
-              </div>
-
+            <n-card class="dashboard-card series-card" :bordered="false" @click="toggleSelection(item, $event, i)">
+              
               <div class="card-inner-layout">
                 
                 <div class="card-poster-container">
-                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover">
+                  <!-- 绝对定位包裹 Checkbox -->
+                  <div class="poster-checkbox-wrap" @click.stop>
+                    <n-checkbox
+                      :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
+                      @update:checked="(checked, event) => toggleSelection(item, event, i)"
+                    />
+                  </div>
+                  <!-- 绝对定位影视类型 Badge -->
+                  <div class="poster-type-badge">
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
+                      </template>
+                      {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
+                    </n-tooltip>
+                  </div>
+
+                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover" @click.stop>
                     <template #placeholder><div class="poster-placeholder"><n-icon :component="TvIcon" size="32" /></div></template>
                   </n-image>
                 </div>
@@ -163,32 +167,33 @@
                     </n-space>
                   </div>
                   
+                  <!-- 操作区域：所有按钮添加 @click.stop 防止触发卡片选中 -->
                   <div class="card-actions">
                   <template v-if="item.subscription_status === 'REQUESTED'">
-                    <n-tooltip><template #trigger><n-button @click="() => subscribeItem(item)" type="primary" ghost circle size="small"><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>批准</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle size="small"><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>批准</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
                   </template>
                   
                   <template v-if="item.subscription_status === 'WANTED'">
-                    <n-tooltip><template #trigger><n-button @click="() => subscribeItem(item)" type="primary" ghost circle size="small"><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>订阅</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle size="small"><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>订阅</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
                   </template>
 
                   <template v-else-if="item.subscription_status === 'SUBSCRIBED' || item.subscription_status === 'PENDING_RELEASE'">
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle size="small"><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消订阅</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消订阅</n-tooltip>
                   </template>
 
                   <template v-else-if="item.subscription_status === 'PAUSED'">
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'SUBSCRIBED')" type="primary" ghost circle size="small"><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>恢复</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle size="small"><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'SUBSCRIBED')" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>恢复</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消</n-tooltip>
                   </template>
 
                   <template v-else-if="item.subscription_status === 'IGNORED'">
-                    <n-tooltip><template #trigger><n-button @click="() => updateItemStatus(item, 'WANTED', true)" type="primary" ghost circle size="small"><template #icon><n-icon :component="WantedIcon" /></template></n-button></template>取消忽略</n-tooltip>
+                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'WANTED', true)" type="primary" ghost circle><template #icon><n-icon :component="WantedIcon" /></template></n-button></template>取消忽略</n-tooltip>
                   </template>
 
-                  <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank"><template #icon><n-icon :component="TMDbIcon" size="18" /></template></n-button></template>TMDb</n-tooltip>
-              </div>
+                  <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" size="22" /></template></n-button></template>TMDb</n-tooltip>
+                  </div>
                 </div>
               </div>
 
@@ -202,6 +207,8 @@
       </div>
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
+    
+    <!-- (下面的模态框等其他结构保持不变) -->
     <transition name="slide-up">
       <div v-if="selectedItems.length > 0" class="floating-action-bar">
         <div class="fab-content">
@@ -254,7 +261,7 @@
         </div>
       </div>
     </transition>
-<!-- 订阅策略配置模态框 -->
+    <!-- 订阅策略配置模态框 -->
     <n-modal v-model:show="showStrategyModal" preset="card" title="自动订阅与清理策略" style="width: 500px;" :auto-focus="false">
       <n-alert type="info" :show-icon="false" style="margin-bottom: 20px;">
         提示：以下策略主要用于控制电影的间歇性搜索。剧集的连载追更由「智能追剧」模块独立管理。
@@ -309,13 +316,14 @@
 </template>
 
 <script setup>
+// JS 逻辑保持不变
 import { ref, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NCheckboxGroup, NRadio, NForm, NFormItem, NInputNumber, NModal, NPopconfirm } from 'naive-ui';
 import { FilmOutline as FilmIcon, TvOutline as TvIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, CaretDownOutline as CaretDownIcon, CheckmarkCircleOutline as WantedIcon, HourglassOutline as PendingIcon, BanOutline as IgnoredIcon, DownloadOutline as SubscribedIcon, PersonCircleOutline as SourceIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon, PauseCircleOutline as PausedIcon, ReaderOutline as AuditIcon, CloseOutline as CloseIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns'
 
-const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "18", height: "18" }, [
+const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "1em", height: "1em" }, [
   h('path', { d: "M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM133.2 176.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zM133.2 262.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8z", fill: "#01b4e4" })
 ]);
 
@@ -343,30 +351,14 @@ const sortOrder = ref('desc');
 const showStrategyModal = ref(false);
 const savingStrategy = ref(false);
 const strategyConfig = ref({
-  movie_protection_days: 180,
-  movie_search_window_days: 1,
-  movie_pause_days: 7,
-  delay_subscription_days: 0,
-  timeout_revive_days: 0,
-  download_timeout_hours: 0
+  movie_protection_days: 180, movie_search_window_days: 1, movie_pause_days: 7, delay_subscription_days: 0, timeout_revive_days: 0, download_timeout_hours: 0
 });
 
 const loadStrategyConfig = async () => {
   try {
     const res = await axios.get('/api/subscription/strategy');
-    
-    strategyConfig.value = {
-      movie_protection_days: 180,
-      movie_search_window_days: 1,
-      movie_pause_days: 7,
-      delay_subscription_days: 0,
-      timeout_revive_days: 0,
-      download_timeout_hours: 0,
-      ...res.data 
-    };
-  } catch (e) {
-    message.error('加载策略配置失败');
-  }
+    strategyConfig.value = { ...strategyConfig.value, ...res.data };
+  } catch (e) { message.error('加载策略配置失败'); }
 };
 
 const saveStrategyConfig = async () => {
@@ -375,176 +367,81 @@ const saveStrategyConfig = async () => {
     await axios.post('/api/subscription/strategy', strategyConfig.value);
     message.success('策略配置已保存');
     showStrategyModal.value = false;
-  } catch (e) {
-    message.error('保存失败');
-  } finally {
-    savingStrategy.value = false;
-  }
+  } catch (e) { message.error('保存失败'); } 
+  finally { savingStrategy.value = false; }
 };
 
-const typeFilterOptions = [
-  { label: '所有类型', value: 'all' },
-  { label: '电影', value: 'Movie' },
-  { label: '剧集', value: 'Season' },
-];
-const sortKeyOptions = computed(() => [
-  { 
-    label: filterStatus.value === 'SUBSCRIBED' ? '按订阅时间' : '按请求时间', 
-    value: 'first_requested_at' 
-  },
-  { label: '按媒体名称', value: 'title' },
-  { label: '按发行日期', value: 'release_date' },
-]);
+const typeFilterOptions = [{ label: '所有类型', value: 'all' }, { label: '电影', value: 'Movie' }, { label: '剧集', value: 'Season' }];
+const sortKeyOptions = computed(() => [{ label: filterStatus.value === 'SUBSCRIBED' ? '按订阅时间' : '按请求时间', value: 'first_requested_at' }, { label: '按媒体名称', value: 'title' }, { label: '按发行日期', value: 'release_date' }]);
 
 const SOURCE_TYPE_MAP = {
-  'user_request': '用户请求',
-  'actor_subscription': '演员订阅',
-  'custom_collection': '自建合集',
-  'native_collection': '原生合集',
-  'manual_add': '手动添加',
-  'revive_from_timeout': '超时复活',
-  'watchlist': '智能追剧',
-  'resubscribe': '自动洗版',
-  'manual_ignore': '手动忽略',
-  'manual_subscribe': '手动订阅',
-  'manual_admin_op': '手动处理',
-  'auto_ignored': '自动忽略',
-  'gap_scan': '缺集的季',
-  'scan_old_seasons_backfill': '补全旧季'
+  'user_request': '用户请求', 'actor_subscription': '演员订阅', 'custom_collection': '自建合集', 'native_collection': '原生合集',
+  'manual_add': '手动添加', 'revive_from_timeout': '超时复活', 'watchlist': '智能追剧', 'resubscribe': '自动洗版',
+  'manual_ignore': '手动忽略', 'manual_subscribe': '手动订阅', 'manual_admin_op': '手动处理', 'auto_ignored': '自动忽略', 'gap_scan': '缺集的季', 'scan_old_seasons_backfill': '补全旧季'
 };
 
 const sourceFilterOptions = computed(() => {
   const sources = new Set();
-  rawItems.value.forEach(item => {
-    item.subscription_sources_json?.forEach(source => {
-      if (source.type) {
-        sources.add(source.type);
-      }
-    });
-  });
-  const options = Array.from(sources).map(type => ({
-    label: SOURCE_TYPE_MAP[type] || type,
-    value: type
-  }));
+  rawItems.value.forEach(item => { item.subscription_sources_json?.forEach(source => { if (source.type) sources.add(source.type); }); });
+  const options = Array.from(sources).map(type => ({ label: SOURCE_TYPE_MAP[type] || type, value: type }));
   options.sort((a, b) => a.label.localeCompare(b.label));
   return options;
 });
 
 const batchActions = computed(() => {
   switch (filterStatus.value) {
-    case 'WANTED':
-      return [
-        { label: '批量订阅', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) },
-        { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
-      ];
-    case 'REQUESTED': 
-      return [
-        { label: '批量批准', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) },
-        { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
-      ];
-    case 'SUBSCRIBED':
-    case 'PENDING_RELEASE':
-      return [
-        { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
-      ];
-    case 'PAUSED':
-      return [
-        { label: '批量恢复', key: 'resume', icon: () => h(NIcon, { component: SubscribedIcon }) }, 
-        { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
-      ];
-    case 'IGNORED':
-      return [
-        { label: '批量取消忽略', key: 'unignore', icon: () => h(NIcon, { component: WantedIcon }) },
-      ];
-    default:
-      return [];
+    case 'WANTED': return [{ label: '批量订阅', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
+    case 'REQUESTED': return [{ label: '批量批准', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
+    case 'SUBSCRIBED': case 'PENDING_RELEASE': return [{ label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
+    case 'PAUSED': return [{ label: '批量恢复', key: 'resume', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
+    case 'IGNORED': return [{ label: '批量取消忽略', key: 'unignore', icon: () => h(NIcon, { component: WantedIcon }) }];
+    default: return [];
   }
 });
 
 const filteredItems = computed(() => {
   let list = rawItems.value.filter(item => item.subscription_status === filterStatus.value);
-
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase();
-    list = list.filter(item => item.title.toLowerCase().includes(query));
-  }
-
-  if (filterType.value !== 'all') {
-    list = list.filter(item => item.item_type === filterType.value);
-  }
-
-  if (filterSource.value) {
-    list = list.filter(item => 
-      item.subscription_sources_json?.some(source => source.type === filterSource.value)
-    );
-  }
-
+  if (searchQuery.value) { const query = searchQuery.value.toLowerCase(); list = list.filter(item => item.title.toLowerCase().includes(query)); }
+  if (filterType.value !== 'all') list = list.filter(item => item.item_type === filterType.value);
+  if (filterSource.value) list = list.filter(item => item.subscription_sources_json?.some(source => source.type === filterSource.value));
   list.sort((a, b) => {
     let valA, valB;
     switch (sortKey.value) {
-      case 'title':
-        valA = a.title || '';
-        valB = b.title || '';
-        return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
-      
-      case 'release_date':
-        valA = a.release_date ? new Date(a.release_date).getTime() : 0;
-        valB = b.release_date ? new Date(b.release_date).getTime() : 0;
-        return sortOrder.value === 'asc' ? valA - valB : valB - valA;
-
-      case 'first_requested_at':
-      default:
-        valA = (a.subscription_status === 'SUBSCRIBED' && a.last_subscribed_at)
-          ? new Date(a.last_subscribed_at).getTime()
-          : (a.first_requested_at ? new Date(a.first_requested_at).getTime() : 0);
-        
-        valB = (b.subscription_status === 'SUBSCRIBED' && b.last_subscribed_at)
-          ? new Date(b.last_subscribed_at).getTime()
-          : (b.first_requested_at ? new Date(b.first_requested_at).getTime() : 0);
-          
+      case 'title': valA = a.title || ''; valB = b.title || ''; return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      case 'release_date': valA = a.release_date ? new Date(a.release_date).getTime() : 0; valB = b.release_date ? new Date(b.release_date).getTime() : 0; return sortOrder.value === 'asc' ? valA - valB : valB - valA;
+      case 'first_requested_at': default:
+        valA = (a.subscription_status === 'SUBSCRIBED' && a.last_subscribed_at) ? new Date(a.last_subscribed_at).getTime() : (a.first_requested_at ? new Date(a.first_requested_at).getTime() : 0);
+        valB = (b.subscription_status === 'SUBSCRIBED' && b.last_subscribed_at) ? new Date(b.last_subscribed_at).getTime() : (b.first_requested_at ? new Date(b.first_requested_at).getTime() : 0);
         return sortOrder.value === 'asc' ? valA - valB : valB - valA;
     }
   });
-
   return list;
 });
 
 const renderedItems = computed(() => filteredItems.value.slice(0, displayCount.value));
 const hasMore = computed(() => displayCount.value < filteredItems.value.length);
 const emptyStateDescription = computed(() => {
-  if (rawItems.value.length > 0 && filteredItems.value.length === 0) {
-    return '没有匹配当前筛选条件的媒体项。';
-  }
+  if (rawItems.value.length > 0 && filteredItems.value.length === 0) return '没有匹配当前筛选条件的媒体项。';
   return '当前列表为空。';
 });
 
 const getTMDbLink = (item) => {
-  if (item.item_type === 'Movie') {
-    return `https://www.themoviedb.org/movie/${item.tmdb_id}`;
-  }
-  if (item.series_tmdb_id) {
-    return `https://www.themoviedb.org/tv/${item.series_tmdb_id}`;
-  }
+  if (item.item_type === 'Movie') return `https://www.themoviedb.org/movie/${item.tmdb_id}`;
+  if (item.series_tmdb_id) return `https://www.themoviedb.org/tv/${item.series_tmdb_id}`;
   return `https://www.themoviedb.org/`;
 };
 
 const toggleSelection = (item, event, index) => {
   if (!event) return;
   const key = { tmdb_id: item.tmdb_id, item_type: item.item_type };
-  
   if (event.shiftKey && lastSelectedIndex.value !== null) {
     const start = Math.min(lastSelectedIndex.value, index);
     const end = Math.max(lastSelectedIndex.value, index);
     const itemsInRange = renderedItems.value.slice(start, end + 1);
     const isCurrentlySelected = selectedItems.value.some(sel => sel.tmdb_id === key.tmdb_id && sel.item_type === key.item_type);
-    
     if (!isCurrentlySelected) {
       const newSelected = [...selectedItems.value];
-      itemsInRange.forEach(rangeItem => {
-        if (!newSelected.some(sel => sel.tmdb_id === rangeItem.tmdb_id && sel.item_type === rangeItem.item_type)) {
-          newSelected.push({ tmdb_id: rangeItem.tmdb_id, item_type: rangeItem.item_type });
-        }
-      });
+      itemsInRange.forEach(rangeItem => { if (!newSelected.some(sel => sel.tmdb_id === rangeItem.tmdb_id && sel.item_type === rangeItem.item_type)) newSelected.push({ tmdb_id: rangeItem.tmdb_id, item_type: rangeItem.item_type }); });
       selectedItems.value = newSelected;
     } else {
       const idsToRemove = new Set(itemsInRange.map(i => `${i.tmdb_id}-${i.item_type}`));
@@ -552,11 +449,8 @@ const toggleSelection = (item, event, index) => {
     }
   } else {
     const idx = selectedItems.value.findIndex(sel => sel.tmdb_id === key.tmdb_id && sel.item_type === key.item_type);
-    if (idx > -1) {
-      selectedItems.value.splice(idx, 1);
-    } else {
-      selectedItems.value.push(key);
-    }
+    if (idx > -1) selectedItems.value.splice(idx, 1);
+    else selectedItems.value.push(key);
   }
   lastSelectedIndex.value = index;
 };
@@ -564,177 +458,84 @@ const toggleSelection = (item, event, index) => {
 const handleBatchAction = (key) => {
   const actionMap = {
     'subscribe': { 
-      title: '批量订阅', 
-      content: `确定要将选中的 ${selectedItems.value.length} 个媒体项提交到后台订阅吗？`, 
-      task_name: 'manual_subscribe_batch',
-      getParams: () => {
-        const fullSelectedItems = rawItems.value.filter(item => 
-          selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)
-        );
-        return { subscribe_requests: fullSelectedItems };
-      },
-      optimistic_status: 'SUBSCRIBED'
+      title: '批量订阅', content: `确定要将选中的 ${selectedItems.value.length} 个媒体项提交到后台订阅吗？`, task_name: 'manual_subscribe_batch',
+      getParams: () => ({ subscribe_requests: rawItems.value.filter(item => selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)) }), optimistic_status: 'SUBSCRIBED'
     },
     'ignore': { 
-      title: '批量忽略', 
-      content: `确定要忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, 
-      endpoint: '/api/subscription/status', 
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'IGNORED', ignore_reason: '手动忽略'})) }),
-      optimistic_status: 'IGNORED'
+      title: '批量忽略', content: `确定要忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status', 
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'IGNORED', ignore_reason: '手动忽略'})) }), optimistic_status: 'IGNORED'
     },
     'cancel': { 
-      title: '批量取消', 
-      content: `确定要取消订阅选中的 ${selectedItems.value.length} 个媒体项吗？`, 
-      endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'NONE'})) }),
-      optimistic_status: 'NONE'
+      title: '批量取消', content: `确定要取消订阅选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'NONE'})) }), optimistic_status: 'NONE'
     },
     'resume': { 
-      title: '批量恢复', 
-      content: `确定要立即唤醒选中的 ${selectedItems.value.length} 个媒体项并重新开始搜索吗？`, 
-      endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'SUBSCRIBED'})) }),
-      optimistic_status: 'SUBSCRIBED'
+      title: '批量恢复', content: `确定要立即唤醒选中的 ${selectedItems.value.length} 个媒体项并重新开始搜索吗？`, endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'SUBSCRIBED'})) }), optimistic_status: 'SUBSCRIBED'
     },
     'unignore': { 
-      title: '批量取消忽略', 
-      content: `确定要取消忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, 
-      endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'WANTED', force_unignore: true})) }),
-      optimistic_status: 'WANTED'
+      title: '批量取消忽略', content: `确定要取消忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'WANTED', force_unignore: true})) }), optimistic_status: 'WANTED'
     },
   };
-
   const action = actionMap[key];
   if (!action) return;
 
   dialog.warning({
-    title: action.title,
-    content: action.content,
-    positiveText: '确定',
-    negativeText: '取消',
+    title: action.title, content: action.content, positiveText: '确定', negativeText: '取消',
     onPositiveClick: async () => {
       try {
         let response;
-        if (action.task_name) {
-          response = await axios.post('/api/tasks/run', {
-            task_name: action.task_name,
-            ...action.getParams()
-          });
-        } else if (action.endpoint) {
-          response = await axios.post(action.endpoint, action.getParams());
-        } else {
-          throw new Error("Action spec 未定义 task_name 或 endpoint");
-        }
+        if (action.task_name) response = await axios.post('/api/tasks/run', { task_name: action.task_name, ...action.getParams() });
+        else if (action.endpoint) response = await axios.post(action.endpoint, action.getParams());
+        else throw new Error("Action spec 未定义 task_name 或 endpoint");
 
         message.success(response.data.message || '批量操作任务已提交！');
-        
         const selectedKeys = new Set(selectedItems.value.map(item => `${item.tmdb_id}-${item.item_type}`));
         
-        if (action.optimistic_status === 'NONE') {
-          rawItems.value = rawItems.value.filter(item => !selectedKeys.has(`${item.tmdb_id}-${item.item_type}`));
-        } else {
+        if (action.optimistic_status === 'NONE') rawItems.value = rawItems.value.filter(item => !selectedKeys.has(`${item.tmdb_id}-${item.item_type}`));
+        else {
           rawItems.value.forEach(item => {
             if (selectedKeys.has(`${item.tmdb_id}-${item.item_type}`)) {
               item.subscription_status = action.optimistic_status;
-              if (action.optimistic_status === 'IGNORED') {
-                item.ignore_reason = '手动忽略';
-              }
+              if (action.optimistic_status === 'IGNORED') item.ignore_reason = '手动忽略';
             }
           });
         }
-        
         selectedItems.value = [];
-
-      } catch (err) {
-        message.error(err.response?.data?.error || '批量操作失败。');
-      }
+      } catch (err) { message.error(err.response?.data?.error || '批量操作失败。'); }
     }
   });
 };
 
 const subscribeItem = async (item) => {
   try {
-    const request_item = { 
-      tmdb_id: item.tmdb_id, 
-      item_type: item.item_type,
-      title: item.title
-    };
-    if (item.item_type === 'Season' && item.season_number) {
-      request_item.season_number = item.season_number;
-    }
-
-    const taskParams = {
-      subscribe_requests: [request_item]
-    };
-    
-    const response = await axios.post('/api/tasks/run', {
-      task_name: 'manual_subscribe_batch',
-      ...taskParams
-    });
+    const request_item = { tmdb_id: item.tmdb_id, item_type: item.item_type, title: item.title };
+    if (item.item_type === 'Season' && item.season_number) request_item.season_number = item.season_number;
+    const response = await axios.post('/api/tasks/run', { task_name: 'manual_subscribe_batch', subscribe_requests: [request_item] });
     message.success(response.data.message || '订阅任务已提交到后台！');
-    
     const index = rawItems.value.findIndex(i => i.tmdb_id === item.tmdb_id && i.item_type === item.item_type);
-    if (index > -1) {
-      rawItems.value[index].subscription_status = 'SUBSCRIBED';
-    }
-  } catch (err) {
-    message.error(err.response?.data?.error || '提交订阅任务失败。');
-  }
+    if (index > -1) rawItems.value[index].subscription_status = 'SUBSCRIBED';
+  } catch (err) { message.error(err.response?.data?.error || '提交订阅任务失败。'); }
 };
 
 const updateItemStatus = async (item, newStatus, forceUnignore = false) => {
   try {
-    const requestItem = {
-      tmdb_id: item.tmdb_id,
-      item_type: item.item_type,
-      new_status: newStatus,
-      source: { type: 'manual_admin_op' },
-      force_unignore: forceUnignore
-    };
-    
-    if (newStatus === 'IGNORED') {
-      requestItem.ignore_reason = '手动忽略';
-    }
-
+    const requestItem = { tmdb_id: item.tmdb_id, item_type: item.item_type, new_status: newStatus, source: { type: 'manual_admin_op' }, force_unignore: forceUnignore };
+    if (newStatus === 'IGNORED') requestItem.ignore_reason = '手动忽略';
     await axios.post('/api/subscription/status', { requests: [requestItem] });
     message.success('状态更新成功！');
-
     const index = rawItems.value.findIndex(i => i.tmdb_id === item.tmdb_id && i.item_type === item.item_type);
     if (index > -1) {
-      if (newStatus === 'NONE') {
-        rawItems.value.splice(index, 1);
-      } else {
-        rawItems.value[index].subscription_status = newStatus;
-        if (newStatus === 'IGNORED') {
-          rawItems.value[index].ignore_reason = '手动忽略';
-        }
-      }
+      if (newStatus === 'NONE') rawItems.value.splice(index, 1);
+      else { rawItems.value[index].subscription_status = newStatus; if (newStatus === 'IGNORED') rawItems.value[index].ignore_reason = '手动忽略'; }
     }
-  } catch (err) {
-    message.error(err.response?.data?.error || '更新状态失败。');
-  }
+  } catch (err) { message.error(err.response?.data?.error || '更新状态失败。'); }
 };
 
-watch(filterStatus, () => {
-  displayCount.value = 30;
-  selectedItems.value = [];
-  lastSelectedIndex.value = null;
-});
-
-const loadMore = () => {
-  if (hasMore.value) {
-    displayCount.value = Math.min(displayCount.value + INCREMENT, filteredItems.value.length);
-  }
-};
-
-const formatTimestamp = (timestamp) => {
-  if (!timestamp) return 'N/A';
-  try {
-    return format(new Date(timestamp), 'yyyy-MM-dd');
-  } catch (e) { return 'N/A'; }
-};
-
+watch(filterStatus, () => { displayCount.value = 30; selectedItems.value = []; lastSelectedIndex.value = null; });
+const loadMore = () => { if (hasMore.value) displayCount.value = Math.min(displayCount.value + INCREMENT, filteredItems.value.length); };
+const formatTimestamp = (timestamp) => { if (!timestamp) return 'N/A'; try { return format(new Date(timestamp), 'yyyy-MM-dd'); } catch (e) { return 'N/A'; } };
 const formatSources = (sources) => {
   if (!sources || sources.length === 0) return '来源: 未知';
   const firstSource = sources[0];
@@ -744,180 +545,79 @@ const formatSources = (sources) => {
 };
 
 const handleClearAllIgnored = async () => {
-  const itemsToDelete = filteredItems.value.map(item => ({
-    tmdb_id: item.tmdb_id,
-    item_type: item.item_type
-  }));
-
+  const itemsToDelete = filteredItems.value.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type }));
   if (itemsToDelete.length === 0) return;
-
   try {
     isLoading.value = true; 
-    
-    const response = await axios.post('/api/media/batch_delete', {
-      items: itemsToDelete
-    });
-
+    const response = await axios.post('/api/media/batch_delete', { items: itemsToDelete });
     message.success(response.data.message || '删除成功');
-
     const deletedKeys = new Set(itemsToDelete.map(i => `${i.tmdb_id}-${i.item_type}`));
-    
-    rawItems.value = rawItems.value.filter(item => 
-      !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`)
-    );
-    
+    rawItems.value = rawItems.value.filter(item => !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`));
     selectedItems.value = [];
-
-  } catch (err) {
-    message.error(err.response?.data?.error || '批量删除失败');
-  } finally {
-    isLoading.value = false;
-  }
+  } catch (err) { message.error(err.response?.data?.error || '批量删除失败'); } finally { isLoading.value = false; }
 };
 
 const handleBatchDelete = async () => {
-  const itemsToDelete = rawItems.value.filter(item => 
-    selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)
-  );
-  
+  const itemsToDelete = rawItems.value.filter(item => selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type));
   if (itemsToDelete.length === 0) return;
-
   try {
     isLoading.value = true; 
-    
-    const response = await axios.post('/api/media/batch_delete', {
-      items: itemsToDelete.map(item => ({
-        tmdb_id: item.tmdb_id,
-        item_type: item.item_type
-      }))
-    });
-
+    const response = await axios.post('/api/media/batch_delete', { items: itemsToDelete.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type })) });
     message.success(response.data.message || `成功删除 ${itemsToDelete.length} 条记录`);
-
     const deletedKeys = new Set(itemsToDelete.map(i => `${i.tmdb_id}-${i.item_type}`));
-    
-    rawItems.value = rawItems.value.filter(item => 
-      !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`)
-    );
-    
+    rawItems.value = rawItems.value.filter(item => !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`));
     selectedItems.value = [];
-
-  } catch (err) {
-    message.error(err.response?.data?.error || '批量删除失败');
-  } finally {
-    isLoading.value = false; 
-  }
+  } catch (err) { message.error(err.response?.data?.error || '批量删除失败'); } finally { isLoading.value = false; }
 };
 
-const formatAirDate = (dateString) => {
-  if (!dateString) return 'N/A';
-  try {
-    return format(new Date(dateString), 'yyyy-MM-dd');
-  } catch (e) { return 'N/A'; }
-};
-
+const formatAirDate = (dateString) => { if (!dateString) return 'N/A'; try { return format(new Date(dateString), 'yyyy-MM-dd'); } catch (e) { return 'N/A'; } };
 const getPosterUrl = (posterPath) => posterPath ? `/api/image_proxy?url=https://image.tmdb.org/t/p/w500${posterPath}` : '/placeholder.png';
 
 const statusInfo = (status) => {
   const map = {
-    'WANTED': { type: 'success', text: '待订阅', icon: WantedIcon },
-    'SUBSCRIBED': { type: 'primary', text: '已订阅', icon: SubscribedIcon },
-    'PENDING_RELEASE': { type: 'info', text: '未上映', icon: PendingIcon },
-    'IGNORED': { type: 'error', text: '已忽略', icon: IgnoredIcon },
-    'PAUSED': { type: 'warning', text: '已暂停', icon: PausedIcon },
-    'REQUESTED': { type: 'warning', text: '待审核', icon: AuditIcon },
+    'WANTED': { type: 'success', text: '待订阅', icon: WantedIcon }, 'SUBSCRIBED': { type: 'primary', text: '已订阅', icon: SubscribedIcon },
+    'PENDING_RELEASE': { type: 'info', text: '未上映', icon: PendingIcon }, 'IGNORED': { type: 'error', text: '已忽略', icon: IgnoredIcon },
+    'PAUSED': { type: 'warning', text: '已暂停', icon: PausedIcon }, 'REQUESTED': { type: 'warning', text: '待审核', icon: AuditIcon },
   };
   return map[status] || { type: 'default', text: '未知', icon: TvIcon };
 };
 
-
 const TAB_PRIORITY = ['REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE', 'IGNORED'];
 const fetchData = async (autoSwitchTab = false) => {
-  isLoading.value = true;
-  error.value = null;
+  isLoading.value = true; error.value = null;
   try {
     const response = await axios.get('/api/subscriptions/all');
     rawItems.value = response.data;
-
     if (autoSwitchTab) {
       for (const status of TAB_PRIORITY) {
         const hasItem = rawItems.value.some(item => item.subscription_status === status);
-        if (hasItem) {
-          filterStatus.value = status;
-          break; 
-        }
+        if (hasItem) { filterStatus.value = status; break; }
       }
     }
-
-  } catch (err) {
-    error.value = err.response?.data?.error || '获取订阅列表失败。';
-  } finally {
-    isLoading.value = false;
-  }
+  } catch (err) { error.value = err.response?.data?.error || '获取订阅列表失败。'; } finally { isLoading.value = false; }
 };
 
-const isAllSelected = computed(() => {
-  return filteredItems.value.length > 0 && selectedItems.value.length === filteredItems.value.length;
-});
-
-const isIndeterminate = computed(() => {
-  return selectedItems.value.length > 0 && selectedItems.value.length < filteredItems.value.length;
-});
-
+const isAllSelected = computed(() => filteredItems.value.length > 0 && selectedItems.value.length === filteredItems.value.length);
+const isIndeterminate = computed(() => selectedItems.value.length > 0 && selectedItems.value.length < filteredItems.value.length);
 const handleSelectAll = () => {
-  if (isAllSelected.value) {
-    selectedItems.value = [];
-  } else {
-    selectedItems.value = filteredItems.value.map(item => ({
-      tmdb_id: item.tmdb_id,
-      item_type: item.item_type
-    }));
-    message.info(`已选中当前列表全部 ${filteredItems.value.length} 项`);
-  }
+  if (isAllSelected.value) selectedItems.value = [];
+  else { selectedItems.value = filteredItems.value.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type })); message.info(`已选中当前列表全部 ${filteredItems.value.length} 项`); }
 };
-
-const clearSelection = () => {
-  selectedItems.value = [];
-};
+const clearSelection = () => { selectedItems.value = []; };
 
 const isMobile = ref(false);
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768;
-};
+const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
 
 onMounted(() => {
-  checkMobile();
-  window.addEventListener('resize', checkMobile);
-  fetchData(true); 
-  
-  loadStrategyConfig();
-  observer = new IntersectionObserver(
-    (entries) => {
-      if (entries[0].isIntersecting) loadMore();
-    },
-    { root: null, rootMargin: '0px', threshold: 0.1 }
-  );
+  checkMobile(); window.addEventListener('resize', checkMobile); fetchData(true); loadStrategyConfig();
+  observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { root: null, rootMargin: '0px', threshold: 0.1 });
   if (loaderRef.value) observer.observe(loaderRef.value);
 });
 
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', checkMobile);
-  if (observer) observer.disconnect();
-});
+onBeforeUnmount(() => { window.removeEventListener('resize', checkMobile); if (observer) observer.disconnect(); });
 
-const statusOptions = [
-  { label: '待审核', value: 'REQUESTED' },
-  { label: '待订阅', value: 'WANTED' },
-  { label: '已订阅', value: 'SUBSCRIBED' },
-  { label: '已暂停', value: 'PAUSED' },
-  { label: '未上映', value: 'PENDING_RELEASE' },
-  { label: '已忽略', value: 'IGNORED' },
-];
-
-watch(loaderRef, (newEl, oldEl) => {
-  if (oldEl && observer) observer.unobserve(oldEl);
-  if (newEl && observer) observer.observe(newEl);
-});
+const statusOptions = [{ label: '待审核', value: 'REQUESTED' }, { label: '待订阅', value: 'WANTED' }, { label: '已订阅', value: 'SUBSCRIBED' }, { label: '已暂停', value: 'PAUSED' }, { label: '未上映', value: 'PENDING_RELEASE' }, { label: '已忽略', value: 'IGNORED' }];
+watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(oldEl); if (newEl && observer) observer.observe(newEl); });
 </script>
 
 <style scoped>
@@ -927,13 +627,12 @@ watch(loaderRef, (newEl, oldEl) => {
 .responsive-grid {
   display: grid;
   gap: 16px;
-  /* 自动填充，最小宽度280px，完美适配手机和电脑 */
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 @media (max-width: 768px) {
   .responsive-grid {
-    grid-template-columns: 1fr; /* 手机端强制单列 */
+    grid-template-columns: 1fr;
     gap: 12px;
   }
 }
@@ -949,17 +648,17 @@ watch(loaderRef, (newEl, oldEl) => {
   border-radius: 12px;
   overflow: hidden; 
   /* 继承全局毛玻璃属性 */
-  background: rgba(20, 25, 35, 0.4) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
 }
 
 .series-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.4) !important;
-  background: rgba(30, 35, 45, 0.5) !important;
-  border-color: rgba(255, 255, 255, 0.2) !important;
+  box-shadow: var(--glass-shadow) !important;
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
 }
 
 .series-card :deep(.n-card__content) {
@@ -1000,6 +699,33 @@ watch(loaderRef, (newEl, oldEl) => {
   width: 100%; height: 100%; background-color: rgba(255,255,255,0.05); color: rgba(255,255,255,0.3);
 }
 
+/* ★★★ 绝对定位：左上角选择框 ★★★ */
+.poster-checkbox-wrap {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+/* ★★★ 绝对定位：右上角影视类型角标 ★★★ */
+.poster-type-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  color: #fff;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* 内容区域 */
 .card-content-container {
   flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; padding: 0;
@@ -1010,17 +736,27 @@ watch(loaderRef, (newEl, oldEl) => {
 }
 
 .card-title {
-  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: #fff;
+  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: var(--text-primary);
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
 .card-status-area { flex-grow: 1; display: flex; flex-direction: column; gap: 6px; }
-.info-text, .info-line { font-size: 13px; color: rgba(255,255,255,0.6); display: flex; align-items: center; gap: 6px; }
+.info-text, .info-line { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
 
-/* 底部按钮区域 */
+/* 底部操作按钮区域 */
 .card-actions {
-  margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.05);
-  display: flex; justify-content: flex-start; align-items: center; gap: 8px;
+  margin-top: auto; 
+  padding-top: 10px; 
+  border-top: 1px dashed var(--glass-border);
+  display: flex; 
+  justify-content: flex-end; /* 靠右对齐 */
+  align-items: center; 
+  gap: 12px; /* 增加按钮间距 */
+}
+
+/* 图标稍作放大 */
+.card-actions .n-button {
+  font-size: 22px; 
 }
 
 /* 悬浮操作栏 (Watchlist/Unified) */
@@ -1035,20 +771,4 @@ watch(loaderRef, (newEl, oldEl) => {
 }
 .fab-text { color: #fff; font-size: 14px; }
 .fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
-
-/* 模态框内的海报墙 (TmdbCollectionsPage 等) */
-.movie-card {
-  border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; 
-  background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: transform 0.2s, box-shadow 0.2s; cursor: default; 
-}
-.movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
-.movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
-.movie-card:hover .movie-poster { transform: scale(1.05); }
-.movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }
-.movie-title { font-size: 13px; font-weight: bold; line-height: 1.3; text-shadow: 0 1px 2px rgba(0,0,0,0.8); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
-.movie-year { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 2px; }
-.movie-actions-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; opacity: 0; transition: opacity 0.2s ease-in-out; z-index: 20; }
-.movie-card:hover .movie-actions-overlay { opacity: 1; }
-.status-badge { position: absolute; top: 10px; left: -30px; width: 100px; height: 24px; background-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px); color: #fff; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 15; pointer-events: none; }
 </style>

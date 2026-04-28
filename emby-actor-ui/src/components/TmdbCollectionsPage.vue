@@ -3,14 +3,10 @@
   <div :style="{ padding: isMobile ? '12px' : '24px' }">
     <div class="collections-page">
       <n-page-header>
-        <template #title>
-          原生合集
-        </template>
+        <template #title>原生合集</template>
         <template #footer>
           <n-space align="center" size="large">
-            <n-tag :bordered="false" round>
-              共 {{ globalStats.totalCollections }} 合集
-            </n-tag>
+            <n-tag :bordered="false" round>共 {{ globalStats.totalCollections }} 合集</n-tag>
             <n-tag v-if="globalStats.totalMissingMovies > 0" type="warning" :bordered="false" round>
               {{ globalStats.collectionsWithMissing }} 合集缺失 {{ globalStats.totalMissingMovies }} 部
             </n-tag>
@@ -83,27 +79,14 @@
       <!-- 排序和筛选控件 -->
       <n-space :wrap="true" :size="[20, 12]" style="margin-top: 24px; margin-bottom: 24px;">
         <n-input v-model:value="searchQuery" placeholder="按名称搜索..." clearable style="min-width: 200px;" />
-        
-        <n-select
-          v-model:value="filterStatus"
-          :options="statusFilterOptions"
-          style="min-width: 160px;"
-        />
-        
-        <n-select
-          v-model:value="sortKey"
-          :options="sortKeyOptions"
-          style="min-width: 180px;"
-        />
-        
+        <n-select v-model:value="filterStatus" :options="statusFilterOptions" style="min-width: 160px;" />
+        <n-select v-model:value="sortKey" :options="sortKeyOptions" style="min-width: 180px;" />
         <n-button-group>
           <n-button @click="sortOrder = 'asc'" :type="sortOrder === 'asc' ? 'primary' : 'default'" ghost>
-            <template #icon><n-icon :component="ArrowUpIcon" /></template>
-            升序
+            <template #icon><n-icon :component="ArrowUpIcon" /></template> 升序
           </n-button>
           <n-button @click="sortOrder = 'desc'" :type="sortOrder === 'desc' ? 'primary' : 'default'" ghost>
-            <template #icon><n-icon :component="ArrowDownIcon" /></template>
-            降序
+            <template #icon><n-icon :component="ArrowDownIcon" /></template> 降序
           </n-button>
         </n-button-group>
       </n-space>
@@ -112,7 +95,6 @@
       <div v-else-if="error" class="center-container"><n-alert title="加载错误" type="error" style="max-width: 500px;">{{ error }}</n-alert></div>
       
       <div v-else-if="filteredAndSortedCollections.length > 0">
-        
         <!-- 合集卡片 -->
         <div class="responsive-grid">
           <div 
@@ -132,7 +114,7 @@
                 
                 <!-- 左侧：海报 -->
                 <div class="card-poster-container">
-                  <n-image lazy :src="getCollectionPosterUrl(item.poster_path)" class="card-poster" object-fit="cover">
+                  <n-image lazy :src="getCollectionPosterUrl(item.poster_path)" class="card-poster" object-fit="cover" @click.stop>
                     <template #placeholder><div class="poster-placeholder"><n-icon :component="AlbumsIcon" size="32" /></div></template>
                   </n-image>
                 </div>
@@ -141,18 +123,21 @@
                 <div class="card-content-container">
                   <div class="card-header">
                     <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.name }}</n-ellipsis>
-                    <!-- 删除按钮移至右上角 -->
-                    <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
-                      <template #trigger>
-                        <n-button text type="error" circle size="tiny" title="删除合集" @click.stop>
-                          <template #icon><n-icon :component="TrashIcon" /></template>
-                        </n-button>
-                      </template>
-                      <div style="max-width: 240px;">
-                        <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
-                        <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
-                      </div>
-                    </n-popconfirm>
+                    
+                    <!-- 绝对定位到卡片右上角的删除按钮，防止标题过长时挤压 -->
+                    <div class="card-delete-btn">
+                      <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
+                        <template #trigger>
+                          <n-button text type="error" circle size="small" title="删除合集" @click.stop>
+                            <template #icon><n-icon :component="TrashIcon" /></template>
+                          </n-button>
+                        </template>
+                        <div style="max-width: 240px;">
+                          <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
+                          <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
+                        </div>
+                      </n-popconfirm>
+                    </div>
                   </div>
 
                   <!-- 统计数据展示区 -->
@@ -187,15 +172,14 @@
                     <n-tooltip>
                       <template #trigger>
                         <n-button text @click.stop="() => openMissingMoviesModal(item)">
-                          <template #icon><n-icon :component="EyeIcon" /></template>
+                          <template #icon><n-icon :component="EyeIcon" size="22" /></template>
                         </n-button>
                       </template>
                       查看详情
                     </n-tooltip>
                     
-                    <!-- 外部链接按钮需要 @click.stop 防止触发卡片点击 -->
-                    <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" size="18" /></template></n-button></template>在 Emby 中打开</n-tooltip>
-                    <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" size="18" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
+                    <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" size="22" /></template></n-button></template>在 Emby 中打开</n-tooltip>
+                    <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" size="22" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
                   </div>
                 </div>
               </div>
@@ -203,38 +187,17 @@
           </div>
         </div>
 
-        <div ref="loaderRef" class="loader-trigger">
-          <n-spin v-if="hasMore" size="small" />
-        </div>
-
+        <div ref="loaderRef" class="loader-trigger"><n-spin v-if="hasMore" size="small" /></div>
       </div>
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
 
-    <!-- 详情模态框 -->
-    <n-modal 
-      v-model:show="showModal" 
-      preset="card" 
-      :style="{
-        width: isMobile ? '95%' : '85%',
-        maxWidth: isMobile ? 'none' : '1000px',
-        height: isMobile ? '85vh' : '80vh'
-      }"
-      content-style="padding: 0; overflow: hidden; display: flex; flex-direction: column;"
-      :title="selectedCollection ? `详情 - ${selectedCollection.name}` : ''" 
-      :bordered="false" 
-      size="huge"
-    >
+    <!-- 详情模态框保持原样... -->
+    <n-modal v-model:show="showModal" preset="card" :style="{ width: isMobile ? '95%' : '85%', maxWidth: isMobile ? 'none' : '1000px', height: isMobile ? '85vh' : '80vh' }" content-style="padding: 0; overflow: hidden; display: flex; flex-direction: column;" :title="selectedCollection ? `详情 - ${selectedCollection.name}` : ''" :bordered="false" size="huge">
       <div class="dashboard-card" v-if="selectedCollection" style="display: flex; flex-direction: column; height: 100%;">
-        <n-tabs 
-          type="line" 
-          animated 
-          style="height: 100%; display: flex; flex-direction: column;" 
-        >
-          <!-- 缺失影片 Tab -->
+        <n-tabs type="line" animated style="height: 100%; display: flex; flex-direction: column;">
           <n-tab-pane name="missing" :tab="`缺失影片 (${missingMoviesInModal.length})`">
             <n-empty v-if="missingMoviesInModal.length === 0" description="太棒了！没有已上映的缺失影片。" style="margin-top: 40px;"></n-empty>
-            <!-- 增加了列数，缩小了图片 -->
             <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
               <n-gi v-for="movie in missingMoviesInModal" :key="movie.tmdb_id">
                 <div class="movie-card">
@@ -248,11 +211,7 @@
                   </div>
                   <div class="movie-actions-overlay">
                     <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank">
-                          <template #icon><n-icon :component="SearchIcon" /></template>
-                        </n-button>
-                      </template>
+                      <template #trigger><n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>
                       在 TMDb 查看
                     </n-tooltip>
                   </div>
@@ -261,7 +220,6 @@
             </n-grid>
           </n-tab-pane>
           
-          <!-- 已入库 Tab -->
           <n-tab-pane name="in_library" :tab="`已入库 (${inLibraryMoviesInModal.length})`">
              <n-empty v-if="inLibraryMoviesInModal.length === 0" description="该合集在媒体库中没有任何影片。" style="margin-top: 40px;"></n-empty>
              <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
@@ -269,25 +227,12 @@
                 <div class="movie-card">
                   <div class="status-badge in_library">已入库</div>
                   <n-image lazy :src="getTmdbImageUrl(movie.poster_path)" class="movie-poster" object-fit="cover" preview-disabled />
-                  <div class="movie-info-overlay">
-                    <div class="movie-title">{{ movie.title }}</div>
-                    <div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div>
-                  </div>
+                  <div class="movie-info-overlay"><div class="movie-title">{{ movie.title }}</div><div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div></div>
                   <div class="movie-actions-overlay">
                     <n-tooltip trigger="hover">
                       <template #trigger>
-                        <n-button 
-                          v-if="movie.emby_id"
-                          circle color="#ffffff" text-color="#000000" tag="a" :href="getEmbyUrl(movie.emby_id)" target="_blank"
-                        >
-                          <template #icon><n-icon :component="EmbyIcon" /></template>
-                        </n-button>
-                        <n-button 
-                          v-else
-                          circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank"
-                        >
-                          <template #icon><n-icon :component="SearchIcon" /></template>
-                        </n-button>
+                        <n-button v-if="movie.emby_id" circle color="#ffffff" text-color="#000000" tag="a" :href="getEmbyUrl(movie.emby_id)" target="_blank"><template #icon><n-icon :component="EmbyIcon" /></template></n-button>
+                        <n-button v-else circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank"><template #icon><n-icon :component="SearchIcon" /></template></n-button>
                       </template>
                       {{ movie.emby_id ? '在 Emby 中查看' : '在 TMDb 查看' }}
                     </n-tooltip>
@@ -297,7 +242,6 @@
             </n-grid>
           </n-tab-pane>
 
-          <!-- 未上映 Tab -->
           <n-tab-pane name="unreleased" :tab="`未上映 (${unreleasedMoviesInModal.length})`">
             <n-empty v-if="unreleasedMoviesInModal.length === 0" description="该合集没有已知的未上映影片。" style="margin-top: 40px;"></n-empty>
             <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
@@ -305,26 +249,15 @@
                 <div class="movie-card">
                   <div class="status-badge unreleased">未上映</div>
                   <n-image lazy :src="getTmdbImageUrl(movie.poster_path)" class="movie-poster" object-fit="cover" preview-disabled />
-                  <div class="movie-info-overlay">
-                    <div class="movie-title">{{ movie.title }}</div>
-                    <div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div>
-                  </div>
+                  <div class="movie-info-overlay"><div class="movie-title">{{ movie.title }}</div><div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div></div>
                   <div class="movie-actions-overlay">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank">
-                          <template #icon><n-icon :component="SearchIcon" /></template>
-                        </n-button>
-                      </template>
-                      在 TMDb 查看
-                    </n-tooltip>
+                    <n-tooltip trigger="hover"><template #trigger><n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>在 TMDb 查看</n-tooltip>
                   </div>
                 </div>
               </n-gi>
             </n-grid>
           </n-tab-pane>
 
-          <!-- 已订阅 Tab -->
           <n-tab-pane name="subscribed" :tab="`已订阅 (${subscribedMoviesInModal.length})`">
             <n-empty v-if="subscribedMoviesInModal.length === 0" description="你没有订阅此合集中的任何影片。" style="margin-top: 40px;"></n-empty>
             <n-grid v-else cols="2 s:4 m:5 l:6 xl:7" :x-gap="12" :y-gap="12" responsive="screen">
@@ -332,19 +265,9 @@
                 <div class="movie-card">
                   <div class="status-badge subscribed">已订阅</div>
                   <n-image lazy :src="getTmdbImageUrl(movie.poster_path)" class="movie-poster" object-fit="cover" preview-disabled />
-                  <div class="movie-info-overlay">
-                    <div class="movie-title">{{ movie.title }}</div>
-                    <div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div>
-                  </div>
+                  <div class="movie-info-overlay"><div class="movie-title">{{ movie.title }}</div><div class="movie-year">{{ extractYear(movie.release_date) || '未知年份' }}</div></div>
                   <div class="movie-actions-overlay">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank">
-                          <template #icon><n-icon :component="SearchIcon" /></template>
-                        </n-button>
-                      </template>
-                      在 TMDb 查看
-                    </n-tooltip>
+                    <n-tooltip trigger="hover"><template #trigger><n-button circle color="#ffffff" text-color="#000000" tag="a" :href="`https://www.themoviedb.org/movie/${movie.tmdb_id}`" target="_blank"><template #icon><n-icon :component="SearchIcon" /></template></n-button></template>在 TMDb 查看</n-tooltip>
                   </div>
                 </div>
               </n-gi>
@@ -357,9 +280,10 @@
 </template>
 
 <script setup>
+// JS 逻辑保持不变
 import { ref, onMounted, onBeforeUnmount, computed, watch, h } from 'vue';
 import axios from 'axios';
-import { NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup } from 'naive-ui';
+import { NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NText, NSwitch } from 'naive-ui';
 import { SyncOutline, AlbumsOutline as AlbumsIcon, EyeOutline as EyeIcon, CloudDownloadOutline as CloudDownloadIcon, CheckmarkCircleOutline as CheckmarkCircle, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, SearchOutline as SearchIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';
@@ -369,8 +293,9 @@ const { configModel } = useConfig();
 const message = useMessage();
 const dialog = useDialog();
 const isTaskRunning = computed(() => props.taskStatus.is_running);
-const EmbyIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 48 48", width: "18", height: "18" }, [ h('path', { d: "M24,4.2c-11,0-19.8,8.9-19.8,19.8S13,43.8,24,43.8s19.8-8.9,19.8-19.8S35,4.2,24,4.2z M24,39.8c-8.7,0-15.8-7.1-15.8-15.8S15.3,8.2,24,8.2s15.8,7.1,15.8,15.8S32.7,39.8,24,39.8z", fill: "currentColor" }), h('polygon', { points: "22.2,16.4 22.2,22.2 16.4,22.2 16.4,25.8 22.2,25.8 22.2,31.6 25.8,31.6 25.8,25.8 31.6,31.6 31.6,22.2 25.8,22.2 25.8,16.4 ", fill: "currentColor" }) ]);
-const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "18", height: "18" }, [ h('path', { d: "M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM133.2 176.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zM133.2 262.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8z", fill: "#01b4e4" }) ]);
+
+const EmbyIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 48 48", width: "1em", height: "1em" }, [ h('path', { d: "M24,4.2c-11,0-19.8,8.9-19.8,19.8S13,43.8,24,43.8s19.8-8.9,19.8-19.8S35,4.2,24,4.2z M24,39.8c-8.7,0-15.8-7.1-15.8-15.8S15.3,8.2,24,8.2s15.8,7.1,15.8,15.8S32.7,39.8,24,39.8z", fill: "currentColor" }), h('polygon', { points: "22.2,16.4 22.2,22.2 16.4,22.2 16.4,25.8 22.2,25.8 22.2,31.6 25.8,31.6 25.8,25.8 31.6,31.6 31.6,22.2 25.8,22.2 25.8,16.4 ", fill: "currentColor" }) ]);
+const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "1em", height: "1em" }, [ h('path', { d: "M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM133.2 176.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zM133.2 262.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8z", fill: "#01b4e4" }) ]);
 
 const collections = ref([]);
 const isInitialLoading = ref(true);
@@ -383,113 +308,55 @@ const INCREMENT = 50;
 const loaderRef = ref(null);
 let observer = null;
 
-// ★★★ 新增：移动端检测 ★★★
 const isMobile = ref(false);
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768;
-};
+const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
 
 const searchQuery = ref('');
 const filterStatus = ref('all');
 const sortKey = ref('last_checked_at');
 const sortOrder = ref('desc');
 
-const statusFilterOptions = [
-  { label: '所有合集', value: 'all' },
-  { label: '有缺失', value: 'has_missing' },
-  { label: '已完整', value: 'complete' },
-  { label: '有已订阅', value: 'has_subscribed' },
-  { label: '有未上映', value: 'has_unreleased' },
-];
-const sortKeyOptions = [
-  { label: '按缺失数量', value: 'missing_count' },
-  { label: '按合集名称', value: 'name' },
-  { label: '按上次检查时间', value: 'last_checked_at' },
-];
-
-const getMovieCountByStatus = (collection, status) => {
-  if (!collection || !Array.isArray(collection.movies)) return 0;
-  return collection.movies.filter(m => m.status === status).length;
-};
+const statusFilterOptions = [{ label: '所有合集', value: 'all' }, { label: '有缺失', value: 'has_missing' }, { label: '已完整', value: 'complete' }, { label: '有已订阅', value: 'has_subscribed' }, { label: '有未上映', value: 'has_unreleased' }];
+const sortKeyOptions = [{ label: '按缺失数量', value: 'missing_count' }, { label: '按合集名称', value: 'name' }, { label: '按上次检查时间', value: 'last_checked_at' }];
 
 const globalStats = computed(() => {
-  const stats = {
-    totalCollections: 0,
-    collectionsWithMissing: 0,
-    totalMissingMovies: 0,
-    totalUnreleased: 0,
-    totalSubscribed: 0,
-  };
+  const stats = { totalCollections: 0, collectionsWithMissing: 0, totalMissingMovies: 0, totalUnreleased: 0, totalSubscribed: 0 };
   if (!Array.isArray(collections.value)) return stats;
   stats.totalCollections = collections.value.length;
   for (const collection of collections.value) {
     const s = collection.statistics || { missing: 0, unreleased: 0, subscribed: 0 };
-    if (s.missing > 0) {
-      stats.collectionsWithMissing++;
-      stats.totalMissingMovies += s.missing;
-    }
-    stats.totalUnreleased += s.unreleased;
-    stats.totalSubscribed += s.subscribed;
+    if (s.missing > 0) { stats.collectionsWithMissing++; stats.totalMissingMovies += s.missing; }
+    stats.totalUnreleased += s.unreleased; stats.totalSubscribed += s.subscribed;
   }
   return stats;
 });
 
 const handleDeleteCollection = async (collection) => {
   if (!collection || !collection.emby_collection_id) return;
-  
   const d = message.loading('正在删除合集，请稍候...', { duration: 0 });
-  
   try {
     await axios.delete(`/api/collections/${collection.emby_collection_id}`);
-    d.destroy();
-    message.success(`合集 "${collection.name}" 删除成功！`);
-    
-    // 从本地列表中移除，避免需要刷新页面
+    d.destroy(); message.success(`合集 "${collection.name}" 删除成功！`);
     collections.value = collections.value.filter(c => c.emby_collection_id !== collection.emby_collection_id);
-    
-  } catch (err) {
-    d.destroy();
-    message.error(err.response?.data?.error || '删除失败，请查看日志。');
-  }
+  } catch (err) { d.destroy(); message.error(err.response?.data?.error || '删除失败，请查看日志。'); }
 };
 
 const filteredAndSortedCollections = computed(() => {
   if (!Array.isArray(collections.value)) return [];
   let list = [...collections.value];
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase();
-    list = list.filter(item => item.name && item.name.toLowerCase().includes(query));
-  }
+  if (searchQuery.value) { const query = searchQuery.value.toLowerCase(); list = list.filter(item => item.name && item.name.toLowerCase().includes(query)); }
   switch (filterStatus.value) {
-    case 'has_missing':
-      list = list.filter(item => (item.statistics?.missing || 0) > 0);
-      break;
-    case 'complete':
-      list = list.filter(item => (item.statistics?.missing || 0) === 0);
-      break;
-    case 'has_subscribed':
-      list = list.filter(item => (item.statistics?.subscribed || 0) > 0);
-      break;
-    case 'has_unreleased':
-      list = list.filter(item => (item.statistics?.unreleased || 0) > 0);
-      break;
+    case 'has_missing': list = list.filter(item => (item.statistics?.missing || 0) > 0); break;
+    case 'complete': list = list.filter(item => (item.statistics?.missing || 0) === 0); break;
+    case 'has_subscribed': list = list.filter(item => (item.statistics?.subscribed || 0) > 0); break;
+    case 'has_unreleased': list = list.filter(item => (item.statistics?.unreleased || 0) > 0); break;
   }
   list.sort((a, b) => {
     let valA, valB;
     switch (sortKey.value) {
-      case 'name':
-        valA = a.name || '';
-        valB = b.name || '';
-        return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
-      case 'last_checked_at':
-        valA = a.last_checked_at ? new Date(a.last_checked_at).getTime() : 0;
-        valB = b.last_checked_at ? new Date(b.last_checked_at).getTime() : 0;
-        break;
-      case 'missing_count':
-      default:
-        valA = a.statistics?.missing || 0;
-        valB = b.statistics?.missing || 0;
-        break;
+      case 'name': valA = a.name || ''; valB = b.name || ''; return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      case 'last_checked_at': valA = a.last_checked_at ? new Date(a.last_checked_at).getTime() : 0; valB = b.last_checked_at ? new Date(b.last_checked_at).getTime() : 0; break;
+      case 'missing_count': default: valA = a.statistics?.missing || 0; valB = b.statistics?.missing || 0; break;
     }
     return sortOrder.value === 'asc' ? valA - valB : valB - valA;
   });
@@ -501,96 +368,47 @@ const hasMore = computed(() => displayCount.value < filteredAndSortedCollections
 const loadMore = () => { if (hasMore.value) displayCount.value += INCREMENT; };
 
 const emptyStateDescription = computed(() => {
-  if (collections.value && collections.value.length > 0 && filteredAndSortedCollections.value.length === 0) {
-    return '没有匹配当前筛选条件的合集。';
-  }
+  if (collections.value && collections.value.length > 0 && filteredAndSortedCollections.value.length === 0) return '没有匹配当前筛选条件的合集。';
   return '没有找到任何电影合集。';
 });
 
-const inLibraryMoviesInModal = computed(() => {
-  if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return [];
-  return selectedCollection.value.movies.filter(movie => movie.status === 'in_library');
-});
-const missingMoviesInModal = computed(() => {
-  if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return [];
-  return selectedCollection.value.movies.filter(movie => movie.status === 'missing');
-});
-const unreleasedMoviesInModal = computed(() => {
-  if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return [];
-  return selectedCollection.value.movies.filter(movie => movie.status === 'unreleased');
-});
-const subscribedMoviesInModal = computed(() => {
-  if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return [];
-  return selectedCollection.value.movies.filter(movie => movie.status === 'subscribed' || movie.status === 'paused');
-});
+const inLibraryMoviesInModal = computed(() => { if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return []; return selectedCollection.value.movies.filter(movie => movie.status === 'in_library'); });
+const missingMoviesInModal = computed(() => { if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return []; return selectedCollection.value.movies.filter(movie => movie.status === 'missing'); });
+const unreleasedMoviesInModal = computed(() => { if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return []; return selectedCollection.value.movies.filter(movie => movie.status === 'unreleased'); });
+const subscribedMoviesInModal = computed(() => { if (!selectedCollection.value || !Array.isArray(selectedCollection.value.movies)) return []; return selectedCollection.value.movies.filter(movie => movie.status === 'subscribed' || movie.status === 'paused'); });
 
 const loadCachedData = async () => {
   if (collections.value.length === 0) isInitialLoading.value = true;
   error.value = null;
   try {
     const response = await axios.get('/api/collections/status', { headers: { 'Cache-Control': 'no-cache' } });
-    collections.value = response.data;
-    displayCount.value = 50;
-  } catch (err) {
-    error.value = err.response?.data?.error || '无法加载合集数据。';
-    collections.value = [];
-  } finally {
-    isInitialLoading.value = false;
-  }
+    collections.value = response.data; displayCount.value = 50;
+  } catch (err) { error.value = err.response?.data?.error || '无法加载合集数据。'; collections.value = []; } finally { isInitialLoading.value = false; }
 };
 
-const autoCompleteEnabled = ref(false);
-const autoSubEnabled = ref(false);
-const isUpdatingSettings = ref(false);
-
+const autoCompleteEnabled = ref(false); const autoSubEnabled = ref(false); const isUpdatingSettings = ref(false);
 const loadSettings = async () => {
   try {
     const response = await axios.get('/api/collections/settings');
-    autoCompleteEnabled.value = response.data.auto_complete_enabled;
-    autoSubEnabled.value = response.data.auto_sub_enabled;
-  } catch (e) {
-    console.error("加载合集设置失败", e);
-  }
+    autoCompleteEnabled.value = response.data.auto_complete_enabled; autoSubEnabled.value = response.data.auto_sub_enabled;
+  } catch (e) { console.error("加载合集设置失败", e); }
 };
 
 const handleAutoCompleteChange = async (value) => {
   isUpdatingSettings.value = true;
   try {
-    await axios.post('/api/collections/settings', {
-      auto_complete_enabled: value,
-      auto_sub_enabled: autoSubEnabled.value 
-    });
+    await axios.post('/api/collections/settings', { auto_complete_enabled: value, auto_sub_enabled: autoSubEnabled.value });
     autoCompleteEnabled.value = value;
-    if (value) {
-      message.success("已开启电影入库实时检查所属合集");
-    } else {
-      message.info("已关闭电影入库实时检查所属合集");
-    }
-  } catch (e) {
-    message.error("保存设置失败");
-  } finally {
-    isUpdatingSettings.value = false;
-  }
+    if (value) message.success("已开启电影入库实时检查所属合集"); else message.info("已关闭电影入库实时检查所属合集");
+  } catch (e) { message.error("保存设置失败"); } finally { isUpdatingSettings.value = false; }
 };
-
 const handleAutoSubChange = async (value) => {
   isUpdatingSettings.value = true;
   try {
-    await axios.post('/api/collections/settings', {
-      auto_complete_enabled: autoCompleteEnabled.value,
-      auto_sub_enabled: value 
-    });
+    await axios.post('/api/collections/settings', { auto_complete_enabled: autoCompleteEnabled.value, auto_sub_enabled: value });
     autoSubEnabled.value = value;
-    if (value) {
-      message.success("已开启自动订阅缺失");
-    } else {
-      message.info("已关闭自动订阅缺失");
-    }
-  } catch (e) {
-    message.error("保存设置失败");
-  } finally {
-    isUpdatingSettings.value = false;
-  }
+    if (value) message.success("已开启自动订阅缺失"); else message.info("已关闭自动订阅缺失");
+  } catch (e) { message.error("保存设置失败"); } finally { isUpdatingSettings.value = false; }
 };
 
 const triggerFullRefresh = async () => {
@@ -598,81 +416,39 @@ const triggerFullRefresh = async () => {
   try {
     const response = await axios.post('/api/tasks/run', { task_name: 'refresh-collections' });
     message.success(response.data.message || '刷新任务已在后台启动！');
-  } catch (err) {
-    message.error(err.response?.data?.error || '启动刷新任务失败。');
-  } finally {
-    isRefreshing.value = false;
-  }
+  } catch (err) { message.error(err.response?.data?.error || '启动刷新任务失败。'); } finally { isRefreshing.value = false; }
 };
 
 onMounted(() => {
-  checkMobile();
-  window.addEventListener('resize', checkMobile);
-  loadCachedData();
-  loadSettings();
+  checkMobile(); window.addEventListener('resize', checkMobile); loadCachedData(); loadSettings();
   observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { threshold: 1.0 });
   if (loaderRef.value) observer.observe(loaderRef.value);
 });
-onBeforeUnmount(() => { 
-  window.removeEventListener('resize', checkMobile);
-  if (observer) observer.disconnect(); 
-});
+onBeforeUnmount(() => { window.removeEventListener('resize', checkMobile); if (observer) observer.disconnect(); });
 watch(loaderRef, (newEl) => { if (observer && newEl) observer.observe(newEl); });
 watch(isTaskRunning, (isRunning, wasRunning) => {
   if (wasRunning && !isRunning) {
     const lastAction = props.taskStatus.last_action;
-    if (lastAction && lastAction.includes('合集')) {
-      message.info('后台合集任务已结束，正在刷新数据...');
-      loadCachedData();
-    }
+    if (lastAction && lastAction.includes('合集')) { message.info('后台合集任务已结束，正在刷新数据...'); loadCachedData(); }
   }
 });
+watch([searchQuery, filterStatus, sortKey, sortOrder], () => { displayCount.value = 50; });
 
-watch([searchQuery, filterStatus, sortKey, sortOrder], () => {
-  displayCount.value = 50;
-});
-
-const openMissingMoviesModal = (collection) => {
-  selectedCollection.value = collection;
-  showModal.value = true;
-};
-
+const openMissingMoviesModal = (collection) => { selectedCollection.value = collection; showModal.value = true; };
 const getEmbyUrl = (itemId) => {
-  const embyServerUrl = configModel.value?.emby_server_url;
-  const serverId = configModel.value?.emby_server_id;
+  const embyServerUrl = configModel.value?.emby_server_url; const serverId = configModel.value?.emby_server_id;
   if (!embyServerUrl || !itemId) return '#';
   const baseUrl = embyServerUrl.endsWith('/') ? embyServerUrl.slice(0, -1) : embyServerUrl;
-  let finalUrl = `${baseUrl}/web/index.html#!/item?id=${itemId}`;
-  if (serverId) { finalUrl += `&serverId=${serverId}`; }
-  return finalUrl;
+  let finalUrl = `${baseUrl}/web/index.html#!/item?id=${itemId}`; if (serverId) { finalUrl += `&serverId=${serverId}`; } return finalUrl;
 };
-const openInEmby = (itemId) => {
-  const url = getEmbyUrl(itemId);
-  if (url !== '#') { window.open(url, '_blank'); }
-};
-
-const formatTimestamp = (timestamp) => {
-  if (!timestamp) return '从未';
-  try {
-    return format(new Date(timestamp), 'MM-dd HH:mm');
-  } catch (e) {
-    return 'N/A';
-  }
-};
-
+const openInEmby = (itemId) => { const url = getEmbyUrl(itemId); if (url !== '#') { window.open(url, '_blank'); } };
+const formatTimestamp = (timestamp) => { if (!timestamp) return '从未'; try { return format(new Date(timestamp), 'MM-dd HH:mm'); } catch (e) { return 'N/A'; } };
 const getCollectionPosterUrl = (posterPath) => {
-  if (!posterPath) {
-    return '/img/poster-placeholder.png';
-  }
-  const fullTmdbUrl = `https://image.tmdb.org/t/p/w300${posterPath}`;
-  return `/api/image_proxy?url=${encodeURIComponent(fullTmdbUrl)}`;
+  if (!posterPath) return '/img/poster-placeholder.png';
+  const fullTmdbUrl = `https://image.tmdb.org/t/p/w300${posterPath}`; return `/api/image_proxy?url=${encodeURIComponent(fullTmdbUrl)}`;
 };
 const getTmdbImageUrl = (posterPath) => posterPath ? `https://image.tmdb.org/t/p/w300${posterPath}` : '/img/poster-placeholder.png';
-
-const extractYear = (dateStr) => {
-  if (!dateStr) return null;
-  return dateStr.substring(0, 4);
-};
+const extractYear = (dateStr) => { if (!dateStr) return null; return dateStr.substring(0, 4); };
 </script>
 
 <style scoped>
@@ -682,13 +458,12 @@ const extractYear = (dateStr) => {
 .responsive-grid {
   display: grid;
   gap: 16px;
-  /* 自动填充，最小宽度280px，完美适配手机和电脑 */
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 @media (max-width: 768px) {
   .responsive-grid {
-    grid-template-columns: 1fr; /* 手机端强制单列 */
+    grid-template-columns: 1fr;
     gap: 12px;
   }
 }
@@ -704,17 +479,17 @@ const extractYear = (dateStr) => {
   border-radius: 12px;
   overflow: hidden; 
   /* 继承全局毛玻璃属性 */
-  background: rgba(20, 25, 35, 0.4) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
 }
 
 .series-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.4) !important;
-  background: rgba(30, 35, 45, 0.5) !important;
-  border-color: rgba(255, 255, 255, 0.2) !important;
+  box-shadow: var(--glass-shadow) !important;
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
 }
 
 .series-card :deep(.n-card__content) {
@@ -757,47 +532,68 @@ const extractYear = (dateStr) => {
 
 /* 内容区域 */
 .card-content-container {
-  flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; padding: 0;
+  flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; padding: 0; position: relative;
 }
 
 .card-header {
   display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px;
+  padding-right: 30px; /* 给绝对定位的删除按钮留出空间 */
 }
 
 .card-title {
-  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: #fff;
+  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: var(--text-primary);
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
+/* ★★★ 将删除按钮定位到卡片右上方，防止挤压文字 ★★★ */
+.card-delete-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 10;
+}
+
 .card-status-area { flex-grow: 1; display: flex; flex-direction: column; gap: 6px; }
-.info-text, .info-line { font-size: 13px; color: rgba(255,255,255,0.6); display: flex; align-items: center; gap: 6px; }
+.last-checked-text { font-size: 13px; color: var(--text-secondary); }
 
-/* 底部按钮区域 */
+/* 底部操作按钮区域 */
 .card-actions {
-  margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.05);
-  display: flex; justify-content: flex-start; align-items: center; gap: 8px;
+  margin-top: auto; 
+  padding-top: 10px; 
+  border-top: 1px dashed var(--glass-border);
+  display: flex; 
+  justify-content: flex-end; /* 靠右对齐 */
+  align-items: center; 
+  gap: 12px; /* 增加间距 */
 }
 
-/* 悬浮操作栏 (Watchlist/Unified) */
-.floating-action-bar {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 1000;
-  width: auto; min-width: 400px; max-width: 90%;
+/* 放大所有底部图标 */
+.card-actions .n-button {
+  font-size: 22px; 
 }
-.fab-content {
-  background: rgba(30, 35, 45, 0.85); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50px; padding: 12px 24px;
-  display: flex; justify-content: space-between; align-items: center; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); gap: 24px;
-}
-.fab-text { color: #fff; font-size: 14px; }
-.fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
 
-/* 模态框内的海报墙 (TmdbCollectionsPage 等) */
+/* 数据网格样式 */
+.card-stats-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 8px 0;
+}
+.stat-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: bold; color: #fff;
+}
+.stat-item.missing { background: rgba(255, 77, 79, 0.2); border: 1px solid rgba(255, 77, 79, 0.4); color: #ff4d4f; }
+.stat-item.in-library { background: rgba(24, 160, 88, 0.2); border: 1px solid rgba(24, 160, 88, 0.4); color: #18a058; }
+.stat-item.subscribed { background: rgba(45, 140, 240, 0.2); border: 1px solid rgba(45, 140, 240, 0.4); color: #2d8cf0; }
+.stat-item.unreleased { background: rgba(250, 173, 20, 0.2); border: 1px solid rgba(250, 173, 20, 0.4); color: #faad14; }
+.stat-item.complete { grid-column: span 2; justify-content: center; background: rgba(24, 160, 88, 0.2); border: 1px solid rgba(24, 160, 88, 0.4); color: #18a058; }
+.stat-label { opacity: 0.8; font-weight: normal; }
+
+/* 模态框内的海报墙 */
 .movie-card {
   border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; 
-  background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: var(--glass-bg); backdrop-filter: blur(10px); border: 1px solid var(--glass-border);
   transition: transform 0.2s, box-shadow 0.2s; cursor: default; 
 }
-.movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
+.movie-card:hover { transform: translateY(-4px); box-shadow: var(--glass-shadow); z-index: 2; }
 .movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
 .movie-card:hover .movie-poster { transform: scale(1.05); }
 .movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }

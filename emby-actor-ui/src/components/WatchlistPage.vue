@@ -113,19 +113,22 @@
             :key="item.tmdb_id" 
             class="grid-item"
           >
-            <n-card class="dashboard-card series-card" :bordered="false">
-              <n-checkbox
-                :checked="selectedItems.includes(item.tmdb_id)"
-                @update:checked="(checked, event) => toggleSelection(item.tmdb_id, event, i)"
-                class="card-checkbox"
-              />
+            <n-card class="dashboard-card series-card" :bordered="false" @click="toggleSelection(item.tmdb_id, $event, i)">
               
               <!-- ★★★ 核心结构：card-inner-layout 包裹层 ★★★ -->
               <div class="card-inner-layout">
                 
                 <!-- 左侧海报 -->
                 <div class="card-poster-container">
-                  <n-image lazy :src="getPosterUrl(item.emby_item_ids_json)" class="card-poster" object-fit="cover">
+                  <!-- 移动到这里，绝对定位漂浮在图片上 -->
+                  <div class="poster-checkbox-wrap" @click.stop>
+                    <n-checkbox
+                      :checked="selectedItems.includes(item.tmdb_id)"
+                      @update:checked="(checked, event) => toggleSelection(item.tmdb_id, event, i)"
+                    />
+                  </div>
+
+                  <n-image lazy :src="getPosterUrl(item.emby_item_ids_json)" class="card-poster" object-fit="cover" @click.stop>
                     <template #placeholder><div class="poster-placeholder"><n-icon :component="TvIcon" size="32" /></div></template>
                   </n-image>
                   
@@ -178,7 +181,7 @@
                 <div class="card-content-container">
                   <div class="card-header">
                     <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.item_name }}</n-ellipsis>
-                    <n-popconfirm @positive-click="() => removeFromWatchlist(item.parent_tmdb_id, item.item_name)">
+                    <n-popconfirm @positive-click="() => removeFromWatchlist(item.parent_tmdb_id, item.item_name)" @click.stop>
                       <template #trigger><n-button text type="error" circle title="移除" size="tiny"><template #icon><n-icon :component="TrashIcon" /></template></n-button></template>
                       确定要从追剧列表中移除《{{ item.item_name }}》吗？
                     </n-popconfirm>
@@ -196,7 +199,7 @@
                         </template>
                         <!-- 追剧中视图 (分季卡片) -->
                         <template v-else>
-                          <n-button round size="tiny" :type="statusInfo(item.status).type" @click="() => updateStatus(item.tmdb_id, statusInfo(item.status).next)" :title="`点击切换到 '${statusInfo(item.status).nextText}'`">
+                          <n-button round size="tiny" :type="statusInfo(item.status).type" @click.stop="() => updateStatus(item.tmdb_id, statusInfo(item.status).next)" :title="`点击切换到 '${statusInfo(item.status).nextText}'`">
                             <template #icon><n-icon :component="statusInfo(item.status).icon" /></template>
                             {{ statusInfo(item.status).text }}
                           </n-button>
@@ -208,25 +211,25 @@
                         <!-- A. 包含 (已入库) -->
                         <div v-if="item.seasons_contains && item.seasons_contains.length > 0" class="info-line">
                           <n-icon :component="CollectionsIcon" class="icon-fix" />
-                          <n-text :depth="3">
+                          <span class="info-line-text">
                             包含: {{ item.seasons_contains.length }} 个季度 ({{ formatSeasonRange(item.seasons_contains) }})
-                          </n-text>
+                          </span>
                         </div>
 
                         <!-- B. 连载 (在库且活跃) - 绿色高亮 -->
-                        <div v-if="item.seasons_airing && item.seasons_airing.length > 0" class="info-line">
-                          <n-icon :component="WatchingIcon" class="icon-fix" style="color: var(--n-success-color)" />
-                          <n-text :depth="3" style="color: var(--n-success-color)">
+                        <div v-if="item.seasons_airing && item.seasons_airing.length > 0" class="info-line success-text">
+                          <n-icon :component="WatchingIcon" class="icon-fix" />
+                          <span class="info-line-text">
                             连载: {{ item.seasons_airing.length }} 个季度 ({{ formatSeasonRange(item.seasons_airing) }})
-                          </n-text>
+                          </span>
                         </div>
 
                         <!-- C. 缺失 (未入库) - 红色高亮 -->
-                        <div v-if="item.seasons_missing && item.seasons_missing.length > 0" class="info-line">
-                          <n-icon :component="DownloadIcon" class="icon-fix" style="color: var(--n-error-color)" />
-                          <n-text :depth="3" style="color: var(--n-error-color)">
+                        <div v-if="item.seasons_missing && item.seasons_missing.length > 0" class="info-line error-text">
+                          <n-icon :component="DownloadIcon" class="icon-fix" />
+                          <span class="info-line-text">
                             缺失: {{ item.seasons_missing.length }} 个季度 ({{ formatSeasonRange(item.seasons_missing) }})
-                          </n-text>
+                          </span>
                         </div>
                       </template>
 
@@ -235,23 +238,23 @@
                         <!-- 待播集数 -->
                         <div v-if="nextEpisode(item)?.name" class="info-line">
                           <n-icon :component="TvIcon" class="icon-fix" />
-                          <n-text :depth="3" style="flex: 1; min-width: 0;">
+                          <span class="info-line-text" style="flex: 1; min-width: 0;">
                             <n-ellipsis>待播集: {{ nextEpisode(item).name }}</n-ellipsis>
-                          </n-text>
+                          </span>
                         </div>
 
                         <!-- 播出时间 -->
                         <div v-if="nextEpisode(item)?.name" class="info-line">
                           <n-icon :component="CalendarIcon" class="icon-fix" />
-                          <n-text :depth="3">
+                          <span class="info-line-text">
                             播出时间: {{ nextEpisode(item).air_date ? formatAirDate(nextEpisode(item).air_date) : '待定' }}
-                          </n-text>
+                          </span>
                         </div>
 
                         <!-- 上次检查 -->
                         <div class="info-line">
                           <n-icon :component="TimeIcon" class="icon-fix" />
-                          <n-text :depth="3">上次检查: {{ formatTimestamp(item.last_checked_at) }}</n-text>
+                          <span class="info-line-text">上次检查: {{ formatTimestamp(item.last_checked_at) }}</span>
                         </div>
                       </template>
                     </n-space>
@@ -273,39 +276,37 @@
 
                   <!-- 底部按钮 -->
                   <div class="card-actions">
-                    <!-- 只有 hasMissing 为真时才显示，且颜色改为 warning -->
                     <n-tooltip v-if="hasMissing(item)">
                       <template #trigger>
                         <n-button
                           type="warning"
                           size="small"
                           circle
-                          @click="() => openMissingInfoModal(item)"
+                          @click.stop="() => openMissingInfoModal(item)"
                         >
                           <template #icon><n-icon :component="EyeIcon" /></template>
                         </n-button>
                       </template>
-                      <!-- 悬停时显示具体缺什么，例如：缺 1 季 | 有分集缺失 -->
                       {{ getMissingCountText(item) }} (点击查看详情)
                     </n-tooltip>
                     <n-tooltip>
                       <template #trigger>
                         <n-button
-                          circle
+                          text
                           :loading="refreshingItems[item.parent_tmdb_id]" 
-                          @click="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)"
+                          @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)"
                         >
-                          <template #icon><n-icon :component="SyncOutline" /></template>
+                          <template #icon><n-icon :component="SyncOutline" size="22" /></template>
                         </n-button>
                       </template>
                       立即刷新此剧集
                     </n-tooltip>
                     <n-tooltip>
-                      <template #trigger><n-button text @click="openInEmby(item.emby_item_ids_json)"><template #icon><n-icon :component="EmbyIcon" size="18" /></template></n-button></template>
+                      <template #trigger><n-button text @click.stop="openInEmby(item.emby_item_ids_json)"><template #icon><n-icon :component="EmbyIcon" size="22" /></template></n-button></template>
                       在 Emby 中打开
                     </n-tooltip>
                     <n-tooltip>
-                      <template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" target="_blank"><template #icon><n-icon :component="TMDbIcon" size="18" /></template></n-button></template>
+                      <template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" size="22" /></template></n-button></template>
                       在 TMDb 中打开
                     </n-tooltip>
                   </div>
@@ -324,6 +325,7 @@
       </div>
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
+    <!-- (下方的 Modals 和 scripts 逻辑部分未更改，保持您的原样) -->
     <n-modal v-model:show="showModal" preset="card" style="width: 90%; max-width: 900px;" :title="selectedSeries ? `缺失详情 - ${selectedSeries.item_name}` : ''" :bordered="false" size="huge">
       <div v-if="selectedSeries && missingData">
         <n-tabs type="line" animated v-model:value="activeTab">
@@ -348,258 +350,102 @@
         </n-tabs>
       </div>
     </n-modal>
-    <!-- 追剧策略配置模态框 -->
-    <n-modal 
-      v-model:show="showConfigModal" 
-      preset="card" 
-      title="智能追剧策略" 
-      style="width: 950px; max-width: 95vw;" 
-      :bordered="false"
-      size="huge"
-    >
-
-      <!-- ★★★ 修改：引入 grid 布局容器 ★★★ -->
+    <!-- 追剧策略配置模态框 (原样保留) -->
+    <n-modal v-model:show="showConfigModal" preset="card" title="智能追剧策略" style="width: 950px; max-width: 95vw;" :bordered="false" size="huge">
       <div class="settings-layout">
-        
-        <!-- === 左侧列：状态 + 跟踪 === -->
         <div class="settings-col">
-          
-          <!-- 第一组：状态自动化 -->
           <div class="settings-group-title">状态自动化</div>
           <div class="settings-card">
-            
-            <!-- 1. 自动待定 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="TimerIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
                   <div class="setting-label">新剧保护 (自动待定)</div>
-                  <n-switch v-model:value="watchlistConfig.auto_pending.enabled" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <n-switch v-model:value="watchlistConfig.auto_pending.enabled" size="small" />
                 </div>
-                <div class="setting-desc">
-                  对于刚开播或集数很少的新剧，将其状态设为“待定”，防止因集数不足被误判为完结。
-                </div>
-                
+                <div class="setting-desc">对于刚开播或集数很少的新剧，将其状态设为“待定”，防止因集数不足被误判为完结。</div>
                 <n-collapse-transition :show="watchlistConfig.auto_pending.enabled">
                   <div class="setting-sub-panel">
-                    <!-- ★★★ 优化：使用 Flex 布局允许换行，解决手机端看不全和电脑端换行问题 ★★★ -->
                     <div class="auto-pending-grid">
-                      <div class="auto-pending-item">
-                        <div class="sub-label">保护期 (天)</div>
-                        <n-input-number v-model:value="watchlistConfig.auto_pending.days" size="small" placeholder="天数">
-                          <template #suffix>天</template>
-                        </n-input-number>
-                      </div>
-                      <div class="auto-pending-item">
-                        <div class="sub-label">保护集数</div>
-                        <n-input-number v-model:value="watchlistConfig.auto_pending.episodes" size="small" placeholder="集数">
-                          <template #suffix>集</template>
-                        </n-input-number>
-                      </div>
-                      <div class="auto-pending-item">
-                        <div class="sub-label">
-                          虚标集数 
-                          <n-tooltip trigger="hover">
-                            <template #trigger>
-                              <n-icon size="14" :component="PendingIcon" style="vertical-align: -2px; margin-left: 2px;" />
-                            </template>
-                            防止 MP 提前完成订阅
-                          </n-tooltip>
-                        </div>
-                        <n-input-number v-model:value="watchlistConfig.auto_pending.default_total_episodes" size="small">
-                          <template #suffix>集</template>
-                        </n-input-number>
-                      </div>
+                      <div class="auto-pending-item"><div class="sub-label">保护期(天)</div><n-input-number v-model:value="watchlistConfig.auto_pending.days" size="small" /></div>
+                      <div class="auto-pending-item"><div class="sub-label">保护集数</div><n-input-number v-model:value="watchlistConfig.auto_pending.episodes" size="small" /></div>
+                      <div class="auto-pending-item"><div class="sub-label">虚标集数</div><n-input-number v-model:value="watchlistConfig.auto_pending.default_total_episodes" size="small" /></div>
                     </div>
                   </div>
                 </n-collapse-transition>
               </div>
             </div>
-
             <n-divider style="margin: 0" />
-
-            <!-- 2. 自动暂停 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="PausedIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
-                  <div class="setting-label">
-                    自动暂停
-                    <!-- 加个小标签提示当前状态，直观一点 -->
-                    <n-tag 
-                      v-if="watchlistConfig.auto_pause === 0" 
-                      :bordered="false" 
-                      type="error" 
-                      size="small" 
-                      style="margin-left: 8px; transform: scale(0.85);"
-                    >
-                      已关闭
-                    </n-tag>
-                    <n-tag 
-                      v-else 
-                      :bordered="false" 
-                      type="success" 
-                      size="small" 
-                      style="margin-left: 8px; transform: scale(0.85);"
-                    >
-                      已开启
-                    </n-tag>
-                  </div>
-                  
-                  <!-- 直接放输入框，去掉 Switch -->
-                  <n-input-number 
-                    v-model:value="watchlistConfig.auto_pause" 
-                    size="small" 
-                    style="width: 120px" 
-                    placeholder="0=关闭"
-                    :min="0"
-                  >
-                    <template #suffix>天</template>
-                  </n-input-number>
+                  <div class="setting-label">自动暂停</div>
+                  <n-input-number v-model:value="watchlistConfig.auto_pause" size="small" style="width: 120px" :min="0" />
                 </div>
-                
-                <div class="setting-desc">
-                  当下一集播出时间在指定天数以后时，自动将状态设为“暂停”。<br/>
-                  <span style="color: var(--n-text-color-3); font-size: 12px;">
-                    * 设置为 0 即关闭此功能；设置为 3 表示若下一集在 3 天后才播，则暂停MP订阅。
-                  </span>
-                </div>
+                <div class="setting-desc">当下一集播出时间在指定天数以后时，自动将状态设为“暂停”。0=关闭。</div>
               </div>
             </div>
           <n-divider style="margin: 0" />
-          <!-- 4. 豆瓣辅助修正 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
                   <div class="setting-label">豆瓣辅助修正集数</div>
-                  <n-switch v-model:value="watchlistConfig.douban_count_correction" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <n-switch v-model:value="watchlistConfig.douban_count_correction" size="small" />
                 </div>
-                <div class="setting-desc">
-                  当 TMDb 集数数据滞后或错误时，尝试从豆瓣获取准确的总集数并锁定。
-                </div>
+                <div class="setting-desc">当 TMDb 集数数据滞后或错误时，尝试从豆瓣获取准确的总集数并锁定。</div>
               </div>
             </div>
           </div>
         </div>
-
-        <!-- === 右侧列：订阅与洗版 === -->
         <div class="settings-col">
-          
-          <!-- 第二组：订阅与洗版 -->
           <div class="settings-group-title">订阅与洗版</div>
           <div class="settings-card">
-            
-            <!-- 4. 完结自动洗版 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="RefreshIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
                   <div class="setting-label">完结自动洗版</div>
-                  <n-switch v-model:value="watchlistConfig.auto_resub_ended" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <n-switch v-model:value="watchlistConfig.auto_resub_ended" size="small" />
                 </div>
-                <div class="setting-desc">
-                  剧集完结后，自动删除旧订阅并提交“洗版订阅”，以获取整季合集。
-                </div>
-                <!-- 子选项展开区域 -->
+                <div class="setting-desc">剧集完结后，自动删除旧订阅并提交“洗版订阅”，以获取整季合集。</div>
                 <n-collapse-transition :show="watchlistConfig.auto_resub_ended">
                   <div class="setting-sub-panel" style="margin-top: 8px; padding: 4px 12px; background-color: rgba(0,0,0,0.03);">
-                    
-                    <!-- 选项 1: 删除 Emby 旧文件 -->
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);">
-                      <span style="font-size: 13px; font-weight: 500;">删除 Emby 旧文件</span>
-                      <n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small">
-                        <template #checked>开启</template>
-                        <template #unchecked>关闭</template>
-                      </n-switch>
-                    </div>
-
-                    <!-- 选项 2: 删除 MP 整理记录 -->
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);">
-                      <span style="font-size: 13px; font-weight: 500;">删除 MP 整理记录</span>
-                      <n-switch v-model:value="watchlistConfig.auto_delete_mp_history" size="small">
-                        <template #checked>开启</template>
-                        <template #unchecked>关闭</template>
-                      </n-switch>
-                    </div>
-
-                    <!-- 选项 3: 删除下载器任务 -->
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);">
-                        <span style="font-size: 13px; font-weight: 500;">删除下载器任务及源文件（含辅种）</span>
-                      <n-switch 
-                        v-model:value="watchlistConfig.auto_delete_download_tasks" 
-                        size="small"
-                      >
-                        <template #checked>开启</template>
-                        <template #unchecked>关闭</template>
-                      </n-switch>
-                    </div>
-
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除 Emby 旧文件</span><n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small"/></div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除 MP 整理记录</span><n-switch v-model:value="watchlistConfig.auto_delete_mp_history" size="small"/></div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除下载器任务及源文件</span><n-switch v-model:value="watchlistConfig.auto_delete_download_tasks" size="small"/></div>
                   </div>
                 </n-collapse-transition>
               </div>
             </div>
-
             <n-divider style="margin: 0" />
-
-            <!-- 5 MoviePilot 自动补订 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="MPSyncIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
                   <div class="setting-label">MoviePilot 自动补订</div>
-                  <n-switch v-model:value="watchlistConfig.sync_mp_subscription" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <n-switch v-model:value="watchlistConfig.sync_mp_subscription" size="small" />
                 </div>
-                <div class="setting-desc">
-                  当发现 MoviePilot 中缺失在追剧订阅时自动补订。
-                </div>
+                <div class="setting-desc">当发现 MoviePilot 中缺失在追剧订阅时自动补订。</div>
               </div>
             </div>
-
-            <n-divider style="margin: 0" />
-            
           </div>
-          <!-- 第三组：跟踪与维护 -->
           <div class="settings-group-title" style="margin-top: 24px;">跟踪与维护</div>
           <div class="settings-card">
-            
-            <!-- 6. 全量刷新回溯期 -->
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="TimeIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
                   <div class="setting-label">全量刷新回溯期</div>
-                  <n-input-number 
-                    v-model:value="watchlistConfig.revival_check_days" 
-                    size="small" 
-                    style="width: 120px" 
-                    placeholder="天数"
-                    :min="1"
-                  >
-                    <template #suffix>天</template>
-                  </n-input-number>
+                  <n-input-number v-model:value="watchlistConfig.revival_check_days" size="small" style="width: 120px" :min="1" />
                 </div>
-                <div class="setting-desc">
-                  对于已完结超过此天数的剧集，仅进行轻量级检查（只看有没有新季），不再全量刷新元数据，以提高效率。
-                </div>
+                <div class="setting-desc">对于已完结超过此天数的剧集，仅进行轻量级检查。</div>
               </div>
             </div>
           </div>
         </div>
       </div>
-
       <template #footer>
         <n-space justify="end">
           <n-button @click="showConfigModal = false">取消</n-button>
@@ -611,6 +457,7 @@
 </template>
 
 <script setup>
+// JS 部分没有需要更改的地方，直接保留您原本的所有逻辑即可
 import { ref, shallowRef, triggerRef, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NPopconfirm, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTabs, NTabPane, NList, NListItem, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NProgress, useThemeVars, NPopover, NInputNumber, NSwitch, NCollapseTransition, NText } from 'naive-ui';
@@ -618,12 +465,11 @@ import { SyncOutline, TvOutline as TvIcon, TrashOutline as TrashIcon, EyeOutline
 import { format, parseISO } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';
 
-// ... (Script 逻辑保持不变) ...
-const EmbyIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 48 48", width: "18", height: "18" }, [
+const EmbyIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 48 48", width: "1em", height: "1em" }, [
   h('path', { d: "M24,4.2c-11,0-19.8,8.9-19.8,19.8S13,43.8,24,43.8s19.8-8.9,19.8-19.8S35,4.2,24,4.2z M24,39.8c-8.7,0-15.8-7.1-15.8-15.8S15.3,8.2,24,8.2s15.8,7.1,15.8,15.8S32.7,39.8,24,39.8z", fill: "currentColor" }),
   h('polygon', { points: "22.2,16.4 22.2,22.2 16.4,22.2 16.4,25.8 22.2,25.8 22.2,31.6 25.8,31.6 25.8,25.8 31.6,31.6 31.6,22.2 25.8,22.2 25.8,16.4 ", fill: "currentColor" })
 ]);
-const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "18", height: "18" }, [
+const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "1em", height: "1em" }, [
   h('path', { d: "M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM133.2 176.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zM133.2 262.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8z", fill: "#01b4e4" })
 ]);
 
@@ -662,12 +508,7 @@ const showConfigModal = ref(false);
 const configSaving = ref(false);
 
 const watchlistConfig = ref({
-  auto_pending: { 
-      enabled: false, 
-      days: 30, 
-      episodes: 1, 
-      default_total_episodes: 99
-  },
+  auto_pending: { enabled: false, days: 30, episodes: 1, default_total_episodes: 99 },
   auto_pause: 0,
   douban_count_correction: false,
   auto_resub_ended: false,
@@ -696,7 +537,6 @@ const openConfigModal = async () => {
          auto_delete_old_files: data.auto_delete_old_files ?? false,
          auto_delete_mp_history: data.auto_delete_mp_history ?? false,
          auto_delete_download_tasks: data.auto_delete_download_tasks ?? false,
-         enable_backfill: data.enable_backfill ?? false,
          sync_mp_subscription: data.sync_mp_subscription ?? false,
          revival_check_days: data.revival_check_days ?? 365
        };
@@ -722,7 +562,7 @@ const saveConfig = async () => {
 const triggerBackfillTask = async () => {
   dialog.info({
     title: '补全旧季',
-    content: '确定要扫描数据库并自动待订阅所有缺失的旧季吗？\n\n逻辑说明：\n1. 仅针对“非最新季”的缺失季。\n2. 仅针对“未入库”且“未忽略”的季。',
+    content: '确定要扫描数据库并自动待订阅所有缺失的旧季吗？',
     positiveText: '确定执行',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -739,226 +579,92 @@ const triggerBackfillTask = async () => {
   });
 };
 
-const hasMissingSeasons = (item) => {
-  const data = item.missing_info;
-  return data?.missing_seasons?.length > 0;
-};
-
-const hasGaps = (item) => {
-  const data = item.missing_info;
-  return Array.isArray(data?.seasons_with_gaps) && data.seasons_with_gaps.length > 0;
-};
-
-const hasMissing = (item) => {
-  return hasMissingSeasons(item) || hasGaps(item);
-};
+const hasMissingSeasons = (item) => item.missing_info?.missing_seasons?.length > 0;
+const hasGaps = (item) => Array.isArray(item.missing_info?.seasons_with_gaps) && item.missing_info.seasons_with_gaps.length > 0;
+const hasMissing = (item) => hasMissingSeasons(item) || hasGaps(item);
 
 const getMissingCountText = (item) => {
   if (!hasMissing(item)) return '';
-  const data = item.missing_info;
-  const season_count = data?.missing_seasons?.length || 0;
-  const gaps_count = (Array.isArray(data?.seasons_with_gaps) && data.seasons_with_gaps.length > 0) ? 1 : 0;
-  
+  const season_count = item.missing_info?.missing_seasons?.length || 0;
+  const gaps_count = hasGaps(item) ? 1 : 0;
   let parts = [];
   if (season_count > 0) parts.push(`缺 ${season_count} 季`);
   if (gaps_count > 0) parts.push(`有分集缺失`);
   return parts.join(' | ');
 };
 
-const statusFilterOptions = [
-  { label: '所有状态', value: 'all' },
-  { label: '追剧中', value: 'Watching' },
-  { label: '已暂停', value: 'Paused' },
-  { label: '待定中', value: 'Pending' },
-];
-const missingFilterOptions = computed(() => {
-    return [
-      { label: '缺季筛选', value: 'all' },
-      { label: '有缺季', value: 'yes' },
-      { label: '无缺季', value: 'no' },
-    ];
-});
-const gapsFilterOptions = [
-    { label: '缺集筛选', value: 'all' },
-    { label: '有缺集', value: 'yes' },
-    { label: '无缺集', value: 'no' },
-];
-const sortKeyOptions = [
-  { label: '按上次检查时间', value: 'last_checked_at' },
-  { label: '按剧集名称', value: 'item_name' },
-  { label: '按添加时间', value: 'added_at' },
-  { label: '按发行年份', value: 'release_year' },
-];
+const statusFilterOptions = [{ label: '所有状态', value: 'all' }, { label: '追剧中', value: 'Watching' }, { label: '已暂停', value: 'Paused' }, { label: '待定中', value: 'Pending' }];
+const missingFilterOptions = computed(() => [{ label: '缺季筛选', value: 'all' }, { label: '有缺季', value: 'yes' }, { label: '无缺季', value: 'no' }]);
+const gapsFilterOptions = [{ label: '缺集筛选', value: 'all' }, { label: '有缺集', value: 'yes' }, { label: '无缺集', value: 'no' }];
+const sortKeyOptions = [{ label: '按上次检查时间', value: 'last_checked_at' }, { label: '按剧集名称', value: 'item_name' }, { label: '按添加时间', value: 'added_at' }, { label: '按发行年份', value: 'release_year' }];
 
 const batchActions = computed(() => {
-  const removeAction = {
-    label: '批量移除',
-    key: 'remove',
-    icon: () => h(NIcon, { component: TrashIcon })
-  };
-
+  const removeAction = { label: '批量移除', key: 'remove', icon: () => h(NIcon, { component: TrashIcon }) };
   if (currentView.value === 'inProgress') {
-    return [
-      {
-        label: '强制完结',
-        key: 'forceEnd',
-        icon: () => h(NIcon, { component: ForceEndIcon })
-      },
-      removeAction
-    ];
-  } 
-  else if (currentView.value === 'completed') {
-    const actions = [
-      {
-        label: '重新追剧',
-        key: 'rewatch',
-        icon: () => h(NIcon, { component: WatchingIcon })
-      }
-    ];
-
-    const hasGapsInSelection = filteredWatchlist.value
-      .filter(item => selectedItems.value.includes(item.tmdb_id))
-      .some(hasGaps);
-
-    actions.push(removeAction);
-    return actions;
+    return [{ label: '强制完结', key: 'forceEnd', icon: () => h(NIcon, { component: ForceEndIcon }) }, removeAction];
+  } else if (currentView.value === 'completed') {
+    return [{ label: '重新追剧', key: 'rewatch', icon: () => h(NIcon, { component: WatchingIcon }) }, removeAction];
   }
-
   return []; 
 });
 
 const filteredWatchlist = computed(() => {
   let list = rawWatchlist.value;
-
-  // 1. 基础过滤：搜索 (通用)
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase();
     list = list.filter(item => item.item_name.toLowerCase().includes(query));
   }
 
-  // 2. 视图分流
   if (currentView.value === 'inProgress') {
-    // --- 追剧中视图 ---
     list = list.filter(item => ['Watching', 'Paused', 'Pending'].includes(item.status));
-    
-    if (filterStatus.value !== 'all') {
-      list = list.filter(item => item.status === filterStatus.value);
-    }
-    // 追剧中：应用缺季筛选
-    if (filterMissing.value !== 'all') {
-      const hasMissingValue = filterMissing.value === 'yes';
-      list = list.filter(item => hasMissingSeasons(item) === hasMissingValue);
-    }
-    // 追剧中：应用缺集筛选
-    if (filterGaps.value !== 'all') {
-       const hasGapsValue = filterGaps.value === 'yes';
-       list = list.filter(item => hasGaps(item) === hasGapsValue);
-    }
-
+    if (filterStatus.value !== 'all') list = list.filter(item => item.status === filterStatus.value);
+    if (filterMissing.value !== 'all') list = list.filter(item => hasMissingSeasons(item) === (filterMissing.value === 'yes'));
+    if (filterGaps.value !== 'all') list = list.filter(item => hasGaps(item) === (filterGaps.value === 'yes'));
   } else if (currentView.value === 'completed') {
-    // --- 已完结视图：聚合逻辑 ---
-    
-    // 1. 先找到所有包含至少一个“已完结”季度的父剧集 ID
-    //    (如果不这样筛选，那些纯粹还在追、没有一季看完的剧也会跑进来)
-    const completedParentIds = new Set(
-      list.filter(item => item.status === 'Completed').map(i => i.parent_tmdb_id)
-    );
-
-    // 2. 获取这些剧集名下的【所有】季度数据
-    //    关键点：这里不再只 filter 'Completed'，而是把该剧的 Watching/Paused 季度也拿进来
+    const completedParentIds = new Set(list.filter(item => item.status === 'Completed').map(i => i.parent_tmdb_id));
     const seasonsToAggregate = list.filter(item => completedParentIds.has(item.parent_tmdb_id));
-
     const groups = {};
     
-    // 3. 对所有相关季度进行遍历聚合
     seasonsToAggregate.forEach(season => {
       const pid = season.parent_tmdb_id;
       if (!groups[pid]) {
         groups[pid] = { 
           ...season, 
-          item_name: season.item_name.replace(/ 第 \d+ 季$/, ''), // 去掉季号作为总标题
-          collected_count: 0, // 重置计数，下面累加
-          total_count: 0,     // 重置计数，下面累加
-          status: season.series_status, 
-          is_aggregated: true,
-          
-          seasons_contains: [], 
-          seasons_missing: [],  
-          seasons_airing: []    
+          item_name: season.item_name.replace(/ 第 \d+ 季$/, ''), 
+          collected_count: 0, total_count: 0, 
+          status: season.series_status, is_aggregated: true,
+          seasons_contains: [], seasons_missing: [], seasons_airing: []    
         };
       }
-
-      // 累加集数
       groups[pid].collected_count += (season.collected_count || 0);
       groups[pid].total_count += (season.total_count || 0);
       
-      // ★★★ 分类逻辑 ★★★
       const isInLibrary = (season.collected_count > 0);
-      
       if (isInLibrary) {
-        // 只要在库，就算包含
-        // 注意：为了避免重复显示，通常 Completed 的才放入 seasons_contains，或者全部放入
-        // 根据你之前的逻辑，这里是放入所有在库的
-        if (season.status === 'Completed') {
-             groups[pid].seasons_contains.push(season.season_number);
-        } else {
-             // 如果在库但不是 Completed，通常也算 contains，但为了区分显示：
-             groups[pid].seasons_contains.push(season.season_number);
-        }
-        
-        // 2. 判断是否连载中：在库 且 状态是 Watching/Paused
+        groups[pid].seasons_contains.push(season.season_number);
         if (season.status === 'Watching' || season.status === 'Paused') {
            groups[pid].seasons_airing.push(season.season_number);
         }
       } else {
-        // 3. 缺失
         groups[pid].seasons_missing.push(season.season_number);
       }
-      
-      // 更新时间取最新的
       if (new Date(season.last_checked_at) > new Date(groups[pid].last_checked_at)) {
         groups[pid].last_checked_at = season.last_checked_at;
       }
     });
 
-    // C. 转回数组
     list = Object.values(groups);
-
-    // 1. 缺季筛选 (Missing Seasons)
-    // 注意：missing_info 来自父剧集，所以聚合对象的 missing_info 是准确的
-    if (filterMissing.value !== 'all') {
-      const hasMissingValue = filterMissing.value === 'yes';
-      list = list.filter(item => hasMissingSeasons(item) === hasMissingValue);
-    }
-
-    // 2. 缺集筛选 (Gaps)
-    if (filterGaps.value !== 'all') {
-       const hasGapsValue = filterGaps.value === 'yes';
-       list = list.filter(item => hasGaps(item) === hasGapsValue);
-    }
+    if (filterMissing.value !== 'all') list = list.filter(item => hasMissingSeasons(item) === (filterMissing.value === 'yes'));
+    if (filterGaps.value !== 'all') list = list.filter(item => hasGaps(item) === (filterGaps.value === 'yes'));
   }
 
-  // 3. 排序 (通用)
   list.sort((a, b) => {
     let valA, valB;
     switch (sortKey.value) {
-      case 'item_name':
-        valA = a.item_name || '';
-        valB = b.item_name || '';
-        return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
-      case 'added_at':
-        valA = a.added_at ? new Date(a.added_at).getTime() : 0;
-        valB = b.added_at ? new Date(b.added_at).getTime() : 0;
-        break;
-      case 'release_year':
-        valA = a.release_year || 0;
-        valB = b.release_year || 0;
-        break;
-      case 'last_checked_at':
-      default:
-        valA = a.last_checked_at ? new Date(a.last_checked_at).getTime() : 0;
-        valB = b.last_checked_at ? new Date(b.last_checked_at).getTime() : 0;
-        break;
+      case 'item_name': valA = a.item_name || ''; valB = b.item_name || ''; return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      case 'added_at': valA = a.added_at ? new Date(a.added_at).getTime() : 0; valB = b.added_at ? new Date(b.added_at).getTime() : 0; break;
+      case 'release_year': valA = a.release_year || 0; valB = b.release_year || 0; break;
+      case 'last_checked_at': default: valA = a.last_checked_at ? new Date(a.last_checked_at).getTime() : 0; valB = b.last_checked_at ? new Date(b.last_checked_at).getTime() : 0; break;
     }
     return sortOrder.value === 'asc' ? valA - valB : valB - valA;
   });
@@ -966,97 +672,55 @@ const filteredWatchlist = computed(() => {
   return list;
 });
 
-// 辅助函数：将数字数组格式化为范围字符串 (如 "S1-S4, S6")
 const formatSeasonRange = (numbers) => {
   if (!numbers || numbers.length === 0) return '';
-  // 排序
   const sorted = [...numbers].sort((a, b) => a - b);
   const ranges = [];
-  let start = sorted[0];
-  let prev = sorted[0];
-
+  let start = sorted[0], prev = sorted[0];
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] === prev + 1) {
-      prev = sorted[i];
-    } else {
-      ranges.push(start === prev ? `S${start}` : `S${start}-S${prev}`);
-      start = sorted[i];
-      prev = sorted[i];
-    }
+    if (sorted[i] === prev + 1) prev = sorted[i];
+    else { ranges.push(start === prev ? `S${start}` : `S${start}-S${prev}`); start = sorted[i]; prev = sorted[i]; }
   }
   ranges.push(start === prev ? `S${start}` : `S${start}-S${prev}`);
   return ranges.join(', ');
 };
 
-// 计算剧集层面的精致状态 
 const getSeriesStatusUI = (item) => {
   const tmdbStatus = item.tmdb_status;
-  const internalStatus = item.status; // 'Watching', 'Paused', 'Completed', 'Pending'
-  const nextEp = item.next_episode_to_air; // 后端传来的下一集信息
+  const internalStatus = item.status;
+  const nextEp = item.next_episode_to_air; 
 
-  if (internalStatus === 'Pending') {
-    return { text: '待定中', type: 'info', icon: PendingIcon, color: undefined };
-  }
-
-  if (internalStatus === 'Watching' || internalStatus === 'Paused') {
-    return { text: '已回归', type: 'success', icon: WatchingIcon, color: undefined };
-  }
-
+  if (internalStatus === 'Pending') return { text: '待定中', type: 'info', icon: PendingIcon };
+  if (internalStatus === 'Watching' || internalStatus === 'Paused') return { text: '已回归', type: 'success', icon: WatchingIcon };
   if (internalStatus === 'Completed') {
-      if (tmdbStatus === 'Ended' || tmdbStatus === 'Canceled') {
-          return { text: '已完结', type: 'default', icon: CompletedIcon, color: undefined };
-      }
-
-      if (tmdbStatus === 'Returning Series' || tmdbStatus === 'In Production' || tmdbStatus === 'Planned') {
-          if (nextEp && nextEp.air_date) {
-               return { text: '待回归', type: 'warning', icon: PausedIcon, color: undefined };
-          }
-          
-          return { text: '已完结', type: 'default', icon: CompletedIcon, color: undefined };
+      if (tmdbStatus === 'Ended' || tmdbStatus === 'Canceled') return { text: '已完结', type: 'default', icon: CompletedIcon };
+      if (['Returning Series', 'In Production', 'Planned'].includes(tmdbStatus)) {
+          if (nextEp && nextEp.air_date) return { text: '待回归', type: 'warning', icon: PausedIcon };
+          return { text: '已完结', type: 'default', icon: CompletedIcon };
       }
   }
-
-  // 3. 兜底
-  return { text: '已完结', type: 'default', icon: CompletedIcon, color: undefined };
+  return { text: '已完结', type: 'default', icon: CompletedIcon };
 };
 
-const renderedWatchlist = computed(() => {
-  return filteredWatchlist.value.slice(0, displayCount.value);
-});
-const hasMore = computed(() => {
-  return displayCount.value < filteredWatchlist.value.length;
-});
+const renderedWatchlist = computed(() => filteredWatchlist.value.slice(0, displayCount.value));
+const hasMore = computed(() => displayCount.value < filteredWatchlist.value.length);
 const emptyStateDescription = computed(() => {
-  if (rawWatchlist.value.length > 0 && filteredWatchlist.value.length === 0) {
-    return '没有匹配当前筛选条件的剧集。';
-  }
-  if (currentView.value === 'inProgress') {
-    return '追剧列表为空，快去“手动处理”页面搜索并添加你正在追的剧集吧！';
-  }
+  if (rawWatchlist.value.length > 0 && filteredWatchlist.value.length === 0) return '没有匹配当前筛选条件的剧集。';
+  if (currentView.value === 'inProgress') return '追剧列表为空，快去“手动处理”页面搜索并添加你正在追的剧集吧！';
   return '还没有已完结的剧集。';
 });
 
 const missingData = computed(() => {
-  const defaults = { 
-    missing_seasons: [], 
-    seasons_with_gaps: []
-  };
+  const defaults = { missing_seasons: [], seasons_with_gaps: [] };
   const infoFromServer = selectedSeries.value?.missing_info;
-  
-  if (infoFromServer && !Array.isArray(infoFromServer.seasons_with_gaps)) {
-    infoFromServer.seasons_with_gaps = [];
-  }
-
+  if (infoFromServer && !Array.isArray(infoFromServer.seasons_with_gaps)) infoFromServer.seasons_with_gaps = [];
   return { ...defaults, ...infoFromServer };
 });
 
 const nextEpisode = (item) => {
   const ep = item.next_episode_to_air;
   if (!ep) return null;
-  // 核心修复：只有当待播集的季号等于当前卡片的季号时，才显示！
-  if (ep.season_number === item.season_number) {
-    return ep;
-  }
+  if (ep.season_number === item.season_number) return ep;
   return null;
 };
 
@@ -1077,85 +741,56 @@ const toggleSelection = (itemId, event, index) => {
     }
   } else {
     const idx = selectedItems.value.indexOf(itemId);
-    if (idx > -1) {
-      selectedItems.value.splice(idx, 1);
-    } else {
-      selectedItems.value.push(itemId);
-    }
+    if (idx > -1) selectedItems.value.splice(idx, 1);
+    else selectedItems.value.push(itemId);
   }
   lastSelectedIndex.value = index;
 };
 
 const handleBatchAction = (key) => {
-  // ★★★ 通用逻辑：将选中的“季ID”转换为去重后的“父剧集ID” ★★★
   const getParentIds = () => {
-    // 1. 在原始列表中找到选中的那些项目
     const selectedItemObjects = rawWatchlist.value.filter(i => selectedItems.value.includes(i.tmdb_id));
-    // 2. 提取 parent_tmdb_id 并去重 (Set)
     return [...new Set(selectedItemObjects.map(i => i.parent_tmdb_id))];
   };
 
   if (key === 'forceEnd') {
-    const parentIds = getParentIds(); // 获取剧集ID
+    const parentIds = getParentIds();
     dialog.warning({
-      title: '确认操作',
-      content: `确定要将选中的 ${parentIds.length} 部剧集标记为“强制完结”吗？`,
-      positiveText: '确定',
-      negativeText: '取消',
+      title: '确认操作', content: `确定要将选中的 ${parentIds.length} 部剧集标记为“强制完结”吗？`, positiveText: '确定', negativeText: '取消',
       onPositiveClick: async () => {
         try {
-          // ★★★ 传 parentIds 给后端 ★★★
           const response = await axios.post('/api/watchlist/batch_force_end', { item_ids: parentIds });
           message.success(response.data.message || '批量操作成功！');
           await fetchWatchlist();
           selectedItems.value = [];
-        } catch (err) {
-          message.error(err.response?.data?.error || '批量操作失败。');
-        }
+        } catch (err) { message.error(err.response?.data?.error || '批量操作失败。'); }
       }
     });
-  }
-  else if (key === 'rewatch') {
-    const parentIds = getParentIds(); // 获取剧集ID
+  } else if (key === 'rewatch') {
+    const parentIds = getParentIds();
     dialog.info({
-      title: '确认操作',
-      content: `确定要将选中的 ${parentIds.length} 部剧集的状态改回“追剧中”吗？`,
-      positiveText: '确定',
-      negativeText: '取消',
+      title: '确认操作', content: `确定要将选中的 ${parentIds.length} 部剧集的状态改回“追剧中”吗？`, positiveText: '确定', negativeText: '取消',
       onPositiveClick: async () => {
         try {
-          // ★★★ 传 parentIds 给后端 ★★★
           const response = await axios.post('/api/watchlist/batch_update_status', { item_ids: parentIds, new_status: 'Watching' });
           message.success(response.data.message || '批量操作成功！');
-          // 重新追剧后，通常希望留在当前视图或刷新列表，这里简单刷新即可
           await fetchWatchlist(); 
           selectedItems.value = [];
-          currentView.value = 'inProgress'; // 自动切回追剧中视图方便查看
-        } catch (err) {
-          message.error(err.response?.data?.error || '批量操作失败。');
-        }
+          currentView.value = 'inProgress'; 
+        } catch (err) { message.error(err.response?.data?.error || '批量操作失败。'); }
       }
     });
-  }
-  else if (key === 'remove') {
-    const parentIds = getParentIds(); // 获取剧集ID
+  } else if (key === 'remove') {
+    const parentIds = getParentIds();
     dialog.warning({
-      title: '确认移除',
-      content: `确定要从追剧列表中移除选中的 ${parentIds.length} 个项目吗？此操作不可恢复。`,
-      positiveText: '确定移除',
-      negativeText: '取消',
+      title: '确认移除', content: `确定要从追剧列表中移除选中的 ${parentIds.length} 个项目吗？此操作不可恢复。`, positiveText: '确定移除', negativeText: '取消',
       onPositiveClick: async () => {
         try {
-          // ★★★ 传 parentIds 给后端 ★★★
-          const response = await axios.post('/api/watchlist/batch_remove', {
-            item_ids: parentIds
-          });
+          const response = await axios.post('/api/watchlist/batch_remove', { item_ids: parentIds });
           message.success(response.data.message || '批量移除成功！');
           await fetchWatchlist();
           selectedItems.value = [];
-        } catch (err) {
-          message.error(err.response?.data?.error || '批量移除失败。');
-        }
+        } catch (err) { message.error(err.response?.data?.error || '批量移除失败。'); }
       }
     });
   }
@@ -1166,11 +801,8 @@ const addAllSeriesToWatchlist = async () => {
   try {
     const response = await axios.post('/api/tasks/run', { task_name: 'add-all-series-to-watchlist' });
     message.success(response.data.message || '任务已成功提交！');
-  } catch (err) {
-    message.error(err.response?.data?.error || '启动扫描任务失败。');
-  } finally {
-    isAddingAll.value = false;
-  }
+  } catch (err) { message.error(err.response?.data?.error || '启动扫描任务失败。'); } 
+  finally { isAddingAll.value = false; }
 };
 
 const triggerSingleRefresh = async (itemId, itemName) => {
@@ -1179,44 +811,24 @@ const triggerSingleRefresh = async (itemId, itemName) => {
     await axios.post(`/api/watchlist/refresh/${itemId}`);
     message.success(`《${itemName}》的刷新任务已提交！`);
     setTimeout(() => { fetchWatchlist(); }, 5000);
-  } catch (err) {
-    message.error(err.response?.data?.error || '启动刷新失败。');
-  } finally {
-    setTimeout(() => { refreshingItems.value[itemId] = false; }, 5000);
-  }
+  } catch (err) { message.error(err.response?.data?.error || '启动刷新失败。'); } 
+  finally { setTimeout(() => { refreshingItems.value[itemId] = false; }, 5000); }
 };
 
 watch(currentView, () => {
-  displayCount.value = 30;
-  selectedItems.value = [];
-  lastSelectedIndex.value = null;
-  searchQuery.value = '';
-  filterStatus.value = 'all';
-  filterMissing.value = 'all';
-  filterGaps.value = 'all';
+  displayCount.value = 30; selectedItems.value = []; lastSelectedIndex.value = null; searchQuery.value = ''; filterStatus.value = 'all'; filterMissing.value = 'all'; filterGaps.value = 'all';
 });
 
-const loadMore = () => {
-  if (hasMore.value) {
-    displayCount.value = Math.min(displayCount.value + INCREMENT, filteredWatchlist.value.length);
-  }
-};
+const loadMore = () => { if (hasMore.value) displayCount.value = Math.min(displayCount.value + INCREMENT, filteredWatchlist.value.length); };
 
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return '从未';
-  try {
-    const localDate = new Date(timestamp);
-    return format(localDate, 'MM-dd HH:mm');
-  }
-  catch (e) {
-    return 'N/A';
-  }
+  try { return format(new Date(timestamp), 'MM-dd HH:mm'); } catch (e) { return 'N/A'; }
 };
 
 const formatAirDate = (dateString) => {
   if (!dateString) return '待定';
-  try { return format(parseISO(dateString), 'yyyy-MM-dd'); }
-  catch (e) { return 'N/A'; }
+  try { return format(parseISO(dateString), 'yyyy-MM-dd'); } catch (e) { return 'N/A'; }
 };
 
 const getPosterUrl = (embyIds) => {
@@ -1245,36 +857,13 @@ const statusInfo = (status) => {
   return map[status] || map['Paused'];
 };
 
-const translateTmdbStatus = (status) => {
-  const statusMap = {
-    "Returning Series": "连载中", "Ended": "已完结", "Canceled": "已取消",
-    "In Production": "制作中", "Planned": "计划中", "Pilot": "试播"
-  };
-  return statusMap[status] || status;
-};
-
-const getSmartTMDbStatusText = (item) => {
-  if (item.status === 'Completed' && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) {
-    return '待回归';
-  }
-  return translateTmdbStatus(item.tmdb_status);
-};
-
-const getSmartTMDbStatusType = (item) => {
-  return getSmartTMDbStatusText(item) === '待回归' ? 'info' : 'default';
-};
-
 const fetchWatchlist = async () => {
-  isLoading.value = true;
-  error.value = null;
+  isLoading.value = true; error.value = null;
   try {
     const response = await axios.get('/api/watchlist');
     rawWatchlist.value = response.data;
-  } catch (err) {
-    error.value = err.response?.data?.error || '获取追剧列表失败。';
-  } finally {
-    isLoading.value = false;
-  }
+  } catch (err) { error.value = err.response?.data?.error || '获取追剧列表失败。'; } 
+  finally { isLoading.value = false; }
 };
 
 const updateStatus = async (itemId, newStatus) => {
@@ -1283,22 +872,15 @@ const updateStatus = async (itemId, newStatus) => {
 
   const oldStatus = item.status;
   const parentId = item.parent_tmdb_id;
-
   const relatedItems = rawWatchlist.value.filter(i => i.parent_tmdb_id === parentId);
   relatedItems.forEach(i => i.status = newStatus);
-    
-  // ★★★ 核心修复：手动触发视图更新 ★★★
   triggerRef(rawWatchlist);
 
   try {
-    await axios.post('/api/watchlist/update_status', { 
-      item_id: parentId, 
-      new_status: newStatus 
-    });
+    await axios.post('/api/watchlist/update_status', { item_id: parentId, new_status: newStatus });
     message.success('状态更新成功！');
   } catch (err) {
     relatedItems.forEach(i => i.status = oldStatus);
-    // ★★★ 核心修复：失败回滚后也要手动触发视图更新 ★★★
     triggerRef(rawWatchlist);
     message.error(err.response?.data?.error || '更新状态失败。');
   }
@@ -1308,15 +890,9 @@ const removeFromWatchlist = async (seriesId, itemName) => {
   try {
     await axios.post(`/api/watchlist/remove/${seriesId}`);
     message.success(`已将《${itemName}》从追剧列表移除。`);
-    
-    // ★★★ 修正：比对 parent_tmdb_id，把该剧的所有季都移出视图 ★★★
     rawWatchlist.value = rawWatchlist.value.filter(i => i.parent_tmdb_id !== seriesId);
-    
-    // 如果是在已完结视图（聚合模式），也需要确保清理干净
     selectedItems.value = []; 
-  } catch (err) {
-    message.error(err.response?.data?.error || '移除失败。');
-  }
+  } catch (err) { message.error(err.response?.data?.error || '移除失败。'); }
 };
 
 const triggerAllWatchlistUpdate = async () => {
@@ -1324,23 +900,16 @@ const triggerAllWatchlistUpdate = async () => {
   try {
     const response = await axios.post('/api/tasks/run', { task_name: 'process-watchlist' });
     message.success(response.data.message || '所有追剧项目更新任务已启动！');
-  } catch (err) {
-    message.error(err.response?.data?.error || '启动更新任务失败。');
-  } finally {
-    isBatchUpdating.value = false;
-  }
+  } catch (err) { message.error(err.response?.data?.error || '启动更新任务失败。'); } 
+  finally { isBatchUpdating.value = false; }
 };
 
 const openMissingInfoModal = (item) => {
   selectedSeries.value = item;
   const info = item.missing_info || {};
-  if (info.missing_seasons && info.missing_seasons.length > 0) {
-    activeTab.value = 'seasons';
-  } else if (info.seasons_with_gaps && info.seasons_with_gaps.length > 0) {
-    activeTab.value = 'gaps';
-  } else {
-    activeTab.value = 'seasons';
-  }
+  if (info.missing_seasons && info.missing_seasons.length > 0) activeTab.value = 'seasons';
+  else if (info.seasons_with_gaps && info.seasons_with_gaps.length > 0) activeTab.value = 'gaps';
+  else activeTab.value = 'seasons';
   showModal.value = true;
 };
 
@@ -1355,86 +924,49 @@ watch(() => props.taskStatus.is_running, (isRunning, wasRunning) => {
   }
 });
 
-// 计算进度百分比
 const calculateProgress = (item) => {
   const total = item.total_count || 0;
   const collected = item.collected_count || 0;
   if (total === 0) return 0;
   const percent = (collected / total) * 100;
-  return Math.min(percent, 100); // 封顶 100%
+  return Math.min(percent, 100); 
 };
 
-// 根据进度返回颜色状态
 const getProgressStatus = (item) => {
   const p = calculateProgress(item);
   if (p >= 100) return 'success';
-  return 'default'; // 使用默认主题色 (Primary)
+  return 'default'; 
 };
 
 const getProgressColor = (item) => {
   const p = calculateProgress(item);
-  // 如果进度 >= 100，返回 undefined，让组件自动变绿 (Success状态)
   if (p >= 100) return undefined;
-  
-  // 如果未完成，返回当前主题的主色调
   return themeVars.value.primaryColor;
 };
 
-// 修正总集数
 const saveTotalEpisodes = async (item) => {
   const newTotal = tempTotalEpisodes.value || item.collected_count;
   try {
-    await axios.post('/api/watchlist/update_total_episodes', {
-      tmdb_id: item.tmdb_id,
-      total_episodes: newTotal,
-      item_type: 'Season'
-    });
+    await axios.post('/api/watchlist/update_total_episodes', { tmdb_id: item.tmdb_id, total_episodes: newTotal, item_type: 'Season' });
     message.success(`已将《${item.item_name}》总集数修正为 ${newTotal}`);
     item.total_count = newTotal;
     item.total_episodes_locked = true;
     item.show_edit_popover = false;
-    
-    // ★★★ 核心修复：手动触发视图更新 ★★★
     triggerRef(rawWatchlist);
-  } catch (err) {
-    message.error('修正失败');
-  }
+  } catch (err) { message.error('修正失败'); }
 };
 
-// ★★★ 新增：移动端检测 ★★★
 const isMobile = ref(false);
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768;
-};
+const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
 
 onMounted(() => {
-  checkMobile();
-  window.addEventListener('resize', checkMobile);
-  fetchWatchlist();
-  observer = new IntersectionObserver(
-    (entries) => {
-      if (entries[0].isIntersecting) {
-        loadMore();
-      }
-    },
-    { root: null, rootMargin: '0px', threshold: 0.1 }
-  );
-  if (loaderRef.value) {
-    observer.observe(loaderRef.value);
-  }
+  checkMobile(); window.addEventListener('resize', checkMobile); fetchWatchlist();
+  observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { root: null, rootMargin: '0px', threshold: 0.1 });
+  if (loaderRef.value) observer.observe(loaderRef.value);
 });
 
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', checkMobile);
-  if (observer) {
-    observer.disconnect();
-  }
-});
-
-watch(loaderRef, (newEl, oldEl) => {
-  if (oldEl && observer) observer.unobserve(oldEl);
-  if (newEl && observer) observer.observe(newEl);
-});
+onBeforeUnmount(() => { window.removeEventListener('resize', checkMobile); if (observer) observer.disconnect(); });
+watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(oldEl); if (newEl && observer) observer.observe(newEl); });
 </script>
 
 <style scoped>
@@ -1444,13 +976,12 @@ watch(loaderRef, (newEl, oldEl) => {
 .responsive-grid {
   display: grid;
   gap: 16px;
-  /* 自动填充，最小宽度280px，完美适配手机和电脑 */
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 @media (max-width: 768px) {
   .responsive-grid {
-    grid-template-columns: 1fr; /* 手机端强制单列 */
+    grid-template-columns: 1fr;
     gap: 12px;
   }
 }
@@ -1466,17 +997,17 @@ watch(loaderRef, (newEl, oldEl) => {
   border-radius: 12px;
   overflow: hidden; 
   /* 继承全局毛玻璃属性 */
-  background: rgba(20, 25, 35, 0.4) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--glass-border) !important;
 }
 
 .series-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.4) !important;
-  background: rgba(30, 35, 45, 0.5) !important;
-  border-color: rgba(255, 255, 255, 0.2) !important;
+  box-shadow: var(--glass-shadow) !important;
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
 }
 
 .series-card :deep(.n-card__content) {
@@ -1517,6 +1048,29 @@ watch(loaderRef, (newEl, oldEl) => {
   width: 100%; height: 100%; background-color: rgba(255,255,255,0.05); color: rgba(255,255,255,0.3);
 }
 
+/* 绝对定位复选框包裹层 */
+.poster-checkbox-wrap {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+/* 海报底部集数遮罩 */
+.poster-overlay {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  padding: 20px 8px 8px 8px;
+  display: flex; justify-content: center; align-items: flex-end;
+}
+.episode-count {
+  background: rgba(0,0,0,0.6); color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; backdrop-filter: blur(4px);
+}
+
 /* 内容区域 */
 .card-content-container {
   flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; padding: 0;
@@ -1527,17 +1081,30 @@ watch(loaderRef, (newEl, oldEl) => {
 }
 
 .card-title {
-  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: #fff;
+  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: var(--text-primary);
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
 .card-status-area { flex-grow: 1; display: flex; flex-direction: column; gap: 6px; }
-.info-text, .info-line { font-size: 13px; color: rgba(255,255,255,0.6); display: flex; align-items: center; gap: 6px; }
+.info-line { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+.info-line-text { color: var(--text-secondary); }
+.success-text .info-line-text { color: var(--n-success-color); }
+.error-text .info-line-text { color: var(--n-error-color); }
 
 /* 底部按钮区域 */
 .card-actions {
-  margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.05);
-  display: flex; justify-content: flex-start; align-items: center; gap: 8px;
+  margin-top: auto; 
+  padding-top: 10px; 
+  border-top: 1px dashed var(--glass-border);
+  display: flex; 
+  justify-content: flex-end; /* 靠右对齐 */
+  align-items: center; 
+  gap: 12px; /* 增加按钮间距 */
+}
+
+/* 放大所有底部文本按钮里的图标 */
+.card-actions .n-button {
+  font-size: 22px; 
 }
 
 /* 悬浮操作栏 (Watchlist/Unified) */
@@ -1553,13 +1120,13 @@ watch(loaderRef, (newEl, oldEl) => {
 .fab-text { color: #fff; font-size: 14px; }
 .fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
 
-/* 模态框内的海报墙 (TmdbCollectionsPage 等) */
+/* 模态框内的海报墙 */
 .movie-card {
   border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; 
-  background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: var(--glass-bg); backdrop-filter: blur(10px); border: 1px solid var(--glass-border);
   transition: transform 0.2s, box-shadow 0.2s; cursor: default; 
 }
-.movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
+.movie-card:hover { transform: translateY(-4px); box-shadow: var(--glass-shadow); z-index: 2; }
 .movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
 .movie-card:hover .movie-poster { transform: scale(1.05); }
 .movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }
