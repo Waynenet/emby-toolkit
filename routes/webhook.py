@@ -563,19 +563,22 @@ def emby_webhook():
 
         # --------------------------------------------------------
         # ★★★ 联动清理 MoviePilot (支持精准单集与辅种) ★★★
-        # --------------------------------------------------------
-        mp_config = settings_db.get_setting('mp_config') or {}
+        # --------------------------------------------------------     
+        # 1. 在 webhook.py 中，使用全局的 APP_CONFIG 获取配置
+        app_config = config_manager.APP_CONFIG
         
-        # 安全转换布尔值（防止前端传过来的是字符串 "true" 或 "false"）
-        def _is_true(val):
+        # 2. 安全转换布尔值（防止配置文件里存的是字符串 "true" 或 "false"）
+        def _is_true(val, default=False):
+            if val is None: return default
             if isinstance(val, bool): return val
             return str(val).lower() in ['true', '1', 'yes', 'on']
             
-        del_history = _is_true(mp_config.get('link_delete_transfer_history', False))
-        del_files = _is_true(mp_config.get('link_delete_download_files', False))
+        # 3. 获取开关状态（默认值坚决设为 False 保平安）
+        del_history = _is_true(app_config.get('link_delete_transfer_history'), default=False)
+        del_files = _is_true(app_config.get('link_delete_download_files'), default=False)
 
         # ★ 增加显式日志，让你一眼看出开关到底有没有打开
-        logger.info(f"  ➜ [深度删除] 读取 MP 联动配置 -> 清理整理记录: {del_history}, 清理下载文件: {del_files}")
+        logger.info(f"  ➜ [深度删除] 读取联动配置 -> 清理整理记录: {del_history}, 清理下载文件: {del_files}")
 
         if (del_history or del_files) and original_item_id:
             try:
