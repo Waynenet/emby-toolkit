@@ -398,7 +398,7 @@ body::before {
 .n-input__placeholder,
 .n-base-selection-input__content,
 .n-base-selection-placeholder {
-  color: rgba(255, 255, 255, 0.9) !important;
+  color: rgba(255, 255, 255, 0.7) !important;
 }
 
 /* 2. 覆盖 Radio Button (解决绿线问题，选中状态改为全局主色绿) */

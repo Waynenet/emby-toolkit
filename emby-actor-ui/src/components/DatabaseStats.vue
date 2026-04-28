@@ -404,7 +404,7 @@ onMounted(() => {
 .site-icon { width: 20px; height: 20px; margin-right: 12px; border-radius: 4px; flex-shrink: 0; }
 
 /* 缩小名称宽度，减小进度条左侧 margin，使它们靠得更近、更紧凑 */
-.ranking-name { width: 75px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+.ranking-name { width: 65px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
 .ranking-bar-container { flex: 1; margin: 0 12px 0 4px; min-width: 50px; }
 .ranking-count { width: 50px; text-align: right; font-size: 13px; color: var(--text-secondary); flex-shrink: 0; }
 
