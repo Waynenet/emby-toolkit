@@ -172,14 +172,14 @@
                     <n-tooltip>
                       <template #trigger>
                         <n-button text @click.stop="() => openMissingMoviesModal(item)">
-                          <template #icon><n-icon :component="EyeIcon" size="22" /></template>
+                          <template #icon><n-icon :component="EyeIcon" /></template>
                         </n-button>
                       </template>
                       查看详情
                     </n-tooltip>
                     
-                    <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" size="22" /></template></n-button></template>在 Emby 中打开</n-tooltip>
-                    <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" size="22" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
+                    <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" /></template></n-button></template>在 Emby 中打开</n-tooltip>
+                    <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
                   </div>
                 </div>
               </div>
@@ -562,14 +562,17 @@ const extractYear = (dateStr) => { if (!dateStr) return null; return dateStr.sub
   padding-top: 10px; 
   border-top: 1px dashed var(--glass-border);
   display: flex; 
-  justify-content: flex-end; /* 靠右对齐 */
+  justify-content: space-evenly;
   align-items: center; 
-  gap: 12px; /* 增加间距 */
+  width: 100%; /* 确保占满容器宽度 */
 }
 
 /* 放大所有底部图标 */
 .card-actions .n-button {
-  font-size: 22px; 
+  font-size: 20px; 
+  flex: 1; /* 让按钮平分点击区域，更容易点中 */
+  display: flex;
+  justify-content: center;
 }
 
 /* 数据网格样式 */

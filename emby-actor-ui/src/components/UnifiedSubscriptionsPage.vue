@@ -192,7 +192,7 @@
                     <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'WANTED', true)" type="primary" ghost circle><template #icon><n-icon :component="WantedIcon" /></template></n-button></template>取消忽略</n-tooltip>
                   </template>
 
-                  <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" size="22" /></template></n-button></template>TMDb</n-tooltip>
+                  <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>TMDb</n-tooltip>
                   </div>
                 </div>
               </div>
@@ -749,14 +749,17 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   padding-top: 10px; 
   border-top: 1px dashed var(--glass-border);
   display: flex; 
-  justify-content: flex-end; /* 靠右对齐 */
+  justify-content: space-evenly;
   align-items: center; 
-  gap: 12px; /* 增加按钮间距 */
+  width: 100%; /* 确保占满容器宽度 */
 }
 
 /* 图标稍作放大 */
 .card-actions .n-button {
-  font-size: 22px; 
+  font-size: 20px; 
+  flex: 1; /* 让按钮平分点击区域，更容易点中 */
+  display: flex;
+  justify-content: center;
 }
 
 /* 悬浮操作栏 (Watchlist/Unified) */
