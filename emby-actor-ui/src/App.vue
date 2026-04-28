@@ -23,13 +23,32 @@ import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, da
 import AppContent from './AppContent.vue';
 
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
-const currentNaiveTheme = ref({});
+
+// ========== 1. 终极优化：全局底层主题覆盖 ==========
+// 通过 JS 层接管 Naive UI 的默认颜色，防止底层组件渲染出白色背景或灰色字体
+const baseThemeOverrides = {
+  common: {
+    textColor1: 'rgba(255, 255, 255, 0.95)',
+    textColor2: 'rgba(255, 255, 255, 0.85)',
+    textColor3: 'rgba(255, 255, 255, 0.65)',
+    textColorDisabled: 'rgba(255, 255, 255, 0.4)',
+    placeholderColor: 'rgba(255, 255, 255, 0.5)',
+    placeholderColorDisabled: 'rgba(255, 255, 255, 0.3)',
+    iconColor: 'rgba(255, 255, 255, 0.9)',
+    popoverColor: 'transparent', // 让浮层默认透明，交给 CSS 毛玻璃处理
+    modalColor: 'transparent',
+    cardColor: 'transparent',
+    bodyColor: 'transparent'
+  }
+};
+
+// 初始化当前主题，默认合并我们的基础毛玻璃主题
+const currentNaiveTheme = ref({ ...baseThemeOverrides });
 
 // ========== 星空逻辑 ==========
 let animFrameId = null; // 用于取消 requestAnimationFrame
 
 function setupStarfield() {
-  // 等 Vue 把 canvas 渲染到 DOM 之后再拿
   const canvas = document.getElementById('starfield');
   if (!canvas) return;
 
@@ -91,7 +110,7 @@ function setupStarfield() {
     ctx.clearRect(0, 0, width, height);
     ctx.globalCompositeOperation = 'lighter';
     for (let s of starsArr) { s.move(); s.fadeIn(); s.fadeOut(); s.draw(); }
-    animFrameId = requestAnimationFrame(update); // ★ 保存 id 以便取消
+    animFrameId = requestAnimationFrame(update);
   }
 
   function init() {
@@ -115,7 +134,6 @@ function destroyStarfield() {
 // ========== 监听暗色模式，动态启停星空 ==========
 watch(isDarkTheme, async (val) => {
   if (val) {
-    // canvas 由 v-if 渲染，需要等下一个 tick DOM 就绪
     await nextTick();
     setupStarfield();
   } else {
@@ -128,14 +146,21 @@ onMounted(() => {
   const app = document.getElementById('app');
 
   app.addEventListener('update-naive-theme', (event) => {
-    currentNaiveTheme.value = event.detail;
+    // 深度合并外部传入的主题与我们的基础主题
+    currentNaiveTheme.value = {
+      ...baseThemeOverrides,
+      ...event.detail,
+      common: {
+        ...baseThemeOverrides.common,
+        ...(event.detail?.common || {})
+      }
+    };
   });
 
   app.addEventListener('update-dark-mode', (event) => {
     isDarkTheme.value = event.detail;
   });
 
-  // 初始如果已经是暗色模式，立即启动星空
   if (isDarkTheme.value) {
     setupStarfield();
   }
@@ -160,27 +185,21 @@ onUnmounted(() => {
   --text-primary: rgba(255, 255, 255, 0.95); 
   --text-secondary: rgba(255, 255, 255, 0.75);
   
-  /* 多彩模块基色 (白天模式) */
   --overlay-color: rgba(0, 0, 0, 0.4);
 
   --tint-blue: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(54, 162, 235, 0.45) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(54, 162, 235, 0.55) 100%);
-  
   --tint-green: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(75, 192, 192, 0.45) 100%);
   --tint-green-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(75, 192, 192, 0.55) 100%);
-  
   --tint-purple: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(153, 102, 255, 0.45) 100%);
   --tint-purple-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(153, 102, 255, 0.55) 100%);
-  
   --tint-orange: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255, 159, 64, 0.45) 100%);
   --tint-orange-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255, 159, 64, 0.55) 100%);
-  
   --tint-red: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255, 99, 132, 0.45) 100%);
   --tint-red-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255, 99, 132, 0.55) 100%);
 }
 
 html.dark {
-  /* 黑夜模式 */
   --global-bg-image: none;
   --global-bg-color: #090a14;
   --glass-bg: rgba(20, 25, 35, 0.15); 
@@ -192,23 +211,30 @@ html.dark {
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
   
-  /* 多彩模块基色 (黑夜模式) */
   --overlay-color: transparent;
 
   --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(54, 162, 235, 0.45) 100%);
-  
   --tint-green: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(99,226,183,0.08) 100%);
   --tint-green-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(75, 192, 192, 0.45) 100%);
-  
   --tint-purple: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(138,43,226,0.08) 100%);
   --tint-purple-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(153, 102, 255, 0.45) 100%);
-  
   --tint-orange: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(242,201,125,0.08) 100%);
   --tint-orange-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 159, 64, 0.45) 100%);
-  
   --tint-red: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(232,128,128,0.08) 100%);
   --tint-red-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 99, 132, 0.45) 100%);
+}
+
+/* ★ 终极兜底：强制接管 Naive UI 基础文字 CSS 变量，确保无遗漏灰色字 */
+:root, [class^="n-"] {
+  --n-text-color: rgba(255, 255, 255, 0.95) !important;
+  --n-text-color-hover: #ffffff !important;
+  --n-text-color-pressed: rgba(255, 255, 255, 0.8) !important;
+  --n-text-color-focus: #ffffff !important;
+  --n-text-color-disabled: rgba(255, 255, 255, 0.4) !important;
+  --n-title-text-color: #ffffff !important;
+  --n-icon-color: rgba(255, 255, 255, 0.9) !important;
+  --n-placeholder-color: rgba(255, 255, 255, 0.5) !important;
 }
 
 html, body { 
@@ -226,7 +252,7 @@ html, body {
   transition: background-image 0.5s ease, color 0.3s ease;
 }
 
-/* 背景遮罩：白天半透明黑色，黑夜透明 */
+/* 背景遮罩 */
 body::before {
   content: '';
   position: fixed;
@@ -242,15 +268,14 @@ body::before {
   z-index: 1;
 }
 
-/* ★ 星空 canvas 样式 */
 #starfield {
   position: fixed;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
-  z-index: 0;          /* 在 body::before(z:0) 同层，但 #app(z:1) 之下 */
-  pointer-events: none; /* 不拦截鼠标事件 */
+  z-index: 0;
+  pointer-events: none;
   display: block;
 }
 
@@ -268,7 +293,6 @@ body::before {
   color: var(--text-primary) !important;
 }
 
-/* 卡片 header/content/footer 区域穿透背景 */
 .n-card-header,
 .n-card__content,
 .n-card__footer,
@@ -277,7 +301,6 @@ body::before {
   color: var(--text-primary) !important;
 }
 
-/* 修复嵌套 embedded card 的背景 (第69行那个) */
 .n-card[embedded],
 .n-card--embedded {
   background: rgba(255, 255, 255, 0.05) !important;
@@ -361,30 +384,32 @@ body::before {
 ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
 .n-scrollbar-rail { display: none !important; }
 
-/* ==================== 4. 表单与交互组件毛玻璃化 (全局覆盖) ==================== */
+/* ==================== 4. 表单与交互组件毛玻璃化 ==================== */
 
-/* 1. 覆盖 Input, Select, InputNumber 等输入框 */
+/* 1. 覆盖 Input, Select 等输入框 */
 .n-input, 
 .n-base-selection {
   background-color: var(--glass-bg) !important;
   border: 1px solid var(--glass-border) !important;
   border-radius: 4px !important;
   color: #ffffff !important;
-  transition: all 0.3s ease !important;
+  /* ★ 修复紫色闪烁：严禁使用 transition: all，改为只针对背景和边框做动画 */
+  transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease !important;
 }
+
 .n-input:hover, .n-input--focus,
 .n-base-selection:hover, .n-base-selection--active {
   background-color: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
 }
 
-/* 修复 Select 下拉框原框是白色的问题：透明化内部的 label 和 tags 容器 */
+/* 透明化内部的 label 和 tags 容器 */
 .n-base-selection-label,
 .n-base-selection-tags {
   background-color: transparent !important;
 }
 
-/* 彻底移除 Naive UI 原生的状态边框层（这就是各种奇怪绿线和白底的罪魁祸首） */
+/* 移除原生状态边框层 */
 .n-base-selection__border,
 .n-base-selection__state-border,
 .n-input__border,
@@ -393,7 +418,7 @@ body::before {
   display: none !important; 
 }
 
-/* 输入框内的文字颜色 */
+/* 输入框内文字颜色 */
 .n-input__input-el, 
 .n-input__placeholder,
 .n-base-selection-input__content,
@@ -401,21 +426,20 @@ body::before {
   color: rgba(255, 255, 255, 0.7) !important;
 }
 
-/* 2. 覆盖 Radio Button (解决绿线问题，选中状态改为全局主色绿) */
+/* 2. 覆盖 Radio Button */
 .n-radio-button {
   background-color: var(--glass-bg) !important;
   color: rgba(255, 255, 255, 0.7) !important;
   border: 1px solid var(--glass-border) !important;
-  border-left: none !important; /* 去除中间的多重边框 */
+  border-left: none !important; 
   box-shadow: none !important;
+  transition: background-color 0.3s ease, color 0.3s ease !important; /* 修复紫色闪烁 */
 }
-/* 给第一个按钮补回左边框和圆角 */
 .n-radio-button:first-child {
   border-left: 1px solid var(--glass-border) !important;
   border-top-left-radius: 4px !important;
   border-bottom-left-radius: 4px !important;
 }
-/* 给最后一个按钮修复圆角 */
 .n-radio-button:last-child {
   border-top-right-radius: 4px !important;
   border-bottom-right-radius: 4px !important;
@@ -424,17 +448,15 @@ body::before {
   background-color: var(--glass-bg-hover) !important;
   color: #ffffff !important;
 }
-
-/* 选中状态：变成类似 Primary 按钮的纯绿色填充 */
 .n-radio-button.n-radio-button--checked {
-  background-color: #18a058 !important; /* Naive UI 默认的主色绿 */
+  background-color: #18a058 !important; 
   color: #ffffff !important;
   font-weight: bold !important;
   border-color: #18a058 !important;
   box-shadow: none !important; 
 }
 
-/* 3. 覆盖普通按钮 (如：排序按钮) */
+/* 3. 覆盖普通按钮 */
 .n-button--default-type {
   background: var(--glass-bg) !important;
   border: 1px solid var(--glass-border) !important;
@@ -445,7 +467,7 @@ body::before {
   border-color: var(--glass-border-light) !important;
 }
 
-/* 4. 覆盖 Tag 标签 (如选择多个类型时的已选标签) */
+/* 4. 覆盖 Tag 标签 */
 .n-tag {
   background: rgba(255, 255, 255, 0.15) !important;
   border: 1px solid var(--glass-border) !important;
@@ -455,12 +477,19 @@ body::before {
   color: #ff4d4f !important;
 }
 
-/* ==================== 5. 解决纯白背景与黑灰字体问题 ==================== */
+/* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
 
-/* 解决下拉框变纯白的问题：Naive UI 的下拉框是包在 popover 里的 */
+/* ★ 补全了所有可能会在顶层弹出的组件（弹窗、日历、提示、抽屉等） */
 .n-popover,
 .n-dropdown-menu,
-.n-base-select-menu {
+.n-base-select-menu,
+.n-dialog,
+.n-modal,
+.n-drawer,
+.n-date-panel,
+.n-time-picker-panel,
+.n-tooltip,
+.n-popconfirm__panel {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
   -webkit-backdrop-filter: var(--glass-blur) !important;
@@ -468,7 +497,7 @@ body::before {
   box-shadow: var(--glass-shadow) !important;
   border-radius: 8px !important;
 }
-/* 下拉菜单的选项文字与 Hover 状态 */
+
 .n-base-select-option, 
 .n-dropdown-option {
   color: rgba(255, 255, 255, 0.9) !important;
@@ -480,33 +509,13 @@ body::before {
   color: #ffffff !important;
 }
 
-/* 暴力接管全局字体颜色：无论日夜模式，强制所有常见文本元素为白色 */
-body,
-.n-page-header__title,
-.n-page-header__subtitle,
-.n-thing-main__header,
-.n-thing-main__description,
-.n-form-item-label,
-.n-checkbox__label,
-.n-radio__label,
-.n-statistic-value__content,
-.n-statistic__label,
-.n-empty__description,
-.n-divider__title,
-.filter-label {
-  color: #ffffff !important;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); /* 增加一点文字阴影，防止在纯白背景图上看不清 */
+/* 文字增加一点阴影防白底看不清 */
+body {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
-/* 弱化次要文本的颜色（如：副标题、时间等） */
-.n-page-header__subtitle,
-.n-empty__description {
-  color: rgba(255, 255, 255, 0.7) !important;
-}
+/* ==================== 6. n-alert / n-table 毛玻璃化 ==================== */
 
-/* ==================== 6. n-alert 毛玻璃化 ==================== */
-
-/* alert 整体背景透明 */
 .n-alert {
   background-color: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
@@ -516,13 +525,11 @@ body,
   box-shadow: var(--glass-shadow) !important;
 }
 
-/* alert 各种 type 的左侧色条保留，但背景透明 */
 .n-alert.n-alert--info-type    { border-left: 4px solid #2080f0 !important; }
 .n-alert.n-alert--success-type { border-left: 4px solid #18a058 !important; }
 .n-alert.n-alert--warning-type { border-left: 4px solid #f0a020 !important; }
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
 
-/* alert 标题与正文文字颜色白色化 */
 .n-alert .n-alert-body__title,
 .n-alert .n-alert-body__content,
 .n-alert .n-alert-body,
@@ -530,15 +537,12 @@ body,
   color: var(--text-primary) !important;
 }
 
-/* alert 图标颜色跟随 type（Naive UI 默认已有，但防止被覆盖） */
 .n-alert .n-base-icon { opacity: 0.9; }
 
-/* 强制 n-text 跟随全局白色 */
 .n-text {
   color: var(--text-primary) !important;
 }
 
-/* ==================== n-table 毛玻璃化 ==================== */
 .n-table {
   background: transparent !important;
 }
