@@ -740,7 +740,7 @@ def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, seaso
                 if not m:
                     continue
                 rec_season = int(m.group(1))
-                if season is None or rec_season != int(season):
+                if rec_season != int(season):
                     continue
 
                 if episode is None:
@@ -767,6 +767,7 @@ def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, seaso
         logger.warning(f"  ➜ [MP智能清理] 分析下载历史失败: {e}")
         return [], []
 
+
 def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any]) -> tuple:
     """
     智能分析 MP 整理记录，计算出哪些记录该删，哪些种子该删，哪些种子该暂停。
@@ -784,14 +785,26 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
         headers = {"Authorization": f"Bearer {access_token}"}
         search_url = f"{moviepilot_url}/api/v1/history/transfer"
         
+        # --- 智能关键词提取 (兼顾性能与准确率) ---
+        import re
+        # 用常见的中英文标点符号切割标题
+        parts = re.split(r'[：:·\-—]+', title)
+        # 取切割后最长的一段作为搜索关键词（去掉首尾空格）
+        search_keyword = max(parts, key=len).strip() if parts else title
+        if not search_keyword:
+            search_keyword = title # 兜底
+
+        logger.debug(f"  ➜ [MP智能清理] 原标题: '{title}', 优化搜索关键词: '{search_keyword}'")
+
         # 1. 循环获取所有相关记录
         all_records = []
         page = 1
+        target_tmdb = int(tmdb_id)
         
-        # 1. 拉取该标题下的所有整理记录
         while True:
             try:
-                res = requests.get(search_url, headers=headers, params={"title": title, "page": page, "count": 500}, timeout=30)
+                # 使用智能关键词搜索，大幅降低 MP 服务器压力
+                res = requests.get(search_url, headers=headers, params={"title": search_keyword, "page": page, "count": 500}, timeout=30)
                 if res.status_code != 200: break
                 data = res.json()
                 if not data: break
@@ -804,21 +817,25 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
                 elif isinstance(data, list): records_list = data
                 
                 if not records_list: break
-                all_records.extend(records_list)
+                
+                # 【终极安全锁】：不管 MP 搜出来多少同名/同系列的，只要 TMDb ID 不对，一律丢弃！
+                for r in records_list:
+                    if isinstance(r, dict) and r.get('tmdbid') == target_tmdb:
+                        all_records.append(r)
+                
                 if len(records_list) < 500: break
                 page += 1
-            except: break
+                if page > 10: break  # 既然有了关键词过滤，最多 10 页(5000条)绝对够了
+            except: 
+                break
 
         if not all_records: return [], [], []
 
-        target_tmdb = int(tmdb_id)
-        
         hash_usage = {} # 记录每个 hash 被哪些记录使用
 
         # 2. 遍历记录，进行精准匹配
         for rec in all_records:
             if not isinstance(rec, dict): continue
-            if rec.get('tmdbid') != target_tmdb: continue
 
             rec_hash = rec.get('download_hash')
             if rec_hash:
@@ -836,7 +853,6 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
                     is_target = True
                 else:
                     rec_season_str = str(rec.get('seasons', '')).strip().upper()
-                    import re
                     match = re.search(r'(\d+)', rec_season_str)
                     if not match: continue
                     rec_season = int(match.group(1))
@@ -870,7 +886,7 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
                     can_delete = False
 
                 # 检查这个 hash 是否真的被我们要删的目标用到了
-                if item_type == 'Movie' or episode is None:
+                if item_type == 'Movie' or episode is None or season is None:
                     used_by_target = True
                 else:
                     eps = _parse_episodes_string(str(r.get('episodes', '')))
@@ -887,6 +903,7 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
     except Exception as e:
         logger.error(f"  ➜ [MP智能分析] 失败: {e}")
         return [], [], []
+
 
 def smart_cleanup_mp_media(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any], delete_history: bool = True, delete_files: bool = True) -> bool:
     """
