@@ -730,6 +730,11 @@ def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, seaso
                     hashes_to_delete.add(h)
                     continue
 
+                # ★★★ 修复：如果 season 为 None，说明是整剧删除，直接加到删除列表 ★★★
+                if season is None:
+                    hashes_to_delete.add(h)
+                    continue
+
                 rec_season_str = str(rec.get('seasons', '')).strip().upper()
                 m = re.search(r'(\d+)', rec_season_str)
                 if not m:
@@ -826,26 +831,30 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
                 is_target = True
             else:
                 # 剧集匹配
-                rec_season_str = str(rec.get('seasons', '')).strip().upper()
-                import re
-                match = re.search(r'(\d+)', rec_season_str)
-                if not match: continue
-                rec_season = int(match.group(1))
+                if season is None:
+                    # ★★★ 修复：如果 season 是 None，说明是删整部剧，所有该剧记录都是 target ★★★
+                    is_target = True
+                else:
+                    rec_season_str = str(rec.get('seasons', '')).strip().upper()
+                    import re
+                    match = re.search(r'(\d+)', rec_season_str)
+                    if not match: continue
+                    rec_season = int(match.group(1))
 
-                if season is not None and rec_season == int(season):
-                    if episode is None:
-                        # 删整季
-                        is_target = True
-                    else:
-                        # 删单集
-                        rec_eps = _parse_episodes_string(str(rec.get('episodes', '')))
-                        if not rec_eps:
-                            # 季包记录，不能删记录，但 hash 会被标记为 pause
-                            is_target = False
-                        elif int(episode) in rec_eps:
-                            # 如果记录只包含这一集，可以删记录
-                            if len(rec_eps) == 1: is_target = True
-                            else: is_target = False # 包含多集，不能删记录
+                    if rec_season == int(season):
+                        if episode is None:
+                            # 删整季
+                            is_target = True
+                        else:
+                            # 删单集
+                            rec_eps = _parse_episodes_string(str(rec.get('episodes', '')))
+                            if not rec_eps:
+                                # 季包记录，不能删记录，但 hash 会被标记为 pause
+                                is_target = False
+                            elif int(episode) in rec_eps:
+                                # 如果记录只包含这一集，可以删记录
+                                if len(rec_eps) == 1: is_target = True
+                                else: is_target = False # 包含多集，不能删记录
 
             if is_target:
                 records_to_delete.append(rec)
