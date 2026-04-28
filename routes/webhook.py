@@ -565,8 +565,17 @@ def emby_webhook():
         # ★★★ 联动清理 MoviePilot (支持精准单集与辅种) ★★★
         # --------------------------------------------------------
         mp_config = settings_db.get_setting('mp_config') or {}
-        del_history = mp_config.get('link_delete_transfer_history', False)
-        del_files = mp_config.get('link_delete_download_files', False)
+        
+        # 安全转换布尔值（防止前端传过来的是字符串 "true" 或 "false"）
+        def _is_true(val):
+            if isinstance(val, bool): return val
+            return str(val).lower() in ['true', '1', 'yes', 'on']
+            
+        del_history = _is_true(mp_config.get('link_delete_transfer_history', False))
+        del_files = _is_true(mp_config.get('link_delete_download_files', False))
+
+        # ★ 增加显式日志，让你一眼看出开关到底有没有打开
+        logger.info(f"  ➜ [深度删除] 读取 MP 联动配置 -> 清理整理记录: {del_history}, 清理下载文件: {del_files}")
 
         if (del_history or del_files) and original_item_id:
             try:
@@ -579,8 +588,8 @@ def emby_webhook():
 
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
-                        # 使用 LIKE 模糊匹配 JSON 数组中的 ID
-                        cursor.execute("SELECT tmdb_id, item_type, season_number, episode_number, title, parent_series_tmdb_id FROM media_metadata WHERE emby_item_ids_json::text LIKE %s", (f'%"{original_item_id}"%',))
+                        # 兼容不同数据库的 JSON 文本搜索，使用 CAST 更安全
+                        cursor.execute("SELECT tmdb_id, item_type, season_number, episode_number, title, parent_series_tmdb_id FROM media_metadata WHERE CAST(emby_item_ids_json AS TEXT) LIKE %s", (f'%"{original_item_id}"%',))
                         row = cursor.fetchone()
                         if row:
                             db_item_type = row['item_type']
@@ -609,11 +618,17 @@ def emby_webhook():
                     logger.info(f"  ➜ [深度删除] 触发 MP 联动清理: {db_title} (TMDb:{db_tmdb_id}, S:{db_season}, E:{db_episode})")
                     from handler.moviepilot import smart_cleanup_mp_media
                     # 异步执行，防止阻塞 Webhook
-                    spawn(smart_cleanup_mp_media, str(db_tmdb_id), db_item_type, db_season, db_episode, db_title, None, del_history, del_files)
+                    # ★ 修复崩溃Bug：将 None 替换为 config_manager.APP_CONFIG 传入
+                    spawn(smart_cleanup_mp_media, str(db_tmdb_id), db_item_type, db_season, db_episode, db_title, config_manager.APP_CONFIG, del_history, del_files)
                 else:
                     logger.warning(f"  ➜ [深度删除] 无法从本地数据库反查到 Emby ID {original_item_id} 的 TMDb 信息，跳过 MP 联动清理。")
             except Exception as e:
                 logger.error(f"  ➜ [深度删除] MP 联动清理失败: {e}", exc_info=True)
+        else:
+            if not original_item_id:
+                logger.warning("  ➜ [深度删除] Webhook 未提供 Item Id，无法执行联动清理。")
+            else:
+                logger.info("  ➜ [深度删除] MP 联动清理开关未开启，跳过该步骤。")
 
         # --------------------------------------------------------
         # 清理本地数据库、日志与内存缓存
