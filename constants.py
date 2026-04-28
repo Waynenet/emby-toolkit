@@ -121,6 +121,9 @@ CONFIG_SECTION_MOVIEPILOT = "MoviePilot"
 CONFIG_OPTION_MOVIEPILOT_URL = "moviepilot_url"
 CONFIG_OPTION_MOVIEPILOT_USERNAME = "moviepilot_username"
 CONFIG_OPTION_MOVIEPILOT_PASSWORD = "moviepilot_password"
+CONFIG_OPTION_LINK_DELETE_TRANSFER_HISTORY = "link_delete_transfer_history"
+CONFIG_OPTION_LINK_DELETE_DOWNLOAD_FILES = "link_delete_download_files"
+
 # --- 智能订阅相关配置 ---
 CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP = "resubscribe_daily_cap"
 CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS = "resubscribe_delay_seconds"

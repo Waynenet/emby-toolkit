@@ -319,19 +319,34 @@
                       <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
                         <n-form-item-grid-item span="1 m:2" label="MoviePilot URL" path="moviepilot_url">
                           <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
-                        </n-form-item-grid-item>
+                        </n-form-item-grid-item> 
                         <n-form-item-grid-item label="用户名" path="moviepilot_username">
                           <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
                         </n-form-item-grid-item>
                         <n-form-item-grid-item label="密码" path="moviepilot_password">
                           <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
                         </n-form-item-grid-item>
-
                         <n-form-item-grid-item label="每日上限 (订阅规则)" path="resubscribe_daily_cap">
                           <n-input-number v-model:value="configModel.resubscribe_daily_cap" :min="1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
                         </n-form-item-grid-item>
                         <n-form-item-grid-item label="请求间隔(秒)" path="resubscribe_delay_seconds">
                           <n-input-number v-model:value="configModel.resubscribe_delay_seconds" :min="0.1" :step="0.1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item label="联动删除整理记录" path="link_delete_transfer_history">
+                          <n-switch v-model:value="configModel.link_delete_transfer_history" />
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">
+                              Emby删除媒体项时，同步删除 MoviePilot 中匹配的整理记录。
+                            </n-text>
+                          </template>
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item label="联动删除种子及源文件" path="link_delete_download_files">
+                          <n-switch v-model:value="configModel.link_delete_download_files" />
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">
+                              Emby删除媒体项时，同步删除下载器的种子和源文件（含辅种）。
+                            </n-text>
+                          </template>
                         </n-form-item-grid-item>
                       </n-grid>
                     </n-card>
