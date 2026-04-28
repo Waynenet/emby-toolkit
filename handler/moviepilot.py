@@ -772,8 +772,7 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
     hashes_to_pause = set()
 
     try:
-        mp_config = settings_db.get_setting('mp_config') or {}
-        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return [], [], []
 
@@ -885,8 +884,7 @@ def smart_cleanup_mp_media(tmdb_id: str, item_type: str, season: Optional[int], 
     【全新入口】智能清理 MP 媒体 (支持独立控制记录和文件，支持辅种清理)
     """
     try:
-        mp_config = settings_db.get_setting('mp_config') or {}
-        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return False
 
