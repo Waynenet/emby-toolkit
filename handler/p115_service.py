@@ -985,7 +985,7 @@ class P115CacheManager:
             logger.error(f"  ➜ 清理 115 文件缓存失败: {e}")
 
     @staticmethod
-    def save_mediainfo_cache(sha1, mediainfo_json):
+    def save_mediainfo_cache(sha1, mediainfo_json, raw_ffprobe_json=None):
         """写入本地 p115_mediainfo_cache，结构保持 Emby MediaSourceInfo 标准格式"""
         if not sha1 or not mediainfo_json:
             return False
@@ -998,15 +998,17 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json, created_at, hit_count)
-                        VALUES (%s, %s, NOW(), 0)
+                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json, raw_ffprobe_json, created_at, hit_count)
+                        VALUES (%s, %s, %s, NOW(), 0)
                         ON CONFLICT (sha1)
                         DO UPDATE SET
                             mediainfo_json = EXCLUDED.mediainfo_json,
+                            raw_ffprobe_json = COALESCE(EXCLUDED.raw_ffprobe_json, p115_mediainfo_cache.raw_ffprobe_json),
                             created_at = NOW()
                     """, (
                         sha1,
-                        Json(mediainfo_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False))
+                        Json(mediainfo_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if mediainfo_json else None,
+                        Json(raw_ffprobe_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if raw_ffprobe_json else None
                     ))
                     conn.commit()
 
@@ -1036,6 +1038,17 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ➜ 读取 p115_mediainfo_cache 失败: {e}")
             return None
+        
+    @staticmethod
+    def get_raw_ffprobe_cache(sha1):
+        if not sha1: return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1 = %s", (str(sha1).upper(),))
+                    row = cursor.fetchone()
+                    return row['raw_ffprobe_json'] if row else None
+        except Exception: return None
 
 # ======================================================================
 # ★★★ 115 整理记录 DB 管理器 ★★★
@@ -3780,15 +3793,15 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
 
                         if not mediainfo_text:
-                            mediainfo_obj = self._probe_mediainfo_with_ffprobe(file_item, sha1=sha1, silent_log=False)
-                            if mediainfo_obj:
+                            emby_obj, raw_ffprobe = self._probe_mediainfo_with_ffprobe(file_item, sha1=sha1, silent_log=False) or (None, None)
+                            if emby_obj:
                                 probe_sha1 = sha1 or file_item.get('sha1') or file_item.get('sha')
                                 if probe_sha1:
                                     probe_sha1 = str(probe_sha1).upper()
-                                    P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                    P115CacheManager.save_mediainfo_cache(probe_sha1, emby_obj, raw_ffprobe)
                                     sha1 = probe_sha1
                                     file_item['sha1'] = probe_sha1
-                                mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
+                                mediainfo_text = json.dumps(emby_obj, ensure_ascii=False, indent=2)
 
                         if mediainfo_text:
                             mediainfo_filename = os.path.splitext(original_name)[0] + "-mediainfo.json"

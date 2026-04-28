@@ -266,20 +266,34 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
                 if sha1:
                     sha1s_to_clean.add(sha1)
                     
-            # C. 删数据库记录
+            # C. 清理与重新格式化媒体信息
             if sha1s_to_clean:
                 try:
                     with connection.get_db_connection() as conn:
                         cursor = conn.cursor()
+                        # 1. 只清空 mediainfo_json，保留 raw_ffprobe_json
                         cursor.execute(
-                            "DELETE FROM p115_mediainfo_cache WHERE sha1 = ANY(%s)", 
+                            "UPDATE p115_mediainfo_cache SET mediainfo_json = NULL WHERE sha1 = ANY(%s)", 
                             (list(sha1s_to_clean),)
                         )
-                        deleted_db_records = cursor.rowcount
                         conn.commit()
-                        logger.info(f"  ➜ 已从数据库清除 {deleted_db_records} 条媒体信息缓存。")
+                        
+                    # 2. 尝试用 raw_ffprobe_json 重新格式化
+                    from handler.p115_service import P115CacheManager, SmartOrganizer
+                    for sha1 in sha1s_to_clean:
+                        raw_ffprobe = P115CacheManager.get_raw_ffprobe_cache(sha1)
+                        if raw_ffprobe:
+                            logger.info(f"  ➜ 发现原始 ffprobe 数据，正在重新格式化: {sha1[:8]}")
+                            dummy_node = {"fn": "unknown.mkv"} 
+                            # ▼▼▼ 修改这里：正确调用解析器的方法 ▼▼▼
+                            analyzer = SmartOrganizer.__new__(SmartOrganizer)
+                            new_emby_json = analyzer._build_emby_mediainfo_from_ffprobe(raw_ffprobe, dummy_node, sha1)
+                            if new_emby_json:
+                                # 重新保存时，把 raw_ffprobe 也带上，防止丢失
+                                P115CacheManager.save_mediainfo_cache(sha1, new_emby_json, raw_ffprobe)
+                                logger.info(f"  ➜ 重新格式化成功，已写回缓存。")
                 except Exception as e:
-                    logger.warning(f"  ➜ 清除数据库媒体信息缓存失败: {e}")
+                    logger.warning(f"  ➜ 处理数据库媒体信息缓存失败: {e}")
                     
             # D. 调用神医接口清除 Emby 内部缓存
             try:
@@ -2141,35 +2155,24 @@ def task_restore_mediainfo(processor):
     failed_count = 0
 
     def _probe_and_cache_mediainfo_online(pc, sha1, filename):
-        """
-        当本地缓存没有媒体信息时，使用 115 直链 + ffprobe 在线提取，
-        成功后写入 p115_mediainfo_cache，并返回原始 mediainfo JSON。
-        """
         if not client or not pc or not sha1:
             return None
 
         try:
-            # 只借用现成 ffprobe 逻辑，跳过 SmartOrganizer.__init__ 的 TMDb 初始化
             probe_helper = SmartOrganizer.__new__(SmartOrganizer)
             probe_helper.client = client
 
-            file_node = {
-                "pick_code": pc,
-                "pc": pc,
-                "file_name": filename,
-                "fn": filename,
-            }
+            file_node = {"pick_code": pc, "pc": pc, "file_name": filename, "fn": filename}
 
-            raw_json = probe_helper._probe_mediainfo_with_ffprobe(
+            emby_json, raw_ffprobe = probe_helper._probe_mediainfo_with_ffprobe(
                 file_node=file_node,
                 sha1=sha1,
                 silent_log=False
-            )
+            ) or (None, None)
 
-            if raw_json:
-                P115CacheManager.save_mediainfo_cache(sha1, raw_json)
-                # logger.info(f"  ➜ [媒体信息还原] 本地缓存缺失，已在线 ffprobe 提取并写入缓存: {filename}")
-                return raw_json
+            if emby_json:
+                P115CacheManager.save_mediainfo_cache(sha1, emby_json, raw_ffprobe)
+                return emby_json
 
         except Exception as e:
             logger.warning(f"  ➜ [媒体信息还原] 在线 ffprobe 提取失败 {filename}: {e}")

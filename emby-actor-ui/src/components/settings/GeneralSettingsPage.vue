@@ -585,10 +585,10 @@
                             <n-text depth="3" style="font-size:0.8em;">在线从中心服务器获取媒体信息数据，需要神医Pro。</n-text>
                         </template>
                     </n-form-item>
-                    <n-form-item label="同步生成媒体信息" path="p115_generate_mediainfo">
+                    <n-form-item label="媒体信息格式化" path="p115_generate_mediainfo">
                       <n-switch v-model:value="configModel.p115_generate_mediainfo">
-                          <template #checked>生成-mediainfo.json</template>
-                          <template #unchecked>仅生成STRM</template>
+                          <template #checked>生成自定义媒体信息</template>
+                          <template #unchecked>保留原版媒体信息</template>
                       </n-switch>
                       <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
@@ -597,13 +597,17 @@
                       </template>
                   </n-form-item>
                   <n-form-item label="默认音轨/字幕配置">
-                      <n-button @click="defaultStreamModalRef?.open()" type="primary" ghost>
+                      <n-button
+                          @click="openDefaultStreamConfig"
+                          :type="configModel.p115_generate_mediainfo ? 'primary' : 'warning'"
+                          ghost
+                      >
                           <template #icon><n-icon :component="OptionsIcon" /></template>
                           配置默认音轨与字幕
                       </n-button>
                       <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
-                              自定义默认音轨语言、特征词，及字幕的优先级排序（特效、双语等）。
+                              自定义默认音轨语言、特征词，及字幕的优先级排序；仅在“媒体信息格式化”开启时生效。
                           </n-text>
                       </template>
                   </n-form-item>
@@ -2148,6 +2152,14 @@ const formRules = { trigger: ['input', 'blur'] };
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
 const message = useMessage();
 const dialog = useDialog();
+
+const openDefaultStreamConfig = () => {
+  if (!configModel.value?.p115_generate_mediainfo) {
+    message.warning('默认音轨/字幕配置需要先启用“同步生成媒体信息”。');
+    return;
+  }
+  defaultStreamModalRef.value?.open();
+};
 
 const enforceMediainfoExclusive = (preferred = 'center', notify = true) => {
   if (!configModel.value) return;

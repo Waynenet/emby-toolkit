@@ -463,11 +463,19 @@ def init_db():
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS p115_mediainfo_cache (
                         sha1 TEXT PRIMARY KEY,
-                        mediainfo_json JSONB NOT NULL,
+                        mediainfo_json JSONB,
+                        raw_ffprobe_json JSONB,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         hit_count INTEGER DEFAULT 0
                     )
                 """)
+
+                # ▼▼▼ 临时代码，强行解除存量数据库的 NOT NULL 约束 ▼▼▼
+                try:
+                    cursor.execute("ALTER TABLE p115_mediainfo_cache ALTER COLUMN mediainfo_json DROP NOT NULL;")
+                except Exception:
+                    pass
+                # ▲▲▲ 临时结束 ▲▲▲
 
                 logger.trace("  ➜ 正在创建 'p115_organize_records' 表 (115整理记录)...")
                 cursor.execute("""
@@ -513,6 +521,9 @@ def init_db():
                             "sha1": "TEXT",
                             "pick_code": "TEXT",
                             "size": "BIGINT DEFAULT 0"
+                        },
+                        'p115_mediainfo_cache': {
+                            "raw_ffprobe_json": "JSONB"
                         },
                         'p115_organize_records': {
                             "is_center_cached": "BOOLEAN DEFAULT FALSE",
