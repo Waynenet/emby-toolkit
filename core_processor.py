@@ -690,23 +690,6 @@ class MediaProcessor:
                         stop_event=None
                     )
 
-                    # ★★★ 新增：将核心导演也写入 person_metadata 单表 (实时监控模式) ★★★
-                    try:
-                        from tasks.helpers import extract_top_directors
-                        top_directors = extract_top_directors(details, max_count=3)
-                        emby_config_for_upsert = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
-                        for director in top_directors:
-                            if director.get('id'):
-                                director_data = {
-                                    "id": director.get("id"),
-                                    "name": director.get("name"),
-                                    "profile_path": director.get("profile_path"),
-                                }
-                                self.actor_db_manager.upsert_person(cursor, director_data, emby_config_for_upsert)
-                        logger.debug(f"  ➜ [实时监控] 成功将 {len(top_directors)} 位导演信息同步至人员元数据库。")
-                    except Exception as e_dir:
-                        logger.warning(f"  ➜ [实时监控] 同步导演信息至数据库时失败: {e_dir}")
-
                     conn.commit()
 
                 if not final_processed_cast:
@@ -2235,23 +2218,6 @@ class MediaProcessor:
                         tmdb_api_key=self.tmdb_api_key,
                         stop_event=self.get_stop_event()
                     )
-
-                    # ★★★ 新增：将核心导演也写入 person_metadata 单表 ★★★
-                    try:
-                        from tasks.helpers import extract_top_directors
-                        top_directors = extract_top_directors(fresh_data, max_count=3)
-                        for director in top_directors:
-                            if director.get('id'):
-                                director_data = {
-                                    "id": director.get("id"),
-                                    "name": director.get("name"),
-                                    "profile_path": director.get("profile_path"),
-                                    # Emby ID 留空，后续的 actor_sync 任务会自动通过 Emby 扫描补全绑定
-                                }
-                                self.actor_db_manager.upsert_person(cursor, director_data, emby_config)
-                        logger.debug(f"  ➜ 成功将 {len(top_directors)} 位导演信息同步至人员元数据库。")
-                    except Exception as e_dir:
-                        logger.warning(f"  ➜ 同步导演信息至数据库时失败: {e_dir}")
 
             # =========================================================
             # ★★★ 步骤 5: 统一的收尾流程 ★★★
