@@ -8,6 +8,7 @@ import requests
 import task_manager
 from logger_setup import frontend_log_queue
 import config_manager
+import reverse_proxy
 import handler.emby as emby
 # 导入共享模块
 import extensions
@@ -337,50 +338,6 @@ def api_save_config():
     except Exception as e:
         logger.error(f"API /api/config (POST) 保存配置时发生错误: {e}", exc_info=True)
         return jsonify({"error": f"保存配置时发生服务器内部错误: {str(e)}"}), 500
-    
-# ★★★ 保存用户的自定义主题 ★★★
-@system_bp.route('/config/custom_theme', methods=['POST'])
-@admin_required
-def api_save_custom_theme():
-    """
-    接收前端发来的自定义主题JSON对象，并将其保存到配置文件。
-    """
-    try:
-        theme_data = request.json
-        if not isinstance(theme_data, dict):
-            return jsonify({"error": "无效的主题数据格式，必须是一个JSON对象。"}), 400
-        
-        # 调用 config_manager 中的新函数来保存
-        config_manager.save_custom_theme(theme_data)
-        
-        logger.info("用户的自定义主题已成功保存。")
-        return jsonify({"message": "你的专属主题已保存！"})
-        
-    except Exception as e:
-        logger.error(f"保存自定义主题时发生错误: {e}", exc_info=True)
-        return jsonify({"error": "保存自定义主题时发生服务器内部错误。"}), 500
-    
-# --- 调用文件删除函数的API端点 ---
-@system_bp.route('/config/custom_theme', methods=['DELETE'])
-@admin_required
-def api_delete_custom_theme():
-    """
-    删除 custom_theme.json 文件。
-    """
-    try:
-        # ★★★ 核心修改：调用 config_manager 中的文件删除函数 ★★★
-        success = config_manager.delete_custom_theme()
-        
-        if success:
-            logger.info("API: 用户的自定义主题文件已成功删除。")
-            return jsonify({"message": "自定义主题已删除。"})
-        else:
-            # 这种情况只在极端的权限问题下发生
-            return jsonify({"error": "删除自定义主题文件时发生服务器内部错误。"}), 500
-
-    except Exception as e:
-        logger.error(f"删除自定义主题时发生未知错误: {e}", exc_info=True)
-        return jsonify({"error": "删除自定义主题时发生服务器内部错误。"}), 500
 
 @system_bp.route('/ai/prompts', methods=['GET'])
 @admin_required
@@ -433,3 +390,24 @@ def api_reset_ai_prompts():
     except Exception as e:
         logger.error(f"  ➜ 重置 AI 提示词失败: {e}", exc_info=True)
         return jsonify({"error": "重置失败"}), 500
+
+@system_bp.route('/actions/clear-strm-cache', methods=['POST'])
+@admin_required
+def api_clear_strm_cache():
+    """
+    手动清空 302 代理缓存的 STRM 直链。
+    """
+    try:
+        # 调用 reverse_proxy.py 中的清空函数
+        cleared_count = reverse_proxy.clear_all_strm_cache()
+        logger.info(f"API: 用户通过 Web UI 清空了 {cleared_count} 条直链缓存。")
+        return jsonify({
+            "success": True, 
+            "message": f"成功清空了 {cleared_count} 条直链缓存！"
+        })
+    except Exception as e:
+        logger.error(f"API: 清空 STRM 缓存时出错: {e}", exc_info=True)
+        return jsonify({
+            "success": False, 
+            "error": f"清空失败: {str(e)}"
+        }), 500

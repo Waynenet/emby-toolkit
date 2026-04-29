@@ -228,6 +228,30 @@
                       <n-form-item-grid-item label="显示缺失海报" path="proxy_show_missing_placeholders">
                          <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="STRM直链缓存 (秒)" path="proxy_strm_cache_ttl">
+                        <n-input-group>
+                          <n-input-number 
+                            v-model:value="configModel.proxy_strm_cache_ttl" 
+                            :min="0" 
+                            :step="60" 
+                            :disabled="!configModel.proxy_enabled" 
+                            style="width: 100%;" 
+                            placeholder="默认 1800"
+                          />
+                          <n-button 
+                            type="warning" 
+                            ghost 
+                            @click="clearStrmCache" 
+                            :loading="isClearingStrmCache" 
+                            :disabled="!configModel.proxy_enabled">
+                            清空缓存
+                          </n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">为0则禁用缓存。遇到播放失败时可手动清空。</n-text>
+                        </template>
+                      </n-form-item-grid-item>
 
                       <n-form-item-grid-item span="1 m:2" label="合并显示位置" path="proxy_native_view_order">
                         <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
@@ -770,6 +794,20 @@ const isCleaningOffline = ref(false);
 const isClearingVectors = ref(false);
 const isTestingAI = ref(false);
 
+// ★ 新增：清空缓存状态与方法
+const isClearingStrmCache = ref(false);
+const clearStrmCache = async () => {
+  isClearingStrmCache.value = true;
+  try {
+    const response = await axios.post('/api/actions/clear-strm-cache');
+    message.success(response.data.message || 'STRM 直链缓存已清空！');
+  } catch (error) {
+    message.error(error.response?.data?.error || '清空缓存失败，请检查后端路由是否已添加。');
+  } finally {
+    isClearingStrmCache.value = false;
+  }
+};
+
 const isInvalidUserId = computed(() => {
   if (!configModel.value || !configModel.value.emby_user_id) return false;
   return configModel.value.emby_user_id.trim() !== '' && !embyUserIdRegex.test(configModel.value.emby_user_id);
@@ -921,7 +959,6 @@ watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_na
   }
 }, { immediate: true });
 
-// ★ 新增：AI 翻译模式选项
 const aiProviderOptions = ref([
   { label: 'OpenAI (及兼容服务)', value: 'openai' },
   { label: '智谱AI (ZhipuAI)', value: 'zhipuai' },

@@ -1,4 +1,4 @@
-# reverse_proxy.py (终极整合版：HTTPStrm缓存 + 完美去重聚合季集 + 排除图片/字幕误伤)
+# reverse_proxy.py (终极整合版：HTTPStrm缓存 + 完美去重聚合季集 + 排除图片/字幕误伤 + 动态缓存时长设置)
 
 import logging
 import requests
@@ -29,7 +29,22 @@ MISSING_ID_PREFIX = "-800000_"
 # 缓存字典，用于防止播放器嗅探导致的重复请求
 # ==========================================
 _strm_cdn_cache = {}
-CACHE_TTL_SECONDS = 7200  
+
+def get_strm_cache_ttl():
+    """动态获取配置中的直链缓存时间，默认 1800 秒"""
+    try:
+        ttl = int(config_manager.APP_CONFIG.get("proxy_strm_cache_ttl", 1800))
+        return ttl if ttl >= 0 else 1800
+    except:
+        return 1800
+
+def clear_all_strm_cache():
+    """供主程序接口调用的清空缓存方法"""
+    global _strm_cdn_cache
+    count = len(_strm_cdn_cache)
+    _strm_cdn_cache.clear()
+    logger.info(f"[HTTPStrm] 用户手动清空了 {count} 条直链缓存。")
+    return count
 
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
@@ -680,13 +695,16 @@ def proxy_all(path):
                                         final_cdn_url = strm_resp.url
                                         strm_resp.close() 
                                         
+                                        ttl_seconds = get_strm_cache_ttl()
                                         if final_cdn_url and final_cdn_url != file_path:
                                             logger.info(f"[HTTPStrm 网络优化] 成功穿透中间跳转链，单次直达底层 CDN: {final_cdn_url}")
-                                            _strm_cdn_cache[file_path] = (final_cdn_url, current_time + CACHE_TTL_SECONDS)
+                                            if ttl_seconds > 0:
+                                                _strm_cdn_cache[file_path] = (final_cdn_url, current_time + ttl_seconds)
                                             return redirect(final_cdn_url, code=302)
                                         else:
                                             logger.info(f"[HTTPStrm] 链接已是直链，无中间跳转: {file_path}")
-                                            _strm_cdn_cache[file_path] = (file_path, current_time + CACHE_TTL_SECONDS)
+                                            if ttl_seconds > 0:
+                                                _strm_cdn_cache[file_path] = (file_path, current_time + ttl_seconds)
                                             return redirect(file_path, code=302)
                                             
                                     except Exception as fetch_e:

@@ -68,6 +68,8 @@ CONFIG_OPTION_PROXY_MERGE_NATIVE = "proxy_merge_native_libraries"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION = "proxy_native_view_selection"  # List[str]
 CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
 CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS = "proxy_show_missing_placeholders"
+# ★ 新增：STRM 直链缓存时间常量
+CONFIG_OPTION_PROXY_STRM_CACHE_TTL = "proxy_strm_cache_ttl"
 
 # ==============================================================================
 # ✨ Emby 服务器连接配置 (Emby Connection)

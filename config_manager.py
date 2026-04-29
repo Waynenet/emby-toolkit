@@ -8,7 +8,6 @@ from database import settings_db
 # --- 核心模块导入 ---
 import constants # 你的常量定义
 
-
 logger = logging.getLogger(__name__)
 
 # --- 路径和配置定义 ---
@@ -72,8 +71,8 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_PROXY_MERGE_NATIVE: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', True),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION: (constants.CONFIG_SECTION_REVERSE_PROXY, 'list', []),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
-    constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
     constants.CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', False),
+    constants.CONFIG_OPTION_PROXY_STRM_CACHE_TTL: (constants.CONFIG_SECTION_REVERSE_PROXY, 'int', 1800), # ★ 新增的缓存时长映射
 
     # [TMDB]
     constants.CONFIG_OPTION_TMDB_API_KEY: (constants.CONFIG_SECTION_TMDB, 'string', ""),
