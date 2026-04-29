@@ -64,11 +64,10 @@
                     </n-button>
                     <!-- ▼▼▼ 编辑媒体信息按钮 ▼▼▼ -->
                     <n-button 
-                      v-if="itemDetails.item_type !== 'Series'" 
                       block 
                       type="info" 
                       secondary 
-                      @click="openMediaInfoEditor"
+                      @click="handleMediaInfoButtonClick"
                     >
                       <template #icon>
                         <n-icon :component="DocumentTextIcon" />
@@ -221,6 +220,50 @@
         </n-alert>
       </div>
     </div>
+
+    <!-- ★★★ 剧集分集选择模态框 ★★★ -->
+    <n-modal
+      v-model:show="showEpisodeSelector"
+      preset="card"
+      style="width: 980px; max-width: 95vw;"
+      title="选择要编辑的集"
+      :bordered="false"
+      size="huge"
+    >
+      <n-spin :show="isFetchingEpisodes">
+        <div v-if="episodesList.length > 0" class="episode-selector-board">
+          <div class="episode-selector-summary">
+            共 {{ episodesList.length }} 集，按季列队。鼠标悬停看标题，点击集号开改；编辑框关闭后方阵还在。
+          </div>
+
+          <section
+            v-for="season in episodeSeasonGroups"
+            :key="season.season_number"
+            class="episode-season-block"
+          >
+            <div class="episode-season-header">
+              <span class="episode-season-title">{{ formatSeasonLabel(season.season_number) }}</span>
+              <span class="episode-season-count">{{ season.episodes.length }} 集</span>
+            </div>
+
+            <div class="episode-parade-grid">
+              <button
+                v-for="ep in season.episodes"
+                :key="ep.emby_id"
+                type="button"
+                :class="['episode-chip', { 'episode-chip-active': String(currentEditMediaId || '') === String(ep.emby_id || '') }]"
+                :title="getEpisodeTooltip(ep)"
+                @click="handleEpisodeChipClick(ep)"
+              >
+                {{ formatEpisodeLabel(ep) }}
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <n-empty v-else description="未找到在库的分集，请确认该剧集已入库" style="padding: 40px 0;" />
+      </n-spin>
+    </n-modal>
 
     <!-- 搜索演员模态框 -->
     <n-modal
@@ -635,11 +678,87 @@ const isSavingMediaInfo = ref(false);
 const mediaInfoData = shallowRef(null); 
 const mediaStreams = ref([]);    
 const mediaInfoContext = ref({}); 
+const currentEditMediaId = ref(null); // ★ 新增：记录当前正在编辑的具体媒体ID (电影ID或具体的集ID)
+
+// ★ 新增：剧集分集选择相关状态
+const showEpisodeSelector = ref(false);
+const isFetchingEpisodes = ref(false);
+const episodesList = ref([]); 
+
+// ★★★ 剧集选择：按季分组，做成“阅兵式”方阵 ★★★
+const episodeSeasonGroups = computed(() => {
+  const groupMap = new Map();
+
+  episodesList.value.forEach((ep) => {
+    const seasonNo = Number(ep.season_number ?? 0);
+    const safeSeasonNo = Number.isFinite(seasonNo) ? seasonNo : 0;
+
+    if (!groupMap.has(safeSeasonNo)) {
+      groupMap.set(safeSeasonNo, []);
+    }
+    groupMap.get(safeSeasonNo).push(ep);
+  });
+
+  return Array.from(groupMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([season_number, episodes]) => ({
+      season_number,
+      episodes: episodes.slice().sort((a, b) => {
+        const aNo = Number(a.episode_number ?? 0);
+        const bNo = Number(b.episode_number ?? 0);
+        return (Number.isFinite(aNo) ? aNo : 0) - (Number.isFinite(bNo) ? bNo : 0);
+      })
+    }));
+});
+
+const formatSeasonLabel = (seasonNumber) => {
+  const n = Number(seasonNumber);
+  if (n === 0) return '特别篇';
+  return `第 ${Number.isFinite(n) ? n : seasonNumber} 季`;
+};
+
+const formatEpisodeLabel = (ep) => {
+  const n = Number(ep?.episode_number);
+  if (!Number.isFinite(n)) return ep?.episode_number || '?';
+  return String(n).padStart(2, '0');
+};
+
+const getEpisodeTooltip = (ep) => {
+  const episodeNo = ep?.episode_number ?? '?';
+  const title = ep?.title || '未知标题';
+  return `${formatSeasonLabel(ep?.season_number)} 第 ${episodeNo} 集：${title}`;
+};
+
+const handleEpisodeChipClick = (ep) => {
+  // 不再关闭分集选择框：媒体信息编辑框会盖在上层，关掉后还能继续点下一集。
+  openMediaInfoEditor(ep.emby_id);
+};
 
 // ★★★ 拆分音轨和字幕的下拉选项 ★★★
 const audioLanguageOptions = ref([]);
 const subtitleLanguageOptions = ref([]);
 
+
+// ★ 新增：点击编辑按钮的分流逻辑
+const handleMediaInfoButtonClick = async () => {
+  if (itemDetails.value.item_type === 'Series') {
+    // 如果是剧集，先拉取分集列表并打开选择框
+    showEpisodeSelector.value = true;
+    isFetchingEpisodes.value = true;
+    try {
+      const res = await axios.get(`/api/media_info/series/${itemId.value}/episodes`);
+      episodesList.value = res.data;
+    } catch (e) {
+      message.error(e.response?.data?.error || "获取剧集分集列表失败");
+      showEpisodeSelector.value = false;
+    } finally {
+      isFetchingEpisodes.value = false;
+    }
+  } else {
+    // 如果是电影，直接打开编辑器
+    openMediaInfoEditor(itemId.value);
+  }
+};
 // 1. 获取语言映射表
 const fetchLanguageMapping = async () => {
   try {
@@ -669,8 +788,10 @@ const fetchLanguageMapping = async () => {
   }
 };
 
-// 2. 打开编辑器并获取数据
-const openMediaInfoEditor = async () => {
+// 2. 打开编辑器并获取数据 (修改为接收 targetId 参数)
+const openMediaInfoEditor = async (targetId) => {
+  currentEditMediaId.value = targetId; // 记录当前正在编辑的 ID
+  
   // 检查其中一个数组是否为空即可
   if (audioLanguageOptions.value.length === 0) {
     await fetchLanguageMapping();
@@ -678,7 +799,7 @@ const openMediaInfoEditor = async () => {
   
   const loadingMsg = message.loading("正在读取底层媒体指纹...", { duration: 0 });
   try {
-    const res = await axios.get(`/api/media_info/edit/${itemId.value}`);
+    const res = await axios.get(`/api/media_info/edit/${targetId}`);
     mediaInfoContext.value = {
       sha1: res.data.sha1,
       media_path: res.data.media_path,
@@ -708,7 +829,7 @@ const openMediaInfoEditor = async () => {
   }
 };
 
-// 3. 保存修改
+// 3. 保存修改 (修改为使用 currentEditMediaId)
 const saveMediaInfo = async () => {
   isSavingMediaInfo.value = true;
   const loadingMsg = message.loading("正在覆盖指纹并通知 Emby 重新加载...", { duration: 0 });
@@ -719,7 +840,8 @@ const saveMediaInfo = async () => {
       mediainfo: mediaInfoData.value 
     };
     
-    const res = await axios.post(`/api/media_info/edit/${itemId.value}`, payload);
+    // 使用 currentEditMediaId 而不是全局的 itemId
+    const res = await axios.post(`/api/media_info/edit/${currentEditMediaId.value}`, payload);
     message.success(res.data.message || "媒体信息已更新！");
     showMediaInfoEditor.value = false;
   } catch (e) {
@@ -1198,6 +1320,125 @@ const handleSaveChanges = async () => {
   transform: rotate(2deg);
   box-shadow: 0 10px 20px rgba(0,0,0,0.2);
   z-index: 99;
+}
+
+/* =========================================================
+   ★★★ 分集选择模态框：季集号阅兵式方阵 ★★★
+   ========================================================= */
+.episode-selector-board {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.episode-selector-summary {
+  margin-bottom: 12px;
+  color: var(--n-text-color-3);
+  font-size: 13px;
+}
+
+.episode-season-block {
+  margin-bottom: 14px;
+  padding: 12px;
+  background-color: var(--n-color-embedded);
+  border: 1px solid var(--n-border-color);
+  border-radius: 8px;
+}
+
+.episode-season-block:last-child {
+  margin-bottom: 0;
+}
+
+.episode-season-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.episode-season-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--n-text-color);
+}
+
+.episode-season-count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  background-color: var(--n-action-color);
+}
+
+.episode-parade-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 34px);
+  gap: 6px;
+  align-items: center;
+}
+
+.episode-chip {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--n-border-color);
+  border-radius: 5px;
+  background-color: var(--n-color);
+  color: var(--n-text-color-2);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background-color 0.15s, transform 0.1s;
+}
+
+.episode-chip:hover {
+  border-color: var(--n-primary-color);
+  background-color: var(--n-primary-color-hover);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.episode-chip:active {
+  transform: translateY(0);
+}
+
+.episode-chip-active {
+  border-color: var(--n-primary-color);
+  background-color: var(--n-primary-color);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(24, 160, 88, 0.16);
+}
+
+.episode-selector-board::-webkit-scrollbar {
+  width: 6px;
+}
+.episode-selector-board::-webkit-scrollbar-track {
+  background: transparent;
+}
+.episode-selector-board::-webkit-scrollbar-thumb {
+  background: var(--n-border-color);
+  border-radius: 4px;
+}
+.episode-selector-board::-webkit-scrollbar-thumb:hover {
+  background: var(--n-text-color-3);
+}
+
+@media (max-width: 640px) {
+  .episode-season-block {
+    padding: 10px;
+  }
+
+  .episode-parade-grid {
+    grid-template-columns: repeat(auto-fill, 30px);
+    gap: 5px;
+  }
+
+  .episode-chip {
+    width: 30px;
+    height: 26px;
+    font-size: 11px;
+  }
 }
 
 /* =========================================================
