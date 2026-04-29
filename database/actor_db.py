@@ -9,6 +9,7 @@ from .connection import get_db_connection
 from . import request_db
 from utils import contains_chinese
 from handler.emby import get_emby_item_details
+import handler.moviepilot as moviepilot
 from config_manager import APP_CONFIG
 import extensions 
 import utils
@@ -602,37 +603,98 @@ def update_actor_subscription(subscription_id: int, data: dict) -> bool:
 
 #   --- 删除演员订阅 ---
 def delete_actor_subscription(subscription_id: int) -> bool:
+    """删除一个演员订阅，并智能清理其在 media_metadata 中的追踪记录及 MoviePilot 订阅。"""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
+            # 1. 获取订阅详情
             cursor.execute("SELECT actor_name, tmdb_person_id FROM actor_subscriptions WHERE id = %s", (subscription_id,))
             sub_info = cursor.fetchone()
             if not sub_info:
-                logger.warning(f"尝试删除一个不存在的订阅 (ID: {subscription_id})。")
+                logger.warning(f"  ➜ 尝试删除一个不存在的订阅 (ID: {subscription_id})。")
                 return True
 
+            actor_name = sub_info['actor_name']
             source_to_remove = {
                 "type": "actor_subscription", 
                 "id": subscription_id,
-                "name": sub_info['actor_name'],
+                "name": actor_name,
                 "person_id": sub_info['tmdb_person_id']
             }
-            source_filter = json.dumps([source_to_remove])
+            # 构建用于查询的 JSONB 过滤器
+            source_filter = json.dumps([{"type": "actor_subscription", "id": subscription_id}])
+
+            # 2. 获取所有包含该订阅源的媒体项 (增加 title 和 in_library 字段)
             cursor.execute(
-                "SELECT tmdb_id, item_type FROM media_metadata WHERE subscription_sources_json @> %s::jsonb",
+                """
+                SELECT tmdb_id, item_type, season_number, subscription_sources_json, title, in_library 
+                FROM media_metadata 
+                WHERE subscription_sources_json @> %s::jsonb
+                """,
                 (source_filter,)
             )
             items_to_clean = cursor.fetchall()
 
-            logger.info(f"  ➜ 正在从 {len(items_to_clean)} 个媒体项中移除订阅源 (ID: {subscription_id})...")
-            for item in items_to_clean:
-                request_db.remove_subscription_source(item['tmdb_id'], item['item_type'], source_to_remove)
+            logger.info(f"  ➜ 正在移除演员 '{actor_name}' 的订阅，共涉及 {len(items_to_clean)} 个媒体项...")
 
+            # 3. 遍历清理并智能联动 MoviePilot
+            for item in items_to_clean:
+                tmdb_id = item['tmdb_id']
+                item_type = item['item_type']
+                season_num = item['season_number']
+                title = item['title'] or f"未知项目({tmdb_id})"
+                in_library = item['in_library']
+                sources = item['subscription_sources_json']
+
+                if isinstance(sources, str):
+                    try: sources = json.loads(sources)
+                    except: sources = []
+
+                if not isinstance(sources, list):
+                    sources = []
+
+                # 过滤掉当前要删除的演员源
+                new_sources = [s for s in sources if not (s.get('type') == source_to_remove['type'] and s.get('id') == source_to_remove['id'])]
+
+                # ★★★ 核心逻辑 A：判断剩下的源里，还有没有"真正的"订阅者 ★★★
+                # 过滤掉 manual_admin_op 等没有 name 的系统级占位符
+                real_other_sources = [s for s in new_sources if s.get('name') or s.get('type') in ['actor_subscription', 'user_request']]
+
+                if not real_other_sources:
+                    # 如果没有其他真正的订阅源了
+                    logger.info(f"    - 《{title}》({item_type}) 已无其他有效订阅源，正在同步取消 MoviePilot 订阅...")
+                    moviepilot.cancel_subscription(tmdb_id, item_type, APP_CONFIG, season=season_num)
+
+                    if not in_library:
+                        # ★★★ 核心逻辑 B：如果不在库，直接物理删除这条记录，释放数据库空间！ ★★★
+                        logger.info(f"    - 《{title}》不在媒体库中，直接从数据库彻底删除该条目。")
+                        cursor.execute("DELETE FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (tmdb_id, item_type))
+                    else:
+                        # 如果在库，仅重置订阅状态，保留资产数据
+                        logger.info(f"    - 《{title}》已在媒体库中，仅重置其订阅状态。")
+                        cursor.execute("""
+                            UPDATE media_metadata 
+                            SET subscription_sources_json = '[]'::jsonb,
+                                subscription_status = 'NONE'
+                            WHERE tmdb_id = %s AND item_type = %s
+                        """, (tmdb_id, item_type))
+                else:
+                    # ★★★ 核心逻辑 C：如果还有其他真实源，仅更新 JSON，保留 MoviePilot 订阅 ★★★
+                    other_names = [s.get('name', '未知用户/规则') for s in real_other_sources]
+                    logger.info(f"    - 《{title}》({item_type}) 仍被 {other_names} 订阅，仅移除演员 '{actor_name}' 的来源标签。")
+                    cursor.execute("""
+                        UPDATE media_metadata 
+                        SET subscription_sources_json = %s::jsonb
+                        WHERE tmdb_id = %s AND item_type = %s
+                    """, (json.dumps(new_sources, ensure_ascii=False), tmdb_id, item_type))
+
+            # 4. 最后删除订阅本身
             cursor.execute("DELETE FROM actor_subscriptions WHERE id = %s", (subscription_id,))
             conn.commit()
-            logger.info(f"  ➜ 成功删除订阅ID {subscription_id} 及其所有追踪记录。")
+            logger.info(f"  ➜ 成功删除演员 '{actor_name}' 的订阅及其所有关联追踪记录。")
             return True
+            
     except Exception as e:
         logger.error(f"  ➜ 删除订阅 {subscription_id} 失败: {e}", exc_info=True)
         raise
