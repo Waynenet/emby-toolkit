@@ -625,6 +625,38 @@ class MediaProcessor:
                             else:
                                 logger.warning(f"  ➜ [实时监控] 标题翻译结果仍为外文或为空，丢弃: {translated_title}")
 
+                    # ====== 3. 标语(Tagline)翻译模块 (跟随标题翻译开关) ======
+                    if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False):
+                        current_tagline = details.get("tagline", "")
+
+                        # 如果标语为空，或者不包含中文，则尝试翻译
+                        if not current_tagline or not utils.contains_chinese(current_tagline):
+                            english_tagline = current_tagline if current_tagline else ""
+
+                            # 如果当前标语为空，主动请求英文版数据获取标语
+                            if not english_tagline and self.tmdb_api_key:
+                                try:
+                                    if item_type == "Movie":
+                                        en_data = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key, language="en-US")
+                                        english_tagline = en_data.get("tagline", "")
+                                    elif item_type == "Series":
+                                        en_data = tmdb.get_tv_details(int(tmdb_id), self.tmdb_api_key, language="en-US")
+                                        english_tagline = en_data.get("tagline", "")
+                                except Exception as e_en:
+                                    logger.warning(f"  ➜ [实时监控] 获取英文标语失败: {e_en}")
+
+                            if english_tagline:
+                                current_title = details.get("title") if item_type == "Movie" else details.get("name")
+                                logger.info(f"  ➜ [实时监控] 准备进行 AI 翻译标语: '{english_tagline}'")
+
+                                translated_tagline = self.ai_translator.translate_overview(english_tagline, title=current_title)
+
+                                if translated_tagline and utils.contains_chinese(translated_tagline):
+                                    logger.info(f"  ➜ [实时监控] 标语翻译成功: '{translated_tagline}'")
+                                    details["tagline"] = translated_tagline
+                                    if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
+                                        aggregated_tmdb_data["series_details"]["tagline"] = translated_tagline
+
                 # 准备演员源数据
                 authoritative_cast_source = []
                 if item_type == "Movie":
@@ -1068,19 +1100,9 @@ class MediaProcessor:
                 movie_record['keywords_json'] = k_json
                 movie_record['countries_json'] = c_json
 
-                # 分级处理
-                raw_ratings_map = {}
-                results = source_data_package.get('release_dates', {}).get('results', [])
-                if results:
-                    for r in results:
-                        country = r.get('iso_3166_1')
-                        if not country: continue
-                        cert = None
-                        for release in r.get('release_dates', []):
-                            if release.get('certification'):
-                                cert = release.get('certification')
-                                break
-                        if cert: raw_ratings_map[country] = cert
+                # 分级处理 
+                raw_ratings_map = source_data_package.get('_official_rating_map', {})
+                movie_record['official_rating_json'] = json.dumps(raw_ratings_map, ensure_ascii=False)
                 
                 releases = source_data_package.get('releases', {}).get('countries', [])
                 for r in releases:
@@ -1119,6 +1141,7 @@ class MediaProcessor:
                 series_record = {
                     "item_type": "Series", "tmdb_id": str(series_details.get('id')) if series_details.get('id') else "", "title": series_details.get('name'),
                     "original_title": series_details.get('original_name'), "overview": series_details.get('overview'),
+                    "tagline": series_details.get('tagline'),
                     "release_date": series_details.get('first_air_date'), 
                     "last_air_date": series_details.get('last_air_date'),
                     "poster_path": series_details.get('poster_path'),
@@ -1142,13 +1165,8 @@ class MediaProcessor:
                 actors_relation = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")]
                 series_record['actors_json'] = json.dumps(actors_relation, ensure_ascii=False)
                 
-                # 分级
-                raw_ratings_map = {}
-                results = series_details.get('content_ratings', {}).get('results', [])
-                for r in results:
-                    country = r.get('iso_3166_1')
-                    rating = r.get('rating')
-                    if country and rating: raw_ratings_map[country] = rating
+                # 分级处理
+                raw_ratings_map = source_data_package.get('_official_rating_map', {})
                 series_record['official_rating_json'] = json.dumps(raw_ratings_map, ensure_ascii=False)
 
                 # 通用字段
@@ -1389,7 +1407,8 @@ class MediaProcessor:
                 "subscription_status", "subscription_sources_json", "emby_item_ids_json", 
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
-                "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status"
+                "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
+                "tagline"
             ]
             data_for_batch = []
             for record in records_to_upsert:
@@ -2185,101 +2204,17 @@ class MediaProcessor:
                     except Exception as e_fetch:
                         logger.warning(f"  ➜ 尝试补全元数据时失败，将使用 Emby 原始数据兜底: {e_fetch}")
 
-                # 标题和简介翻译 (仅在完整模式下执行) 
+                # 3. AI 翻译 (大一统引擎：标题、简介、标语)
                 if self.ai_translator:
-                    
-                    # ====== 1. 简介翻译处理 ======
-                    if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False):
-                        logger.info(f"  ➜ [完整模式] 正在检查是否需要 AI 翻译简介...")
-                        
-                        # 优先检查本地数据库缓存
-                        local_trans = media_db.get_local_translation_info(str(tmdb_id), item_type)
-                        
-                        # 逻辑 A: 回填缓存
-                        if local_trans and local_trans.get('overview') and utils.contains_chinese(local_trans['overview']):
-                            tmdb_details_for_extra["overview"] = local_trans['overview']
-                            if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                aggregated_tmdb_data["series_details"]["overview"] = local_trans['overview']
-                            logger.info(f"  ➜ [完整模式] 命中本地中文简介缓存，跳过AI翻译。")
-                        
-                        # 逻辑 B: 执行翻译
-                        else:
-                            current_overview = tmdb_details_for_extra.get("overview", "")
-                            item_title_for_ai = tmdb_details_for_extra.get("title") or tmdb_details_for_extra.get("name")
-                            
-                            needs_trans_overview = False
-                            if not current_overview: needs_trans_overview = True
-                            elif not utils.contains_chinese(current_overview): needs_trans_overview = True
-                            
-                            if needs_trans_overview:
-                                english_overview = ""
-                                if current_overview and len(current_overview) > 10:
-                                    english_overview = current_overview
-                                elif self.tmdb_api_key:
-                                    try:
-                                        if item_type == "Movie":
-                                            en_data = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key, language="en-US")
-                                            english_overview = en_data.get("overview")
-                                        elif item_type == "Series":
-                                            en_data = tmdb.get_tv_details(int(tmdb_id), self.tmdb_api_key, language="en-US")
-                                            english_overview = en_data.get("overview")
-                                    except: pass
-                                
-                                if english_overview:
-                                    logger.info(f"  ➜ [完整模式] 正在调用 AI 翻译简介...")
-                                    trans_overview = self.ai_translator.translate_overview(english_overview, title=item_title_for_ai)
-                                    if trans_overview:
-                                        tmdb_details_for_extra["overview"] = trans_overview
-                                        if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                            aggregated_tmdb_data["series_details"]["overview"] = trans_overview
-
-                    # ====== 2. 标题翻译处理 ======
-                    if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False):
-                        logger.info(f"  ➜ [完整模式] 正在检查是否需要 AI 翻译标题...")
-                        
-                        # 优先检查本地数据库缓存
-                        local_trans = media_db.get_local_translation_info(str(tmdb_id), item_type)
-                        
-                        # 逻辑 A: 回填缓存
-                        if local_trans and local_trans.get('title') and utils.contains_chinese(local_trans['title']):
-                            cached_title = local_trans['title']
-                            if item_type == "Movie": 
-                                tmdb_details_for_extra["title"] = cached_title
-                            else: 
-                                tmdb_details_for_extra["name"] = cached_title
-                                if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                    aggregated_tmdb_data["series_details"]["name"] = cached_title
-                            logger.info(f"  ➜ [完整模式] 命中本地中文标题缓存，跳过AI翻译。")
-                        
-                        # 逻辑 B: 执行翻译
-                        else:
-                            current_title = tmdb_details_for_extra.get("title") if item_type == "Movie" else tmdb_details_for_extra.get("name")
-                            if current_title and not utils.contains_chinese(current_title):
-                                logger.info(f"  ➜ [完整模式] 正在调用 AI 翻译标题: {current_title}")
-                                release_date = tmdb_details_for_extra.get("release_date") or tmdb_details_for_extra.get("first_air_date")
-                                year_str = release_date[:4] if release_date else ""
-                                
-                                trans_title = self.ai_translator.translate_title(current_title, media_type=item_type, year=year_str)
-                                if trans_title and utils.contains_chinese(trans_title):
-                                    if item_type == "Movie": tmdb_details_for_extra["title"] = trans_title
-                                    else: 
-                                        tmdb_details_for_extra["name"] = trans_title
-                                        if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                            aggregated_tmdb_data["series_details"]["name"] = trans_title
-
-                # 3. 剧集分集翻译
-                if item_type == "Series" and aggregated_tmdb_data and self.ai_translator and self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_EPISODE_OVERVIEW, False):
-                    logger.info(f"  ➜ [完整模式] 正在递归检查分集简介翻译...")
-                    current_series_name = tmdb_details_for_extra.get("name")
+                    from tasks.helpers import translate_tmdb_metadata_recursively
                     translate_tmdb_metadata_recursively(
-                        item_type='Series',
-                        tmdb_data=aggregated_tmdb_data,
+                        item_type=item_type,
+                        tmdb_data=formatted_metadata, # 传入已构建好的骨架
                         ai_translator=self.ai_translator,
-                        item_name=current_series_name
+                        item_name=item_name_for_log,
+                        tmdb_api_key=self.tmdb_api_key,
+                        config=self.config
                     )
-                    # 翻译完后，需要把 aggregated_tmdb_data 里的 episodes_details 同步回 tmdb_details_for_extra
-                    if "episodes_details" in aggregated_tmdb_data:
-                        tmdb_details_for_extra["episodes_details"] = aggregated_tmdb_data["episodes_details"]
 
                 with get_central_db_connection() as conn:
                     cursor = conn.cursor()

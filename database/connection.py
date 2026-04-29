@@ -195,6 +195,7 @@ def init_db():
                         original_title TEXT,
                         original_language TEXT,
                         overview TEXT,
+                        tagline TEXT,
                         overview_embedding JSONB,
                         release_date DATE,
                         release_year INTEGER,
@@ -512,7 +513,8 @@ def init_db():
                             "backdrop_path": "TEXT",  
                             "homepage": "TEXT", 
                             "production_companies_json": "JSONB",
-                            "networks_json": "JSONB"
+                            "networks_json": "JSONB",
+                            "tagline": "TEXT"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
