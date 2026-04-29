@@ -1373,6 +1373,9 @@ def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[
     payload['status'] = db_row.get('watchlist_tmdb_status')
     payload['backdrop_path'] = db_row.get('backdrop_path')
     payload['homepage'] = db_row.get('homepage')
+    payload['vote_average'] = db_row.get('rating')
+    payload['poster_path'] = db_row.get('poster_path')
+    payload['tagline'] = db_row.get('tagline')
 
     # 标题与日期
     if item_type == "Movie":
@@ -1391,12 +1394,8 @@ def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[
         payload['number_of_episodes'] = db_row.get('total_episodes', 0)
         # 数据库不存总季数，给个默认值 1，避免为 0
         payload['number_of_seasons'] = 1 
-
-    payload['vote_average'] = db_row.get('rating')
-    payload['poster_path'] = db_row.get('poster_path')
     
     # 3. 复杂 JSON 字段还原
-    
     # Genres (类型)
     if db_row.get('genres_json'):
         try:
