@@ -791,7 +791,7 @@ class MediaProcessor:
     def _refresh_lib_guid_map(self):
         """从 Emby 实时获取所有媒体库的 ID 到 GUID 映射"""
         try:
-            # 调用 emby.py 中的函数
+            # 调用 emby.py 中的函数 (现在自带极速缓存)
             libs_data = emby.get_all_libraries_with_paths(self.emby_url, self.emby_api_key)
             new_map = {}
             for lib in libs_data:
@@ -1877,7 +1877,8 @@ class MediaProcessor:
                 item_id=emby_item_id,
                 base_url=self.emby_url,
                 api_key=self.emby_api_key,
-                user_id=self.emby_user_id
+                user_id=self.emby_user_id,
+                item_path=item_details.get("Path") # ★★★ 核心优化：直接把刚查到的 Path 喂进去
             )
             if lib_info and lib_info.get('Id'):
                 item_details['_SourceLibraryId'] = lib_info['Id']
