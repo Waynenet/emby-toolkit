@@ -549,6 +549,11 @@ class WatchlistProcessor:
                 item_name=item_name
             )
 
+        # ======================================================================
+        # ★★★ 核心修复：真假美猴王 (临时 ID 资产转移) ★★★
+        # ======================================================================
+        watchlist_db.transfer_dummy_episode_assets(tmdb_id, unified_episodes_dict)
+
         # 解包数据
         latest_series_data = aggregated_data['series_details']
         seasons_list = aggregated_data['seasons_details'] # 这是一个包含完整集信息的季列表

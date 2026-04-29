@@ -1799,13 +1799,11 @@ def task_restore_local_cache_from_db(processor):
                         if actor_tmdb_ids:
                             with connection.get_db_connection() as conn:
                                 cursor = conn.cursor()
-                                # 批量查询演员详情
                                 placeholders = ','.join(['%s'] * len(actor_tmdb_ids))
                                 sql = f"""
-                                    SELECT am.*, pim.primary_name as name
-                                    FROM actor_metadata am
-                                    LEFT JOIN person_identity_map pim ON am.tmdb_id = pim.tmdb_person_id
-                                    WHERE am.tmdb_id IN ({placeholders})
+                                    SELECT *, primary_name AS name, tmdb_person_id AS tmdb_id
+                                    FROM person_metadata
+                                    WHERE tmdb_person_id IN ({placeholders})
                                 """
                                 cursor.execute(sql, tuple(actor_tmdb_ids))
                                 actor_rows = cursor.fetchall()
