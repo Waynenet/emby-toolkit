@@ -339,15 +339,70 @@ DEFAULT_COUNTRY_MAPPING = [
 ]
 
 # --- 音视频流/字幕流特色标签映射 ---
-# 用于识别 DYSY、TX、Latin America、Brazil、SDH 这类“不是语言”的标题信息
+# 用于识别并标准化 DYSY、CCTV、上译、公映 等特色标签
 DEFAULT_STREAM_FEATURE_MAPPING = [
     {
-        "label": "东影上译",
+        "label": "上译",  # 统一标准化为“上译”
         "types": ["Audio", "Subtitle"],
         "patterns": [
+            r"(?<![A-Za-z0-9])SY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])DYSY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])CH-DYSY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])GP-DYSY(?![A-Za-z0-9])",
+            r"上译",
+            r"东影上译",
+            r"泰盛上译"
+        ],
+    },
+    {
+        "label": "公映",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"公映",
+            r"院线配音",
+            r"影院版"
+        ],
+    },
+    {
+        "label": "长译",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"长译",
+            r"长春电影"
+        ],
+    },
+    {
+        "label": "京译",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"京译",
+            r"中影配音",
+            r"北京电影"
+        ],
+    },
+    {
+        "label": "八一",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"八一",  
+        ],
+    },
+    {
+        "label": "央视",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])CCTV(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])GP-CCTV(?![A-Za-z0-9])",
+            r"央视",
+            r"CCTV6"
+        ],
+    },
+    {
+        "label": "台配",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"台配",
+            r"台湾配音"
         ],
     },
     {
@@ -399,12 +454,24 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
             r"导评",
         ],
     },
-    {
-    "label": "人人影视",
-    "types": ["Subtitle"],
-    "patterns": [r"(?<![A-Za-z0-9])YYeTs(?![A-Za-z0-9])"],
-    },
 ]
+
+# --- 音轨/字幕无意义压制组/字幕组过滤名单 ---
+# 只要出现在这里的词，都会从音轨和字幕的标题中被无情抹除
+STREAM_TITLE_GARBAGE_FILTER = [
+    "麦哈", "说一不二", "人人字幕组", "人人影视", "远鉴字幕组", "衣柜字幕组", 
+    "霸王龙压制组", "字幕组", "压制组", "手抄", "调轴", "精校", "原创"
+]
+
+def clean_stream_garbage_words(text: str) -> str:
+    """
+    清理音轨/字幕标题中的无意义压制组、字幕组等干扰词汇。
+    """
+    if not text:
+        return ""
+    for garbage in STREAM_TITLE_GARBAGE_FILTER:
+        text = text.replace(garbage, "")
+    return text.strip()
 
 # --- 语言预设表 ---
 DEFAULT_LANGUAGE_MAPPING = [

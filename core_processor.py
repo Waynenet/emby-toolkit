@@ -534,6 +534,103 @@ class MediaProcessor:
             item_type = "Series" if is_series else "Movie"
 
             # =========================================================
+            # ★★★ MP直出模式下的洗版 (Replace) 逻辑 ★★★
+            # =========================================================
+            mp_classify_enabled = self.config.get(constants.CONFIG_OPTION_115_MP_CLASSIFY, False)
+            if mp_classify_enabled:
+                rename_config = settings_db.get_setting('p115_rename_config') or {}
+                if rename_config.get('conflict_mode') == 'replace':
+                    try:
+                        from database import maintenance_db
+                        
+                        # 1. 调用 media_db 批量查询接口获取在库状态
+                        status_map = media_db.get_in_library_status_with_type_bulk([tmdb_id])
+                        is_in_lib = status_map.get(f"{tmdb_id}_{item_type}", False)
+                        
+                        if is_in_lib:
+                            with get_central_db_connection() as conn:
+                                with conn.cursor() as cursor:
+                                    old_records = []
+                                    # 2. 查询旧版文件的路径、Emby ID 和 PickCode
+                                    if item_type == "Movie":
+                                        cursor.execute("""
+                                            SELECT emby_item_ids_json, asset_details_json, title, file_pickcode_json 
+                                            FROM media_metadata 
+                                            WHERE tmdb_id = %s AND item_type = 'Movie' AND in_library = TRUE
+                                        """, (str(tmdb_id),))
+                                        old_records = cursor.fetchall()
+                                    elif item_type == "Series" and detected_season is not None and detected_episode is not None:
+                                        cursor.execute("""
+                                            SELECT emby_item_ids_json, asset_details_json, title, file_pickcode_json 
+                                            FROM media_metadata 
+                                            WHERE parent_series_tmdb_id = %s AND item_type = 'Episode' 
+                                              AND season_number = %s AND episode_number = %s AND in_library = TRUE
+                                        """, (str(tmdb_id), detected_season, detected_episode))
+                                        old_records = cursor.fetchall()
+
+                                    old_pickcodes = set()
+
+                                    for old_row in old_records:
+                                        raw_assets = old_row['asset_details_json']
+                                        assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets or [])
+                                        
+                                        raw_ids = old_row['emby_item_ids_json']
+                                        emby_ids = json.loads(raw_ids) if isinstance(raw_ids, str) else (raw_ids or [])
+                                        
+                                        raw_pcs = old_row.get('file_pickcode_json')
+                                        pcs = json.loads(raw_pcs) if isinstance(raw_pcs, str) else (raw_pcs or [])
+                                        for pc in pcs:
+                                            if pc: old_pickcodes.add(pc)
+                                        
+                                        old_title = old_row['title'] or "未知名称"
+
+                                        # 3. 物理删除旧版主文件及附属文件
+                                        for asset in assets:
+                                            old_path = asset.get('path')
+                                            if old_path and old_path != file_path and os.path.exists(old_path):
+                                                logger.info(f"  ➜ [洗版替换] 发现旧版文件，准备物理删除: {old_path}")
+                                                
+                                                # 删除主文件
+                                                try: os.remove(old_path)
+                                                except Exception as e: logger.warning(f"    - 删除旧主文件失败: {e}")
+                                                
+                                                # 删除附属文件 (严谨匹配，防误杀)
+                                                base_dir = os.path.dirname(old_path)
+                                                stem = os.path.splitext(os.path.basename(old_path))[0]
+                                                if os.path.exists(base_dir):
+                                                    for f in os.listdir(base_dir):
+                                                        if (f.startswith(stem + '.') or f.startswith(stem + '-')) and f != os.path.basename(file_path):
+                                                            ext = os.path.splitext(f)[1].lower()
+                                                            if ext in ['.nfo', '.json', '.jpg', '.png', '.srt', '.ass', '.ssa', '.sub']:
+                                                                try: 
+                                                                    os.remove(os.path.join(base_dir, f))
+                                                                    logger.debug(f"    - 已删除附属文件: {f}")
+                                                                except: pass
+
+                                        # 4. 调用 maintenance_db 清理 Emby 相关的数据库记录和缓存
+                                        for e_id in emby_ids:
+                                            logger.info(f"  ➜ [洗版替换] 清理旧版媒体库记录 (EmbyID: {e_id})")
+                                            maintenance_db.cleanup_deleted_media_item(
+                                                item_id=str(e_id), 
+                                                item_name=old_title, 
+                                                item_type='Movie' if item_type == 'Movie' else 'Episode'
+                                            )
+
+                                    # 5. 清理 115 整理记录和文件缓存 (精准打击，不碰目录)
+                                    if old_pickcodes:
+                                        try:
+                                            cursor.execute("DELETE FROM p115_organize_records WHERE pick_code = ANY(%s)", (list(old_pickcodes),))
+                                            cursor.execute("DELETE FROM p115_filesystem_cache WHERE pick_code = ANY(%s)", (list(old_pickcodes),))
+                                            logger.info(f"  ➜ [洗版替换] 已清理旧版 115 整理记录和文件缓存 (数量: {len(old_pickcodes)})")
+                                        except Exception as e:
+                                            logger.warning(f"  ➜ [洗版替换] 清理 115 缓存记录失败: {e}")
+                                            
+                                # 提交事务
+                                conn.commit()
+                    except Exception as e:
+                        logger.error(f"  ➜ [洗版替换] 执行旧版清理逻辑时发生错误: {e}", exc_info=True)
+
+            # =========================================================
             # 极速查重 (利用文件名比对)
             # =========================================================
             try:
@@ -748,20 +845,14 @@ class MediaProcessor:
                     logger.warning(f"  ➜ [拦截] 拦截到恶意广告片名: '{current_title}'，准备寻找干净的别名或进行翻译...")
                     current_title = "" 
 
-                # 2. 寻找更优的中文别名 (如果原名为空、无中文，或者包含英文字母导致不纯)
-                has_english = bool(re.search(r'[a-zA-Z]', current_title)) if current_title else False
-                
-                if not current_title or not utils.contains_chinese(current_title) or has_english:
-                    best_alias = None
-                    pure_chinese_alias = None
-                    mixed_chinese_alias = None
-                    
+                # 2. 如果标题为空（被拦截）或不包含中文，则寻找别名
+                if not current_title or not utils.contains_chinese(current_title):
+                    chinese_alias = None
                     alt_titles_data = details.get("alternative_titles", {})
                     alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
                     
                     priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
-                    best_pure_priority = 99
-                    best_mixed_priority = 99
+                    best_priority = 99
                     
                     for alt in alt_list:
                         # ★ 核心：对别名也必须进行隐身符清洗！
@@ -771,44 +862,29 @@ class MediaProcessor:
                             iso_country = alt.get("iso_3166_1", "").upper()
                             current_priority = priority_map.get(iso_country, 5)
                             
-                            # 判断是否为纯中文（不含英文字母）
-                            is_pure = not bool(re.search(r'[a-zA-Z]', alt_title))
-                            
-                            if is_pure:
-                                if current_priority < best_pure_priority:
-                                    pure_chinese_alias = alt_title
-                                    best_pure_priority = current_priority
-                            else:
-                                if current_priority < best_mixed_priority:
-                                    mixed_chinese_alias = alt_title
-                                    best_mixed_priority = current_priority
+                            if current_priority < best_priority:
+                                chinese_alias = alt_title
+                                best_priority = current_priority
+                                
+                            if best_priority == 1:
+                                break
                     
-                    # 决策：优先使用纯中文别名
-                    if pure_chinese_alias:
-                        best_alias = pure_chinese_alias
-                        if has_english and utils.contains_chinese(current_title):
-                            logger.info(f"  ➜ 发现更优的纯中文别名: '{best_alias}' (原名: '{current_title}')")
-                        else:
-                            logger.info(f"  ➜ 发现纯中文别名: '{best_alias}'")
-                    # 如果原名完全没有中文，才退而求其次使用混合中文别名
-                    elif not utils.contains_chinese(current_title) and mixed_chinese_alias:
-                        best_alias = mixed_chinese_alias
-                        logger.info(f"  ➜ 发现 TMDb 官方中文别名: '{best_alias}'")
-                    
-                    if best_alias:
+                    if chinese_alias:
+                        logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
                         if item_type == "Movie":
-                            details["title"] = best_alias
+                            details["title"] = chinese_alias
                         else:
-                            details["name"] = best_alias
+                            details["name"] = chinese_alias
                             if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                aggregated_tmdb_data["series_details"]["name"] = best_alias
-                    elif not current_title or not utils.contains_chinese(current_title):
+                                aggregated_tmdb_data["series_details"]["name"] = chinese_alias
+                    else:
                         # ★ 核心：如果没有干净的中文别名，回退到原名，原名也要清洗！
                         raw_original = details.get("original_title") if item_type == "Movie" else details.get("original_name")
                         original_title = utils.clean_invisible_chars(raw_original)
                         
                         logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
-                        if item_type == "Movie": details["title"] = original_title
+                        if item_type == "Movie":
+                            details["title"] = original_title
                         else:
                             details["name"] = original_title
                             if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
@@ -3095,65 +3171,33 @@ class MediaProcessor:
                     logger.warning(f"  ➜ [拦截] 检测到恶意广告片名: '{current_title}'，准备寻找替代片名...")
                     current_title = ""
                 
-                # 2. 寻找更优的中文别名 (如果原名为空、无中文，或者包含英文字母导致不纯)
-                has_english = bool(re.search(r'[a-zA-Z]', current_title)) if current_title else False
-                
-                if not current_title or not utils.contains_chinese(current_title) or has_english:
-                    best_alias = None
-                    pure_chinese_alias = None
-                    mixed_chinese_alias = None
-                    
+                if not current_title or not utils.contains_chinese(current_title):
+                    chinese_alias = None
                     alt_titles_data = fresh_data.get("alternative_titles", {})
                     alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
-                    
                     priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
-                    best_pure_priority = 99
-                    best_mixed_priority = 99
-                    
+                    best_priority = 99
                     for alt in alt_list:
-                        # ★ 核心：对别名也必须进行隐身符清洗！
                         alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        
+                        # 别名也必须经过广告过滤
                         if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
                             iso_country = alt.get("iso_3166_1", "").upper()
                             current_priority = priority_map.get(iso_country, 5)
-                            
-                            # 判断是否为纯中文（不含英文字母）
-                            is_pure = not bool(re.search(r'[a-zA-Z]', alt_title))
-                            
-                            if is_pure:
-                                if current_priority < best_pure_priority:
-                                    pure_chinese_alias = alt_title
-                                    best_pure_priority = current_priority
-                            else:
-                                if current_priority < best_mixed_priority:
-                                    mixed_chinese_alias = alt_title
-                                    best_mixed_priority = current_priority
+                            if current_priority < best_priority:
+                                chinese_alias = alt_title
+                                best_priority = current_priority
+                            if best_priority == 1: break
                     
-                    # 决策：优先使用纯中文别名
-                    if pure_chinese_alias:
-                        best_alias = pure_chinese_alias
-                        if has_english and utils.contains_chinese(current_title):
-                            logger.info(f"  ➜ 发现更优的纯中文别名: '{best_alias}' (原名: '{current_title}')")
+                    if chinese_alias:
+                        logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                        if item_type == "Movie": fresh_data["title"] = chinese_alias
                         else:
-                            logger.info(f"  ➜ 发现纯中文别名: '{best_alias}'")
-                    # 如果原名完全没有中文，才退而求其次使用混合中文别名
-                    elif not utils.contains_chinese(current_title) and mixed_chinese_alias:
-                        best_alias = mixed_chinese_alias
-                        logger.info(f"  ➜ 发现 TMDb 官方中文别名: '{best_alias}'")
-                    
-                    if best_alias:
-                        if item_type == "Movie":
-                            fresh_data["title"] = best_alias
-                        else:
-                            fresh_data["name"] = best_alias
+                            fresh_data["name"] = chinese_alias
                             if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                aggregated_tmdb_data["series_details"]["name"] = best_alias
-                    elif not current_title or not utils.contains_chinese(current_title):
-                        # ★ 核心：如果没有干净的中文别名，回退到原名，原名也要清洗！
-                        raw_original = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
-                        original_title = utils.clean_invisible_chars(raw_original)
-                        
+                                aggregated_tmdb_data["series_details"]["name"] = chinese_alias
+                    else:
+                        # 回退到原名，交给 AI 翻译
+                        original_title = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
                         logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
                         if item_type == "Movie": fresh_data["title"] = original_title
                         else:

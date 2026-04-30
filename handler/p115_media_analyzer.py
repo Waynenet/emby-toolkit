@@ -628,7 +628,10 @@ class P115MediaAnalyzerMixin:
             # 2. 暴力净化：碾碎所有 SUP/ASS/Chs 等英文污染
             friendly_title = utils.clean_non_chinese_chars(friendly_title)
 
-            # 3. 统一简繁字形，并替换常见冗余词
+            # 3. 抹除无意义的压制组/字幕组名称 ★★★
+            friendly_title = utils.clean_stream_garbage_words(friendly_title)
+
+            # 4. 统一简繁字形，并替换常见冗余词
             friendly_title = friendly_title.replace("繁體", "繁体").replace("簡體", "简体")
             
             replace_map = {
@@ -638,6 +641,7 @@ class P115MediaAnalyzerMixin:
                 "中文繁体": "繁体",
                 "繁体中文": "繁体",
                 "繁中": "繁体",
+                "原盘": "",
             }
             for old, new in replace_map.items():
                 friendly_title = friendly_title.replace(old, new)
@@ -665,12 +669,14 @@ class P115MediaAnalyzerMixin:
             friendly_title = friendly_title.replace("简体韩文", "中韩双语（简体）").replace("繁体韩文", "中韩双语（繁体）")
             
             # 5. 兜底与组合
-            if not friendly_title:
-                if display_lang and display_lang != "未知" and stream_features:
-                    friendly_title = self._format_stream_feature_title(display_lang, stream_features)
-                else:
-                    friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
+            if stream_features:
+                # ★★★ 核心修改：只要提取到了标准化的特色标签，直接用它！抛弃所有残留的中文杂质
+                friendly_title = self._format_stream_feature_title(display_lang, stream_features)
+            elif not friendly_title:
+                # 没有特色标签，且标题被清空了，只显示语言
+                friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
             else:
+                # 没有特色标签，但有未知的中文残留，组合起来
                 if display_lang in ["简体", "繁体", "中英双语（简体）", "中英双语（繁体）", "中日双语（简体）", "中日双语（繁体）", "中韩双语（简体）", "中韩双语（繁体）"]:
                     check_kw = "简" if "简" in display_lang else ("繁" if "繁" in display_lang else "")
                     if check_kw and check_kw not in friendly_title:
@@ -685,7 +691,10 @@ class P115MediaAnalyzerMixin:
             # 1. 暴力净化：碾碎所有 DTS-HD, Dolby, kbps 等非中文字符
             friendly_title = utils.clean_non_chinese_chars(friendly_title)
 
-            # 2. 替换常见词
+            # 2. 抹除无意义的压制组/音轨组名称
+            friendly_title = utils.clean_stream_garbage_words(friendly_title)
+
+            # 3. 替换常见词
             audio_replace_map = {
                 "国语配音": "国语",
                 "粤语配音": "粤语",
@@ -695,20 +704,21 @@ class P115MediaAnalyzerMixin:
                 friendly_title = friendly_title.replace(old, new)
 
             # 3. 兜底与组合
-            if not friendly_title:
-                if display_lang and display_lang != "未知" and stream_features:
-                    friendly_title = self._format_stream_feature_title(display_lang, stream_features)
-                else:
-                    friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
+            if stream_features:
+                # ★★★ 核心修改：只要提取到了标准化的特色标签，直接用它！抛弃所有残留的中文杂质
+                friendly_title = self._format_stream_feature_title(display_lang, stream_features)
+            elif not friendly_title:
+                # 没有特色标签，且标题被清空了，只显示语言
+                friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
             else:
+                # 没有特色标签，但有未知的中文残留，组合起来
                 if display_lang and display_lang != "未知":
-                    # 移除开头多余的 display_lang (例如 "国语中译公映国语" -> "中译公映国语")
+                    # 移除开头多余的 display_lang
                     friendly_title = re.sub(rf"^{display_lang}", "", friendly_title)
                     
                     if not friendly_title:
                         friendly_title = display_lang
                     else:
-                        # 如果有特色词，比如 "台配"，组合成 "国语（台配）"
                         if display_lang not in friendly_title:
                             friendly_title = f"{display_lang}（{friendly_title}）"
 
