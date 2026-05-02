@@ -346,18 +346,26 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         "types": ["Audio", "Subtitle"],
         "patterns": [
             r"(?<![A-Za-z0-9])SY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])CYSY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])DYSY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])GYSY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])CH-DYSY(?![A-Za-z0-9])",
             r"(?<![A-Za-z0-9])GP-DYSY(?![A-Za-z0-9])",
             r"上译",
             r"东影上译",
-            r"泰盛上译"
+            r"泰盛上译",
+            r"上海电影译制",
+            r"上海电影配音",
+            r"上海译制",
+            r"上海配音",
+            r"公映上译"
         ],
     },
     {
         "label": "公映",
         "types": ["Audio", "Subtitle"],
         "patterns": [
+            r"(?<![A-Za-z0-9])GY(?![A-Za-z0-9])",
             r"公映",
             r"院线配音",
             r"影院版"
@@ -367,6 +375,8 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         "label": "长译",
         "types": ["Audio", "Subtitle"],
         "patterns": [
+            r"(?<![A-Za-z0-9])CY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])GYCY(?![A-Za-z0-9])",
             r"长译",
             r"长春电影"
         ],
@@ -375,6 +385,8 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         "label": "京译",
         "types": ["Audio", "Subtitle"],
         "patterns": [
+            r"(?<![A-Za-z0-9])JY(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])GYJY(?![A-Za-z0-9])",
             r"京译",
             r"中影配音",
             r"北京电影"
@@ -398,20 +410,35 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         ],
     },
     {
-        "label": "国配",
-        "types": ["Audio", "Subtitle"],
-        "patterns": [
-            r"国配",
-            r"国语配音"
-        ],
-    },
-    {
         "label": "台配",
         "types": ["Audio", "Subtitle"],
         "patterns": [
             r"台配",
             r"台湾配音"
         ],
+    },
+    {
+    "label": "台湾",
+    "types": ["Subtitle"],
+    "patterns": [
+        "(?<![A-Za-z0-9])TW(?![A-Za-z0-9])",
+        "台灣",
+        "臺灣",
+        "台湾",
+        "台配",
+        "台灣配音",
+        "臺灣配音",
+        "台湾配音"
+    ]
+    },
+    {
+    "label": "香港",
+    "types": ["Subtitle"],
+    "patterns": [
+        "(?<![A-Za-z0-9])HK(?![A-Za-z0-9])",
+        "港配",
+        "香港配音"
+    ]
     },
     {
         "label": "特效",
@@ -468,7 +495,9 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
 # 只要出现在这里的词，都会从音轨和字幕的标题中被无情抹除
 STREAM_TITLE_GARBAGE_FILTER = [
     "麦哈", "说一不二", "人人字幕组", "人人影视", "远鉴字幕组", "衣柜字幕组", 
-    "霸王龙压制组", "字幕组", "压制组", "手抄", "调轴", "精校", "原创"
+    "霸王龙压制组", "字幕组", "压制组", "手抄", "调轴", "精校", "原创", "校对", 
+    "后期", "翻译", "制作", "发布", "团队", "组", "字幕", "配音", "合金弹头",
+    "山茶树", "木木"
 ]
 
 def clean_stream_garbage_words(text: str) -> str:
