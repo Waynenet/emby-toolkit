@@ -1,5 +1,4 @@
 # core_processor.py
-
 import os
 import json
 import time
@@ -3094,59 +3093,104 @@ class MediaProcessor:
     # --- 辅助函数：丰富合集信息（名称、简介） ---
     def _enrich_collection_info(self, collection_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        辅助函数：获取并翻译电影合集信息 (名称、简介)。
+        【V3 - 架构优化版】
+        1. 优先查本地数据库缓存。
+        2. 缓存未命中时，调用 tmdb 处理器获取详情（自带重试和代理）。
+        3. 提取合集内所有电影 ID 并执行 AI 翻译。
+        4. 结果回写数据库，实现“占坑”缓存。
         """
         if not collection_info or not isinstance(collection_info, dict) or not collection_info.get("id"):
             return collection_info
 
-        col_id = collection_info.get("id")
+        col_id = str(collection_info.get("id"))
         col_name = collection_info.get("name", "")
         col_overview = ""
+        all_tmdb_ids = []
 
+        # =========================================================
+        # 步骤 1: 尝试从数据库加载缓存 (秒级返回)
+        # =========================================================
         try:
-            import requests
-            base_url = self.config.get(constants.CONFIG_OPTION_TMDB_API_BASE_URL, 'https://api.themoviedb.org/3')
-            
-            # 尝试获取中文合集简介
-            url_zh = f"{base_url}/collection/{col_id}?api_key={self.tmdb_api_key}&language=zh-CN"
-            resp_zh = requests.get(url_zh, timeout=10, proxies=config_manager.get_proxies_for_requests())
-            if resp_zh.status_code == 200:
-                col_details_zh = resp_zh.json()
-                col_overview = col_details_zh.get("overview", "")
-                if not col_name: col_name = col_details_zh.get("name", "")
-            
-            # 兜底获取英文合集简介
-            if not col_overview:
-                url_en = f"{base_url}/collection/{col_id}?api_key={self.tmdb_api_key}&language=en-US"
-                resp_en = requests.get(url_en, timeout=10, proxies=config_manager.get_proxies_for_requests())
-                if resp_en.status_code == 200:
-                    col_details_en = resp_en.json()
-                    col_overview = col_details_en.get("overview", "")
-                    if not col_name: col_name = col_details_en.get("name", "")
+            with get_central_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name, overview, all_tmdb_ids_json FROM collections_info WHERE tmdb_collection_id = %s LIMIT 1", 
+                    (col_id,)
+                )
+                row = cursor.fetchone()
+                
+                # 如果命中缓存且数据完整，直接返回
+                if row and row.get('overview') and row.get('all_tmdb_ids_json'):
+                    logger.info(f"  ➜ [合集缓存] 命中数据库记录: {row.get('name') or col_name}")
+                    collection_info["name"] = row.get('name') or col_name
+                    collection_info["overview"] = row['overview']
+                    return collection_info
         except Exception as e:
-            logger.warning(f"  ➜ 获取合集详细信息失败: {e}")
+            logger.warning(f"  ➜ [合集缓存] 查询数据库失败: {e}")
 
-        # AI 翻译逻辑
+        # =========================================================
+        # 步骤 2: 调用 tmdb 处理器获取详情 (代替原始 requests)
+        # =========================================================
+        logger.info(f"  ➜ [合集详情] 正在通过 TMDb 处理器获取合集信息 (ID: {col_id})...")
+        try:
+            # 直接调用 handler/tmdb.py 中的函数，它会自动处理 API Key 和语言
+            data = tmdb.get_collection_details(int(col_id), self.tmdb_api_key)
+            
+            if data:
+                col_overview = data.get("overview", "")
+                col_name = data.get("name") or col_name
+                
+                # 提取合集内所有电影的 ID
+                parts = data.get("parts", [])
+                all_tmdb_ids = [str(p.get("id")) for p in parts if p.get("id")]
+                
+                # 兜底：如果中文简介为空，尝试手动补一个英文请求 (因为 handler 默认是中文)
+                if not col_overview:
+                    logger.debug(f"  ➜ [合集详情] 中文简介缺失，尝试获取英文版源文本...")
+                    # 这里稍微 hack 一下，利用 _tmdb_request 的灵活性
+                    en_data = tmdb._tmdb_request(f"/collection/{col_id}", self.tmdb_api_key, {"language": "en-US"})
+                    if en_data:
+                        col_overview = en_data.get("overview", "")
+                        if not all_tmdb_ids:
+                            all_tmdb_ids = [str(p.get("id")) for p in en_data.get("parts", []) if p.get("id")]
+        except Exception as e:
+            logger.warning(f"  ➜ [合集详情] 获取失败: {e}")
+
+        # =========================================================
+        # 步骤 3: 执行 AI 翻译
+        # =========================================================
         if self.ai_translator:
             # 翻译标题
             if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False) and col_name and not utils.contains_chinese(col_name):
                 trans_col_name = self.ai_translator.translate_title(col_name, media_type="Movie")
                 if trans_col_name and utils.contains_chinese(trans_col_name):
                     if trans_col_name.endswith("合集"): trans_col_name = trans_col_name[:-2] + "（系列）"
-                    collection_info["name"] = trans_col_name
                     col_name = trans_col_name 
-            else: 
-                collection_info["name"] = col_name
 
             # 翻译简介
             if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False) and col_overview and not utils.contains_chinese(col_overview):
                 trans_col_overview = self.ai_translator.translate_overview(col_overview, title=col_name)
-                if trans_col_overview: collection_info["overview"] = trans_col_overview
-            elif col_overview: 
-                collection_info["overview"] = col_overview
-        else:
-            collection_info["name"] = col_name
-            if col_overview: collection_info["overview"] = col_overview
+                if trans_col_overview: col_overview = trans_col_overview
+
+        collection_info["name"] = col_name
+        collection_info["overview"] = col_overview
+
+        # =========================================================
+        # 步骤 4: 占坑式写入数据库 (包含 ID 列表)
+        # =========================================================
+        try:
+            from database import tmdb_collection_db
+            tmdb_collection_db.upsert_native_collection({
+                'tmdb_collection_id': col_id,
+                'name': col_name,
+                'overview': col_overview,
+                'poster_path': collection_info.get("poster_path") or (data.get("poster_path") if data else None),
+                'all_tmdb_ids': all_tmdb_ids,
+                'emby_collection_id': None 
+            })
+            logger.debug(f"  ➜ [合集缓存] 已成功缓存元数据及 {len(all_tmdb_ids)} 部关联电影 ID。")
+        except Exception as e:
+            logger.warning(f"  ➜ [合集缓存] 预占位写入失败: {e}")
 
         return collection_info
 
@@ -4616,8 +4660,8 @@ class MediaProcessor:
             logger.error(f"  ➜ 获取编辑数据失败 for ItemID {item_id}: {e}", exc_info=True)
             return None
     
-    # --- 从 115 直链截取分集缩略图 ---
-    def _extract_episode_thumb_via_ffmpeg(self, video_path: str, thumb_save_path: str, ep_data: dict = None) -> bool:
+    # --- 从 115 直链截取缩略图 ---
+    def _extract_thumb_via_ffmpeg(self, video_path: str, thumb_save_path: str, ep_data: dict = None) -> bool:
         """
         调用 FFmpeg 从 115 直链截取高质量分集缩略图 (视频流直读 + 智能去黑边 + 强制 16:9)
         """
@@ -4812,6 +4856,9 @@ class MediaProcessor:
             # 4. 图片选择与命名逻辑 (存入绝对路径)
             # =========================================================
             downloads = [] # 存储 (url, 绝对保存路径, 是否强制覆盖)
+            ffmpeg_thumb_tasks = []  # 存储需要 FFmpeg 截图的任务 (视频路径, 绝对保存路径, 相关剧集数据)
+            enable_ffmpeg_thumb = self.config.get(constants.CONFIG_OPTION_EXTRACT_THUMB, False)
+            
             images_node = tmdb_data.get("images", {})
 
             # --- A. 海报 (Poster) -> 根目录 ---
@@ -4821,19 +4868,27 @@ class MediaProcessor:
             # --- B. 背景 (Backdrop) -> 根目录 ---
             backdrops_list = images_node.get("backdrops", [])
             selected_backdrop = backdrops_list[0]["file_path"] if backdrops_list else tmdb_data.get("backdrop_path")
+            
+            landscape_path = os.path.join(series_root_dir, "landscape.jpg")
+            fanart_path = os.path.join(series_root_dir, "fanart.jpg")
+            
             if selected_backdrop:
-                downloads.append((selected_backdrop, os.path.join(series_root_dir, "fanart.jpg"), False))
-                downloads.append((selected_backdrop, os.path.join(series_root_dir, "landscape.jpg"), False))
+                downloads.append((selected_backdrop, fanart_path, False))
+                downloads.append((selected_backdrop, landscape_path, False))
+            else:
+                # ★ 核心拓展：TMDb 没背景图，且是电影，触发 FFmpeg 智能截图！
+                if item_type == "Movie" and enable_ffmpeg_thumb:
+                    if not os.path.exists(landscape_path) and not os.path.exists(fanart_path):
+                        if media_path and os.path.isfile(media_path):
+                            # 传入电影的理论时长作为兜底
+                            movie_ep_data = {"runtime": tmdb_data.get("runtime")}
+                            ffmpeg_thumb_tasks.append((media_path, landscape_path, movie_ep_data))
 
             # --- C. Logo -> 根目录 ---
             if images_node.get("logos"):
                 downloads.append((images_node["logos"][0]["file_path"], os.path.join(series_root_dir, "clearlogo.png"), False))
 
             # --- D. 剧集季海报 & 分集图 ---
-            ffmpeg_thumb_tasks = [] # 存储需要 FFmpeg 截图的任务
-            #  读取智能截图开关 (默认关闭，需用户主动开启)
-            enable_ffmpeg_thumb = self.config.get(constants.CONFIG_OPTION_EXTRACT_EPISODE_THUMB, False)
-
             if item_type == "Series":
                 # 季海报 -> 根目录
                 seasons_source = aggregated_tmdb_data.get("seasons_details", []) if aggregated_tmdb_data else tmdb_data.get("seasons", [])
@@ -4843,39 +4898,40 @@ class MediaProcessor:
                     if s_num is not None and s_poster:
                         downloads.append((s_poster, os.path.join(series_root_dir, f"season{s_num:02d}-poster.jpg"), False))
                 
-                # 分集图 -> 深度遍历寻找视频文件
-                if aggregated_tmdb_data and "episodes_details" in aggregated_tmdb_data:
-                    episodes = aggregated_tmdb_data["episodes_details"]
-                    ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
+                # ★ 核心修复：以本地文件为基准进行遍历，不再受限于 TMDb 是否有该集数据
+                if item_details and item_details.get("Path") and os.path.isdir(series_root_dir):
+                    import re
+                    valid_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.strm'}
                     
-                    if item_details and item_details.get("Path") and os.path.isdir(series_root_dir):
-                        import re
-                        valid_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.strm'}
-                        
-                        for root, dirs, files in os.walk(series_root_dir):
-                            for filename in files:
-                                if os.path.splitext(filename)[1].lower() not in valid_exts: continue
-                                match = re.search(r'[sS](\d{1,4})[eE](\d{1,4})', filename)
-                                if match:
-                                    target_s, target_e = int(match.group(1)), int(match.group(2))
-                                    for ep in ep_list:
-                                        if ep.get("season_number") == target_s and ep.get("episode_number") == target_e:
-                                            e_still = ep.get("still_path")
-                                            thumb_name = os.path.splitext(filename)[0] + "-thumb.jpg"
-                                            thumb_save_path = os.path.join(root, thumb_name)
-                                            
-                                            ep_key = f"S{target_s}E{target_e}"
-                                            force_overwrite = force_overwrite_episodes and ep_key in force_overwrite_episodes
-                                            
-                                            if e_still:
-                                                # TMDb 有图，正常下载
-                                                downloads.append((e_still, thumb_save_path, force_overwrite))
-                                            else:
-                                                # ★ TMDb 没图，且开启了智能截图开关，才加入 FFmpeg 截图队列
-                                                if enable_ffmpeg_thumb and (force_overwrite or not os.path.exists(thumb_save_path)):
-                                                    video_full_path = os.path.join(root, filename)
-                                                    ffmpeg_thumb_tasks.append((video_full_path, thumb_save_path, ep))
-                                            break
+                    # 提前提取 TMDb 的分集数据字典（如果有的话）
+                    ep_list = []
+                    if aggregated_tmdb_data and "episodes_details" in aggregated_tmdb_data:
+                        episodes = aggregated_tmdb_data["episodes_details"]
+                        ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
+                    
+                    for root, dirs, files in os.walk(series_root_dir):
+                        for filename in files:
+                            if os.path.splitext(filename)[1].lower() not in valid_exts: continue
+                            match = re.search(r'[sS](\d{1,4})[eE](\d{1,4})', filename)
+                            if match:
+                                target_s, target_e = int(match.group(1)), int(match.group(2))
+                                
+                                # 尝试在 TMDb 数据中寻找对应集
+                                matched_ep = next((ep for ep in ep_list if ep.get("season_number") == target_s and ep.get("episode_number") == target_e), None)
+                                
+                                thumb_name = os.path.splitext(filename)[0] + "-thumb.jpg"
+                                thumb_save_path = os.path.join(root, thumb_name)
+                                ep_key = f"S{target_s}E{target_e}"
+                                force_overwrite = force_overwrite_episodes and ep_key in force_overwrite_episodes
+                                
+                                # 判断逻辑：如果有 TMDb 数据且有图，则下载
+                                if matched_ep and matched_ep.get("still_path"):
+                                    downloads.append((matched_ep.get("still_path"), thumb_save_path, force_overwrite))
+                                else:
+                                    # ★ 兜底逻辑：TMDb 没图，或者 TMDb 压根没有这集，统统触发 FFmpeg 截图！
+                                    if enable_ffmpeg_thumb and (force_overwrite or not os.path.exists(thumb_save_path)):
+                                        video_full_path = os.path.join(root, filename)
+                                        ffmpeg_thumb_tasks.append((video_full_path, thumb_save_path, matched_ep))
 
             # 5. 执行下载 (原有逻辑)
             base_image_url = "https://image.tmdb.org/t/p/original"
@@ -4908,13 +4964,23 @@ class MediaProcessor:
             # ★ 6. 执行 FFmpeg 截图任务 (串行执行，防止 115 封控或 CPU 爆炸)
             # =========================================================
             if ffmpeg_thumb_tasks:
-                logger.info(f"  ➜ {log_prefix} 发现 {len(ffmpeg_thumb_tasks)} 个分集缺失 TMDb 图片，准备调用 FFmpeg 智能截图...")
+                logger.info(f"  ➜ {log_prefix} 发现 {len(ffmpeg_thumb_tasks)} 个媒体缺失 TMDb 图片，准备调用 FFmpeg 智能截图...")
                 ffmpeg_success_count = 0
-                # ★ 接收解包出来的 ep_data
                 for video_path, thumb_path, ep_data in ffmpeg_thumb_tasks:
-                    if self._extract_episode_thumb_via_ffmpeg(video_path, thumb_path, ep_data):
+                    if self._extract_thumb_via_ffmpeg(video_path, thumb_path, ep_data):
                         ffmpeg_success_count += 1
-                logger.info(f"  ➜ {log_prefix} FFmpeg 截图完成，成功生成 {ffmpeg_success_count} 张分集图。")
+                        
+                        # ★ 拓展逻辑：如果是电影截取了 landscape.jpg，顺手复制一份 fanart.jpg 给 Emby 备用
+                        if item_type == "Movie" and thumb_path.endswith("landscape.jpg"):
+                            fanart_save_path = os.path.join(os.path.dirname(thumb_path), "fanart.jpg")
+                            if not os.path.exists(fanart_save_path):
+                                try:
+                                    import shutil
+                                    shutil.copy2(thumb_path, fanart_save_path)
+                                except Exception:
+                                    pass
+                                    
+                logger.info(f"  ➜ {log_prefix} FFmpeg 截图完成，成功生成 {ffmpeg_success_count} 张高清缩略图。")
 
             return True
 
