@@ -749,19 +749,23 @@ class MediaProcessor:
                             logger.info(f"  ➜ [实时监控] 已从数据库恢复 {len(seasons_data)} 个季和 {len(episodes_data)} 个分集的数据。")
                     
                     # =========================================================
-                    # ★★★ 电影合集补全逻辑 (防止洗版丢失合集 NFO) ★★★
+                    # ★★★ 电影合集补全逻辑 (纯本地数据库极速版) ★★★
                     # =========================================================
                     if item_type == "Movie" and self.config.get(constants.CONFIG_OPTION_GENERATE_COLLECTION_NFO, False):
-                        logger.info(f"  ➜ [实时监控] 电影合集 NFO 开关已开启，正在从 TMDb 获取合集信息以补全缓存...")
                         try:
-                            movie_details = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key)
-                            if movie_details and movie_details.get("belongs_to_collection"):
-                                enriched_collection = self._enrich_collection_info(movie_details.get("belongs_to_collection"))
-                                payload["belongs_to_collection"] = enriched_collection
-                                logger.info(f"  ➜ [实时监控] 成功补全合集信息: {enriched_collection.get('name')}")
+                            from database import tmdb_collection_db
+                            # 直接从本地 collections_info 表反查该电影所属的合集
+                            cached_collection = tmdb_collection_db.get_collection_by_movie_tmdb_id(str(tmdb_id))
+                            if cached_collection:
+                                payload["belongs_to_collection"] = {
+                                    "id": int(cached_collection["tmdb_collection_id"]),
+                                    "name": cached_collection["name"],
+                                    "poster_path": cached_collection.get("poster_path"),
+                                    "backdrop_path": None # NFO 中通常只需要 name
+                                }
+                                logger.debug(f"  ➜ [实时监控] 命中本地合集缓存，成功补全合集信息: {cached_collection.get('name')}")
                         except Exception as e:
-                            logger.warning(f"  ➜ [实时监控] 补全合集信息失败: {e}")
-                    # =========================================================
+                            logger.warning(f"  ➜ [实时监控] 从本地数据库补全合集信息失败: {e}")
 
                     # 2. 构造上下文对象
                     fake_item_details = {
@@ -792,13 +796,18 @@ class MediaProcessor:
                     # =========================================================
                     
                     if item_type == "Series":
-                        payload, patched = self._patch_ongoing_series_cache_from_tmdb(
-                            tmdb_id=str(tmdb_id),
-                            payload=payload,
-                            file_path=file_path
-                        )
-                        if patched:
-                            logger.info("  ➜ [实时监控] 追更剧元数据补充完成，将使用最新分集演员表重新写入 NFO。")
+                        # ★ 性能优化：如果配置了不获取分集演员(0)，则直接跳过 TMDb 补抓逻辑
+                        max_ep_actors = int(self.config.get(constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS, 0))
+                        if max_ep_actors > 0:
+                            payload, patched = self._patch_ongoing_series_cache_from_tmdb(
+                                tmdb_id=str(tmdb_id),
+                                payload=payload,
+                                file_path=file_path
+                            )
+                            if patched:
+                                logger.info("  ➜ [实时监控] 追更剧元数据补充完成，将使用最新分集演员表重新写入 NFO。")
+                        else:
+                            logger.debug("  ➜ [实时监控] 分集演员数配置为 0，跳过分集演员表补抓，直接继承剧集演员表。")
 
                     # 3. 写入 NFO 文件 (传入 db_actors 确保演员表不丢失)
                     self.sync_item_metadata(
@@ -3090,110 +3099,6 @@ class MediaProcessor:
             specific_episode_ids=specific_episode_ids
         )
 
-    # --- 辅助函数：丰富合集信息（名称、简介） ---
-    def _enrich_collection_info(self, collection_info: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        【V3 - 架构优化版】
-        1. 优先查本地数据库缓存。
-        2. 缓存未命中时，调用 tmdb 处理器获取详情（自带重试和代理）。
-        3. 提取合集内所有电影 ID 并执行 AI 翻译。
-        4. 结果回写数据库，实现“占坑”缓存。
-        """
-        if not collection_info or not isinstance(collection_info, dict) or not collection_info.get("id"):
-            return collection_info
-
-        col_id = str(collection_info.get("id"))
-        col_name = collection_info.get("name", "")
-        col_overview = ""
-        all_tmdb_ids = []
-
-        # =========================================================
-        # 步骤 1: 尝试从数据库加载缓存 (秒级返回)
-        # =========================================================
-        try:
-            with get_central_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT name, overview, all_tmdb_ids_json FROM collections_info WHERE tmdb_collection_id = %s LIMIT 1", 
-                    (col_id,)
-                )
-                row = cursor.fetchone()
-                
-                # 如果命中缓存且数据完整，直接返回
-                if row and row.get('overview') and row.get('all_tmdb_ids_json'):
-                    logger.info(f"  ➜ [合集缓存] 命中数据库记录: {row.get('name') or col_name}")
-                    collection_info["name"] = row.get('name') or col_name
-                    collection_info["overview"] = row['overview']
-                    return collection_info
-        except Exception as e:
-            logger.warning(f"  ➜ [合集缓存] 查询数据库失败: {e}")
-
-        # =========================================================
-        # 步骤 2: 调用 tmdb 处理器获取详情 (代替原始 requests)
-        # =========================================================
-        logger.info(f"  ➜ [合集详情] 正在通过 TMDb 处理器获取合集信息 (ID: {col_id})...")
-        try:
-            # 直接调用 handler/tmdb.py 中的函数，它会自动处理 API Key 和语言
-            data = tmdb.get_collection_details(int(col_id), self.tmdb_api_key)
-            
-            if data:
-                col_overview = data.get("overview", "")
-                col_name = data.get("name") or col_name
-                
-                # 提取合集内所有电影的 ID
-                parts = data.get("parts", [])
-                all_tmdb_ids = [str(p.get("id")) for p in parts if p.get("id")]
-                
-                # 兜底：如果中文简介为空，尝试手动补一个英文请求 (因为 handler 默认是中文)
-                if not col_overview:
-                    logger.debug(f"  ➜ [合集详情] 中文简介缺失，尝试获取英文版源文本...")
-                    # 这里稍微 hack 一下，利用 _tmdb_request 的灵活性
-                    en_data = tmdb._tmdb_request(f"/collection/{col_id}", self.tmdb_api_key, {"language": "en-US"})
-                    if en_data:
-                        col_overview = en_data.get("overview", "")
-                        if not all_tmdb_ids:
-                            all_tmdb_ids = [str(p.get("id")) for p in en_data.get("parts", []) if p.get("id")]
-        except Exception as e:
-            logger.warning(f"  ➜ [合集详情] 获取失败: {e}")
-
-        # =========================================================
-        # 步骤 3: 执行 AI 翻译
-        # =========================================================
-        if self.ai_translator:
-            # 翻译标题
-            if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False) and col_name and not utils.contains_chinese(col_name):
-                trans_col_name = self.ai_translator.translate_title(col_name, media_type="Movie")
-                if trans_col_name and utils.contains_chinese(trans_col_name):
-                    if trans_col_name.endswith("合集"): trans_col_name = trans_col_name[:-2] + "（系列）"
-                    col_name = trans_col_name 
-
-            # 翻译简介
-            if self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False) and col_overview and not utils.contains_chinese(col_overview):
-                trans_col_overview = self.ai_translator.translate_overview(col_overview, title=col_name)
-                if trans_col_overview: col_overview = trans_col_overview
-
-        collection_info["name"] = col_name
-        collection_info["overview"] = col_overview
-
-        # =========================================================
-        # 步骤 4: 占坑式写入数据库 (包含 ID 列表)
-        # =========================================================
-        try:
-            from database import tmdb_collection_db
-            tmdb_collection_db.upsert_native_collection({
-                'tmdb_collection_id': col_id,
-                'name': col_name,
-                'overview': col_overview,
-                'poster_path': collection_info.get("poster_path") or (data.get("poster_path") if data else None),
-                'all_tmdb_ids': all_tmdb_ids,
-                'emby_collection_id': None 
-            })
-            logger.debug(f"  ➜ [合集缓存] 已成功缓存元数据及 {len(all_tmdb_ids)} 部关联电影 ID。")
-        except Exception as e:
-            logger.warning(f"  ➜ [合集缓存] 预占位写入失败: {e}")
-
-        return collection_info
-
     # ---核心处理流程 ---
     def _process_item_core_logic(self, item_details_from_emby: Dict[str, Any], force_full_update: bool = False, specific_episode_ids: Optional[List[str]] = None):
         """
@@ -3343,12 +3248,6 @@ class MediaProcessor:
                         config=self.config
                     )
                     
-                    # 合集翻译 (电影专属)
-                    if item_type == "Movie" and self.config.get(constants.CONFIG_OPTION_GENERATE_COLLECTION_NFO, False):
-                        collection_info = fresh_data.get("belongs_to_collection")
-                        if collection_info and isinstance(collection_info, dict) and collection_info.get("id"):
-                            fresh_data["belongs_to_collection"] = self._enrich_collection_info(collection_info)
-
                 # 2. 填充骨架
                 formatted_metadata = construct_metadata_payload(
                     item_type=item_type,
@@ -4663,24 +4562,21 @@ class MediaProcessor:
     # --- 从 115 直链截取缩略图 ---
     def _extract_thumb_via_ffmpeg(self, video_path: str, thumb_save_path: str, ep_data: dict = None) -> bool:
         """
-        调用 FFmpeg 从 115 直链截取高质量分集缩略图 (视频流直读 + 智能去黑边 + 强制 16:9)
+        调用 FFmpeg 从 115 直链截取高质量分集缩略图 (极速版 + 智能硬件降级)
         """
         import subprocess
         import shutil
         import re
-        from collections import Counter
         
         if not shutil.which("ffmpeg"):
-            logger.warning("  ➜ [智能截图] 容器内未安装 ffmpeg，无法截取分集图。")
+            logger.warning("  ➜ [视频截图] 容器内未安装 ffmpeg，无法截取分集图。")
             return False
 
         try:
             # 1. 获取 115 提取码和 SHA1
             pc, sha1 = self._extract_115_fingerprints(video_path)
-            
             if not sha1 and pc:
                 sha1 = self._get_sha1_by_pickcode(pc)
-                
             if not pc:
                 return False
 
@@ -4705,13 +4601,10 @@ class MediaProcessor:
                             row = cursor.fetchone()
                             if row and row['mediainfo_json']:
                                 mi = row['mediainfo_json']
-                                if isinstance(mi, list) and len(mi) > 0:
-                                    mi = mi[0]
+                                if isinstance(mi, list) and len(mi) > 0: mi = mi[0]
                                 ticks = mi.get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
-                                if ticks > 0:
-                                    duration_sec = ticks / 10000000
-                except Exception:
-                    pass
+                                if ticks > 0: duration_sec = ticks / 10000000
+                except Exception: pass
             
             if duration_sec == 0 and ep_data:
                 runtime_min = ep_data.get("runtime")
@@ -4721,79 +4614,63 @@ class MediaProcessor:
             if duration_sec > 0:
                 timestamp_sec = int(duration_sec * 0.3)
 
-            logger.info(f"  ➜ [智能截图] 正在截取视频画面 (时间点: {timestamp_sec}s) -> {os.path.basename(thumb_save_path)}")
+            logger.info(f"  ➜ [视频截图] 正在截取视频画面 (时间点: {timestamp_sec}s) -> {os.path.basename(thumb_save_path)}")
 
             # =========================================================
-            # ★ 阶段一：直接从视频流读取 10 帧，精准探测黑边
+            # ★ 核心逻辑：定义基础滤镜与两种色彩映射方案
             # =========================================================
-            # skip=0: 强制不跳过任何帧
-            # limit=40: 激进探测，无视 WEB-DL 的暗部压缩噪点
-            cmd_detect = [
-                "ffmpeg",
-                "-hide_banner",
-                "-user_agent", "Mozilla/5.0",
-                "-rw_timeout", "15000000",
-                "-ss", str(timestamp_sec),
-                "-i", str(direct_url),
-                "-frames:v", "10",
-                "-vf", "cropdetect=limit=40:round=2:skip=0",
-                "-f", "null",
-                "-"
-            ]
-
-            proc_detect = subprocess.run(cmd_detect, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='ignore', timeout=60)
+            # 基础滤镜：提取帧 -> 强制16:9缩放 -> 中心裁剪 (抛弃耗时的黑边探测)
+            base_vf = "thumbnail=24,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"
             
-            crop_param = ""
-            # 解析所有的 crop 参数
-            matches = re.findall(r'crop=\d+:\d+:\d+:\d+', proc_detect.stderr)
-            if matches:
-                # 取出现次数最多的裁剪参数，防止某几帧画面闪烁导致误判
-                crop_param = Counter(matches).most_common(1)[0][0]
-                logger.info(f"  ➜ [智能截图] 探测到黑边，将进行裁剪: {crop_param}")
-            else:
-                logger.debug("  ➜ [智能截图] 未探测到黑边，将使用原画面比例。")
-
-            # =========================================================
-            # ★ 阶段二：提取最佳帧 -> 切除黑边 -> 强制 16:9 缩放 -> 中心裁剪
-            # =========================================================
-            vf_filters = ["thumbnail=24"]
-            if crop_param:
-                vf_filters.append(crop_param)
+            # 方案 A：GPU 硬件加速 (通杀 HDR10 和 杜比视界 P5)
+            hw_tonemap = "libplacebo=format=yuv420p:colorspace=bt709:color_primaries=bt709:color_trc=bt709:tonemapping=hable"
             
-            vf_filters.append("scale=1920:1080:force_original_aspect_ratio=increase")
-            vf_filters.append("crop=1920:1080")
-            
-            vf_string = ",".join(vf_filters)
+            # 方案 B：CPU 软件映射 (支持 HDR10，不支持杜比视界)
+            sw_tonemap = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
 
-            cmd_extract = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-user_agent", "Mozilla/5.0",
-                "-rw_timeout", "15000000",
-                "-ss", str(timestamp_sec),
-                "-i", str(direct_url),
-                "-vf", vf_string,
-                "-frames:v", "1",
-                "-q:v", "2",
-                "-y",
-                thumb_save_path
-            ]
-            
-            proc_extract = subprocess.run(cmd_extract, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            def run_ffmpeg(vf_string):
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000",
+                    "-ss", str(timestamp_sec), "-i", str(direct_url),
+                    "-vf", vf_string, "-frames:v", "1", "-q:v", "2", "-y", thumb_save_path
+                ]
+                return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
 
-            if proc_extract.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
+            # ---------------------------------------------------------
+            # 尝试 1：优先使用 GPU 硬件加速
+            # ---------------------------------------------------------
+            proc_hw = run_ffmpeg(f"{base_vf},{hw_tonemap}")
+            
+            if proc_hw.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
+                return True
+
+            # ---------------------------------------------------------
+            # 尝试 2：硬件加速失败，智能降级到 CPU
+            # ---------------------------------------------------------
+            err_msg = (proc_hw.stderr.decode('utf-8', errors='ignore') or "").strip()
+            logger.debug(f"  ➜ [视频截图] GPU 硬件加速不可用，准备降级到 CPU。原因: {err_msg[:100]}")
+
+            # 杜比视界保护：如果降级到 CPU，且是杜比视界，直接放弃，防止绿毛怪
+            if re.search(r'(?i)(dovi|dv|profile\s*5)', video_path):
+                logger.warning(f"  ➜ [视频截图] 检测到杜比视界视频，由于 GPU 加速不可用，跳过 CPU 截图以避免产生偏色(绿毛怪)。")
+                return False
+
+            logger.info("  ➜ [视频截图] 正在使用 CPU (zscale) 重新截取...")
+            proc_sw = run_ffmpeg(f"{base_vf},{sw_tonemap}")
+
+            if proc_sw.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
                 return True
             else:
-                err_msg = (proc_extract.stderr.decode('utf-8', errors='ignore') or "").strip()
-                logger.debug(f"  ➜ [智能截图] 提取画面失败: {err_msg}")
+                err_msg_sw = (proc_sw.stderr.decode('utf-8', errors='ignore') or "").strip()
+                logger.debug(f"  ➜ [视频截图] CPU 截图也失败了: {err_msg_sw}")
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"  ➜ [智能截图] 截图超时: {os.path.basename(video_path)}")
+            logger.warning(f"  ➜ [视频截图] 截图超时: {os.path.basename(video_path)}")
             return False
         except Exception as e:
-            logger.warning(f"  ➜ [智能截图] 发生异常: {e}")
+            logger.warning(f"  ➜ [视频截图] 发生异常: {e}")
             return False
 
     # --- 从 TMDb 直接下载图片 (用于实时监控/预处理/追剧刷新) ---

@@ -442,11 +442,44 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
     ]
     },
     {
+        "label": "国语",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"国语",
+            r"国配",
+        ],
+    },
+    {
         "label": "特效",
         "types": ["Subtitle"],
         "patterns": [
             r"(?<![A-Za-z0-9])TX(?![A-Za-z0-9])",
             r"特效",
+        ],
+    },
+    {
+        "label": "HDR",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])HDR(?![A-Za-z0-9])",
+            r"HDR",
+        ],
+    },
+    {
+        "label": "SDR",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])SDR(?![A-Za-z0-9])",
+            r"SDR",
+        ],
+    },
+    {
+        "label": "DoVi",
+        "types": ["Subtitle"],
+        "patterns": [
+            r"(?<![A-Za-z0-9])DoVi(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])DV(?![A-Za-z0-9])",
+            r"DoVi",
         ],
     },
     {
