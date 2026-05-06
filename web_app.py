@@ -18,7 +18,6 @@ import os
 import sys
 import shutil
 from jinja2 import Environment, FileSystemLoader
-from handler.actor_sync import UnifiedSyncHandler
 import extensions
 from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, stream_with_context, send_from_directory,Response, abort, session
 from werkzeug.utils import safe_join, secure_filename
