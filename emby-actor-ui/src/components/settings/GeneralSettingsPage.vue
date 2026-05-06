@@ -110,7 +110,7 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">数据源与API</span></template>
-                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                    <n-grid cols="1 s:3" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 s:2" label="本地数据源路径" path="local_data_path">
                         <n-input-group>
                           <n-input v-model:value="configModel.local_data_path" placeholder="缓存目录路径" @click="openLocalFolderSelector('local_data_path', false)"><template #prefix><n-icon :component="FolderIcon" /></template></n-input>
