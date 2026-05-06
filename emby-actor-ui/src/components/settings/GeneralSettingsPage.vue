@@ -415,7 +415,7 @@
                     <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       
                       <!-- 网络代理 -->
-                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 0; font-size: 0.9em; color: gray;">网络代理</n-divider></n-gi>
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 0; font-size: 0.9em;">网络代理</n-divider></n-gi>
                       
                       <!-- ★ 修改：网络代理启用和输入框放在同一行 -->
                       <n-form-item-grid-item span="1" label="启用网络代理" path="network_proxy_enabled">
@@ -430,7 +430,7 @@
                       </n-form-item-grid-item>
 
                       <!-- 日志配置 -->
-                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 8px 0 0 0; font-size: 0.9em; color: gray;">日志配置</n-divider></n-gi>
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 8px 0 0 0; font-size: 0.9em;">日志配置</n-divider></n-gi>
                       <n-form-item-grid-item span="1">
                         <template #label>
                           <n-space align="center" :size="4" :wrap="false">
