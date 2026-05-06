@@ -158,53 +158,6 @@ class ActorDBManager:
                     enriched_actors_map[person_id]["ProviderIds"] = person_details.get("ProviderIds")
 
         return list(enriched_actors_map.values())
-    
-    def rehydrate_slim_actors(self, cursor: psycopg2.extensions.cursor, slim_actors_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        【重构版】不再需要 JOIN，直接从 person_metadata 单表查询。
-        """
-        if not slim_actors_list:
-            return []
-
-        logger.debug(f"  ➜ [演员数据管家-恢复] 开始为 {len(slim_actors_list)} 位演员从缓存恢复完整元数据...")
-        
-        tmdb_ids_to_fetch = [actor['tmdb_id'] for actor in slim_actors_list if 'tmdb_id' in actor]
-        if not tmdb_ids_to_fetch:
-            return []
-
-        sql = """
-            SELECT
-                primary_name AS name,
-                imdb_id,
-                douban_celebrity_id AS douban_id,
-                tmdb_person_id AS tmdb_id,
-                profile_path,
-                gender,
-                adult,
-                popularity,
-                original_name
-            FROM person_metadata
-            WHERE tmdb_person_id = ANY(%s);
-        """
-        cursor.execute(sql, (tmdb_ids_to_fetch,))
-        full_details_rows = cursor.fetchall()
-        
-        details_map = {row['tmdb_id']: dict(row) for row in full_details_rows}
-        
-        rehydrated_list = []
-        for slim_actor in slim_actors_list:
-            tmdb_id = slim_actor.get('tmdb_id')
-            if tmdb_id in details_map:
-                full_details = details_map[tmdb_id]
-                hydrated_actor = {**full_details, **slim_actor}
-                hydrated_actor['id'] = tmdb_id
-                rehydrated_list.append(hydrated_actor)
-            else:
-                rehydrated_list.append(slim_actor)
-                
-        rehydrated_list.sort(key=lambda x: x.get('order', 999))
-        logger.debug(f"  ➜ [演员数据管家-恢复] 成功恢复 {len(rehydrated_list)} 位演员的元数据。")
-        return rehydrated_list
 
     def upsert_person(self, cursor: psycopg2.extensions.cursor, person_data: Dict[str, Any], emby_config: Dict[str, Any]) -> Tuple[int, str]:
         """
@@ -434,7 +387,9 @@ def safe_json_dumps(value):
     else:
         return json.dumps(value, ensure_ascii=False)
 
+# --- 添加演员订阅 ---
 def add_actor_subscription(tmdb_person_id: int, actor_name: str, profile_path: str, config: dict) -> int:
+    """添加一个新的演员订阅，并返回新创建的订阅ID。"""
     start_year = config.get('start_year', 1900)
     media_types_list = config.get('media_types', ['Movie','TV'])
     if isinstance(media_types_list, list):

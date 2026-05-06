@@ -17,7 +17,7 @@
       </div>
     </div>
 
-    <!-- ★★★ 1. 媒体库分布 (拆分为 5 个独立模块，应用多彩色) ★★★ -->
+    <!-- ★★★ 1. 媒体库分布 ★★★ -->
     <n-grid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" style="margin-bottom: 16px;">
       <!-- 左侧：图表模块 -->
       <n-gi>
@@ -31,9 +31,9 @@
         </n-card>
       </n-gi>
       
-      <!-- 右侧：4个小数据模块 (2行2列) -->
+      <!-- 右侧：小数据模块 -->
       <n-gi>
-        <n-grid cols="2" :x-gap="16" :y-gap="16" style="height: 100%;">
+        <n-grid cols="2 m:3" :x-gap="16" :y-gap="16" style="height: 100%;">
           <n-gi>
             <n-card :bordered="false" class="dashboard-card tint-green" style="height: 100%; justify-content: center;">
               <div class="mini-stat-box-content">
@@ -61,15 +61,6 @@
               </div>
             </n-card>
           </n-gi>
-          <n-gi>
-            <n-card :bordered="false" class="dashboard-card tint-red" style="height: 100%; justify-content: center;">
-              <div class="mini-stat-box-content">
-                <n-skeleton v-if="loading.system" text style="width: 50%; height: 32px; margin-bottom: 4px;" />
-                <div v-else class="mini-stat-val">{{ stats.system.actor_mappings_linked }}</div>
-                <div class="mini-stat-label">演员关联</div>
-              </div>
-            </n-card>
-          </n-gi>
         </n-grid>
       </n-gi>
     </n-grid>
@@ -83,7 +74,6 @@
           <div v-if="loading.core || loading.system" class="auto-task-stats"><n-skeleton text :repeat="3" /></div>
           <div v-else class="auto-task-stats">
             <span>媒体缓存数: <b>{{ stats.media_library.cached_total }}</b></span>
-            <span>人员缓存数: <b>{{ stats.system.actor_mappings_total }}</b></span>
             <span>翻译缓存数: <b>{{ stats.system.translation_cache_count }}</b></span>
           </div>
         </n-card>
@@ -263,7 +253,7 @@ const isAnyLoading = computed(() => {
 
 const stats = reactive({
   media_library: { cached_total: 0, mediainfo_backed_up_total: 0, mediainfo_hits_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, resolution_stats: [] },
-  system: { actor_mappings_total: 0, actor_mappings_linked: 0, actor_mappings_unlinked: 0, translation_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
+  system: { translation_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
   subscriptions_card: {
     watchlist: { watching: 0, paused: 0, completed: 0 },
     actors: { subscriptions: 0, tracked_total: 0, tracked_in_library: 0 },
@@ -282,7 +272,7 @@ const fetchCore = async () => {
     const res = await axios.get('/api/database/stats/core');
     if (res.data.status === 'success') {
       Object.assign(stats.media_library, { cached_total: res.data.data.media_cached_total });
-      Object.assign(stats.system, { actor_mappings_total: res.data.data.actor_mappings_total });
+      Object.assign(stats.system, { });
     }
   } catch (e) {} finally { loading.core = false; }
 };
