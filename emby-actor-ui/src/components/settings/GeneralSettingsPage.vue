@@ -183,7 +183,7 @@
                         <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
                       </n-form-item-grid-item>
 
-                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em; color: gray;">管理员凭证 (选填)</n-divider></n-gi>
+                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员凭证 (选填)</n-divider></n-gi>
                       <n-form-item-grid-item label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
                       <n-form-item-grid-item label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
 
