@@ -1511,9 +1511,10 @@ class MediaProcessor:
         
         # 2. 兜底从 Emby 数据提取
         if not imdb_id:
-            imdb_id = media_info.get("ProviderIds", {}).get("Imdb")
+            imdb_id = provider_ids.get("Imdb")
         if not item_year:
-            item_year = str(media_info.get("ProductionYear", ""))
+            raw_year = media_info.get("ProductionYear")
+            item_year = str(raw_year) if raw_year else ""
 
         # 2. 尝试从本地缓存查找
         douban_cache_dir_name = "douban-movies" if item_type == "Movie" else "douban-tv"
