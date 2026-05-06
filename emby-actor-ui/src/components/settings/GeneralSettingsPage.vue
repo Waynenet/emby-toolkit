@@ -228,8 +228,15 @@
                       <n-form-item-grid-item label="显示缺失海报" path="proxy_show_missing_placeholders">
                          <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 m:2" label="合并显示位置" path="proxy_native_view_order">
+                        <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
+                          <n-radio value="before">原生在前</n-radio>
+                          <n-radio value="after">原生在后</n-radio>
+                        </n-radio-group>
+                      </n-form-item-grid-item>
                       
-                      <n-form-item-grid-item label="STRM直链缓存 (秒)" path="proxy_strm_cache_ttl">
+                      <n-form-item-grid-item span="1 m:2" label="STRM直链缓存 (秒)" path="proxy_strm_cache_ttl">
                         <n-input-group>
                           <n-input-number 
                             v-model:value="configModel.proxy_strm_cache_ttl" 
@@ -251,13 +258,6 @@
                         <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">为0则禁用缓存。遇到播放失败时可手动清空。</n-text>
                         </template>
-                      </n-form-item-grid-item>
-
-                      <n-form-item-grid-item span="1 m:2" label="合并显示位置" path="proxy_native_view_order">
-                        <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
-                          <n-radio value="before">原生在前</n-radio>
-                          <n-radio value="after">原生在后</n-radio>
-                        </n-radio-group>
                       </n-form-item-grid-item>
 
                       <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择合并原生库</n-divider></n-gi>
