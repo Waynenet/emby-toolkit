@@ -563,14 +563,20 @@ class MediaProcessor:
                         "Id": "pending",
                         "Name": details.get('title') or details.get('name'),
                         "OriginalTitle": details.get('original_title') or details.get('original_name'),
+                        "Type": item_type, # ★ 必须加上 Type，否则豆瓣匹配会失败
+                        "ProductionYear": (details.get('release_date') or details.get('first_air_date') or "")[:4],
                         "People": [],
                         "Genres": details.get('genres', [])
                     }
+
+                    # 调用豆瓣 API 获取演员表原始数据 (如果可用)，并传入核心处理函数进行翻译/去重/头像检查
+                    douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, details)
+
                     logger.info(f"  ➜ [实时监控] 启动演员表核心处理 (AI翻译/去重/头像检查)...")
                     final_processed_cast = self._process_cast_list(
                         tmdb_cast_people=authoritative_cast_source,
                         emby_cast_people=[],
-                        douban_cast_list=[],
+                        douban_cast_list=douban_cast_raw, # ★ 传入豆瓣数据
                         item_details_from_emby=dummy_emby_item,
                         cursor=cursor,
                         tmdb_api_key=self.tmdb_api_key,
@@ -1483,18 +1489,31 @@ class MediaProcessor:
         return None
 
     # --- 获取豆瓣数据（演员+评分） 封装了“优先本地缓存，失败则在线获取”的逻辑 ---
-    def _get_douban_data_with_local_cache(self, media_info: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+    def _fetch_douban_cast_data(self, media_info: Dict[str, Any], tmdb_data: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Optional[float]]:
         """
-        【V3 - 最终版】获取豆瓣数据（演员+评分）。优先本地缓存，失败则回退到功能完整的在线API路径。
-        返回: (演员列表, 豆瓣评分) 的元组。
+        获取豆瓣数据（演员+评分）。优先本地缓存，失败则回退到功能完整的在线API路径。
+        优先从 tmdb_data 提取 imdb_id 进行精准匹配。
         """
         # 1. 准备查找所需的信息
         provider_ids = media_info.get("ProviderIds", {})
         item_name = media_info.get("Name", "")
-        imdb_id = provider_ids.get("Imdb")
         douban_id_from_provider = provider_ids.get("Douban")
         item_type = media_info.get("Type")
-        item_year = str(media_info.get("ProductionYear", ""))
+
+        # 1. 优先从 TMDb 数据提取 IMDb ID 和年份
+        imdb_id = None
+        item_year = ""
+        if tmdb_data:
+            imdb_id = tmdb_data.get("external_ids", {}).get("imdb_id")
+            release_date = tmdb_data.get("release_date") or tmdb_data.get("first_air_date") or ""
+            if release_date:
+                item_year = release_date[:4]
+        
+        # 2. 兜底从 Emby 数据提取
+        if not imdb_id:
+            imdb_id = media_info.get("ProviderIds", {}).get("Imdb")
+        if not item_year:
+            item_year = str(media_info.get("ProductionYear", ""))
 
         # 2. 尝试从本地缓存查找
         douban_cache_dir_name = "douban-movies" if item_type == "Movie" else "douban-tv"
@@ -1521,7 +1540,7 @@ class MediaProcessor:
             return [], None
         
         # 3. 如果本地未找到，回退到功能完整的在线API路径
-        logger.info("  ➜ 未找到本地豆瓣缓存，将通过在线API获取演员信息。")
+        logger.info(f"  ➜ 未找到本地豆瓣缓存，准备通过豆瓣在线 API 获取演员信息 (IMDb: {imdb_id or '无'}, 年份: {item_year})...")
 
         # 3.1 匹配豆瓣ID和类型。现在 match_info 返回的结果是完全可信的。
         match_info_result = self.douban_api.match_info(
@@ -2081,7 +2100,7 @@ class MediaProcessor:
                     current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
                     emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
                     enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
-                    douban_cast_raw, _ = self._get_douban_data_with_local_cache(item_details_from_emby)
+                    douban_cast_raw, _ = self._fetch_douban_cast_data(item_details_from_emby, fresh_data)
 
                     # 调用核心处理器处理演员表
                     final_processed_cast = self._process_cast_list(
