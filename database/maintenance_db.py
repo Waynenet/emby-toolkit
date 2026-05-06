@@ -104,7 +104,7 @@ def get_stats_core() -> dict:
     """1. 核心头部数据 (极快)"""
     sql = """
     SELECT
-        (SELECT COUNT(*) FROM media_metadata WHERE item_type IN ('Movie', 'Series')) AS media_cached_total,
+        (SELECT COUNT(*) FROM media_metadata WHERE item_type IN ('Movie', 'Series')) AS media_cached_total
     """
     return _execute_single_row_query(sql)
 

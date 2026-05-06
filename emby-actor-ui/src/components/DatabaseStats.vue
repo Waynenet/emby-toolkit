@@ -33,7 +33,7 @@
       
       <!-- 右侧：小数据模块 -->
       <n-gi>
-        <n-grid cols="2 m:3" :x-gap="16" :y-gap="16" style="height: 100%;">
+        <n-grid cols="2" :x-gap="16" :y-gap="16" style="height: 100%;">
           <n-gi>
             <n-card :bordered="false" class="dashboard-card tint-green" style="height: 100%; justify-content: center;">
               <div class="mini-stat-box-content">
@@ -272,16 +272,31 @@ const fetchCore = async () => {
     const res = await axios.get('/api/database/stats/core');
     if (res.data.status === 'success') {
       Object.assign(stats.media_library, { cached_total: res.data.data.media_cached_total });
-      Object.assign(stats.system, { });
     }
   } catch (e) {} finally { loading.core = false; }
 };
+
 const fetchLibrary = async () => {
   loading.library = true;
   try {
     const res = await axios.get('/api/database/stats/library');
-    if (res.data.status === 'success') Object.assign(stats.media_library, res.data.data);
-  } catch (e) {} finally { loading.library = false; }
+    if (res.data.status === 'success') {
+      // 防止并发请求导致数据被覆盖：先提取 library 数据中可能为空的 cached_total
+      const { cached_total, ...otherLibraryData } = res.data.data;
+      
+      // 合并其他库数据
+      Object.assign(stats.media_library, otherLibraryData);
+      
+      // 只有当 library 接口确实返回了有效的缓存数时，才允许覆盖
+      if (cached_total !== undefined && cached_total !== null) {
+        stats.media_library.cached_total = cached_total;
+      }
+    }
+  } catch (e) {
+    console.error("获取媒体库数据失败", e);
+  } finally { 
+    loading.library = false; 
+  }
 };
 const fetchSystem = async () => {
   loading.system = true;
