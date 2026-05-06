@@ -562,4 +562,93 @@ body {
 .n-table tr:hover td {
   background: var(--glass-bg-hover) !important;
 }
+
+/* ==================== 7. 高级表格 (n-data-table) 毛玻璃化 ==================== */
+/* 强制穿透清除 Naive UI 高级表格自带的各种白底容器 */
+.n-data-table,
+.n-data-table-wrapper,
+.n-data-table-base-table {
+  background: transparent !important;
+  border-color: var(--glass-border) !important;
+}
+
+.n-data-table {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--glass-border) !important;
+  overflow: hidden;
+}
+
+.n-data-table .n-data-table-th {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid var(--glass-border) !important;
+  border-color: var(--glass-border) !important;
+  font-weight: bold;
+}
+
+.n-data-table .n-data-table-td {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid var(--glass-border) !important;
+  border-color: var(--glass-border) !important;
+}
+
+.n-data-table .n-data-table-tr:hover .n-data-table-td {
+  background-color: var(--glass-bg-hover) !important;
+}
+
+/* 表头的排序、过滤等功能按钮 */
+.n-data-table-th__sort, 
+.n-data-table-th__filter {
+  color: var(--text-primary) !important;
+}
+.n-data-table-th__sort:hover, 
+.n-data-table-th__filter:hover {
+  background: rgba(255, 255, 255, 0.2) !important;
+}
+
+/* ==================== 8. 分页器 (Pagination) 毛玻璃化 ==================== */
+.n-pagination .n-pagination-item {
+  background: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: var(--text-primary) !important;
+  transition: all 0.3s ease;
+}
+
+.n-pagination .n-pagination-item:hover {
+  background: var(--glass-bg-hover) !important;
+  border-color: rgba(255, 255, 255, 0.4) !important;
+}
+
+/* 当前选中页码高亮 */
+.n-pagination .n-pagination-item--active {
+  background: rgba(255, 255, 255, 0.2) !important;
+  border-color: rgba(255, 255, 255, 0.5) !important;
+  color: #ffffff !important;
+  font-weight: bold;
+}
+
+/* 如果分页器里有下拉选择框 (比如 10条/页) */
+.n-pagination .n-select .n-base-selection {
+  background: var(--glass-bg) !important;
+  border-color: var(--glass-border) !important;
+}
+
+/* ==================== 9. Tabs (标签页) 毛玻璃化 ==================== */
+.n-tabs-nav { 
+  background-color: transparent !important; 
+}
+.n-tabs-tab { 
+  color: var(--text-secondary) !important; 
+}
+.n-tabs-tab--active { 
+  color: var(--text-primary) !important; 
+  font-weight: 600; 
+}
+.n-tabs-bar { 
+  background-color: var(--text-primary) !important; 
+}
 </style>
