@@ -651,4 +651,45 @@ body {
 .n-tabs-bar { 
   background-color: var(--text-primary) !important; 
 }
+
+/* ==================== 10. 终极修复：交互组件变紫/卡色问题 ==================== */
+
+/* 1. 强行覆盖 Naive UI 默认的 transition: all，只对明确的属性做动画，防止浏览器插值计算卡在紫色 */
+.n-button,
+.n-switch,
+.n-radio-button,
+.n-checkbox,
+.n-input,
+.n-base-selection,
+.n-tag,
+.n-alert {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, opacity 0.3s ease, box-shadow 0.3s ease !important;
+}
+
+/* 2. 彻底禁用按钮点击时产生的波纹 (Ripple) 阴影层，防止产生紫色的幽灵边框 */
+.n-base-wave {
+  display: none !important;
+  animation: none !important;
+}
+.n-button::after,
+.n-radio-button::after {
+  box-shadow: none !important;
+}
+
+/* 3. 为 Primary (主操作) 按钮兜底，确保无论是日间还是夜间，它的基调始终是绿色系，不会被意外污染 */
+.n-button--primary-type {
+  background-color: #18a058 !important;
+  border-color: #18a058 !important;
+  color: #ffffff !important;
+}
+.n-button--primary-type:hover,
+.n-button--primary-type:focus {
+  background-color: #36ad6a !important;
+  border-color: #36ad6a !important;
+}
+
+/* 4. 确保 Switch 开关在激活状态下必定是绿色 */
+.n-switch.n-switch--active .n-switch__rail {
+  background-color: #18a058 !important;
+}
 </style>
