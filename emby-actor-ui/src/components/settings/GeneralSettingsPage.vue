@@ -75,11 +75,11 @@
                       <n-input-number v-model:value="configModel.max_episode_actors_to_process" :min="0" :step="1" placeholder="例如: 5"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">每集最多处理的演员数量，0代表不单独处理分集演员。</n-text></template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="智能截取视频图片" path="extract_thumb">
+                    <n-form-item-grid-item label="截取视频图片" path="extract_thumb">
                       <n-switch v-model:value="configModel.extract_thumb" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          智能从视频流中截取无黑边高清画面作为分集图或背景图。
+                          从视频流中截取高清画面作为分集图或背景图。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
@@ -604,7 +604,7 @@
                           </n-text>
                       </template>
                   </n-form-item>
-                  <n-form-item label="默认音轨/字幕配置">
+                  <n-form-item label="默认音轨/字幕">
                       <n-button
                           @click="openDefaultStreamConfig"
                           :type="configModel.p115_generate_mediainfo ? 'primary' : 'warning'"

@@ -2,6 +2,8 @@
 import os
 import json
 import time
+import shutil
+import subprocess
 import re
 import copy
 import random
@@ -4562,12 +4564,13 @@ class MediaProcessor:
     # --- 从 115 直链截取缩略图 ---
     def _extract_thumb_via_ffmpeg(self, video_path: str, thumb_save_path: str, ep_data: dict = None) -> bool:
         """
-        调用 FFmpeg 从 115 直链截取高质量分集缩略图 (极速版 + 智能硬件降级)
+        调用 FFmpeg 从 115 直链截取高质量分集缩略图。
+        【终极提速版】：
+        1. 杜比视界 P5：必须使用 zscale 进行色彩空间转换（解决绿毛怪）。
+        2. 普通 HDR / DV P7 P8：直接截图 + 极低性能消耗的饱和度补偿（解决轻微发灰）。
+        3. SDR：直接截图。
+        全程只执行 1 次 FFmpeg，拒绝二次重试和复杂的图像分析。
         """
-        import subprocess
-        import shutil
-        import re
-        
         if not shutil.which("ffmpeg"):
             logger.warning("  ➜ [视频截图] 容器内未安装 ffmpeg，无法截取分集图。")
             return False
@@ -4589,81 +4592,118 @@ class MediaProcessor:
             if not direct_url:
                 return False
 
-            # 3. 智能计算截图时间点
-            timestamp_sec = 600 
+            # 3. 读取媒体信息：时长 / 识别 DV P5 和 HDR
             duration_sec = 0
+            is_hdr = False
+            is_dovi_p5 = False
             
             if sha1:
                 try:
                     with get_central_db_connection() as conn:
                         with conn.cursor() as cursor:
-                            cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (sha1,))
+                            cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (str(sha1).upper(),))
                             row = cursor.fetchone()
                             if row and row['mediainfo_json']:
                                 mi = row['mediainfo_json']
-                                if isinstance(mi, list) and len(mi) > 0: mi = mi[0]
-                                ticks = mi.get("MediaSourceInfo", {}).get("RunTimeTicks", 0)
+                                if isinstance(mi, str): mi = json.loads(mi)
+                                if isinstance(mi, list) and mi: mi = mi[0]
+                                
+                                media_source = mi.get("MediaSourceInfo", {})
+                                ticks = media_source.get("RunTimeTicks", 0)
                                 if ticks > 0: duration_sec = ticks / 10000000
-                except Exception: pass
+                                
+                                streams = media_source.get("MediaStreams", [])
+                                v_stream = next((s for s in streams if s.get("Type") == "Video"), {})
+                                
+                                probe_text = str(v_stream).lower()
+                                
+                                # 精准识别 DV P5
+                                is_dovi_p5 = "doviprofile5" in probe_text or "profile 5" in probe_text or "p5" in probe_text
+                                # 识别普通 HDR
+                                is_hdr = "hdr" in probe_text or "smpte2084" in probe_text or "bt2020" in probe_text or "dolbyvision" in probe_text
+                except Exception:
+                    pass
             
+            # 文件名兜底识别
+            filename_upper = os.path.basename(str(video_path)).upper()
+            if not is_dovi_p5:
+                is_dovi_p5 = bool(re.search(r"(?:DV|DOVI|DOLBY[.\s_-]*VISION)[\.\s\-_]*(?:P5|PROFILE[.\s_-]*5)", filename_upper))
+            if not is_hdr:
+                is_hdr = bool(re.search(r"(HDR10|HDR|HLG|DV|DOVI|DOLBY[.\s_-]*VISION)", filename_upper))
+
+            # 4. 计算截图时间点
+            timestamp_sec = 600
             if duration_sec == 0 and ep_data:
                 runtime_min = ep_data.get("runtime")
-                if runtime_min and isinstance(runtime_min, (int, float)) and runtime_min > 0:
+                if isinstance(runtime_min, (int, float)) and runtime_min > 0:
                     duration_sec = runtime_min * 60
-                    
+
             if duration_sec > 0:
-                timestamp_sec = int(duration_sec * 0.3)
+                timestamp_sec = max(60, int(duration_sec * 0.3))
+                timestamp_sec = min(timestamp_sec, int(duration_sec - 10))
 
-            logger.info(f"  ➜ [视频截图] 正在截取视频画面 (时间点: {timestamp_sec}s) -> {os.path.basename(thumb_save_path)}")
+            logger.info(f"  ➜ [视频截图] 截取画面 (时间点: {timestamp_sec}s, HDR: {'是' if is_hdr else '否'}, DV P5: {'是' if is_dovi_p5 else '否'}) -> {os.path.basename(thumb_save_path)}")
 
             # =========================================================
-            # ★ 核心逻辑：定义基础滤镜与两种色彩映射方案
+            # ★ 5. 构建单次极速滤镜
             # =========================================================
-            # 基础滤镜：提取帧 -> 强制16:9缩放 -> 中心裁剪 (抛弃耗时的黑边探测)
-            base_vf = "thumbnail=24,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"
+            vf_filters = []
             
-            # 方案 A：GPU 硬件加速 (通杀 HDR10 和 杜比视界 P5)
-            hw_tonemap = "libplacebo=format=yuv420p:colorspace=bt709:color_primaries=bt709:color_trc=bt709:tonemapping=hable"
+            if is_dovi_p5:
+                # 只有遇到绿毛怪 (DV P5)，才动用耗时的 zscale 进行色彩空间转换
+                vf_filters.append(
+                    "zscale=t=linear:npl=100,format=gbrpf32le,"
+                    "tonemap=tonemap=hable:desat=0,"
+                    "zscale=p=bt709:t=bt709:m=bt709:r=tv"
+                )
+            elif is_hdr:
+                # 普通 HDR：不搞复杂的色调映射，直接用 eq 滤镜拉高 30% 饱和度和 10% 对比度
+                # 计算量几乎为 0，完美解决“轻微灰蒙蒙”的问题
+                vf_filters.append("eq=saturation=1.3:contrast=1.1")
+
+            # 统一缩放并转换为标准 8-bit SDR 格式
+            vf_filters.append("scale=640:360:force_original_aspect_ratio=increase,crop=640:360")
+            vf_filters.append("format=yuv420p")
             
-            # 方案 B：CPU 软件映射 (支持 HDR10，不支持杜比视界)
-            sw_tonemap = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+            vf_string = ",".join(vf_filters)
 
-            def run_ffmpeg(vf_string):
-                cmd = [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000",
-                    "-ss", str(timestamp_sec), "-i", str(direct_url),
-                    "-vf", vf_string, "-frames:v", "1", "-q:v", "2", "-y", thumb_save_path
-                ]
-                return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            # =========================================================
+            # ★ 6. 执行 FFmpeg (一击脱离)
+            # =========================================================
+            if os.path.exists(thumb_save_path):
+                os.remove(thumb_save_path)
 
-            # ---------------------------------------------------------
-            # 尝试 1：优先使用 GPU 硬件加速
-            # ---------------------------------------------------------
-            proc_hw = run_ffmpeg(f"{base_vf},{hw_tonemap}")
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-user_agent", "Mozilla/5.0",
+                "-rw_timeout", "15000000",
+                
+                # 提速核心：模糊 Seek，直接抓取最近的 I 帧
+                "-fflags", "+fastseek",
+                "-ss", str(timestamp_sec),
+                "-i", str(direct_url),
+                
+                "-map", "0:v:0",
+                "-an", "-sn", "-dn",
+                
+                "-vf", vf_string,
+                "-frames:v", "1",
+                "-q:v", "5", # 适当降低质量参数，缩略图看不出区别，但编码更快
+                "-y",
+                thumb_save_path
+            ]
             
-            if proc_hw.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
-                return True
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 
-            # ---------------------------------------------------------
-            # 尝试 2：硬件加速失败，智能降级到 CPU
-            # ---------------------------------------------------------
-            err_msg = (proc_hw.stderr.decode('utf-8', errors='ignore') or "").strip()
-            logger.debug(f"  ➜ [视频截图] GPU 硬件加速不可用，准备降级到 CPU。原因: {err_msg[:100]}")
-
-            # 杜比视界保护：如果降级到 CPU，且是杜比视界，直接放弃，防止绿毛怪
-            if re.search(r'(?i)(dovi|dv|profile\s*5)', video_path):
-                logger.warning(f"  ➜ [视频截图] 检测到杜比视界视频，由于 GPU 加速不可用，跳过 CPU 截图以避免产生偏色(绿毛怪)。")
-                return False
-
-            logger.info("  ➜ [视频截图] 正在使用 CPU (zscale) 重新截取...")
-            proc_sw = run_ffmpeg(f"{base_vf},{sw_tonemap}")
-
-            if proc_sw.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
+            if proc.returncode == 0 and os.path.exists(thumb_save_path) and os.path.getsize(thumb_save_path) > 0:
                 return True
             else:
-                err_msg_sw = (proc_sw.stderr.decode('utf-8', errors='ignore') or "").strip()
-                logger.debug(f"  ➜ [视频截图] CPU 截图也失败了: {err_msg_sw}")
+                if os.path.exists(thumb_save_path):
+                    os.remove(thumb_save_path)
+                err_msg = (proc.stderr.decode('utf-8', errors='ignore') or "").strip()
+                logger.debug(f"  ➜ [视频截图] 提取画面失败: {err_msg}")
                 return False
 
         except subprocess.TimeoutExpired:
@@ -4691,7 +4731,6 @@ class MediaProcessor:
             media_path = item_details.get("Path")
             episode_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
             
-            import re
             series_root_dir = episode_dir
             # 如果当前目录名是 Season XX 或 Specials，说明在季文件夹内，根目录需要往上一级
             if self._extract_season_from_path_or_text(os.path.basename(episode_dir)) is not None:
@@ -4753,7 +4792,7 @@ class MediaProcessor:
                 downloads.append((selected_backdrop, fanart_path, False))
                 downloads.append((selected_backdrop, landscape_path, False))
             else:
-                # ★ 核心拓展：TMDb 没背景图，且是电影，触发 FFmpeg 智能截图！
+                # ★ 核心拓展：TMDb 没背景图，且是电影，触发 FFmpeg 视频截图！
                 if item_type == "Movie" and enable_ffmpeg_thumb:
                     if not os.path.exists(landscape_path) and not os.path.exists(fanart_path):
                         if media_path and os.path.isfile(media_path):
@@ -4777,7 +4816,6 @@ class MediaProcessor:
                 
                 # ★ 核心修复：以本地文件为基准进行遍历，不再受限于 TMDb 是否有该集数据
                 if item_details and item_details.get("Path") and os.path.isdir(series_root_dir):
-                    import re
                     valid_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.strm'}
                     
                     # 提前提取 TMDb 的分集数据字典（如果有的话）
@@ -4838,25 +4876,38 @@ class MediaProcessor:
             logger.info(f"  ➜ {log_prefix} 共下载 {success_count} 张图片。")
 
             # =========================================================
-            # ★ 6. 执行 FFmpeg 截图任务 (串行执行，防止 115 封控或 CPU 爆炸)
+            # ★ 6. 执行 FFmpeg 截图任务 (并发执行，极大提升整季处理速度)
             # =========================================================
             if ffmpeg_thumb_tasks:
-                logger.info(f"  ➜ {log_prefix} 发现 {len(ffmpeg_thumb_tasks)} 个媒体缺失 TMDb 图片，准备调用 FFmpeg 智能截图...")
+                logger.info(f"  ➜ {log_prefix} 发现 {len(ffmpeg_thumb_tasks)} 个媒体缺失 TMDb 图片，准备调用 FFmpeg 视频截图...")
                 ffmpeg_success_count = 0
-                for video_path, thumb_path, ep_data in ffmpeg_thumb_tasks:
-                    if self._extract_thumb_via_ffmpeg(video_path, thumb_path, ep_data):
-                        ffmpeg_success_count += 1
-                        
-                        # ★ 拓展逻辑：如果是电影截取了 landscape.jpg，顺手复制一份 fanart.jpg 给 Emby 备用
-                        if item_type == "Movie" and thumb_path.endswith("landscape.jpg"):
-                            fanart_save_path = os.path.join(os.path.dirname(thumb_path), "fanart.jpg")
-                            if not os.path.exists(fanart_save_path):
-                                try:
-                                    import shutil
-                                    shutil.copy2(thumb_path, fanart_save_path)
-                                except Exception:
-                                    pass
-                                    
+                
+                # 定义单任务包装器
+                def _do_ffmpeg_task(task):
+                    v_path, t_path, e_data = task
+                    success = self._extract_thumb_via_ffmpeg(v_path, t_path, e_data)
+                    return success, v_path, t_path
+
+                # 使用线程池并发执行，最大并发数设为 4 (避免触发 115 风控或 CPU 满载)
+                import concurrent.futures
+                max_workers = min(4, len(ffmpeg_thumb_tasks))
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(_do_ffmpeg_task, task) for task in ffmpeg_thumb_tasks]
+                    for future in concurrent.futures.as_completed(futures):
+                        success, video_path, thumb_path = future.result()
+                        if success:
+                            ffmpeg_success_count += 1
+                            
+                            # ★ 拓展逻辑：如果是电影截取了 landscape.jpg，顺手复制一份 fanart.jpg 给 Emby 备用
+                            if item_type == "Movie" and thumb_path.endswith("landscape.jpg"):
+                                fanart_save_path = os.path.join(os.path.dirname(thumb_path), "fanart.jpg")
+                                if not os.path.exists(fanart_save_path):
+                                    try:
+                                        shutil.copy2(thumb_path, fanart_save_path)
+                                    except Exception:
+                                        pass
+                                        
                 logger.info(f"  ➜ {log_prefix} FFmpeg 截图完成，成功生成 {ffmpeg_success_count} 张高清缩略图。")
 
             return True
@@ -4891,7 +4942,6 @@ class MediaProcessor:
             target_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
             
             # 智能判断：如果是剧集，且当前在 Season 文件夹内，需要退回上一级根目录
-            import re
             if re.match(r'^(Season|S)\s*\d+|Specials', os.path.basename(target_dir), re.IGNORECASE):
                 target_dir = os.path.dirname(target_dir)
 
@@ -5077,7 +5127,6 @@ class MediaProcessor:
             return
 
         episode_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
-        import re
         series_root_dir = episode_dir
         if self._extract_season_from_path_or_text(os.path.basename(episode_dir)) is not None:
             series_root_dir = os.path.dirname(episode_dir)
@@ -5090,7 +5139,6 @@ class MediaProcessor:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         old_content = f.read()
                     
-                    import re
                     def _get_tag_text(xml_str, tag):
                         match = re.search(f'<{tag}[^>]*>(.*?)</{tag}>', xml_str, re.IGNORECASE | re.DOTALL)
                         return match.group(1).strip() if match else ""
