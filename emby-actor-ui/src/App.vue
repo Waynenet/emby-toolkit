@@ -581,7 +581,8 @@ body {
   overflow: hidden;
 }
 
-.n-data-table .n-data-table-th {
+.n-data-table .n-data-table-th,
+.n-data-table .n-data-table-thead {
   background: rgba(255, 255, 255, 0.08) !important;
   color: var(--text-primary) !important;
   border-bottom: 1px solid var(--glass-border) !important;
