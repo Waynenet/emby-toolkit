@@ -326,6 +326,7 @@
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_episode_overview">分集简介</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_vector">生成媒体向量</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_recognition">辅助识别</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_joke_fallback">无简介小笑话占位</n-checkbox></n-gi>
                           </n-grid>
                         </n-form-item-grid-item>
                       </n-grid>
@@ -638,12 +639,13 @@
     </n-alert>
     <n-spin :show="loadingPrompts">
       <n-tabs type="segment" animated size="small">
-        <n-tab-pane name="fast_mode" tab="快速"><n-input v-model:value="promptsModel.fast_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
-        <n-tab-pane name="quality_mode" tab="顾问"><n-input v-model:value="promptsModel.quality_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
-        <n-tab-pane name="overview_translation" tab="简介"><n-input v-model:value="promptsModel.overview_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {title}, {overview}</n-text></n-tab-pane>
-        <n-tab-pane name="title_translation" tab="标题"><n-input v-model:value="promptsModel.title_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {media_type}, {title}, {year}</n-text></n-tab-pane>
-        <n-tab-pane name="transliterate_mode" tab="音译"><n-input v-model:value="promptsModel.transliterate_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
-        <n-tab-pane name="filename_parsing" tab="识别"><n-input v-model:value="promptsModel.filename_parsing" type="textarea" :autosize="{minRows:10, maxRows:20}" style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="fast_mode" tab="快速"><n-input v-model:value="promptsModel.fast_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="quality_mode" tab="顾问"><n-input v-model:value="promptsModel.quality_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="overview_translation" tab="简介"><n-input v-model:value="promptsModel.overview_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {title}, {overview}</n-text></n-tab-pane>
+        <n-tab-pane name="title_translation" tab="标题"><n-input v-model:value="promptsModel.title_translation" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/><n-text depth="3" style="font-size: 12px;">变量: {media_type}, {title}, {year}</n-text></n-tab-pane>
+        <n-tab-pane name="transliterate_mode" tab="音译"><n-input v-model:value="promptsModel.transliterate_mode" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="filename_parsing" tab="识别"><n-input v-model:value="promptsModel.filename_parsing" type="textarea" :autosize="{minRows:10, maxRows:20}" placeholder="输入提示词..." style="font-family: monospace;"/></n-tab-pane>
+        <n-tab-pane name="batch_joke_fallback" tab="占位简介"><n-input v-model:value="promptsModel.batch_joke_fallback" type="textarea" :autosize="{ minRows: 10, maxRows: 20 }" placeholder="输入提示词..." style="font-family: monospace;"/></n-tab-pane>
       </n-tabs>
     </n-spin>
     <template #action>
@@ -696,7 +698,8 @@ const promptsModel = ref({
   overview_translation: '',
   title_translation: '',
   transliterate_mode: '',
-  filename_parsing: ''
+  filename_parsing: '',
+  batch_joke_fallback: ''
 });
 
 const tableInfo = {
