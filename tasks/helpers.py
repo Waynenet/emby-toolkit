@@ -1560,17 +1560,19 @@ def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[
 
     return payload
 
+# 1. 在参数中新增 douban_cast_data
 def translate_tmdb_metadata_recursively(
     item_type: str, 
     tmdb_data: Dict[str, Any], 
     ai_translator: Any, 
     item_name: str = "",
     tmdb_api_key: str = None,
-    config: dict = None
+    config: dict = None,
+    douban_cast_data: list = None  # <--- 新增
 ):
     """
-    【大一统翻译引擎】递归翻译 TMDb 数据的标题、简介 (Overview)、标语 (Tagline)、演员名 (Name) 和 角色名 (Role)。
-    在最早期完成清洗、截断和翻译，供后续流水线直接使用完美数据。
+    【大一统翻译引擎】递归翻译 TMDb 数据的标题、简介、标语、演员名和角色名。
+    加入豆瓣字典拦截：优先使用豆瓣的官方中文数据，剥夺 AI 乱翻译的机会。
     """
     if not ai_translator or not tmdb_data or not config:
         return
@@ -1600,9 +1602,24 @@ def translate_tmdb_metadata_recursively(
     translation_mode = config.get(constants.CONFIG_OPTION_AI_TRANSLATION_MODE, "fast")
 
     # 收集器
-    pending_media = {} # 存储待翻媒体信息: { tmdb_id: {ref, title, overview, tagline} }
-    actor_terms = {'person': set(), 'role': set()} # 去重后的词条
-    actor_refs = [] # 记录需要回填的字典引用: [(dict, key, orig_text, type)]
+    pending_media = {} 
+    actor_terms = {'person': set(), 'role': set()}
+    actor_refs = []
+
+    # =================================================================
+    # ★★★ 新增：构建豆瓣权威字典 ★★★
+    # =================================================================
+    douban_actor_map = {}
+    if douban_cast_data:
+        for d in douban_cast_data:
+            en_name = (d.get('OriginalName') or '').lower().strip()
+            zh_name = (d.get('Name') or '').strip()
+            role = (d.get('Role') or '').strip()
+            
+            if en_name:
+                douban_actor_map[en_name] = {'name': zh_name, 'role': role}
+            if zh_name: # 兼容：如果 TMDb 拿到的本身就是中文名，也能匹配上
+                douban_actor_map[zh_name.lower()] = {'name': zh_name, 'role': role}
 
     # --- 1. 媒体与演员遍历收集阶段 ---
     def _collect_single_item(data_dict: Dict, specific_item_type: str):
@@ -1614,9 +1631,7 @@ def translate_tmdb_metadata_recursively(
         title_key = 'title' if specific_item_type == 'Movie' else 'name'
         local_info = media_db.get_local_translation_info(tmdb_id_str, specific_item_type)
         
-        needs_title = False
-        needs_overview = False
-        needs_tagline = False
+        needs_title, needs_overview, needs_tagline = False, False, False
         
         # A1. 简介 (Overview)
         is_ep = (specific_item_type == 'Episode')
@@ -1630,11 +1645,9 @@ def translate_tmdb_metadata_recursively(
                     if not overview and tmdb_api_key:
                         try:
                             if specific_item_type == 'Movie':
-                                en_data = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                                data_dict['overview'] = en_data.get('overview', '')
+                                data_dict['overview'] = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('overview', '')
                             elif specific_item_type == 'Series':
-                                en_data = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                                data_dict['overview'] = en_data.get('overview', '')
+                                data_dict['overview'] = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('overview', '')
                         except Exception: pass
                     if data_dict.get('overview'):
                         needs_overview = True
@@ -1658,11 +1671,9 @@ def translate_tmdb_metadata_recursively(
                 if not tagline and tmdb_api_key:
                     try:
                         if specific_item_type == 'Movie':
-                            en_data = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                            data_dict['tagline'] = en_data.get('tagline', '')
+                            data_dict['tagline'] = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('tagline', '')
                         elif specific_item_type == 'Series':
-                            en_data = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US")
-                            data_dict['tagline'] = en_data.get('tagline', '')
+                            data_dict['tagline'] = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('tagline', '')
                     except Exception: pass
                 if data_dict.get('tagline'):
                     needs_tagline = True
@@ -1670,8 +1681,7 @@ def translate_tmdb_metadata_recursively(
 
         if needs_title or needs_overview or needs_tagline:
             pending_media[tmdb_id_str] = {
-                "type": specific_item_type,
-                "title_key": title_key,
+                "type": specific_item_type, "title_key": title_key,
                 "title": data_dict.get(title_key) if needs_title else None,
                 "overview": data_dict.get('overview') if needs_overview else None,
                 "tagline": data_dict.get('tagline') if needs_tagline else None,
@@ -1685,7 +1695,6 @@ def translate_tmdb_metadata_recursively(
         cast_list = credits_dict['cast']
         stats['original_cast_count'] += len(cast_list)
 
-        # 截断逻辑
         if remove_no_avatar:
             with_pic = [a for a in cast_list if a.get('profile_path')]
             no_pic = [a for a in cast_list if not a.get('profile_path')]
@@ -1701,6 +1710,22 @@ def translate_tmdb_metadata_recursively(
         # 收集翻译词条
         if translate_role_enabled:
             for actor in cast_list:
+                orig_name = actor.get('name', '')
+                
+                # =========================================================
+                # ★★★ 豆瓣防线：在提交AI前，先看豆瓣有没有翻译 ★★★
+                # =========================================================
+                if douban_actor_map and orig_name:
+                    d_match = douban_actor_map.get(orig_name.lower().strip())
+                    if d_match:
+                        # 注入中文名字
+                        if d_match['name'] and utils.contains_chinese(d_match['name']):
+                            actor['name'] = d_match['name']
+                        # 注入中文角色 (如果 TMDb 有角色占位的话，或者强制覆盖)
+                        if d_match['role'] and utils.contains_chinese(d_match['role']):
+                            actor['character'] = d_match['role']
+
+                # --- 豆瓣处理完后，如果还不是中文，才丢给 AI ---
                 name = actor.get('name', '')
                 if name and not utils.contains_chinese(name):
                     actor_terms['person'].add(name)
@@ -1709,7 +1734,7 @@ def translate_tmdb_metadata_recursively(
                 role = actor.get('character', '')
                 if role:
                     cleaned_role = utils.clean_character_name_static(role)
-                    actor['character'] = cleaned_role # 提前注入清洗后的英文
+                    actor['character'] = cleaned_role 
                     if not utils.contains_chinese(cleaned_role):
                         actor_terms['role'].add(cleaned_role)
                         actor_refs.append((actor, 'character', cleaned_role, 'role'))
@@ -1727,16 +1752,14 @@ def translate_tmdb_metadata_recursively(
         for ep in episodes_list:
             _collect_single_item(ep, 'Episode')
 
-    # 更新演员待翻统计
     stats['person_pending_count'] = len(actor_terms['person'])
     stats['role_pending_count'] = len(actor_terms['role'])
 
     # --- 2. AI 批量翻译与回填阶段 ---
     BATCH_SIZE = 20
     
-    # [A] 处理媒体信息 (Title/Overview/Tagline)
+    # [A] 处理媒体信息
     if pending_media:
-        # 1. 翻译简介
         overviews_to_translate = {k: v["overview"] for k, v in pending_media.items() if v["overview"]}
         if overviews_to_translate:
             items_list = list(overviews_to_translate.items())
@@ -1748,7 +1771,6 @@ def translate_tmdb_metadata_recursively(
                         pending_media[tid]["ref"]['overview'] = trans_text
                         stats['overview_needs_translation'] += 1
 
-        # 2. 翻译标语
         taglines_to_translate = {k: v["tagline"] for k, v in pending_media.items() if v["tagline"]}
         if taglines_to_translate:
             items_list = list(taglines_to_translate.items())
@@ -1760,7 +1782,6 @@ def translate_tmdb_metadata_recursively(
                         pending_media[tid]["ref"]['tagline'] = trans_text
                         stats['tagline_needs_translation'] += 1
 
-        # 3. 翻译标题
         titles_to_translate = {k: v["title"] for k, v in pending_media.items() if v["title"]}
         if titles_to_translate:
             items_list = list(titles_to_translate.items())
@@ -1773,16 +1794,17 @@ def translate_tmdb_metadata_recursively(
                         pending_media[tid]["ref"][title_key] = trans_text
                         stats['title_needs_translation'] += 1
 
-    # [B] 处理演员信息 (Names/Roles)
+    # [B] 处理演员信息
     if translate_role_enabled and (actor_terms['person'] or actor_terms['role']):
-        with get_db_connection() as conn: 
+        from database.connection import get_db_connection
+        from database.actor_db import ActorDBManager
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             actor_db = ActorDBManager()
             
             final_actor_translation_map = {}
             api_submit_list = []
 
-            # 1. 查缓存
             all_actor_terms = list(actor_terms['person'].union(actor_terms['role']))
             for term in all_actor_terms:
                 cached = actor_db.get_translation_from_db(cursor, term)
@@ -1795,14 +1817,12 @@ def translate_tmdb_metadata_recursively(
                     if term in actor_terms['person']: stats['person_ai_calls'] += 1
                     if term in actor_terms['role']: stats['role_ai_calls'] += 1
 
-            # 2. 调 AI 并存缓存
             if api_submit_list:
                 api_results = ai_translator.batch_translate(api_submit_list, mode=translation_mode, title=item_name)
                 for term, translated in api_results.items():
                     final_actor_translation_map[term] = translated
                     actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
 
-            # 3. 回填至原始树
             for actor_dict, field_key, orig_text, t_type in actor_refs:
                 if orig_text in final_actor_translation_map:
                     actor_dict[field_key] = final_actor_translation_map[orig_text]
@@ -1815,8 +1835,8 @@ def translate_tmdb_metadata_recursively(
     if total_pending > 0 or stats['original_cast_count'] > 0:
         logger.info("  ➜ [AI翻译引擎] 翻译统计汇总")
         logger.info(
-            f"  ➜ 演员节点: 原始 {stats['original_cast_count']} 人 → "
-            f"最终保留 {stats['truncated_cast_count']} 人（含剧/季/集）"
+            f"  ➜ 演员节点: 原始 {stats['original_cast_count']} 人次 → "
+            f"截断保留 {stats['truncated_cast_count']} 人次（含主剧/分季/分集）"
         )
         logger.info(
             f"  ➜ 待翻词条: 标题 {stats['title_pending_count']} | "

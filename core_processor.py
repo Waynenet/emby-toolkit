@@ -526,22 +526,38 @@ class MediaProcessor:
                             details["name"] = original_title
                             if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
                                 aggregated_tmdb_data["series_details"]["name"] = original_title
-                
+
+                # =================================================================
+                # ★★★ 提前获取豆瓣数据，充当免费权威翻译字典 ★★★
+                # =================================================================
+                douban_cast_raw = []
+                try:
+                    dummy_emby_item = {
+                        "Id": "pending",
+                        "Name": current_title or original_title,
+                        "Type": item_type,
+                        "ProductionYear": (details.get('release_date') or details.get('first_air_date') or "")[:4],
+                        "ProviderIds": {"Tmdb": tmdb_id}
+                    }
+                    douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, details)
+                except Exception as e:
+                    logger.warning(f"  ➜ [提前拦截] 获取豆瓣数据失败: {e}")
+
                 # =================================================================
                 # ★★★ 大一统 AI 翻译引擎 (直接作用于原始数据) ★★★
                 # =================================================================
                 if self.ai_translator:
                     from tasks.helpers import translate_tmdb_metadata_recursively
-                    # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
                     
                     translate_tmdb_metadata_recursively(
                         item_type=item_type,
                         tmdb_data=target_tmdb_data,
                         ai_translator=self.ai_translator,
-                        item_name=current_title or original_title, # 使用清理后的标题作为日志名
+                        item_name=current_title or original_title, 
                         tmdb_api_key=self.tmdb_api_key,
-                        config=self.config
+                        config=self.config,
+                        douban_cast_data=douban_cast_raw  # ★ 传入豆瓣字典
                     )
 
                 # 准备演员源数据
@@ -559,15 +575,18 @@ class MediaProcessor:
 
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    dummy_emby_item = {
-                        "Id": "pending",
-                        "Name": details.get('title') or details.get('name'),
-                        "OriginalTitle": details.get('original_title') or details.get('original_name'),
-                        "Type": item_type, # ★ 必须加上 Type，否则豆瓣匹配会失败
-                        "ProductionYear": (details.get('release_date') or details.get('first_air_date') or "")[:4],
-                        "People": [],
-                        "Genres": details.get('genres', [])
-                    }
+                    # ★ 注意这里：不再重复请求，直接使用刚才拿到的 douban_cast_raw
+                    # dummy_emby_item 也复用上面的
+                    logger.info(f"  ➜ [实时监控] 启动演员表核心处理 (AI翻译/去重/头像检查)...")
+                    final_processed_cast = self._process_cast_list(
+                        tmdb_cast_people=authoritative_cast_source,
+                        emby_cast_people=[],
+                        douban_cast_list=douban_cast_raw, # ★ 复用
+                        item_details_from_emby=dummy_emby_item,
+                        cursor=cursor,
+                        tmdb_api_key=self.tmdb_api_key,
+                        stop_event=None
+                    )
 
                     # 调用豆瓣 API 获取演员表原始数据 (如果可用)，并传入核心处理函数进行翻译/去重/头像检查
                     douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, details)
@@ -1894,11 +1913,19 @@ class MediaProcessor:
                                 aggregated_tmdb_data["series_details"]["name"] = original_title
 
                 # =================================================================
-                # ★★★ 核心修复：大一统 AI 翻译引擎 (必须在构建骨架前，直接作用于原始数据) ★★★
+                # ★★★ 提前获取豆瓣数据，充当免费权威翻译字典 ★★★
+                # =================================================================
+                douban_cast_raw = []
+                if fresh_data:
+                    dummy_emby_item = item_details_from_emby.copy()
+                    dummy_emby_item["Name"] = current_title or original_title or item_details_from_emby.get("Name")
+                    douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, fresh_data)
+
+                # =================================================================
+                # ★★★ 大一统 AI 翻译引擎 (直接作用于原始数据) ★★★
                 # =================================================================
                 if self.ai_translator:
                     from tasks.helpers import translate_tmdb_metadata_recursively
-                    # 针对剧集，传入完整的聚合数据；针对电影，传入单体数据
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
                     
                     translate_tmdb_metadata_recursively(
@@ -1907,7 +1934,8 @@ class MediaProcessor:
                         ai_translator=self.ai_translator,
                         item_name=item_name_for_log,
                         tmdb_api_key=self.tmdb_api_key,
-                        config=self.config
+                        config=self.config,
+                        douban_cast_data=douban_cast_raw  # ★ 传入豆瓣字典
                     )
 
             # 4. 填充骨架 (Data Mapping)
@@ -2101,7 +2129,6 @@ class MediaProcessor:
                     current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
                     emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
                     enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
-                    douban_cast_raw, _ = self._fetch_douban_cast_data(item_details_from_emby, fresh_data)
 
                     # 调用核心处理器处理演员表
                     final_processed_cast = self._process_cast_list(
