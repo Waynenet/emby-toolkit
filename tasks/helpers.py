@@ -1568,11 +1568,12 @@ def translate_tmdb_metadata_recursively(
     item_name: str = "",
     tmdb_api_key: str = None,
     config: dict = None,
-    douban_cast_data: list = None  # <--- 新增
+    douban_cast_data: list = None
 ):
     """
     【大一统翻译引擎】递归翻译 TMDb 数据的标题、简介、标语、演员名和角色名。
     加入豆瓣字典拦截：优先使用豆瓣的官方中文数据，剥夺 AI 乱翻译的机会。
+    加入智能兜底：如果豆瓣角色为"演员"，则交给 AI 翻译；若 AI 翻译失败(仍为全英文)，则使用"演员"兜底。
     """
     if not ai_translator or not tmdb_data or not config:
         return
@@ -1607,7 +1608,7 @@ def translate_tmdb_metadata_recursively(
     actor_refs = []
 
     # =================================================================
-    # ★★★ 新增：构建豆瓣权威字典 ★★★
+    # ★★★ 构建豆瓣权威字典 ★★★
     # =================================================================
     douban_actor_map = {}
     if douban_cast_data:
@@ -1618,7 +1619,7 @@ def translate_tmdb_metadata_recursively(
             
             if en_name:
                 douban_actor_map[en_name] = {'name': zh_name, 'role': role}
-            if zh_name: # 兼容：如果 TMDb 拿到的本身就是中文名，也能匹配上
+            if zh_name:
                 douban_actor_map[zh_name.lower()] = {'name': zh_name, 'role': role}
 
     # --- 1. 媒体与演员遍历收集阶段 ---
@@ -1713,17 +1714,21 @@ def translate_tmdb_metadata_recursively(
                 orig_name = actor.get('name', '')
                 
                 # =========================================================
-                # ★★★ 豆瓣防线：在提交AI前，先看豆瓣有没有翻译 ★★★
+                # ★★★ 豆瓣防线 & 智能兜底 ★★★
                 # =========================================================
                 if douban_actor_map and orig_name:
                     d_match = douban_actor_map.get(orig_name.lower().strip())
                     if d_match:
-                        # 注入中文名字
                         if d_match['name'] and utils.contains_chinese(d_match['name']):
                             actor['name'] = d_match['name']
-                        # 注入中文角色 (如果 TMDb 有角色占位的话，或者强制覆盖)
-                        if d_match['role'] and utils.contains_chinese(d_match['role']):
-                            actor['character'] = d_match['role']
+                        
+                        d_role = d_match.get('role', '').strip()
+                        if d_role and utils.contains_chinese(d_role):
+                            if d_role == "演员":
+                                # 记下豆瓣给的保底词汇，先不覆盖，给 AI 一个翻译原英文的机会
+                                actor['_douban_fallback_role'] = "演员"
+                            else:
+                                actor['character'] = d_role
 
                 # --- 豆瓣处理完后，如果还不是中文，才丢给 AI ---
                 name = actor.get('name', '')
@@ -1823,9 +1828,23 @@ def translate_tmdb_metadata_recursively(
                     final_actor_translation_map[term] = translated
                     actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
 
+            # =========================================================
+            # ★★★ 智能回填与兜底判断 ★★★
+            # =========================================================
             for actor_dict, field_key, orig_text, t_type in actor_refs:
                 if orig_text in final_actor_translation_map:
-                    actor_dict[field_key] = final_actor_translation_map[orig_text]
+                    translated_text = final_actor_translation_map[orig_text]
+                    
+                    # 如果是角色字段，且翻译后依然不包含中文 (AI翻译失败)
+                    if t_type == 'role' and not utils.contains_chinese(translated_text):
+                        fallback = actor_dict.get('_douban_fallback_role')
+                        if fallback:
+                            translated_text = fallback # 启用豆瓣的 "演员" 兜底
+                            
+                    actor_dict[field_key] = translated_text
+                    
+                # 无论怎样，一定要清理掉临时字段，防止影响 JSON 结构
+                actor_dict.pop('_douban_fallback_role', None)
 
     # --- 3. 统计汇总日志输出 ---
     total_pending = (
@@ -1835,8 +1854,8 @@ def translate_tmdb_metadata_recursively(
     if total_pending > 0 or stats['original_cast_count'] > 0:
         logger.info("  ➜ [AI翻译引擎] 翻译统计汇总")
         logger.info(
-            f"  ➜ 演员节点: 原始 {stats['original_cast_count']} 人次 → "
-            f"截断保留 {stats['truncated_cast_count']} 人次（含主剧/分季/分集）"
+            f"  ➜ 演员节点: 原始 {stats['original_cast_count']} 人 → "
+            f"最终保留 {stats['truncated_cast_count']} 人（含剧/季/集）"
         )
         logger.info(
             f"  ➜ 待翻词条: 标题 {stats['title_pending_count']} | "
