@@ -649,7 +649,8 @@ body {
   color: var(--text-primary) !important; 
   font-weight: 600; 
 }
-.n-tabs-bar { 
+.n-tabs-bar,
+.n-tabs-rail { 
   background-color: var(--text-primary) !important; 
 }
 
