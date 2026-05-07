@@ -13,7 +13,7 @@ from database import settings_db, connection, request_db, media_db
 from ai_translator import AITranslator
 import utils
 import constants
-from database.connection import get_central_db_connection
+from database.connection import get_db_connection
 from database.actor_db import ActorDBManager
 
 logger = logging.getLogger(__name__)
@@ -1775,7 +1775,7 @@ def translate_tmdb_metadata_recursively(
 
     # [B] 处理演员信息 (Names/Roles)
     if translate_role_enabled and (actor_terms['person'] or actor_terms['role']):
-        with get_central_db_connection() as conn:
+        with get_db_connection() as conn
             cursor = conn.cursor()
             actor_db = ActorDBManager()
             
