@@ -127,6 +127,35 @@ class AITranslator:
             logger.error(f"{self.provider.capitalize()} client 初始化失败: {e}")
             raise
 
+    def _normalize_translation_result(self, raw_result: Any, original_texts: List[str]) -> Dict[str, str]:
+        """
+        将 AI 返回的各种奇葩格式强制归一化为标准的 Dict[str, str]
+        """
+        if not raw_result:
+            return {}
+        
+        # 1. 如果 AI 乖乖返回了字典
+        if isinstance(raw_result, dict):
+            # 防御：有些 AI 喜欢包一层，比如 {"translations": {"John": "约翰"}} 或 {"result": ["约翰", "史密斯"]}
+            if len(raw_result) == 1:
+                first_val = list(raw_result.values())[0]
+                if isinstance(first_val, dict):
+                    return first_val
+                elif isinstance(first_val, list) and len(first_val) == len(original_texts):
+                    return {original_texts[i]: str(first_val[i]) for i in range(len(original_texts))}
+            return raw_result
+            
+        # 2. 如果 AI 脑抽返回了列表 ["约翰", "史密斯"]
+        if isinstance(raw_result, list):
+            if len(raw_result) == len(original_texts):
+                # 将原文和译文打包成字典
+                return {original_texts[i]: str(raw_result[i]) for i in range(len(original_texts))}
+            else:
+                logger.error(f"  ➜ AI返回的列表长度({len(raw_result)})与原文长度({len(original_texts)})不一致！已丢弃该批次。")
+                return {}
+                
+        return {}
+
     def translate(self, text: str) -> Optional[str]:
         if not text or not text.strip():
             return text
@@ -541,7 +570,8 @@ class AITranslator:
                 timeout=300
             )
             response_content = chat_completion.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [翻译模式-OpenAI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -563,7 +593,8 @@ class AITranslator:
                 timeout=300
             )
             response_content = chat_completion.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [顾问模式-OpenAI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -584,7 +615,8 @@ class AITranslator:
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [翻译模式-智谱AI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -605,7 +637,8 @@ class AITranslator:
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [顾问模式-智谱AI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -627,7 +660,8 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            return _safe_json_loads(response.text) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [翻译模式-Gemini] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -649,7 +683,8 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            return _safe_json_loads(response.text) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [顾问模式-Gemini] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -671,7 +706,8 @@ class AITranslator:
                 timeout=300
             )
             response_content = chat_completion.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [音译模式-OpenAI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -692,7 +728,8 @@ class AITranslator:
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
-            return _safe_json_loads(response_content) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [音译模式-智谱AI] 翻译时发生错误: {e}", exc_info=True)
             return {}
@@ -714,7 +751,8 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            return _safe_json_loads(response.text) or {}
+            raw_result = _safe_json_loads(response_content)
+            return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [音译模式-Gemini] 翻译时发生错误: {e}", exc_info=True)
             return {}
