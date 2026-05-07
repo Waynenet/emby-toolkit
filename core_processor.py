@@ -2127,8 +2127,8 @@ class MediaProcessor:
                 jokes_to_generate = {}
 
                 # 1. 检查主干 (电影/剧集主简介)
-                if not formatted_metadata.get("overview"):
-                    jokes_to_generate["main"] = formatted_metadata.get("title") or formatted_metadata.get("name")
+                if not tmdb_details_for_extra.get("overview"):
+                    jokes_to_generate["main"] = tmdb_details_for_extra.get("title") or tmdb_details_for_extra.get("name")
 
                 # 2. 检查分集
                 ep_list = []
@@ -2150,7 +2150,7 @@ class MediaProcessor:
                             if "【老六占位简介】" in old_overview:
                                 ep["overview"] = old_overview # 继承老笑话，不花冤枉钱
                             else:
-                                jokes_to_generate[ep_key] = f"{formatted_metadata.get('name')} {ep_key}"
+                                jokes_to_generate[ep_key] = f"{tmdb_details_for_extra.get('name')} {ep_key}"
 
                 # 3. 批量生成并回填
                 if jokes_to_generate:
@@ -2158,7 +2158,7 @@ class MediaProcessor:
                     generated_jokes = self.ai_translator.batch_generate_jokes(jokes_to_generate)
 
                     if "main" in generated_jokes:
-                        formatted_metadata["overview"] = generated_jokes["main"]
+                        tmdb_details_for_extra["overview"] = generated_jokes["main"]
                         if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
                             aggregated_tmdb_data["series_details"]["overview"] = generated_jokes["main"]
 
