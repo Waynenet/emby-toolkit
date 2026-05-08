@@ -1711,24 +1711,28 @@ def translate_tmdb_metadata_recursively(
         # 收集翻译词条
         if translate_role_enabled:
             for actor in cast_list:
-                orig_name = actor.get('name', '')
+                orig_name = actor.get('original_name', '').lower().strip()
+                curr_name = actor.get('name', '').lower().strip()
                 
                 # =========================================================
                 # ★★★ 豆瓣防线 & 智能兜底 ★★★
                 # =========================================================
-                if douban_actor_map and orig_name:
-                    d_match = douban_actor_map.get(orig_name.lower().strip())
-                    if d_match:
-                        if d_match['name'] and utils.contains_chinese(d_match['name']):
-                            actor['name'] = d_match['name']
-                        
-                        d_role = d_match.get('role', '').strip()
-                        if d_role and utils.contains_chinese(d_role):
-                            if d_role == "演员":
-                                # 记下豆瓣给的保底词汇，先不覆盖，给 AI 一个翻译原英文的机会
-                                actor['_douban_fallback_role'] = "演员"
-                            else:
-                                actor['character'] = d_role
+                d_match = None
+                if douban_actor_map:
+                    # 双重匹配：原名或现名匹配上豆瓣都可以
+                    d_match = douban_actor_map.get(orig_name) or douban_actor_map.get(curr_name)
+                    
+                if d_match:
+                    if d_match['name'] and utils.contains_chinese(d_match['name']):
+                        actor['name'] = d_match['name']
+                    
+                    d_role = d_match.get('role', '').strip()
+                    if d_role and utils.contains_chinese(d_role):
+                        if d_role == "演员":
+                            # 记下豆瓣给的保底词汇，先不覆盖，给 AI 一个翻译原英文的机会
+                            actor['_douban_fallback_role'] = "演员"
+                        else:
+                            actor['character'] = d_role
 
                 # --- 豆瓣处理完后，如果还不是中文，才丢给 AI ---
                 name = actor.get('name', '')
@@ -1829,21 +1833,22 @@ def translate_tmdb_metadata_recursively(
                     actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
 
             # =========================================================
-            # ★★★ 智能回填与兜底判断 ★★★
+            # ★★★ 智能回填与终极兜底判断 ★★★
             # =========================================================
+            # 1. 回填 AI 结果
             for actor_dict, field_key, orig_text, t_type in actor_refs:
                 if orig_text in final_actor_translation_map:
-                    translated_text = final_actor_translation_map[orig_text]
-                    
-                    # 如果是角色字段，且翻译后依然不包含中文 (AI翻译失败)
-                    if t_type == 'role' and not utils.contains_chinese(translated_text):
-                        fallback = actor_dict.get('_douban_fallback_role')
-                        if fallback:
-                            translated_text = fallback # 启用豆瓣的 "演员" 兜底
-                            
-                    actor_dict[field_key] = translated_text
-                    
-                # 无论怎样，一定要清理掉临时字段，防止影响 JSON 结构
+                    actor_dict[field_key] = final_actor_translation_map[orig_text]
+            
+            # 2. 全局统一兜底
+            for actor_dict, field_key, orig_text, t_type in actor_refs:
+                if t_type == 'role':
+                    current_val = actor_dict.get(field_key, '')
+                    # 规则：只要是角色名，且最终(无论是原版还是AI翻译后)没有中文，一律强行设为"演员"
+                    if not utils.contains_chinese(current_val):
+                        actor_dict[field_key] = "演员"
+                
+                # 清理临时字段
                 actor_dict.pop('_douban_fallback_role', None)
 
     # --- 3. 统计汇总日志输出 ---
