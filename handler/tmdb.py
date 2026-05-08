@@ -14,20 +14,31 @@ import constants
 import threading
 logger = logging.getLogger(__name__)
 
-# ★★★ 自定义的重试类，用于输出更友好的日志 ★★★
+# ★★★ 自定义的重试类，用于输出更友好的日志并强制控制等待时间 ★★★
 class LoggedRetry(Retry):
     """
     一个继承自 urllib3.Retry 的自定义类，
-    用于在每次重试时记录一条更清晰、更友好的日志消息。
+    用于在每次重试时记录一条更清晰、更友好的日志消息，并强制指定退避时间。
     """
+    
+    def get_backoff_time(self):
+        """
+        覆盖原生的退避时间计算方法。
+        根据当前已经失败的历史记录数量，强制返回固定的等待秒数。
+        """
+        failed_attempts = len(self.history)
+        if failed_attempts == 0:
+            return 2.0  # 准备进行第 1 次重试前，等待 2 秒
+        elif failed_attempts == 1:
+            return 5.0  # 准备进行第 2 次重试前，等待 5 秒
+        else:
+            return 5.0  # 兜底：如果还有更多重试，都等 5 秒
+
     def increment(self, method, url, response=None, error=None, _pool=None, _stacktrace=None):
-        # 首先，调用父类的 increment 方法。
-        # 如果不应该重试了（例如，达到最大次数），它会抛出异常，
-        # 这样我们的日志代码就不会执行。
+        # 首先，调用父类的 increment 方法产生一个新的 retry 对象。
+        # 如果达到最大次数，它会抛出 RetryError 异常，后续的日志代码不会执行。
         new_retry = super().increment(method, url, response, error, _pool, _stacktrace)
 
-        # 如果代码能执行到这里，说明即将进行一次重试。
-        
         # 确定失败原因
         if response:
             reason = f"不成功的状态码: {response.status}"
@@ -36,12 +47,12 @@ class LoggedRetry(Retry):
         else:
             reason = "未知错误"
 
-        # 获取下一次重试的等待时间
-        backoff_time = self.get_backoff_time()
+        # ★ 关键修改：从 new_retry 获取下次将要等待的时间
+        backoff_time = new_retry.get_backoff_time()
+        
         # 计算当前是第几次重试
         attempt_number = len(self.history) + 1
-
-        # ★★★ 修复分母变小的 Bug ★★★
+        
         # 初始总次数 = 已失败的次数 + 剩余的重试次数
         original_total = len(self.history) + self.total
         
@@ -51,10 +62,10 @@ class LoggedRetry(Retry):
 
         return new_retry
 
-# ★★★ 创建带重试功能的 Session (已修改为使用 LoggedRetry) ★★★
+# ★★★ 创建带重试功能的 Session ★★★
 def requests_retry_session(
-    retries=3,
-    backoff_factor=0.5,
+    retries=2,              # ★ 降低重试次数：由 3 改为 2
+    backoff_factor=1.0,     # 因为我们在上方已强制接管等待时间，这个参数将作为备用
     status_forcelist=(500, 502, 503, 504),
     session=None,
 ):
@@ -69,10 +80,8 @@ def requests_retry_session(
         allowed_methods=frozenset(['HEAD', 'GET', 'PUT', 'DELETE', 'OPTIONS', 'TRACE', 'POST']),
     )
     
-    # ★★★ 核心修改：增加 pool_connections 和 pool_maxsize 参数 ★★★
     # pool_connections: 要缓存的 urllib3 连接池个数 (对应不同的 host)
     # pool_maxsize: 每个连接池中保存的最大连接数 (对应并发数)
-    # 我们设为 50，足以应付 3*5=15 的并发需求
     adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
     
     session.mount('http://', adapter)
