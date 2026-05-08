@@ -1637,31 +1637,59 @@ def translate_tmdb_metadata_recursively(
         # A1. 简介 (Overview)
         is_ep = (specific_item_type == 'Episode')
         if (not is_ep and translate_overview_enabled) or (is_ep and translate_ep_overview_enabled):
-            overview = data_dict.get('overview')
-            if not overview or not utils.contains_chinese(overview):
-                if local_info and local_info.get('overview') and utils.contains_chinese(local_info['overview']):
-                    data_dict['overview'] = local_info['overview']
+            raw_tmdb_overview = data_dict.get('overview') or ''
+            local_overview = local_info.get('overview') if local_info else ''
+            
+            # --- 第 1 步：清洗并检验 TMDb 官方数据的纯洁性 ---
+            tmdb_overview = utils.clean_invisible_chars(raw_tmdb_overview)
+            if utils.is_spam_title(tmdb_overview):
+                tmdb_overview = "" # 发现广告，直接击杀，当它不存在
+            
+            # --- 第 2 步：仲裁逻辑 ---
+            if tmdb_overview and utils.contains_chinese(tmdb_overview):
+                # 只要 TMDb 有干净的官方中文，无论是电影、剧集还是分集，无条件以官方为准！
+                # 直接覆盖（代码中不用特意写覆盖，因为 tmdb_data 里本身就是 tmdb_overview）
+                # 注意：这里我们故意不加 cache_hits，因为用的是官方数据
+                data_dict['overview'] = tmdb_overview 
+            else:
+                # TMDb 没中文（或者是广告被击杀了），那就看本地有没有货
+                if local_overview and utils.contains_chinese(local_overview):
+                    # 本地有货（不管是笑话还是机翻），顶上去
+                    data_dict['overview'] = local_overview
                     stats['overview_cache_hits'] += 1
                 else:
-                    if not overview and tmdb_api_key:
+                    # 连本地都没货，准备摇人（呼叫 AI）
+                    # 尝试拉取英文兜底，给 AI 翻译用
+                    if not tmdb_overview and tmdb_api_key:
                         try:
                             if specific_item_type == 'Movie':
                                 data_dict['overview'] = get_movie_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('overview', '')
                             elif specific_item_type == 'Series':
                                 data_dict['overview'] = get_tv_details(int(tmdb_id_str), tmdb_api_key, language="en-US").get('overview', '')
                         except Exception: pass
+                    
                     if data_dict.get('overview'):
                         needs_overview = True
                         stats['overview_pending_count'] += 1
 
         # A2. 标题 (Title)
         if translate_title_enabled:
-            current_title = data_dict.get(title_key)
-            if current_title and not utils.contains_chinese(current_title):
-                if local_info and local_info.get('title') and utils.contains_chinese(local_info['title']):
-                    data_dict[title_key] = local_info['title']
+            raw_title = data_dict.get(title_key) or ''
+            current_title = utils.clean_invisible_chars(raw_title)
+            if utils.is_spam_title(current_title):
+                current_title = ""
+            
+            if current_title and utils.contains_chinese(current_title):
+                # TMDb 官方有干净中文，无条件使用
+                data_dict[title_key] = current_title
+            else:
+                local_title = local_info.get('title') if local_info else ''
+                if local_title and utils.contains_chinese(local_title):
+                    # 官方没有，用本地缓存
+                    data_dict[title_key] = local_title
                     stats['title_cache_hits'] += 1
                 else:
+                    # 都没有，呼叫 AI
                     needs_title = True
                     stats['title_pending_count'] += 1
 
