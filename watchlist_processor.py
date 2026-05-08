@@ -562,13 +562,21 @@ class WatchlistProcessor:
                 jokes_to_generate["main"] = item_name
 
             # 2. 检查分集
-            # 尝试从数据库读取旧数据，继承已有笑话，省 Token！
-            import extensions
-            old_payload, _ = extensions.media_processor_instance._reconstruct_full_data_from_db(tmdb_id, 'Series') if hasattr(extensions, 'media_processor_instance') else (None, None)
+            # 尝试从数据库读取旧数据，继承已有笑话，省 Token！(极简直查版)
             old_episodes = {}
-            if old_payload and "episodes_details" in old_payload:
-                old_eps = old_payload["episodes_details"]
-                old_episodes = old_eps if isinstance(old_eps, dict) else {f"S{e.get('season_number')}E{e.get('episode_number')}": e for e in old_eps}
+            try:
+                from database.connection import get_db_connection
+                with get_db_connection() as conn_joke:
+                    cursor_joke = conn_joke.cursor()
+                    cursor_joke.execute(
+                        "SELECT season_number, episode_number, overview FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'",
+                        (str(tmdb_id),)
+                    )
+                    for row in cursor_joke.fetchall():
+                        key = f"S{row['season_number']}E{row['episode_number']}"
+                        old_episodes[key] = {"overview": row.get('overview', '')}
+            except Exception as e_joke:
+                logger.warning(f"  ➜ 追剧刷新读取旧简介用于AI笑话判断时失败: {e_joke}")
 
             for season_details in aggregated_data['seasons_details']:
                 for ep in season_details.get("episodes", []):
