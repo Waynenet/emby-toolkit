@@ -40,10 +40,13 @@ class LoggedRetry(Retry):
         backoff_time = self.get_backoff_time()
         # 计算当前是第几次重试
         attempt_number = len(self.history) + 1
+
+        # ★★★ 修复分母变小的 Bug ★★★
+        # 初始总次数 = 已失败的次数 + 剩余的重试次数
+        original_total = len(self.history) + self.total
         
-        # 记录一条警告级别的日志，这样既能引起注意又不会像错误一样吓人
         logger.warning(
-            f"  ➜ TMDb API 请求失败 ({reason})。将在 {backoff_time:.2f} 秒后重试... (第 {attempt_number}/{self.total} 次)"
+            f"  ➜ TMDb API 请求失败 ({reason})。将在 {backoff_time:.2f} 秒后重试... (第 {attempt_number}/{original_total} 次)"
         )
 
         return new_retry
