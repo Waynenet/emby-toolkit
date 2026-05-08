@@ -73,7 +73,7 @@ def _get_properties_for_comparison(version: Dict) -> Dict:
         "subtitle_languages": subtitle_langs
     }
 
-def _compare_versions(v1: Dict[str, Any], v2: Dict[str, Any], rules: List[Dict[str, Any]], item_name: str = "") -> int:
+def _compare_versions(v1: Dict[str, Any], v2: Dict[str, Any], rules: List[Dict[str, Any]], item_name: str = "", is_chinese_media: bool = False) -> int:
     """
     比较两个版本 v1 和 v2。
     返回: 1 (v1优), -1 (v2优), 0 (相当)
@@ -175,6 +175,10 @@ def _compare_versions(v1: Dict[str, Any], v2: Dict[str, Any], rules: List[Dict[s
         
         # --- 7. ★★★ 修复：按字幕 (Subtitle) ★★★ ---
         elif rule_type == 'subtitle':
+            # 如果是华语片区，直接跳过中文字幕的PK
+            if is_chinese_media:
+                continue
+
             # 扩充中文字幕代码库，防止误判
             chi_codes = {'chi', 'zho', 'zh', 'yue', 'chs', 'cht', 'zh-cn', 'zh-tw', 'zh-hk'}
             
@@ -210,7 +214,7 @@ def _compare_versions(v1: Dict[str, Any], v2: Dict[str, Any], rules: List[Dict[s
 
     return 0
 
-def _determine_best_version_by_rules(versions: List[Dict[str, Any]], item_name: str = "") -> Optional[str]:
+def _determine_best_version_by_rules(versions: List[Dict[str, Any]], item_name: str = "", is_chinese_media: bool = False) -> Optional[str]:
     """
     根据规则决定最佳版本，返回最佳版本的 ID。
     """
@@ -233,8 +237,7 @@ def _determine_best_version_by_rules(versions: List[Dict[str, Any]], item_name: 
     version_properties = [_get_properties_for_comparison(v) for v in versions if v]
 
     def compare_wrapper(v1, v2):
-        # 传入 item_name 以便在日志中显示剧名
-        return _compare_versions(v1, v2, rules, item_name)
+        return _compare_versions(v1, v2, rules, item_name, is_chinese_media)
 
     sorted_versions = sorted(version_properties, key=cmp_to_key(compare_wrapper), reverse=True)
     
@@ -279,7 +282,7 @@ def task_scan_for_cleanup_issues(processor):
             return
 
         sql_query = sql.SQL("""
-            SELECT t.tmdb_id, t.item_type, t.asset_details_json
+            SELECT t.tmdb_id, t.item_type, t.asset_details_json, t.original_language, t.countries_json
             FROM media_metadata AS t
             WHERE 
                 t.in_library = TRUE 
@@ -320,6 +323,16 @@ def task_scan_for_cleanup_issues(processor):
             
             task_manager.update_status_from_thread(progress, f"({i+1}/{total_items}) 正在分析: {display_title}")
 
+            # 判断是否为华语片区
+            orig_lang = str(item.get('original_language') or '').lower()
+            countries = item.get('countries_json') or []
+            is_chinese_media = False
+            
+            if orig_lang in ['zh', 'cn', 'zh-cn', 'zh-tw', 'zh-hk', 'yue', 'cmn']:
+                is_chinese_media = True
+            elif isinstance(countries, list) and any(c in ['CN', 'HK', 'TW', 'MO'] for c in countries):
+                is_chinese_media = True
+
             raw_versions = item['asset_details_json']
             unique_versions_map = {}
             for v in raw_versions:
@@ -343,7 +356,7 @@ def task_scan_for_cleanup_issues(processor):
                 best_ids_set = set()
                 for res, group_versions in res_groups.items():
                     # ★ 传入 display_title 以便打印日志
-                    best_in_group = _determine_best_version_by_rules(group_versions, item_name=f"{display_title} ({res})")
+                    best_in_group = _determine_best_version_by_rules(group_versions, item_name=f"{display_title} ({res})", is_chinese_media=is_chinese_media)
                     if best_in_group:
                         best_ids_set.add(best_in_group)
                 
