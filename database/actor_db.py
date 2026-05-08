@@ -58,7 +58,7 @@ class ActorDBManager:
             logger.error(f"  ➜ 读取翻译缓存时发生错误 for '{text}': {e}", exc_info=True)
             return None
 
-def save_translation_to_db(self, cursor: psycopg2.extensions.cursor, original_text: str, translated_text: Optional[str], engine_used: Optional[str]):
+    def save_translation_to_db(self, cursor: psycopg2.extensions.cursor, original_text: str, translated_text: Optional[str], engine_used: Optional[str]):
         """将翻译结果保存到数据库，增加中文校验。"""    
         
         # --- 新增防御性代码：如果 AI 抽风返回了列表或其他类型，强制转为字符串 ---
