@@ -1857,6 +1857,13 @@ def translate_tmdb_metadata_recursively(
             if api_submit_list:
                 api_results = ai_translator.batch_translate(api_submit_list, mode=translation_mode, title=item_name)
                 for term, translated in api_results.items():
+                    # --- 新增防御：强制提取字符串 ---
+                    if isinstance(translated, list):
+                        translated = str(translated[0]) if translated else ""
+                    elif translated is not None and not isinstance(translated, str):
+                        translated = str(translated)
+                    # ----------------------------
+
                     final_actor_translation_map[term] = translated
                     actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
 
