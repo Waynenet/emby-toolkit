@@ -3919,5 +3919,43 @@ class MediaProcessor:
         except Exception as e:
             logger.error(f"  ➜ {log_prefix} 为 '{item_name_for_log}' 更新覆盖缓存文件时发生错误: {e}", exc_info=True)
 
+def _reconstruct_full_data_from_db(self, tmdb_id: str, item_type: str) -> Tuple[Optional[Dict[str, Any]], Optional[List]]:
+        """
+        【兼容补丁】为 watchlist_processor (追更后台刷新) 提供的极速数据重建适配器。
+        防止背景刷新时覆盖掉用户之前对简介、标题的手动修改（包括继承AI老六笑话）。
+        """
+        try:
+            with get_central_db_connection() as conn:
+                cursor = conn.cursor()
+                # 1. 查询主记录
+                cursor.execute("SELECT * FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(tmdb_id), item_type))
+                row = cursor.fetchone()
+                if not row:
+                    return None, None
+                
+                # 2. 调用 helpers 里的新方法极速构建基础骨架
+                from tasks.helpers import reconstruct_metadata_from_db
+                payload = reconstruct_metadata_from_db(dict(row), [])
+                
+                # 3. 如果是剧集，将分集的重要文本(标题/简介)挂载回去，供追更逻辑比对合并
+                if item_type == "Series":
+                    cursor.execute("SELECT season_number, episode_number, title, overview FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'", (str(tmdb_id),))
+                    episodes_data = {}
+                    for e_row in cursor.fetchall():
+                        key = f"S{e_row['season_number']}E{e_row['episode_number']}"
+                        episodes_data[key] = {
+                            "name": e_row.get('title', ''),
+                            "overview": e_row.get('overview', ''),
+                            "season_number": e_row['season_number'],
+                            "episode_number": e_row['episode_number']
+                        }
+                    if episodes_data:
+                        payload['episodes_details'] = episodes_data
+                        
+                return payload, []
+        except Exception as e:
+            logger.error(f"  ➜ 追更后台读取旧数据时发生异常: {e}")
+            return None, None
+
     def close(self):
         if self.douban_api: self.douban_api.close()
