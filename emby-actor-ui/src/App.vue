@@ -694,4 +694,28 @@ body {
 .n-switch.n-switch--active .n-switch__rail {
   background-color: #18a058 !important;
 }
+
+/* ==================== 消除海报复选框未选中时的纯白底色 ==================== */
+/* 1. 把未选中时的小方块变成透明，并加粗一点白色边框以便看清 */
+.poster-checkbox-wrap .n-checkbox .n-checkbox-box {
+  background-color: transparent !important;
+  border: 1.5px solid rgba(255, 255, 255, 0.75) !important;
+}
+
+/* 2. 鼠标悬停时边框高亮 */
+.poster-checkbox-wrap .n-checkbox:hover .n-checkbox-box {
+  border-color: #ffffff !important;
+}
+
+/* 3. 选中时恢复正常的颜色（比如绿色，如果不加这句选中时可能也会变透明） */
+.poster-checkbox-wrap .n-checkbox.n-checkbox--checked .n-checkbox-box {
+  background-color: #18a058 !important;
+  border-color: #18a058 !important;
+}
+
+/* 隐藏自带的白底状态遮罩层（防止悬停时闪烁白光） */
+.poster-checkbox-wrap .n-checkbox .n-checkbox-box__border,
+.poster-checkbox-wrap .n-checkbox .n-checkbox-box__state-border {
+  display: none !important;
+}
 </style>
