@@ -630,6 +630,54 @@ class P115MediaAnalyzerMixin:
                     return True
 
             return False
+
+        def _strip_non_language_feature_text(text, detected_features):
+            """
+            语言识别前先剥离“非语言特色词”。
+
+            典型例子：
+            - language=spa + title=Latin American
+              Latin American 是地区标签“拉美”，不能让 latin 抢走语言识别，
+              正确结果应为：西班牙语（拉美）。
+            - language=por + title=Brazilian
+              Brazilian 是地区标签“巴西”，语言仍应来自 por。
+            """
+            text = str(text or "")
+            if not text or not detected_features:
+                return text
+
+            # 不剥离“国语 / 原声”这类可能承载语言身份的标签；
+            # 只剥离纯版本/地区/字幕属性，避免污染语言识别。
+            non_language_feature_labels = {
+                "上译", "公映", "长译", "京译", "八一", "央视",
+                "台配", "台湾", "香港",
+                "特效", "HDR", "SDR", "DoVi",
+                "拉美", "巴西", "听障", "导评",
+            }
+            active_features = set(detected_features) & non_language_feature_labels
+            if not active_features:
+                return text
+
+            feature_map = (
+                getattr(self, "stream_feature_map", None)
+                or utils.DEFAULT_STREAM_FEATURE_MAPPING
+            )
+
+            cleaned = text
+            for item in feature_map:
+                label = item.get("label")
+                if label not in active_features:
+                    continue
+                patterns = item.get("patterns") or item.get("aliases") or []
+                for pattern in patterns:
+                    try:
+                        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+                    except re.error:
+                        logger.warning(f"  ➜ 无效的流标签匹配规则: {pattern}")
+
+            cleaned = re.sub(r"[|/]+", " ", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            return cleaned
         def _lookup_base_label(norm_lang):
             if not norm_lang:
                 return ""
@@ -663,7 +711,16 @@ class P115MediaAnalyzerMixin:
         # 1. 判断 Title 是否包含明确语言信息
         #    注意：这里必须用 _has_lang_marker，不能裸 in，否则 Deutsch 会命中 sc。
         # =========================================================
-        title_clean = _normalize_marker_text(raw_title)
+        # 先提取一次非语言特色标签，并把这些标签从语言识别文本里剥离。
+        # 例如 Latin American / Brazilian 应作为“拉美 / 巴西”特色标签，
+        # 不应把 raw_lang=spa/por 误判成 lat。
+        pre_stream_features = self._extract_stream_features(
+            stream_type,
+            raw_title,
+            raw_display_title
+        )
+        title_for_lang_detect = _strip_non_language_feature_text(raw_title, pre_stream_features)
+        title_clean = _normalize_marker_text(title_for_lang_detect)
 
         title_has_lang = _has_lang_marker(title_clean, [
             "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "簡體", "简英", "简日", "简韩",
@@ -682,12 +739,12 @@ class P115MediaAnalyzerMixin:
 
         if title_has_lang:
             lang_lower_for_detect = ""
-            norm_lang = helpers.normalize_lang_code(raw_title)
+            norm_lang = helpers.normalize_lang_code(title_for_lang_detect)
         else:
             lang_lower_for_detect = lang_lower
             norm_lang = helpers.normalize_lang_code(raw_lang)
 
-        combined_text = f"{title_lower} {lang_lower_for_detect}".strip()
+        combined_text = f"{title_for_lang_detect.lower()} {lang_lower_for_detect}".strip()
         clean_text = _normalize_marker_text(combined_text)
 
         display_lang = ""
@@ -822,12 +879,14 @@ class P115MediaAnalyzerMixin:
         # =========================================================
         # 5. 提取非语言特征：DYSY / TX / SDH / 拉美 / 巴西 / 导评
         # =========================================================
-        stream_features = self._extract_stream_features(
-            stream_type,
-            raw_title,
-            raw_display_title,
-            raw_lang
-        )
+        stream_features = list(dict.fromkeys(
+            pre_stream_features + self._extract_stream_features(
+                stream_type,
+                raw_title,
+                raw_display_title,
+                raw_lang
+            )
+        ))
 
         # IsHearingImpaired 也强制视为 SDH
         if stream_type == "Subtitle" and is_hearing_impaired is True:
@@ -925,7 +984,9 @@ class P115MediaAnalyzerMixin:
             # 3. 替换常见词
             audio_replace_map = {
                 "国语配音": "国语",
+                "（国语）": "国语",
                 "粤语配音": "粤语",
+                "（粤语）": "粤语",
                 "视障口述": "视障口述",
             }
             for old, new in audio_replace_map.items():

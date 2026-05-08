@@ -6,6 +6,7 @@ from urllib3.util.retry import Retry
 import json
 import time
 import concurrent.futures
+import re
 from utils import contains_chinese, normalize_name_for_matching
 from typing import Optional, List, Dict, Any, Callable
 import logging
@@ -13,7 +14,7 @@ import config_manager
 import constants
 import threading
 logger = logging.getLogger(__name__)
-
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 # ★★★ 自定义的重试类，用于输出更友好的日志 ★★★
 class LoggedRetry(Retry):
     """
@@ -21,14 +22,12 @@ class LoggedRetry(Retry):
     用于在每次重试时记录一条更清晰、更友好的日志消息。
     """
     def increment(self, method, url, response=None, error=None, _pool=None, _stacktrace=None):
-        # 首先，调用父类的 increment 方法。
-        # 如果不应该重试了（例如，达到最大次数），它会抛出异常，
-        # 这样我们的日志代码就不会执行。
-        new_retry = super().increment(method, url, response, error, _pool, _stacktrace)
+        # ★ 修复：在调用父类 increment 之前计算真实的原始总次数
+        # self.total 是剩余次数，len(self.history) 是已失败次数
+        original_total = (len(self.history) + self.total) if self.total is not None else 0
+        attempt_number = len(self.history) + 1
+        backoff_time = self.get_backoff_time()
 
-        # 如果代码能执行到这里，说明即将进行一次重试。
-        
-        # 确定失败原因
         if response:
             reason = f"不成功的状态码: {response.status}"
         elif error:
@@ -36,44 +35,34 @@ class LoggedRetry(Retry):
         else:
             reason = "未知错误"
 
-        # 获取下一次重试的等待时间
-        backoff_time = self.get_backoff_time()
-        # 计算当前是第几次重试
-        attempt_number = len(self.history) + 1
-        
-        # 记录一条警告级别的日志，这样既能引起注意又不会像错误一样吓人
         logger.warning(
-            f"  ➜ TMDb API 请求失败 ({reason})。将在 {backoff_time:.2f} 秒后重试... (第 {attempt_number}/{self.total} 次)"
+            f"  ➜ TMDb API 请求失败 ({reason})。将在 {backoff_time:.2f} 秒后重试... (第 {attempt_number}/{original_total} 次)"
         )
 
-        return new_retry
+        # 调用父类方法，它会返回一个新的 Retry 对象用于下一次请求
+        return super().increment(method, url, response, error, _pool, _stacktrace)
 
 # ★★★ 创建带重试功能的 Session (已修改为使用 LoggedRetry) ★★★
 def requests_retry_session(
     retries=3,
-    backoff_factor=0.5,
-    status_forcelist=(500, 502, 503, 504),
+    backoff_factor=2,
+    status_forcelist=(500, 502, 503, 504, 429),
     session=None,
 ):
-    """创建一个配置了重试策略的 requests.Session 对象"""
     session = session or requests.Session()
     retry = LoggedRetry(
         total=retries,
         read=retries,
         connect=retries,
+        status=retries,
         backoff_factor=backoff_factor,
         status_forcelist=status_forcelist,
-        allowed_methods=frozenset(['HEAD', 'GET', 'PUT', 'DELETE', 'OPTIONS', 'TRACE', 'POST']),
+        allowed_methods=frozenset(["GET"]),
+        respect_retry_after_header=True,
     )
-    
-    # ★★★ 核心修改：增加 pool_connections 和 pool_maxsize 参数 ★★★
-    # pool_connections: 要缓存的 urllib3 连接池个数 (对应不同的 host)
-    # pool_maxsize: 每个连接池中保存的最大连接数 (对应并发数)
-    # 我们设为 50，足以应付 3*5=15 的并发需求
     adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
-    
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
 
 # 创建一个全局的、可复用的、带重试功能的 session 实例
@@ -89,6 +78,13 @@ def get_tmdb_api_base_url() -> str:
 # 默认语言设置
 DEFAULT_LANGUAGE = "zh-CN"
 DEFAULT_REGION = "CN"
+
+def _sanitize_text(text: str) -> str:
+    """隐藏文本中的 api_key，防止日志泄露"""
+    if not text:
+        return str(text)
+    # 将 api_key= 后面的字母数字替换为 ***
+    return re.sub(r'api_key=[a-zA-Z0-9]+', 'api_key=***', str(text))
 
 # --- 通用的 TMDb 请求函数 ---
 def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None, use_default_language: bool = True) -> Optional[Dict[str, Any]]:
@@ -121,13 +117,18 @@ def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] 
             error_details = error_data.get("status_message", str(e))
         except json.JSONDecodeError:
             error_details = str(e)
-        logger.error(f"  ➜ 所有重试后 TMDb API HTTP 出现错误: {e.response.status_code} - {error_details}. URL: {full_url}", exc_info=False)
+            
+        safe_error_details = _sanitize_text(error_details)
+        logger.error(f"  ➜ 所有重试后 TMDb API HTTP 出现错误: {e.response.status_code} - {safe_error_details}. URL: {full_url}", exc_info=False)
         return None
     except requests.exceptions.RequestException as e:
-        logger.error(f"  ➜ 所有重试后 TMDb API 请求均出现错误: {e}. URL: {full_url}", exc_info=False)
+        safe_e = _sanitize_text(str(e))
+        logger.error(f"  ➜ 所有重试后 TMDb API 请求均出现错误: {safe_e}. URL: {full_url}", exc_info=False)
         return None
     except json.JSONDecodeError as e:
-        logger.error(f"  ➜ TMDb API JSON 解码错误: {e}. URL: {full_url}. Response: {response.text[:200] if response else 'N/A'}", exc_info=False)
+        safe_e = _sanitize_text(str(e))
+        safe_response = _sanitize_text(response.text[:200]) if response else 'N/A'
+        logger.error(f"  ➜ TMDb API JSON 解码错误: {safe_e}. URL: {full_url}. Response: {safe_response}", exc_info=False)
         return None
 
 # --- 获取电影的详细信息 ---

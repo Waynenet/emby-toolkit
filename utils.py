@@ -401,6 +401,20 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         ],
     },
     {
+        "label": "六区",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"六区",  
+        ],
+    },
+    {
+        "label": "华纳",
+        "types": ["Audio", "Subtitle"],
+        "patterns": [
+            r"华纳",  
+        ],
+    },
+    {
         "label": "央视",
         "types": ["Audio", "Subtitle"],
         "patterns": [
@@ -438,7 +452,8 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
     "patterns": [
         "(?<![A-Za-z0-9])HK(?![A-Za-z0-9])",
         "港配",
-        "香港配音"
+        "香港配音",
+        "港",
     ]
     },
     {
@@ -495,8 +510,14 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
         "types": ["Subtitle", "Audio"],
         "patterns": [
             r"\bLatin\s*America\b",
+            r"\bLatin\s*American\b",
+            r"\bLatin[-_\s]*America\b",
+            r"\bLatin[-_\s]*American\b",
             r"\bLATAM\b",
+            r"\bLatinoamerica\b",
+            r"\bLatinoam[eé]rica\b",
             r"拉美",
+            r"拉丁美洲",
         ],
     },
     {
@@ -507,6 +528,10 @@ DEFAULT_STREAM_FEATURE_MAPPING = [
             r"\bBrasil\b",
             r"\bBrazilian\b",
             r"\bBrasilian\b",
+            r"\bBrasileiro\b",
+            r"\bBrasileira\b",
+            r"\bPortuguese\s*\(?Brazil\)?\b",
+            r"\bPortuguese\s*[-_]\s*Brazil\b",
             r"巴西",
         ],
     },
@@ -600,7 +625,6 @@ DEFAULT_LANGUAGE_MAPPING = [
     {"label": "斯洛文尼亚语", "value": "sl", "aliases": ["slv", "SLV", "sl", "slovenian", "斯洛文尼亚语", "斯洛文尼亚文"]},
     {"label": "泰米尔语", "value": "ta", "aliases": ["tam", "TAM", "ta", "tamil", "泰米尔语", "泰米尔文"]},
     {"label": "泰卢固语", "value": "te", "aliases": ["tel", "TEL", "te", "telugu", "泰卢固语", "泰卢固文"]},
-    {"label": "拉丁语", "value": "la", "aliases": ["lat", "la", "latin", "拉丁语", "拉丁文"]},
     {"label": "卡纳达语", "value": "kn", "aliases": ["kan", "KAN", "kn", "kannada", "卡纳达语", "卡纳达文", "康纳达语"]},
     {"label": "马拉雅拉姆语", "value": "ml", "aliases": ["mal", "MAL", "ml", "malayalam", "马拉雅拉姆语", "马拉雅拉姆文"]},
     {"label": "无语言", "value": "xx", "aliases": ["und", "undefined", "unknown", "none", "无语言", "未知"]},

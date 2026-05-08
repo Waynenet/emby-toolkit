@@ -389,8 +389,26 @@
                 
                 <!-- 模式 A: 洗版设置 -->
                 <div v-if="currentRule.rule_type === 'resubscribe'">
-                  <!-- 缺集洗版整季开关 -->
-                  <n-form-item label="缺集处理策略 (仅剧集)">
+                  <n-form-item label="洗版源">
+                    <n-radio-group v-model:value="currentRule.resubscribe_source" size="small">
+                      <n-radio-button value="moviepilot">MoviePilot</n-radio-button>
+                      <n-radio-button value="hdhive">影巢</n-radio-button>
+                    </n-radio-group>
+                    <template #feedback>
+                      <span v-if="currentRule.resubscribe_source === 'moviepilot'">
+                        使用 MoviePilot 订阅洗版。
+                      </span>
+                      <span v-else>
+                        手动整理时弹出影巢资源搜索；一键整理时自动调用影巢下载/转存。
+                      </span>
+                    </template>
+                  </n-form-item>
+                  <n-divider style="margin: 0" />
+                  <!-- 缺集洗版整季开关：仅 MoviePilot 显示 -->
+                  <n-form-item
+                    v-if="currentRule.resubscribe_source === 'moviepilot'"
+                    label="缺集处理策略 (仅剧集)"
+                  >
                     <n-space vertical>
                       <n-space align="center">
                         <n-switch v-model:value="currentRule.resubscribe_entire_season" />
@@ -401,17 +419,22 @@
                       </div>
                     </n-space>
                   </n-form-item>
-                  <n-form-item label="自定义洗版">
+
+                  <!-- 自定义洗版：仅 MoviePilot 显示 -->
+                  <n-form-item
+                    v-if="currentRule.resubscribe_source === 'moviepilot'"
+                    label="自定义洗版"
+                  >
                     <n-space vertical>
                       <n-space align="center">
-                        <n-switch 
-                          v-model:value="currentRule.custom_resubscribe_enabled" 
-                        />
-                        <span class="tip">开启后，将根据规则生成订阅参数，关闭则采用MP洗版规则处理订阅。</span>
+                        <n-switch v-model:value="currentRule.custom_resubscribe_enabled" />
+                        <span class="tip">开启后，将根据规则生成订阅参数，关闭则采用 MP 洗版规则处理订阅。</span>
                       </n-space>
-                      
-                      <!-- 子选项：特效字幕 (仅在自定义洗版开启时显示) -->
-                      <div v-if="currentRule.custom_resubscribe_enabled" style="margin-left: 34px; margin-top: 4px; padding: 8px; background: var(--n-color-embedded); border-radius: 4px;">
+
+                      <div
+                        v-if="currentRule.custom_resubscribe_enabled"
+                        style="margin-left: 34px; margin-top: 4px; padding: 8px; background: var(--n-color-embedded); border-radius: 4px;"
+                      >
                         <n-checkbox v-model:checked="currentRule.resubscribe_subtitle_effect_only">
                           要求包含特效字幕 (正则匹配)
                         </n-checkbox>
@@ -617,7 +640,9 @@ const openRuleModal = async (rule = null) => {
   if (rule) {
     currentRule.value = JSON.parse(JSON.stringify(rule));
     if (!currentRule.value.scope_rules) currentRule.value.scope_rules = [];
-    if (!currentRule.value.resubscribe_source) currentRule.value.resubscribe_source = 'moviepilot';
+    if (!currentRule.value.resubscribe_source) {
+          currentRule.value.resubscribe_source = 'moviepilot';
+        }
     if (!currentRule.value.delete_mode) currentRule.value.delete_mode = 'physical'; 
   } else {
     currentRule.value = {
@@ -742,7 +767,6 @@ const getLibraryCountText = (rule) => {
 const getLibraryTagType = (rule) => {
   return (rule.scope_rules && rule.scope_rules.length > 0) ? 'default' : 'warning';
 };
-
 onMounted(loadData);
 </script>
 
