@@ -1882,11 +1882,20 @@ class MediaProcessor:
                     episodes = aggregated_tmdb_data["episodes_details"]
                     ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
 
-                    old_payload, _ = self._reconstruct_full_data_from_db(tmdb_id, item_type)
+                    # 尝试从数据库读取旧数据，继承已有笑话，省 Token！(极简直查版)
                     old_episodes = {}
-                    if old_payload and "episodes_details" in old_payload:
-                        old_eps = old_payload["episodes_details"]
-                        old_episodes = old_eps if isinstance(old_eps, dict) else {f"S{e.get('season_number')}E{e.get('episode_number')}": e for e in old_eps}
+                    try:
+                        with get_central_db_connection() as conn_joke:
+                            cursor_joke = conn_joke.cursor()
+                            cursor_joke.execute(
+                                "SELECT season_number, episode_number, overview FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'",
+                                (str(tmdb_id),)
+                            )
+                            for row in cursor_joke.fetchall():
+                                key = f"S{row['season_number']}E{row['episode_number']}"
+                                old_episodes[key] = {"overview": row.get('overview', '')}
+                    except Exception as e_joke:
+                        logger.warning(f"  ➜ 读取旧简介用于AI笑话判断时失败: {e_joke}")
 
                     for ep in ep_list:
                         if not ep.get("overview"):
