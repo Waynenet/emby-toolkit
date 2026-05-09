@@ -606,7 +606,27 @@ class WatchlistProcessor:
         # ======================================================================
         # ★★★ 核心修复：真假美猴王 (临时 ID 资产转移) ★★★
         # ======================================================================
-        watchlist_db.transfer_dummy_episode_assets(tmdb_id, unified_episodes_dict)
+        try:
+            # 1. 动态构建统一分集字典，兼容不同数据库方法的读取格式
+            unified_episodes_dict = {}
+            for season in aggregated_data.get('seasons_details', []):
+                s_num = season.get('season_number')
+                if s_num is not None:
+                    if s_num not in unified_episodes_dict:
+                        unified_episodes_dict[s_num] = {}
+                    
+                    for ep in season.get('episodes', []):
+                        e_num = ep.get('episode_number')
+                        if e_num is not None:
+                            # 格式 A: 嵌套结构 {1: {1: ep_info}}
+                            unified_episodes_dict[s_num][e_num] = ep
+                            # 格式 B: 平铺字符串结构 "S1E1": ep_info
+                            unified_episodes_dict[f"S{s_num}E{e_num}"] = ep
+
+            # 2. 执行转移
+            watchlist_db.transfer_dummy_episode_assets(tmdb_id, unified_episodes_dict)
+        except Exception as e_dummy:
+            logger.warning(f"  ➜ 临时 ID 资产转移时出错 (忽略并继续): {e_dummy}")
 
         # 解包数据
         latest_series_data = aggregated_data['series_details']
