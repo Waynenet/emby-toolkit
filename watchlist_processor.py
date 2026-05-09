@@ -540,15 +540,21 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 无法聚合 '{item_name}' 的TMDb详情，元数据刷新中止。")
             return None
 
-        # 翻译简介、标题、标语 (大一统引擎)
+        # ======================================================================
+        # ★★★ 核心优化：追剧专用轻量级翻译 (关闭演员翻译以加速) ★★★
+        # ======================================================================
         if self.ai_translator:
+            # 临时伪造配置，强行关闭演员/角色翻译 (因为追剧刷新本来就不会写入演员数据)
+            refresh_config = self.config.copy()
+            refresh_config[constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE] = False
+            
             helpers.translate_tmdb_metadata_recursively(
                 item_type='Series',
                 tmdb_data=aggregated_data,
                 ai_translator=self.ai_translator,
                 item_name=item_name,
                 tmdb_api_key=self.tmdb_api_key,
-                config=self.config
+                config=refresh_config # <--- 使用伪造的配置
             )
 
         # ======================================================================
