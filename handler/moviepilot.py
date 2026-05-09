@@ -494,11 +494,26 @@ def _list_qb_torrents(conf: dict) -> list:
     base_url = _build_base_url(conf)
     if not base_url:
         return []
+
     username = str(_conf_get(conf, "username", "user", default="") or "")
     password = str(_conf_get(conf, "password", "passwd", "pass", default="") or "")
     downloader_name = str(conf.get("name") or "")
 
     session = requests.Session()
+
+    # qB 5.2.0+ 对 WebAPI 的 Origin / Referer / UA 校验更严格
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": f"{base_url}/",
+        "Origin": base_url,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    })
+
     try:
         if username or password:
             login = session.post(
@@ -506,19 +521,41 @@ def _list_qb_torrents(conf: dict) -> list:
                 data={"username": username, "password": password},
                 timeout=10
             )
-            if login.status_code != 200 or "Ok" not in (login.text or ""):
-                logger.warning(f"  ➜ [MP智能清理] qB 登录失败，跳过下载器: {downloader_name or base_url}")
+
+            login_text = login.text or ""
+
+            if "Fails" in login_text:
+                logger.warning(
+                    f"  ➜ [MP智能清理] qB 登录失败 "
+                    f"(状态码: {login.status_code}, 响应: {login_text[:80]})，"
+                    f"跳过下载器: {downloader_name or base_url}"
+                )
                 return []
 
+            if login.status_code not in (200, 204):
+                logger.warning(
+                    f"  ➜ [MP智能清理] qB 登录响应异常 "
+                    f"(状态码: {login.status_code}, 响应: {login_text[:80]})，"
+                    f"继续尝试获取种子列表验证: {downloader_name or base_url}"
+                )
+
+        # 真正的登录成功与否，以能不能拿到种子列表为准
         res = session.get(f"{base_url}/api/v2/torrents/info", timeout=20)
+
         if res.status_code != 200:
-            logger.warning(f"  ➜ [MP智能清理] qB 获取种子失败: {downloader_name or base_url} -> {res.status_code}")
+            logger.warning(
+                f"  ➜ [MP智能清理] qB 获取种子失败: "
+                f"{downloader_name or base_url} -> 状态码 {res.status_code}, 响应: {(res.text or '')[:120]}"
+            )
             return []
+
         torrents = res.json() or []
         result = []
+
         for t in torrents:
             if not isinstance(t, dict):
                 continue
+
             result.append({
                 "hash": t.get("hash"),
                 "name": t.get("name"),
@@ -528,7 +565,9 @@ def _list_qb_torrents(conf: dict) -> list:
                 "downloader": downloader_name,
                 "_source": "qbittorrent"
             })
+
         return result
+
     except Exception as e:
         logger.warning(f"  ➜ [MP智能清理] qB 获取种子异常: {downloader_name or base_url} -> {e}")
         return []

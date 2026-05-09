@@ -248,6 +248,43 @@ class P115MediaAnalyzerMixin:
                 sha1=sha1
             )
 
+            # ========================================================
+            # ★ 新增：开启缺失语言时的实时字幕流嗅探
+            # ========================================================
+            from database import settings_db
+            stream_config = settings_db.get_setting('p115_default_stream_config') or {}
+            enable_sub_detect = stream_config.get('realtime_sub_detect', False)
+            
+            if enable_sub_detect and direct_url:
+                streams = probe_data.get("streams", [])
+                for s in streams:
+                    codec_type = (s.get("codec_type") or "").lower()
+                    codec_name = (s.get("codec_name") or "").lower()
+                    
+                    if codec_type == "subtitle":
+                        tags = s.get("tags") or {}
+                        raw_lang = tags.get("language")
+                        raw_title = tags.get("title") or ""
+                        
+                        # 清理掉 MP4 (mov_text) 经常自带的无意义描述
+                        if raw_title.lower() in ["subtitlehandler", "subtitle media handler", "core media video"]:
+                            raw_title = ""
+                            
+                        # 包括 mov_text 在内的主流文本字幕
+                        text_sub_codecs = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+                        
+                        # 条件: 没有打语言标签(或为und)，且没写标题，且是文本字幕
+                        if (not raw_lang or raw_lang == "und") and not raw_title and codec_name in text_sub_codecs:
+                            stream_index = s.get("index")
+                            detected_lang = self._extract_and_detect_subtitle_stream(direct_url, stream_index)
+                            
+                            if detected_lang:
+                                # 强行回填给 ffprobe 数据
+                                if "tags" not in s:
+                                    s["tags"] = {}
+                                s["tags"]["language"] = detected_lang
+                                s["tags"]["title"] = "智能识别" # 打个标记
+
             emby_json = self._build_emby_mediainfo_from_ffprobe(
                 probe_data,
                 file_node,
@@ -273,6 +310,109 @@ class P115MediaAnalyzerMixin:
                 logger.warning(f"  ➜ [ffprobe] 解析异常: {original_name} -> {e}", exc_info=True)
             return None
     
+    def _guess_language_from_text(self, text):
+        """
+        基于 Unicode 字符块快速猜测字幕文本语言 (日常高频异体字扩展版)
+        """
+        if not text: return None
+        
+        # 去除 ASS/SRT 标签
+        text = re.sub(r'<[^>]+>|{[^}]+}', '', text) 
+        
+        # 统计有效字符数量
+        hanzi_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
+        kana_count = len(re.findall(r'[\u3040-\u30ff]', text))    # 日文假名
+        hangul_count = len(re.findall(r'[\uac00-\ud7a3]', text))  # 韩文
+        cyrillic_count = len(re.findall(r'[\u0400-\u04FF]', text)) # 俄文
+        latin_count = len(re.findall(r'[a-zA-Zà-ÿÀ-Ÿ]', text))    # 拉丁/英文
+        
+        total = hanzi_count + kana_count + hangul_count + cyrillic_count + latin_count
+        if total == 0: return None
+
+        if kana_count > total * 0.05: # 假名只要超过 5% 即认为是日文
+            return "jpn"
+        elif hangul_count > total * 0.1:
+            return "kor"
+        elif cyrillic_count > total * 0.4:
+            return "rus"
+        elif hanzi_count > total * 0.3:
+            # ★ 扩展了 70 个在影视剧日常对话中最常出现的简繁差异字
+            cht_pattern = r'[這們麼兒幾嗎說聽覺寫讓為辦應該幫帶買賣開關來過還會當給變認識記國車門時機長視電錯誤裡裏頭髮個種樣點總沒無對歡謝後從與專業東兩嚴萬愛動學網熱題]'
+            cht_chars = len(re.findall(cht_pattern, text))
+            
+            # 因为只采样 8 句台词，样本极小，只要发现 1 个纯繁体特征字，即可定性为繁体！
+            return "cht" if cht_chars > 0 else "chi"
+            
+        elif latin_count > total * 0.5:
+            return "eng"
+            
+        return None
+
+    def _extract_and_detect_subtitle_stream(self, direct_url, stream_index):
+        """
+        通过 ffmpeg 直链实时拉取字幕流内容并识别语言 (多点游击采样优化版)
+        """
+        import subprocess
+        
+        logger.info(f"  ➜ [实时字幕嗅探] 发现未知语言的文本字幕 (Stream {stream_index})，启动嗅探...")
+
+        # 获取 Cookie 增强兼容性
+        cookie_str = ""
+        try:
+            from database import settings_db
+            tokens = settings_db.get_setting('p115_auth_tokens') or {}
+            cookie_str = tokens.get('cookie') or ""
+        except: pass
+
+        # 采样点策略：避开片头片尾，直击正片核心区 (5分钟, 15分钟, 30分钟)
+        sample_points = ["00:05:00", "00:15:00", "00:30:00"]
+        
+        for pt_idx, start_time in enumerate(sample_points):
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-v", "error",
+                "-user_agent", "Mozilla/5.0"
+            ]
+            
+            if cookie_str:
+                cmd.extend(["-headers", f"Cookie: {cookie_str}\r\n"])
+                
+            cmd.extend([
+                "-ss", start_time,   # 跳到采样点
+                "-t", "00:02:00",    # ★ 核心防死锁：最多只在时间轴上往后读2分钟，绝不死磕！
+                "-i", str(direct_url),
+                "-map", f"0:{stream_index}",
+                "-f", "srt",
+                "-frames:s", "8",    # ★ 只需8句台词即刻退出，瞬间完成
+                "-"
+            ])
+            
+            try:
+                # 单次探测超时极短 (4秒)，打一枪换一个地方
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=4)
+                
+                if proc.stdout:
+                    lines = proc.stdout.splitlines()
+                    dialogue_text = " ".join([line for line in lines if not re.match(r'^\d+$|^\d{2}:\d{2}:\d{2}', line)])
+                    
+                    lang_code = self._guess_language_from_text(dialogue_text)
+                    if lang_code:
+                        logger.info(f"  ➜ [实时字幕嗅探] 成功！在 {start_time} 处精准识别 Stream {stream_index} 为 '{lang_code}'")
+                        return lang_code
+                    else:
+                        logger.debug(f"  ➜ [实时字幕嗅探] {start_time} 处提取到文本但特征不足，尝试下一采样点...")
+                else:
+                    logger.debug(f"  ➜ [实时字幕嗅探] {start_time} 处为无对白场景或提取失败，尝试下一采样点...")
+                    
+            except subprocess.TimeoutExpired:
+                logger.debug(f"  ➜ [实时字幕嗅探] {start_time} 处拉取超时 (4s)，尝试下一采样点...")
+            except Exception as e:
+                logger.debug(f"  ➜ [实时字幕嗅探] 采样异常: {e}")
+                
+        logger.info(f"  ➜ [实时字幕嗅探] 已完成 {len(sample_points)} 个采样点探测，未提取到有效对白，放弃嗅探。")
+        return None
+
     def _ffprobe_rate_to_float(self, value):
         """解析 ffprobe 帧率：24000/1001 -> 23.976"""
         if not value or value == "0/0":
@@ -391,6 +531,16 @@ class P115MediaAnalyzerMixin:
         if not source_text:
             return []
 
+        # ★ 新增：简繁转换，确保能匹配上特征词库
+        cht_to_chs = {
+            "粵": "粤", "語": "语", "國": "国", "雙": "双", 
+            "臺": "台", "灣": "湾", "聽": "听", "導": "导", 
+            "評": "评", "視": "视", "體": "体", "簡": "简",
+            "譯": "译", "長": "长", "蘋": "苹", "華": "华"
+        }
+        for k, v in cht_to_chs.items():
+            source_text = source_text.replace(k, v)
+
         feature_map = (
             getattr(self, "stream_feature_map", None)
             or utils.DEFAULT_STREAM_FEATURE_MAPPING
@@ -419,6 +569,20 @@ class P115MediaAnalyzerMixin:
                     logger.warning(f"  ➜ 无效的流标签匹配规则: {pattern}")
 
         return list(dict.fromkeys(features))
+
+    def _detect_cn_script_simple(self, *texts):
+        """
+        极简中文字幕脚本识别：
+        - 文本里出现“繁” => 繁体
+        - 文本里出现“简 / 簡” => 简体
+        - 都没有 => 返回空字符串，交给 language=chi 兜底
+        """
+        text = "".join(str(t or "") for t in texts)
+        if "繁" in text:
+            return "cht"
+        if "简" in text or "簡" in text:
+            return "chs"
+        return ""
 
     def _normalize_subtitle_display_title(self, title):
         """
@@ -458,17 +622,33 @@ class P115MediaAnalyzerMixin:
             title = title.replace(old, new)
 
         exact_map = {
+            "简": "中文简体",
+            "簡": "中文简体",
             "简体": "中文简体",
+            "簡體": "中文简体",
             "简中": "中文简体",
+            "中简": "中文简体",
+            "中簡": "中文简体",
             "中文简体": "中文简体",
             "简体中文": "中文简体",
+            "繁": "中文繁体",
             "繁体": "中文繁体",
+            "繁體": "中文繁体",
             "繁中": "中文繁体",
+            "中繁": "中文繁体",
             "中文繁体": "中文繁体",
             "繁体中文": "中文繁体",
+            "繁體中文": "中文繁体",
         }
 
-        return exact_map.get(title, title)
+        if title in exact_map:
+            return exact_map[title]
+
+        script = self._detect_cn_script_simple(title)
+        if script and title in {"中简", "中簡", "简中", "簡中", "简体", "簡體", "中繁", "繁中", "繁体", "繁體"}:
+            return "中文繁体" if script == "cht" else "中文简体"
+
+        return title
     
     def _normalize_compact_cn_dual_title(self, title):
         """
@@ -582,11 +762,11 @@ class P115MediaAnalyzerMixin:
         """
         返回：(底层 ISO 代码，UI 主标题/DisplayLanguage，UI 副标题/Title)
 
-        设计原则：
-        1. Language 负责底层语言码。
-        2. Title 优先用于识别简繁、双语、特效、压制组、地区、SDH 等信息。
-        3. DEFAULT_LANGUAGE_MAPPING 只管语言。
-        4. DEFAULT_STREAM_FEATURE_MAPPING 只管 DYSY / TX / SDH / 拉美 / 巴西 / 导评 这类非语言特征。
+        字幕简繁兜底规则：
+        1. Title / DisplayTitle 里有“繁” => 中文繁体
+        2. Title / DisplayTitle 里有“简 / 簡” => 中文简体
+        3. language 是 chi/zho/zh/cmn，但 Title 找不到简繁标识 => 中文简体
+        4. 未知中文残留一律丢弃，不再拼到 Title 括号里
         """
 
         # 防御性检查，防止 language_map 未初始化
@@ -598,11 +778,21 @@ class P115MediaAnalyzerMixin:
         raw_display_title = str(raw_display_title or "").strip()
         stream_type = str(stream_type or "").strip()
 
-        title_lower = raw_title.lower()
         lang_lower = raw_lang.lower()
 
         def _normalize_marker_text(text):
             text = str(text or "").lower()
+            
+            # ★ 新增：简繁转换，确保能匹配上语种库
+            cht_to_chs = {
+                "粵": "粤", "語": "语", "國": "国", "雙": "双", 
+                "臺": "台", "灣": "湾", "聽": "听", "導": "导", 
+                "評": "评", "視": "视", "體": "体", "簡": "简",
+                "譯": "译", "長": "长", "蘋": "苹", "華": "华"
+            }
+            for k, v in cht_to_chs.items():
+                text = text.replace(k, v)
+                
             text = re.sub(r"[\.\-_+/|\\\[\]\(\)【】（）]+", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
             return text
@@ -611,7 +801,7 @@ class P115MediaAnalyzerMixin:
             """
             安全判断语言标记：
             - 中文词：允许 substring
-            - 英文/短码：必须是独立 token，避免 Deutsch 命中 sc
+            - 英文/短码：必须是独立 token，避免 Deutsch 命中 sc。
             """
             t = _normalize_marker_text(text)
 
@@ -625,7 +815,6 @@ class P115MediaAnalyzerMixin:
                         return True
                     continue
 
-                # 英文/短码必须独立成词
                 if re.search(rf"(?<![a-z0-9]){re.escape(m)}(?![a-z0-9])", t):
                     return True
 
@@ -634,20 +823,13 @@ class P115MediaAnalyzerMixin:
         def _strip_non_language_feature_text(text, detected_features):
             """
             语言识别前先剥离“非语言特色词”。
-
-            典型例子：
-            - language=spa + title=Latin American
-              Latin American 是地区标签“拉美”，不能让 latin 抢走语言识别，
-              正确结果应为：西班牙语（拉美）。
-            - language=por + title=Brazilian
-              Brazilian 是地区标签“巴西”，语言仍应来自 por。
+            例如 Latin American / Brazilian 只作为“拉美 / 巴西”特色标签，
+            不能让 latin 抢走语言识别。
             """
             text = str(text or "")
             if not text or not detected_features:
                 return text
 
-            # 不剥离“国语 / 原声”这类可能承载语言身份的标签；
-            # 只剥离纯版本/地区/字幕属性，避免污染语言识别。
             non_language_feature_labels = {
                 "上译", "公映", "长译", "京译", "八一", "央视",
                 "台配", "台湾", "香港",
@@ -678,6 +860,7 @@ class P115MediaAnalyzerMixin:
             cleaned = re.sub(r"[|/]+", " ", cleaned)
             cleaned = re.sub(r"\s+", " ", cleaned).strip()
             return cleaned
+
         def _lookup_base_label(norm_lang):
             if not norm_lang:
                 return ""
@@ -707,13 +890,46 @@ class P115MediaAnalyzerMixin:
 
             return base_label
 
+        def _is_chinese_lang_code(value):
+            value = str(value or "").strip().lower().replace("_", "-")
+            if not value:
+                return False
+
+            if value in {
+                "chi", "zho", "zh", "cmn", "cn",
+                "zh-cn", "zh-hans", "zh-sg",
+                "zh-tw", "zh-hk", "zh-hant",
+            }:
+                return True
+
+            try:
+                normalized = str(helpers.normalize_lang_code(value) or "").strip().lower()
+                return normalized in {"chi", "zho", "zh", "cmn"}
+            except Exception:
+                return False
+
+        def _subtitle_script_from_text_or_code(*texts):
+            """
+            先按用户要求看中文字符“繁 / 简 / 簡”，再兼容 chs/cht 等短码。
+            """
+            script = self._detect_cn_script_simple(*texts)
+            if script:
+                return script
+
+            text = " ".join(str(t or "") for t in texts)
+            if _has_lang_marker(text, ["cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "traditional"]):
+                return "cht"
+            if _has_lang_marker(text, ["chs", "sc", "gb", "zh cn", "zh hans", "simplified"]):
+                return "chs"
+            return ""
+
+        def _script_display_suffix(script):
+            """"""
+            return "繁体" if script == "cht" else "简体"
+
         # =========================================================
-        # 1. 判断 Title 是否包含明确语言信息
-        #    注意：这里必须用 _has_lang_marker，不能裸 in，否则 Deutsch 会命中 sc。
+        # 1. Title 语言识别预处理
         # =========================================================
-        # 先提取一次非语言特色标签，并把这些标签从语言识别文本里剥离。
-        # 例如 Latin American / Brazilian 应作为“拉美 / 巴西”特色标签，
-        # 不应把 raw_lang=spa/por 误判成 lat。
         pre_stream_features = self._extract_stream_features(
             stream_type,
             raw_title,
@@ -723,8 +939,9 @@ class P115MediaAnalyzerMixin:
         title_clean = _normalize_marker_text(title_for_lang_detect)
 
         title_has_lang = _has_lang_marker(title_clean, [
-            "chs", "sc", "gb", "zh cn", "zh hans", "简中", "简体", "簡體", "简英", "简日", "简韩",
-            "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "繁中", "繁体", "繁體", "繁英", "繁日", "繁韩",
+            "简", "簡", "繁",
+            "chs", "sc", "gb", "zh cn", "zh hans",
+            "cht", "tc", "big5", "zh tw", "zh hk", "zh hant",
             "eng", "english", "en", "英文", "英语", "英字",
             "jpn", "japanese", "ja", "jp", "日文", "日语", "日字",
             "kor", "korean", "ko", "kr", "韩文", "韩语", "韩字",
@@ -753,65 +970,74 @@ class P115MediaAnalyzerMixin:
         # 2. 字幕流：字幕底层中文统一 chi，靠 Title 区分简繁/双语
         # =========================================================
         if stream_type == "Subtitle":
+            script_marker = _subtitle_script_from_text_or_code(title_for_lang_detect, raw_display_title)
             compact_dual_title = self._normalize_compact_cn_dual_title(raw_title)
+
+            has_eng = _has_lang_marker(clean_text, [
+                "eng", "english", "en", "英文", "英语", "英字", "简英", "繁英", "中英",
+                "中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"
+            ])
+
+            has_jpn = _has_lang_marker(clean_text, [
+                "jpn", "japanese", "ja", "jp", "日文", "日语", "日字", "简日", "繁日", "中日",
+                "中上日下", "日上中下", "繁上日下", "日上繁下", "简体日文", "繁体日文"
+            ])
+
+            has_kor = _has_lang_marker(clean_text, [
+                "kor", "korean", "ko", "kr", "韩文", "韩语", "韩字", "简韩", "繁韩", "中韩",
+                "中上韩下", "韩上中下", "繁上韩下", "韩上繁下", "简体韩文", "繁体韩文"
+            ])
+
+            is_dual_eng = _has_lang_marker(clean_text, [
+                "中英", "中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"
+            ])
+            is_dual_jpn = _has_lang_marker(clean_text, [
+                "中日", "中上日下", "日上中下", "繁上日下", "日上繁下", "简体日文", "繁体日文"
+            ])
+            is_dual_kor = _has_lang_marker(clean_text, [
+                "中韩", "中上韩下", "韩上中下", "繁上韩下", "韩上繁下", "简体韩文", "繁体韩文"
+            ])
 
             if compact_dual_title:
                 norm_lang = "chi"
                 display_lang = compact_dual_title
             else:
-                has_chs = _has_lang_marker(clean_text, [
-                    "chs", "sc", "gb", "zh cn", "zh hans", "simplified", "简中", "简体", "簡體", "简英", "简日", "简韩", "中英", "中日", "中韩", "中文", 
-                    "中上英下", "英上中下", "中上日下", "日上中下", "中上韩下", "韩上中下", "简体英文", "简体日文", "简体韩文"
-                ])
+                is_yue = _has_lang_marker(combined_text, helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
+                is_chi = _has_lang_marker(combined_text, helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
+                is_taiwan = _has_lang_marker(combined_text, ["台配", "台灣", "台湾"])
 
-                has_cht = _has_lang_marker(clean_text, [
-                    "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "traditional", "繁中", "繁体", "繁體", "繁英", "繁日", "繁韩",
-                    "繁上英下", "英上繁下", "繁上日下", "日上繁下", "繁上韩下", "韩上繁下", "繁体英文", "繁体日文", "繁体韩文"
-                ])
+                # 明确脚本标识：Title 里有“繁”就是繁体；有“简/簡”就是简体。
+                if script_marker:
+                    norm_lang = "chi"
+                    script_suffix = _script_display_suffix(script_marker)
 
-                has_eng = _has_lang_marker(clean_text, [
-                    "eng", "english", "en", "英文", "英语", "英字", "简英", "繁英", "中英",
-                    "中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"
-                ])
-                
-                has_jpn = _has_lang_marker(clean_text, [
-                    "jpn", "japanese", "ja", "jp", "日文", "日语", "日字", "简日", "繁日", "中日",
-                    "中上日下", "日上中下", "繁上日下", "日上繁下", "简体日文", "繁体日文"
-                ])
+                    if has_eng or is_dual_eng:
+                        display_lang = f"中英双语{script_suffix}"
+                    elif has_jpn or is_dual_jpn:
+                        display_lang = f"中日双语{script_suffix}"
+                    elif has_kor or is_dual_kor:
+                        display_lang = f"中韩双语{script_suffix}"
+                    else:
+                        display_lang = f"中文{script_suffix}"
 
-                has_kor = _has_lang_marker(clean_text, [
-                    "kor", "korean", "ko", "kr", "韩文", "韩语", "韩字", "简韩", "繁韩", "中韩",
-                    "中上韩下", "韩上中下", "繁上韩下", "韩上繁下", "简体韩文", "繁体韩文"
-                ])
-
-                is_dual_eng = _has_lang_marker(clean_text, ["中上英下", "英上中下", "繁上英下", "英上繁下", "简体英文", "繁体英文"])
-                is_dual_jpn = _has_lang_marker(clean_text, ["中上日下", "日上中下", "繁上日下", "日上繁下", "简体日文", "繁体日文"])
-                is_dual_kor = _has_lang_marker(clean_text, ["中上韩下", "韩上中下", "繁上韩下", "韩上繁下", "简体韩文", "繁体韩文"])
-
-                if (has_chs and has_eng and not has_cht) or (is_dual_eng and not has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中英双语简体"
-                elif (has_cht and has_eng) or (is_dual_eng and has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中英双语繁体"
-                elif (has_chs and has_jpn and not has_cht) or (is_dual_jpn and not has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中日双语简体"
-                elif (has_cht and has_jpn) or (is_dual_jpn and has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中日双语繁体"
-                elif (has_chs and has_kor and not has_cht) or (is_dual_kor and not has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中韩双语简体"
-                elif (has_cht and has_kor) or (is_dual_kor and has_cht):
-                    norm_lang = "chi"
-                    display_lang = "中韩双语繁体"
-                elif has_cht:
+                # 粤语 / 台湾字幕默认繁体。
+                elif is_taiwan or is_yue:
                     norm_lang = "chi"
                     display_lang = "中文繁体"
-                elif has_chs:
+
+                # language=chi/zho/zh/cmn 但 title 没有简繁标识：按简体兜底。
+                elif _is_chinese_lang_code(raw_lang) or _is_chinese_lang_code(norm_lang) or is_chi:
                     norm_lang = "chi"
-                    display_lang = "中文简体"
+
+                    if has_eng or is_dual_eng:
+                        display_lang = "中英双语简体"
+                    elif has_jpn or is_dual_jpn:
+                        display_lang = "中日双语简体"
+                    elif has_kor or is_dual_kor:
+                        display_lang = "中韩双语简体"
+                    else:
+                        display_lang = "中文简体"
+
                 elif has_eng:
                     norm_lang = "eng"
                     display_lang = "英文"
@@ -822,23 +1048,10 @@ class P115MediaAnalyzerMixin:
                     norm_lang = "kor"
                     display_lang = "韩文"
                 else:
-                    is_yue = _has_lang_marker(combined_text, helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_yue", []))
-                    is_chi = _has_lang_marker(combined_text, helpers.AUDIO_SUBTITLE_KEYWORD_MAP.get("sub_chi", []))
-
-                    if _has_lang_marker(combined_text, ["台配", "台灣", "台湾"]):
-                        norm_lang = "chi"
-                        display_lang = "中文繁体"
-                    elif is_yue:
-                        norm_lang = "chi"
-                        display_lang = "中文繁体"
-                    elif is_chi:
-                        norm_lang = "chi"
-                        display_lang = "中文简体"
-                    else:
-                        for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
-                            if _has_lang_marker(combined_text, keywords):
-                                norm_lang = key.replace("sub_", "")
-                                break
+                    for key, keywords in helpers.AUDIO_SUBTITLE_KEYWORD_MAP.items():
+                        if _has_lang_marker(combined_text, keywords):
+                            norm_lang = key.replace("sub_", "")
+                            break
 
         # =========================================================
         # 3. 音轨流：国语/粤语要保留发音差异
@@ -873,6 +1086,15 @@ class P115MediaAnalyzerMixin:
             base_label = _lookup_base_label(norm_lang)
             display_lang = _display_label_from_base_label(base_label, stream_type)
 
+        # 字幕兜底再兜一层：language=chi 但 Title 没有任何简繁标识，固定简体。
+        if (
+            stream_type == "Subtitle"
+            and (not display_lang or display_lang == "未知")
+            and (_is_chinese_lang_code(raw_lang) or _is_chinese_lang_code(norm_lang))
+        ):
+            norm_lang = "chi"
+            display_lang = "中文简体"
+
         if not display_lang:
             display_lang = "未知"
 
@@ -888,9 +1110,14 @@ class P115MediaAnalyzerMixin:
             )
         ))
 
+        # 拦截实时嗅探注入的“智能识别”标识，使其作为特效标签参与渲染
+        if stream_type == "Subtitle" and "智能识别" in raw_title:
+            if "智能识别" not in stream_features:
+                stream_features.append("智能识别")
+
         # IsHearingImpaired 也强制视为 SDH
         if stream_type == "Subtitle" and is_hearing_impaired is True:
-            if "SDH" not in stream_features:
+            if "听障" not in stream_features:
                 stream_features.append("听障")
 
         stream_features = list(dict.fromkeys([f for f in stream_features if f]))
@@ -905,34 +1132,38 @@ class P115MediaAnalyzerMixin:
 
             # 1. 预处理：去掉“画面内简中（iTunes）”这种多余前缀
             friendly_title = re.sub(r"画面内.*?（.*?）", "", friendly_title)
-            
+
             # 2. 暴力净化：碾碎所有 SUP/ASS/Chs 等英文污染
             friendly_title = utils.clean_non_chinese_chars(friendly_title)
 
-            # 3. 抹除无意义的压制组/字幕组名称 ★★★
+            # 3. 抹除无意义的压制组/字幕组名称
             friendly_title = utils.clean_stream_garbage_words(friendly_title)
 
             # 4. 统一简繁字形，并替换常见冗余词
-            friendly_title = friendly_title.replace("繁體", "繁体").replace("簡體", "简体")
-            
+            friendly_title = (
+                friendly_title
+                .replace("繁體", "繁体")
+                .replace("簡體", "简体")
+                .replace("簡", "简")
+                .replace("雙語", "双语")
+                .replace("智能识别", "") 
+            ).strip()
+
             replace_map = {
                 "简体中文": "中文简体",
                 "简中": "中文简体",
                 "繁体中文": "中文繁体",
                 "繁中": "中文繁体",
-                "雙語": "双语",
                 "原盘": "",
             }
             for old, new in replace_map.items():
                 friendly_title = friendly_title.replace(old, new)
-                
-            # 4. 修复双语标签：脚本信息作为纯后缀，不再放到括号里
+
             compact_dual_title = self._normalize_compact_cn_dual_title(friendly_title)
 
             if compact_dual_title:
                 friendly_title = compact_dual_title
             else:
-                # 原来的中上英下、英上中下、简体英文这些特殊格式再继续处理
                 friendly_title = friendly_title.replace("中上英下", "中英双语简体").replace("英上中下", "中英双语简体")
                 friendly_title = friendly_title.replace("简体英文", "中英双语简体").replace("中文简体英文", "中英双语简体")
                 friendly_title = friendly_title.replace("繁体英文", "中英双语繁体").replace("中文繁体英文", "中英双语繁体")
@@ -944,27 +1175,20 @@ class P115MediaAnalyzerMixin:
                 friendly_title = friendly_title.replace("中上韩下", "中韩双语简体").replace("韩上中下", "中韩双语简体")
                 friendly_title = friendly_title.replace("简体韩文", "中韩双语简体").replace("中文简体韩文", "中韩双语简体")
                 friendly_title = friendly_title.replace("繁体韩文", "中韩双语繁体").replace("中文繁体韩文", "中韩双语繁体")
+
             friendly_title = self._normalize_subtitle_display_title(friendly_title)
-            
-            # Title 明确解析出了标准字幕标签时，以 Title 为准，反向修正 DisplayLanguage
+
+            # Title 明确解析出了标准字幕标签时，以 Title 为准，反向修正 DisplayLanguage。
             if self._is_standard_subtitle_label(friendly_title):
                 display_lang = friendly_title
 
-            # 5. 兜底与组合
+            # 兜底与组合：
+            # - 有特色标签：用标准语言 + 特色标签
+            # - 没特色标签：未知中文残留一律丢弃，只显示标准语言
             if stream_features:
-                # ★★★ 核心修改：只要提取到了标准化的特色标签，直接用它！抛弃所有残留的中文杂质
                 friendly_title = self._format_stream_feature_title(display_lang, stream_features)
-            elif not friendly_title:
-                # 没有特色标签，且标题被清空了，只显示语言
-                friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
             else:
-                # 没有特色标签，但有未知的中文残留，组合起来
-                display_lang = self._normalize_subtitle_display_title(display_lang)
-                if display_lang in ["中文简体", "中文繁体", "中英双语简体", "中英双语繁体", "中日双语简体", "中日双语繁体", "中韩双语简体", "中韩双语繁体"]:
-                    check_kw = "简" if "简" in display_lang else ("繁" if "繁" in display_lang else "")
-                    if check_kw and check_kw not in friendly_title:
-                        # 语言/脚本不再进括号；未知中文残留按特色词处理。
-                        friendly_title = f"{display_lang}（{friendly_title}）" if friendly_title else display_lang
+                friendly_title = display_lang if display_lang and display_lang != "未知" else ""
 
             if re.match(r"^中.+?双语(简体|繁体)$", friendly_title):
                 display_lang = friendly_title
@@ -974,6 +1198,16 @@ class P115MediaAnalyzerMixin:
         # =========================================================
         elif stream_type == "Audio":
             friendly_title = raw_title
+            
+            # ★ 新增：简繁转换，防止出现 粤语(粵語) 的尴尬情况
+            cht_to_chs = {
+                "粵": "粤", "語": "语", "國": "国", "雙": "双", 
+                "臺": "台", "灣": "湾", "聽": "听", "導": "导", 
+                "評": "评", "視": "视", "體": "体", "簡": "简",
+                "譯": "译", "長": "长", "蘋": "苹", "華": "华"
+            }
+            for k, v in cht_to_chs.items():
+                friendly_title = friendly_title.replace(k, v)
 
             # 1. 暴力净化：碾碎所有 DTS-HD, Dolby, kbps 等非中文字符
             friendly_title = utils.clean_non_chinese_chars(friendly_title)
@@ -992,19 +1226,16 @@ class P115MediaAnalyzerMixin:
             for old, new in audio_replace_map.items():
                 friendly_title = friendly_title.replace(old, new)
 
-            # 3. 兜底与组合
+            # 4. 兜底与组合
             if stream_features:
-                # ★★★ 核心修改：只要提取到了标准化的特色标签，直接用它！抛弃所有残留的中文杂质
                 friendly_title = self._format_stream_feature_title(display_lang, stream_features)
             elif not friendly_title:
-                # 没有特色标签，且标题被清空了，只显示语言
                 friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
             else:
-                # 没有特色标签，但有未知的中文残留，组合起来
                 if display_lang and display_lang != "未知":
                     # 移除开头多余的 display_lang
                     friendly_title = re.sub(rf"^{display_lang}", "", friendly_title)
-                    
+
                     if not friendly_title:
                         friendly_title = display_lang
                     else:
@@ -1043,7 +1274,11 @@ class P115MediaAnalyzerMixin:
             or friendly_title.lower().replace(" ", "") in redundant_exact_matches
             or friendly_title.lower() == raw_lang.lower()
         ):
-            friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
+            if stream_type == "Subtitle":
+                # 字幕不要把 raw_title 拉回来，避免“未知中文残留”重新污染最终展示。
+                friendly_title = display_lang if display_lang and display_lang != "未知" else ""
+            else:
+                friendly_title = display_lang if display_lang and display_lang != "未知" else raw_title
 
         if not norm_lang:
             norm_lang = raw_lang
@@ -1845,30 +2080,42 @@ class P115MediaAnalyzerMixin:
                     return False
 
                 def _detect_sub_flags(sub):
-                    sub_title = _norm_sub_text(" ".join([
-                        sub.get("Title", ""),
-                        sub.get("DisplayTitle", ""),
-                        sub.get("DisplayLanguage", ""),
-                        sub.get("Language", ""),
-                    ]))
+                    sub_title_raw = " ".join([
+                        str(sub.get("Title", "")),
+                        str(sub.get("DisplayTitle", "")),
+                        str(sub.get("DisplayLanguage", "")),
+                        str(sub.get("Language", "")),
+                    ])
+                    sub_title = _norm_sub_text(sub_title_raw)
 
                     is_effect = _has_token(sub_title, "特效", "effect", "effects", "tx")
 
-                    has_cht = _has_token(
-                        sub_title,
-                        "繁体", "繁體", "繁中", "cht", "tc", "big5", "zh tw", "zh hk", "zh hant"
-                    )
-                    has_chs = _has_token(
-                        sub_title,
-                        "简体", "簡體", "简中", "chs", "sc", "gb", "zh cn", "zh hans"
+                    # 极简简繁判断：
+                    # - 任意标题字段里有“繁” => 繁体
+                    # - 任意标题字段里有“简 / 簡” => 简体
+                    # - 没有中文简繁字，再兼容 chs/cht/tc/sc/zh-hant/zh-hans 等短码
+                    script_marker = self._detect_cn_script_simple(
+                        sub.get("Title", ""),
+                        sub.get("DisplayTitle", ""),
+                        sub.get("DisplayLanguage", ""),
                     )
 
-                    # 纯 chi/zho/zh 没有简繁标记时，按用户偏好兜底；没有偏好则默认简体。
-                    if not has_chs and not has_cht and _has_token(sub_title, "chi", "zho", "zh", "中文"):
-                        if primary_chinese_subtitle_pref == "cht":
-                            has_cht = True
-                        else:
-                            has_chs = True
+                    has_cht = script_marker == "cht"
+                    has_chs = script_marker == "chs"
+
+                    if not has_chs and not has_cht:
+                        has_cht = _has_token(
+                            sub_title,
+                            "cht", "tc", "big5", "zh tw", "zh hk", "zh hant", "traditional"
+                        )
+                        has_chs = _has_token(
+                            sub_title,
+                            "chs", "sc", "gb", "zh cn", "zh hans", "simplified"
+                        )
+
+                    # language=chi/zho/zh/cmn 且没有简繁标识：固定按简体处理。
+                    if not has_chs and not has_cht and _has_token(sub_title, "chi", "zho", "zh", "cmn", "中文"):
+                        has_chs = True
 
                     has_eng = _has_token(sub_title, "eng", "en", "英文", "英语", "中英", "双语")
                     has_jpn = _has_token(sub_title, "jpn", "jp", "ja", "日文", "日语", "中日")
