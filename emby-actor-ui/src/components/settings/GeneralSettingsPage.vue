@@ -130,7 +130,7 @@
                         <n-switch v-model:value="configModel.tmdb_include_adult" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item label="启用在线豆瓣" path="douban_enable_online_api">
+                      <n-form-item-grid-item label="启用豆瓣辅助" path="douban_enable_online_api">
                         <n-switch v-model:value="configModel.douban_enable_online_api" />
                       </n-form-item-grid-item>
 
