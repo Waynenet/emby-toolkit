@@ -651,7 +651,7 @@ body {
 }
 .n-tabs-bar,
 .n-tabs-rail { 
-  background-color: var(--text-primary) !important; 
+  background-color: transparent !important; 
 }
 
 /* ==================== 10. 终极修复：交互组件变紫/卡色问题 ==================== */
