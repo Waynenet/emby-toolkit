@@ -135,35 +135,67 @@ class ActorDBManager:
                 logger.error(f"  ➜ 查询 person_metadata 时出错 ({column}={value}): {e}")
         return None
     
-    def enrich_actors_with_provider_ids(self, cursor: psycopg2.extensions.cursor, raw_emby_actors: List[Dict[str, Any]], emby_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def enrich_actors_with_provider_ids(
+        self,
+        cursor: psycopg2.extensions.cursor,
+        raw_emby_actors: List[Dict[str, Any]],
+        emby_config: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
         """
-        接收一个来自 Emby 的原始演员列表，检查并补充 ProviderIds。
-        (已移除本地数据库缓存逻辑，直接依赖 Emby 自身数据或 API)
+        【优化版】批量补充演员 ProviderIds，解决 N+1 请求导致的入库缓慢问题。
         """
         if not raw_emby_actors:
             return []
 
-        enriched_actors_map = {actor['Id']: actor.copy() for actor in raw_emby_actors}
-        
+        enriched_actors_map = {}
         ids_to_fetch_from_api = []
 
-        # 检查哪些演员缺少 Tmdb ID
-        for actor in enriched_actors_map.values():
-            if not actor.get("ProviderIds", {}).get("Tmdb"):
-                ids_to_fetch_from_api.append(actor['Id'])
+        for actor in raw_emby_actors:
+            person_id = actor.get("Id")
+            if not person_id:
+                continue
+
+            actor_copy = actor.copy()
+            enriched_actors_map[person_id] = actor_copy
+
+            provider_ids = actor_copy.get("ProviderIds") or {}
+            tmdb_provider_id = provider_ids.get("Tmdb")
+            
+            # 1. 如果已经有 TMDb ID，跳过
+            if tmdb_provider_id:
+                continue
+
+            # 2. 如果是中文名，通常不需要查外部ID（靠名字匹配即可），跳过以节省开销
+            actor_name = str(actor_copy.get("Name") or "").strip()
+            if actor_name and contains_chinese(actor_name):
+                continue
+
+            ids_to_fetch_from_api.append(person_id)
 
         if ids_to_fetch_from_api:
-            logger.info(f"  ➜ [演员数据管家] 将通过 Emby API 为 {len(ids_to_fetch_from_api)} 位演员获取外部ID...")
-            for person_id in ids_to_fetch_from_api:
-                person_details = get_emby_item_details(
-                    item_id=person_id, 
-                    emby_server_url=emby_config['url'], 
-                    emby_api_key=emby_config['api_key'], 
-                    user_id=emby_config['user_id'],
-                    fields="ProviderIds"
-                )
-                if person_details and person_details.get("ProviderIds"):
-                    enriched_actors_map[person_id]["ProviderIds"] = person_details.get("ProviderIds")
+            # ★★★ 核心优化：使用批量获取接口，将 N 次请求合并为 1 次 ★★★
+            from handler.emby import get_emby_items_by_id
+            
+            logger.info(f"  ➜ [演员数据管家] 正在批量获取 {len(ids_to_fetch_from_api)} 位演员的外部ID...")
+            
+            # get_emby_items_by_id 内部会自动处理分页（每100个一组）
+            batch_details = get_emby_items_by_id(
+                base_url=emby_config['url'],
+                api_key=emby_config['api_key'],
+                user_id=emby_config['user_id'],
+                item_ids=ids_to_fetch_from_api,
+                fields="ProviderIds"
+            )
+
+            # 将查到的 ProviderIds 写回 map
+            for item in batch_details:
+                eid = item.get("Id")
+                if eid in enriched_actors_map:
+                    enriched_actors_map[eid]["ProviderIds"] = item.get("ProviderIds")
+                    
+            logger.debug(f"  ➜ [演员数据管家] 批量补充完成。")
+        else:
+            logger.debug("  ➜ [演员数据管家] 无需通过 Emby API 补充演员外部ID。")
 
         return list(enriched_actors_map.values())
 
