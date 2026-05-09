@@ -25,10 +25,10 @@
           <template #header><span class="card-title">媒体库分布</span></template>
           
           <!-- 图表区 -->
-          <div v-if="loading.library" style="display: flex; justify-content: center; align-items: center; height: 180px;">
-            <n-skeleton circle :width="140" :height="140" />
+          <div v-if="loading.library" style="display: flex; justify-content: center; align-items: center; height: 200px; margin-top: 8px;">
+            <n-skeleton circle :width="130" :height="130" />
           </div>
-          <v-chart v-else class="chart-container" :option="resolutionChartOptions" autoresize style="height: 180px; width: 100%;" />
+          <v-chart v-else class="chart-container" :option="resolutionChartOptions" autoresize style="height: 200px; width: 100%; margin-top: 8px;" />
 
           <!-- 融合的媒体库数据 -->
           <div class="integrated-media-stats">
@@ -321,7 +321,8 @@ const fetchData = () => {
 const resolutionChartOptions = computed(() => {
   const chartData = stats.media_library.resolution_stats || [];
   if (!chartData.length) {
-    return { series: [{ type: 'pie', radius: ['40%', '70%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
+    // 同步空数据状态的中心点
+    return { series: [{ type: 'pie', radius: ['40%', '70%'], center: ['50%', '42%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
   }
   return {
     color: ['#8a2be2', '#18a058', '#f0a020', '#d03050', '#999', '#73C0DE'],
@@ -329,8 +330,8 @@ const resolutionChartOptions = computed(() => {
     legend: { show: true, bottom: '0', textStyle: { color: 'var(--text-primary)' } },
     series: [{
       type: 'pie',
-      radius: ['45%', '75%'],
-      center: ['50%', '35%'],
+      radius: ['45%', '70%'], // 缩小外半径防止贴边
+      center: ['50%', '42%'], // 将 Y 轴中心下调（原为35%），让上方留出足够空间
       itemStyle: { borderRadius: 8, borderColor: 'rgba(255,255,255,0.2)', borderWidth: 2 },
       label: { show: false },
       data: chartData.map(item => ({ value: item.count, name: item.resolution || '未知' }))
