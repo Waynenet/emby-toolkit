@@ -654,6 +654,11 @@ body {
   background-color: transparent !important; 
 }
 
+.n-tabs-capsule {
+  background-color: #18a058 !important;
+  border-color: #18a058 !important;
+}
+
 /* ==================== 10. 终极修复：交互组件变紫/卡色问题 ==================== */
 
 /* 1. 强行覆盖 Naive UI 默认的 transition: all，只对明确的属性做动画，防止浏览器插值计算卡在紫色 */
