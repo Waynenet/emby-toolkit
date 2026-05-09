@@ -552,152 +552,71 @@ class WatchlistProcessor:
             )
 
         # ======================================================================
-        # ★★★ 老六专属：无简介笑话占位功能 (追剧刷新) ★★★
+        # ★★★ 新增：统一构建 episodes_details 字典 (解决真假美猴王报错核心) ★★★
         # ======================================================================
-        if self.config.get("ai_joke_fallback", False) and self.ai_translator:
-            jokes_to_generate = {}
-
-            # 1. 检查主干
-            if not aggregated_data['series_details'].get("overview"):
-                jokes_to_generate["main"] = item_name
-
-            # 2. 检查分集
-            # 尝试从数据库读取旧数据，继承已有笑话，省 Token！(极简直查版)
-            old_episodes = {}
-            try:
-                from database.connection import get_db_connection
-                with get_db_connection() as conn_joke:
-                    cursor_joke = conn_joke.cursor()
-                    cursor_joke.execute(
-                        "SELECT season_number, episode_number, overview FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'",
-                        (str(tmdb_id),)
-                    )
-                    for row in cursor_joke.fetchall():
-                        key = f"S{row['season_number']}E{row['episode_number']}"
-                        old_episodes[key] = {"overview": row.get('overview', '')}
-            except Exception as e_joke:
-                logger.warning(f"  ➜ 追剧刷新读取旧简介用于AI笑话判断时失败: {e_joke}")
-
-            for season_details in aggregated_data['seasons_details']:
-                for ep in season_details.get("episodes", []):
-                    if not ep.get("overview"):
-                        ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
-                        old_overview = old_episodes.get(ep_key, {}).get("overview") or ""
-                        if "【老六占位简介】" in old_overview:
-                            ep["overview"] = old_overview # 继承老笑话
-                        else:
-                            jokes_to_generate[ep_key] = f"{item_name} {ep_key}"
-
-            # 3. 批量生成并回填
-            if jokes_to_generate:
-                logger.info(f"  ➜ [老六模式] 追剧刷新发现 {len(jokes_to_generate)} 处缺失简介，正在呼叫 AI 编段子...")
-                generated_jokes = self.ai_translator.batch_generate_jokes(jokes_to_generate)
-
-                if "main" in generated_jokes:
-                    aggregated_data['series_details']["overview"] = generated_jokes["main"]
-
-                for season_details in aggregated_data['seasons_details']:
-                    for ep in season_details.get("episodes", []):
-                        ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
-                        if ep_key in generated_jokes:
-                            ep["overview"] = generated_jokes[ep_key]
-
+        unified_episodes_dict = {}
+        for season_details in aggregated_data.get('seasons_details', []):
+            for ep in season_details.get('episodes', []):
+                s_num = ep.get('season_number')
+                e_num = ep.get('episode_number')
+                if s_num is not None and e_num is not None:
+                    unified_episodes_dict[f"S{s_num}E{e_num}"] = ep
+                    
+        # 兜底确保 poster_path 存在 (有些剧 TMDb 只返回 still_path)
+        for ep_key, ep in unified_episodes_dict.items():
+            if ep.get('still_path') and not ep.get('poster_path'):
+                ep['poster_path'] = ep['still_path']
 
         # ======================================================================
         # ★★★ 核心修复：真假美猴王 (临时 ID 资产转移) ★★★
         # ======================================================================
         try:
-            # 1. 动态构建统一分集字典，兼容不同数据库方法的读取格式
-            unified_episodes_dict = {}
-            for season in aggregated_data.get('seasons_details', []):
-                s_num = season.get('season_number')
-                if s_num is not None:
-                    if s_num not in unified_episodes_dict:
-                        unified_episodes_dict[s_num] = {}
-                    
-                    for ep in season.get('episodes', []):
-                        e_num = ep.get('episode_number')
-                        if e_num is not None:
-                            # 格式 A: 嵌套结构 {1: {1: ep_info}}
-                            unified_episodes_dict[s_num][e_num] = ep
-                            # 格式 B: 平铺字符串结构 "S1E1": ep_info
-                            unified_episodes_dict[f"S{s_num}E{e_num}"] = ep
-
-            # 2. 执行转移
             watchlist_db.transfer_dummy_episode_assets(tmdb_id, unified_episodes_dict)
         except Exception as e_dummy:
             logger.warning(f"  ➜ 临时 ID 资产转移时出错 (忽略并继续): {e_dummy}")
 
-        # 解包数据
-        latest_series_data = aggregated_data['series_details']
-        seasons_list = aggregated_data['seasons_details'] # 这是一个包含完整集信息的季列表
+        # ======================================================================
+        # ★★★ 老六专属：无简介笑话占位功能 (追剧刷新极简版) ★★★
+        # ======================================================================
+        if self.config.get("ai_joke_fallback", False) and self.ai_translator:
+            jokes_to_generate = {}
+            if not aggregated_data['series_details'].get("overview"):
+                jokes_to_generate["main"] = item_name
+                
+            for ep_key, ep in unified_episodes_dict.items():
+                if not ep.get("overview"):
+                    jokes_to_generate[ep_key] = f"{item_name} {ep_key}"
 
-        # 在保存 JSON 和写入数据库之前，强制应用分级映射逻辑
-        # 这会原地修改 latest_series_data，注入映射后的 'US' 分级
+            if jokes_to_generate:
+                logger.info(f"  ➜ [老六模式] 追剧发现 {len(jokes_to_generate)} 处缺失简介，呼叫 AI...")
+                generated_jokes = self.ai_translator.batch_generate_jokes(jokes_to_generate)
+                if "main" in generated_jokes:
+                    aggregated_data['series_details']["overview"] = generated_jokes["main"]
+                for ep_key, ep in unified_episodes_dict.items():
+                    if ep_key in generated_jokes:
+                        ep["overview"] = generated_jokes[ep_key]
+
+        # 解包数据并应用分级
+        latest_series_data = aggregated_data['series_details']
         try:
             helpers.apply_rating_logic(latest_series_data, latest_series_data, 'Series')
-            # 顺便把映射后的分级打印出来看看
-            mapped_rating = latest_series_data.get('mpaa') or latest_series_data.get('certification')
-            logger.debug(f"  ➜ 已对 '{item_name}' 应用分级映射，结果: {mapped_rating}")
         except Exception as e:
-            logger.warning(f"  ➜ 应用分级映射逻辑时出错: {e}")
+            pass
         
-        # 2. 将 TMDb 最新数据合并写入本地 JSON (series.json) 
+        # 2. 将 TMDb 最新数据写入本地 JSON
         self._save_local_json(f"override/tmdb-tv/{tmdb_id}/series.json", latest_series_data)
 
-        # 3. 更新数据库 (Series 层级) - 代码保持不变
+        # 3. 更新数据库 (Series 层级)
         content_ratings = latest_series_data.get("content_ratings", {}).get("results", [])
-        official_rating_json = {}
-        if latest_series_data.get('adult') is True:
-            official_rating_json['US'] = 'XXX' 
-        else:
-            content_ratings = latest_series_data.get("content_ratings", {}).get("results", [])
-            for r in content_ratings:
-                iso = r.get("iso_3166_1")
-                rating = r.get("rating")
-                if iso and rating:
-                    official_rating_json[iso] = rating
-
-        genres_raw = latest_series_data.get("genres", [])
-        genres_list = []
-        
-        for g in genres_raw:
-            # TMDb 返回的是字典 {"id": 18, "name": "Drama"}
-            if isinstance(g, dict):
-                name = g.get('name')
-                if name:
-                    # 应用汉化补丁
-                    if name in utils.GENRE_TRANSLATION_PATCH:
-                        name = utils.GENRE_TRANSLATION_PATCH[name]
-                    
-                    genres_list.append({
-                        "id": g.get('id', 0), 
-                        "name": name
-                    })
-            # 防御性编程：如果 TMDb 返回了字符串 (虽然不太可能)
-            elif isinstance(g, str):
-                name = g
-                if name in utils.GENRE_TRANSLATION_PATCH:
-                    name = utils.GENRE_TRANSLATION_PATCH[name]
-                genres_list.append({"id": 0, "name": name})
-
+        official_rating_json = {'US': 'XXX'} if latest_series_data.get('adult') else {r.get("iso_3166_1"): r.get("rating") for r in content_ratings if r.get("iso_3166_1") and r.get("rating")}
         # 2. 处理类型 (Genres)
-        genres_raw = latest_series_data.get("genres", [])
-        genres_list = [{"id": g.get('id', 0), "name": utils.GENRE_TRANSLATION_PATCH.get(g.get('name'), g.get('name'))} 
-                       for g in genres_raw if isinstance(g, dict)]
-
+        genres_list = [{"id": g.get('id', 0), "name": utils.GENRE_TRANSLATION_PATCH.get(g.get('name'), g.get('name'))} for g in latest_series_data.get("genres", []) if isinstance(g, dict)]
         # 3. 处理关键词 (Keywords)
-        keywords = latest_series_data.get("keywords", {}).get("results", [])
-        keywords_json = [{"id": k["id"], "name": k["name"]} for k in keywords]
-
+        keywords_json = [{"id": k["id"], "name": k["name"]} for k in latest_series_data.get("keywords", {}).get("results", [])]
         # 4. 处理制作公司 (Production Companies) 
-        production_companies = latest_series_data.get("production_companies", [])
-        production_companies_json = [{"id": p["id"], "name": p["name"], "logo_path": p.get("logo_path")} for p in production_companies]
-
-        # 5. 处理播出网络 (Networks) 
-        networks = latest_series_data.get("networks", [])
-        networks_json = [{"id": n["id"], "name": n["name"], "logo_path": n.get("logo_path")} for n in networks]
-
+        production_companies_json = [{"id": p["id"], "name": p["name"], "logo_path": p.get("logo_path")} for p in latest_series_data.get("production_companies", [])]
+        # 5. 处理播出网络 (Networks)
+        networks_json = [{"id": n["id"], "name": n["name"], "logo_path": n.get("logo_path")} for n in latest_series_data.get("networks", [])]
         # 6. 处理产地
         countries = latest_series_data.get("origin_country", [])
         countries_json = countries if isinstance(countries, list) else [countries]
@@ -720,36 +639,21 @@ class WatchlistProcessor:
             "networks_json": json.dumps(networks_json) if networks_json else None,
             "countries_json": json.dumps(countries_json) if countries_json else None
         }
-        
         media_db.update_media_metadata_fields(tmdb_id, 'Series', series_updates)
         logger.debug(f"  ➜ 已全量刷新 '{item_name}' 的 Series 元数据。")
 
         # 4. 处理季和集的数据 (保存 JSON + 收集列表)
-        # 这里不需要再发网络请求了，直接从 aggregated_data 里拿
-        all_tmdb_episodes = []
-        
-        for season_details in seasons_list:
+        all_tmdb_episodes = list(unified_episodes_dict.values())
+        for season_details in aggregated_data.get('seasons_details', []):
             season_num = season_details.get("season_number")
-            if season_num is None: continue
-            
-            # 保存 season-X.json
-            self._save_local_json(f"override/tmdb-tv/{tmdb_id}/season-{season_num}.json", season_details)
-
-            # 提取集信息
-            episodes = season_details.get("episodes", [])
-            if episodes:
-                all_tmdb_episodes.extend(episodes)
-                
-                # 保存 season-X-episode-Y.json
-                for ep in episodes:
+            if season_num is not None:
+                self._save_local_json(f"override/tmdb-tv/{tmdb_id}/season-{season_num}.json", season_details)
+                for ep in season_details.get("episodes", []):
                     ep_num = ep.get("episode_number")
                     if ep_num is not None:
-                        self._save_local_json(
-                            f"override/tmdb-tv/{tmdb_id}/season-{season_num}-episode-{ep_num}.json", 
-                            ep
-                        )
+                        self._save_local_json(f"override/tmdb-tv/{tmdb_id}/season-{season_num}-episode-{ep_num}.json", ep)
 
-        # ★★★ 4.5 新增：并发下载缺失的图片 (包含最新分集图片) ★★★
+        # ★★★ 4.5 并发下载缺失的图片 ★★★
         try:
             import extensions
             if extensions.media_processor_instance:
