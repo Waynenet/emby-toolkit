@@ -325,7 +325,8 @@
       </div>
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
-    <!-- (下方的 Modals 和 scripts 逻辑部分未更改，保持您的原样) -->
+    
+    <!-- 模态框: 缺失详情 -->
     <n-modal v-model:show="showModal" preset="card" style="width: 90%; max-width: 900px;" :title="selectedSeries ? `缺失详情 - ${selectedSeries.item_name}` : ''" :bordered="false" size="huge">
       <div v-if="selectedSeries && missingData">
         <n-tabs type="line" animated v-model:value="activeTab">
@@ -350,9 +351,11 @@
         </n-tabs>
       </div>
     </n-modal>
-    <!-- 追剧策略配置模态框 (原样保留) -->
+    
+    <!-- 追剧策略配置模态框 -->
     <n-modal v-model:show="showConfigModal" preset="card" title="智能追剧策略" style="width: 950px; max-width: 95vw;" :bordered="false" size="huge">
       <div class="settings-layout">
+        <!-- 左侧列 -->
         <div class="settings-col">
           <div class="settings-group-title">状态自动化</div>
           <div class="settings-card">
@@ -386,7 +389,7 @@
                 <div class="setting-desc">当下一集播出时间在指定天数以后时，自动将状态设为“暂停”。0=关闭。</div>
               </div>
             </div>
-          <n-divider style="margin: 0" />
+            <n-divider style="margin: 0" />
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
               <div class="setting-content">
@@ -399,6 +402,8 @@
             </div>
           </div>
         </div>
+        
+        <!-- 右侧列 -->
         <div class="settings-col">
           <div class="settings-group-title">订阅与洗版</div>
           <div class="settings-card">
@@ -411,10 +416,19 @@
                 </div>
                 <div class="setting-desc">剧集完结后，自动删除旧订阅并提交“洗版订阅”，以获取整季合集。</div>
                 <n-collapse-transition :show="watchlistConfig.auto_resub_ended">
-                  <div class="setting-sub-panel" style="margin-top: 8px; padding: 4px 12px; background-color: rgba(0,0,0,0.03);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除 Emby 旧文件</span><n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small"/></div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除 MP 整理记录</span><n-switch v-model:value="watchlistConfig.auto_delete_mp_history" size="small"/></div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);"><span style="font-size: 13px;">删除下载器任务及源文件</span><n-switch v-model:value="watchlistConfig.auto_delete_download_tasks" size="small"/></div>
+                  <div class="setting-sub-panel">
+                    <div class="resub-item">
+                      <span class="resub-label">删除 Emby 旧文件</span>
+                      <n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small"/>
+                    </div>
+                    <div class="resub-item">
+                      <span class="resub-label">删除 MP 整理记录</span>
+                      <n-switch v-model:value="watchlistConfig.auto_delete_mp_history" size="small"/>
+                    </div>
+                    <div class="resub-item" style="border-bottom: none;">
+                      <span class="resub-label">删除下载器任务及源文件</span>
+                      <n-switch v-model:value="watchlistConfig.auto_delete_download_tasks" size="small"/>
+                    </div>
                   </div>
                 </n-collapse-transition>
               </div>
@@ -431,7 +445,8 @@
               </div>
             </div>
           </div>
-          <div class="settings-group-title" style="margin-top: 24px;">跟踪与维护</div>
+          
+          <div class="settings-group-title" style="margin-top: 4px;">跟踪与维护</div>
           <div class="settings-card">
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="TimeIcon" /></div>
@@ -457,7 +472,6 @@
 </template>
 
 <script setup>
-// JS 部分没有需要更改的地方，直接保留您原本的所有逻辑即可
 import { ref, shallowRef, triggerRef, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NPopconfirm, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTabs, NTabPane, NList, NListItem, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NProgress, useThemeVars, NPopover, NInputNumber, NSwitch, NCollapseTransition, NText } from 'naive-ui';
@@ -1110,32 +1124,148 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   justify-content: center;
 }
 
-/* 悬浮操作栏 (Watchlist/Unified) */
-.floating-action-bar {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 1000;
-  width: auto; min-width: 400px; max-width: 90%;
-}
-.fab-content {
-  background: rgba(30, 35, 45, 0.85); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50px; padding: 12px 24px;
-  display: flex; justify-content: space-between; align-items: center; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); gap: 24px;
-}
-.fab-text { color: #fff; font-size: 14px; }
-.fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
 
-/* 模态框内的海报墙 */
-.movie-card {
-  border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; 
-  background-color: var(--glass-bg); backdrop-filter: blur(10px); border: 1px solid var(--glass-border);
-  transition: transform 0.2s, box-shadow 0.2s; cursor: default; 
+/* ★★★ 策略配置模态框专属样式 ★★★ */
+.settings-layout {
+  display: flex;
+  gap: 32px;
 }
-.movie-card:hover { transform: translateY(-4px); box-shadow: var(--glass-shadow); z-index: 2; }
-.movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
-.movie-card:hover .movie-poster { transform: scale(1.05); }
-.movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }
-.movie-title { font-size: 13px; font-weight: bold; line-height: 1.3; text-shadow: 0 1px 2px rgba(0,0,0,0.8); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
-.movie-year { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 2px; }
-.movie-actions-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; opacity: 0; transition: opacity 0.2s ease-in-out; z-index: 20; }
-.movie-card:hover .movie-actions-overlay { opacity: 1; }
-.status-badge { position: absolute; top: 10px; left: -30px; width: 100px; height: 24px; background-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px); color: #fff; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 15; pointer-events: none; }
+
+.settings-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-group-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--n-text-color);
+  border-left: 4px solid var(--n-primary-color, #18a058);
+  padding-left: 10px;
+  margin-bottom: 4px;
+  line-height: 1.2;
+}
+
+.settings-card {
+  background: var(--n-color);
+  border: 1px solid var(--n-border-color);
+  border-radius: 8px;
+  padding: 0 16px;
+}
+
+.setting-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px 0;
+}
+
+.setting-icon {
+  font-size: 26px;
+  color: var(--n-primary-color, #18a058);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  background: rgba(128, 128, 128, 0.1);
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+
+.setting-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setting-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.setting-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--n-text-color);
+}
+
+.setting-desc {
+  font-size: 13px;
+  color: var(--n-text-color-depth-3, #888);
+  line-height: 1.5;
+}
+
+.setting-sub-panel {
+  margin-top: 10px;
+  background-color: rgba(128, 128, 128, 0.05);
+  border: 1px solid var(--n-border-color);
+  border-radius: 6px;
+  padding: 12px 16px;
+}
+
+.auto-pending-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.auto-pending-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sub-label {
+  font-size: 13px;
+  color: var(--n-text-color-depth-2, #666);
+}
+
+/* 洗版订阅子选项 */
+.resub-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--n-border-color);
+}
+.resub-label {
+  font-size: 13px;
+  color: var(--n-text-color-depth-2, #666);
+}
+
+/* 策略配置：移动端响应式 */
+@media (max-width: 768px) {
+  .settings-layout {
+    flex-direction: column;
+    gap: 24px;
+  }
+  .settings-group-title {
+    margin-top: 12px;
+  }
+  .settings-col .settings-group-title:first-child {
+    margin-top: 0;
+  }
+  .auto-pending-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .setting-item {
+    gap: 12px;
+    padding: 14px 0;
+  }
+  .setting-icon {
+    font-size: 22px;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+  }
+}
 </style>
