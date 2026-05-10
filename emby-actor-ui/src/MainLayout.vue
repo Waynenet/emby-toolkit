@@ -88,7 +88,7 @@
                 object-fit="cover"
                 style="margin-right: 4px;"
               />
-              <n-icon v-else size="18" :component="UserCenterIcon" style="margin-right: 4px;" />
+              <n-icon v-else size="18" :component="UserCenterIcon" />
               <span v-if="!isMobile" class="username-text">{{ accountInfo?.name || authStore.username }}</span>
             </div>
           </n-dropdown>
@@ -393,11 +393,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border-radius: 12px !important;
 }
 
-.n-dropdown-option-body:hover,
-.n-menu-popover .n-menu-item-content:hover {
-  background-color: rgba(34, 247, 201, 0.705) !important;
-}
-
 .sider-bottom-tools {
   padding: 16px;
   display: flex;
@@ -519,6 +514,10 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
+  .user-module {
+    padding: 0 10px;
+    justify-content: center;
+  }
   .floating-task-pill { top: 70px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>

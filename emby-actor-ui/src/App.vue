@@ -509,6 +509,51 @@ body::before {
   color: #ffffff !important;
 }
 
+/* ==================== 退出登录/下拉菜单悬浮高亮变绿 (破解伪元素遮挡) ==================== */
+/* 必须穿透 ::before 伪元素，才能防止白底盖住绿色 */
+.n-dropdown-option-body:hover::before,
+.n-dropdown-option-body--pending::before,
+.n-base-select-option:hover::before,
+.n-base-select-option--pending::before,
+.n-menu-popover .n-menu-item-content:hover::before {
+  background-color: #18a058 !important; /* 强制覆盖悬浮层为绿色 */
+  opacity: 1 !important;
+}
+
+/* 确保悬浮时内部的文字和图标变成纯白色，防止看不清 */
+.n-dropdown-option-body:hover .n-dropdown-option-body__label,
+.n-dropdown-option-body--pending .n-dropdown-option-body__label,
+.n-dropdown-option-body:hover .n-dropdown-option-body__icon,
+.n-dropdown-option-body--pending .n-dropdown-option-body__icon,
+.n-base-select-option:hover,
+.n-base-select-option--pending {
+  color: #ffffff !important;
+}
+
+/* ==================== 侧边栏折叠/展开箭头强制纯白 (破解 div 拼接原理) ==================== */
+/* 因为 Naive UI 的 bar 箭头是由两个 div 拼出来的，必须改它们的 background-color */
+.n-layout-toggle-bar__top,
+.n-layout-toggle-bar__bottom {
+  background-color: rgba(255, 255, 255, 0.5) !important;
+  box-shadow: 0 0 2px rgba(255,255,255,0.9) !important; /* 增加一点微光防暗 */
+}
+
+/* 悬浮时的箭头状态更亮更粗 */
+.n-layout-toggle-bar:hover .n-layout-toggle-bar__top,
+.n-layout-toggle-bar:hover .n-layout-toggle-bar__bottom {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 6px rgba(255,255,255,1) !important;
+  width: 3px !important; /* 原本可能是 2px，稍微加粗更醒目 */
+}
+
+/* 兜底：如果是 button 形态的图标 */
+.n-layout-toggle-button .n-base-icon,
+.n-layout-toggle-button svg,
+.n-layout-toggle-button path {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+
 /* 文字增加一点阴影防白底看不清 */
 body {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
