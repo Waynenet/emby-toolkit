@@ -25,10 +25,10 @@
           <template #header><span class="card-title">媒体库分布</span></template>
           
           <!-- 图表区 -->
-          <div v-if="loading.library" style="display: flex; justify-content: center; align-items: center; height: 200px; margin-top: 8px;">
-            <n-skeleton circle :width="130" :height="130" />
+          <div v-if="loading.library" class="library-chart-wrapper" style="display: flex; justify-content: center; align-items: center;">
+            <n-skeleton circle :width="120" :height="120" />
           </div>
-          <v-chart v-else class="chart-container" :option="resolutionChartOptions" autoresize style="height: 200px; width: 100%; margin-top: 8px;" />
+          <v-chart v-else class="chart-container library-chart-wrapper" :option="resolutionChartOptions" autoresize style="width: 100%;" />
 
           <!-- 融合的媒体库数据 -->
           <div class="integrated-media-stats">
@@ -321,8 +321,7 @@ const fetchData = () => {
 const resolutionChartOptions = computed(() => {
   const chartData = stats.media_library.resolution_stats || [];
   if (!chartData.length) {
-    // 同步空数据状态的中心点
-    return { series: [{ type: 'pie', radius: ['40%', '70%'], center: ['50%', '42%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
+    return { series: [{ type: 'pie', radius: ['45%', '72%'], center: ['50%', '40%'], data: [{ value: 0, name: '暂无数据' }], label: { show: false } }] };
   }
   return {
     color: ['#8a2be2', '#18a058', '#f0a020', '#d03050', '#999', '#73C0DE'],
@@ -330,8 +329,8 @@ const resolutionChartOptions = computed(() => {
     legend: { show: true, bottom: '0', textStyle: { color: 'var(--text-primary)' } },
     series: [{
       type: 'pie',
-      radius: ['45%', '70%'], // 缩小外半径防止贴边
-      center: ['50%', '42%'], // 将 Y 轴中心下调（原为35%），让上方留出足够空间
+      radius: ['45%', '72%'], // 恢复大半径，饱满醒目
+      center: ['50%', '40%'], // 中心点偏上，留出底部图例空间
       itemStyle: { borderRadius: 8, borderColor: 'rgba(255,255,255,0.2)', borderWidth: 2 },
       label: { show: false },
       data: chartData.map(item => ({ value: item.count, name: item.resolution || '未知' }))
@@ -380,6 +379,12 @@ onMounted(() => {
 .stat-val { font-size: 22px; font-weight: bold; color: var(--text-primary); line-height: 1.2; }
 .stat-label { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
 
+/* PC端稍微加高一点，让大图更舒展 */
+.library-chart-wrapper {
+  height: 220px; 
+  margin-top: 8px;
+}
+
 .auto-task-block {
   padding: 16px;
   height: 100%;
@@ -421,5 +426,9 @@ onMounted(() => {
   .ranking-name { width: 55px; font-size: 13px; }
   .ranking-bar-container { margin: 0 8px 0 2px; }
   .ranking-count { width: 45px; font-size: 12px; }
+
+  .library-chart-wrapper {
+    height: 260px; /* 给足260px高度，完美容纳大饼图 + 2行图例 */
+  }
 }
 </style>
