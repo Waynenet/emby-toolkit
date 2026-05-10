@@ -1273,8 +1273,7 @@ def _execute_resubscribe(processor, task_name: str, target):
             hdhive_client = HDHiveClient(api_key)
             resources = hdhive_client.get_resources(
                 tmdb_id=tmdb_id,
-                media_type=media_type,
-                target_season=target_season
+                media_type=media_type
             )
 
             if not resources:
@@ -1282,7 +1281,10 @@ def _execute_resubscribe(processor, task_name: str, target):
                 continue
 
             before_count = len(resources)
-            resources = filter_hdhive_resources(resources)
+            resources = filter_hdhive_resources(
+                resources,
+                media_type=media_type
+            )
 
             if not resources:
                 logger.warning(
