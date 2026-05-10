@@ -534,21 +534,8 @@ class MediaProcessor:
                     logger.warning(f"  ➜ [提前拦截] 获取豆瓣数据失败: {e}")
 
                 # =================================================================
-                # ★★★ 大一统 AI 翻译引擎 (直接作用于原始数据) ★★★
+                # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
                 # =================================================================
-                if self.ai_translator:
-                    from tasks.helpers import translate_tmdb_metadata_recursively
-                    target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
-                    translate_tmdb_metadata_recursively(
-                        item_type=item_type,
-                        tmdb_data=target_tmdb_data,
-                        ai_translator=self.ai_translator,
-                        item_name=current_title or original_title, 
-                        tmdb_api_key=self.tmdb_api_key,
-                        config=self.config,
-                        douban_cast_data=douban_cast_raw
-                    )
-
                 # 准备演员源数据
                 authoritative_cast_source = []
                 if item_type == "Movie":
@@ -564,7 +551,7 @@ class MediaProcessor:
 
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    logger.info(f"  ➜ [实时监控] 启动演员表核心处理 (去重/映射/头像检查)...")
+                    logger.info(f"  ➜ [实时监控] 启动演员表核心处理 (ID精准匹配/映射)...")
                     final_processed_cast = self._process_cast_list(
                         tmdb_cast_people=authoritative_cast_source,
                         emby_cast_people=[],
@@ -579,6 +566,41 @@ class MediaProcessor:
                 if not final_processed_cast:
                     logger.warning("  ➜ [实时监控] 演员处理未能返回结果，将使用原始数据。")
                     final_processed_cast = authoritative_cast_source
+
+                # =================================================================
+                # ★★★ 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译 ★★★
+                # =================================================================
+                target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
+                
+                cast_payload = []
+                for actor in final_processed_cast:
+                    cast_payload.append({
+                        "id": actor.get("id"), "name": actor.get("name"), "character": actor.get("character"),
+                        "order": actor.get("order")
+                    })
+                    
+                if item_type == "Movie":
+                    if 'credits' not in target_tmdb_data: target_tmdb_data['credits'] = {}
+                    target_tmdb_data['credits']['cast'] = cast_payload
+                elif item_type == "Series":
+                    if 'series_details' in target_tmdb_data:
+                        if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
+                        target_tmdb_data['series_details']['credits']['cast'] = cast_payload
+
+                # =================================================================
+                # ★★★ 大一统 AI 翻译引擎 (此时演员已经是中文，AI 会直接跳过演员翻译) ★★★
+                # =================================================================
+                if self.ai_translator:
+                    from tasks.helpers import translate_tmdb_metadata_recursively
+                    translate_tmdb_metadata_recursively(
+                        item_type=item_type,
+                        tmdb_data=target_tmdb_data,
+                        ai_translator=self.ai_translator,
+                        item_name=current_title or original_title, 
+                        tmdb_api_key=self.tmdb_api_key,
+                        config=self.config,
+                        douban_cast_data=douban_cast_raw
+                    )
             
             # =========================================================
             # 步骤 4 & 5: 生成本地 override 元数据文件 & 写入数据库
@@ -1552,6 +1574,33 @@ class MediaProcessor:
                 current_progress = progress_after_cleanup + int(((i + 1) / total) * (100 - progress_after_cleanup))
                 update_status_callback(current_progress, f"处理中 ({i+1}/{total}): {item_name}")
             
+            # =================================================================
+            # ★★★ 性能二次飞跃：全库扫描时，如果本地有完美缓存，直接跳过 TMDB/豆瓣请求 ★★★
+            # =================================================================
+            tmdb_id = item.get("ProviderIds", {}).get("Tmdb")
+            item_type = item.get("Type")
+            
+            if not force_full_update and tmdb_id and item_type in ["Movie", "Series"]:
+                cache_folder_name = "tmdb-movies2" if item_type == "Movie" else "tmdb-tv"
+                override_path = os.path.join(self.local_data_path, "override", cache_folder_name, str(tmdb_id), "all.json" if item_type == "Movie" else "series.json")
+                
+                if os.path.exists(override_path):
+                    logger.info(f"  ➜ [高性能模式] 命中本地缓存，跳过 API 请求: {item_name}")
+                    if not item.get('_SourceLibraryId'):
+                        lib_info = emby.get_library_root_for_item(
+                            item_id=item_id,
+                            base_url=self.emby_url,
+                            api_key=self.emby_api_key,
+                            user_id=self.emby_user_id,
+                            item_path=item.get("Path")
+                        )
+                        if lib_info and lib_info.get('Id'):
+                            item['_SourceLibraryId'] = lib_info['Id']
+                    
+                    self._process_item_core_logic(item, force_full_update=False)
+                    time_module.sleep(float(self.config.get("delay_between_items_sec", 0.5)))
+                    continue
+
             self.process_single_item(
                 item_id, 
                 force_full_update=force_full_update
@@ -1630,121 +1679,12 @@ class MediaProcessor:
             
             fresh_data = None
             aggregated_tmdb_data = None
-
-            if self.tmdb_api_key:
-                try:
-                    if item_type == "Movie":
-                        fresh_data = tmdb.get_movie_details(tmdb_id, self.tmdb_api_key)
-                        if fresh_data: logger.info(f"  ➜ 成功从 TMDb API 获取到最新电影元数据。")
-
-                    elif item_type == "Series":
-                        aggregated_tmdb_data = tmdb.aggregate_full_series_data_from_tmdb(int(tmdb_id), self.tmdb_api_key)
-                        if aggregated_tmdb_data:
-                            fresh_data = aggregated_tmdb_data.get("series_details")
-                            logger.info(f"  ➜ 成功从 TMDb API 获取到最新剧集聚合数据。")
-
-                except Exception as e:
-                    logger.warning(f"  ➜ 从 TMDb API 获取数据失败: {e}")
-
-            if fresh_data:
-                raw_title = fresh_data.get("title") if item_type == "Movie" else fresh_data.get("name")
-                current_title = utils.clean_invisible_chars(raw_title)
-                
-                if utils.is_spam_title(current_title):
-                    logger.warning(f"  ➜ [拦截] 检测到恶意广告片名: '{current_title}'，准备寻找替代片名...")
-                    current_title = ""
-                
-                if not current_title or not utils.contains_chinese(current_title):
-                    chinese_alias = None
-                    alt_titles_data = fresh_data.get("alternative_titles", {})
-                    alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
-                    priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
-                    best_priority = 99
-                    
-                    for alt in alt_list:
-                        alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
-                            iso_country = alt.get("iso_3166_1", "").upper()
-                            current_priority = priority_map.get(iso_country, 5)
-                            if current_priority < best_priority:
-                                chinese_alias = alt_title
-                                best_priority = current_priority
-                            if best_priority == 1:
-                                break
-                    
-                    if chinese_alias:
-                        logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
-                        if item_type == "Movie":
-                            fresh_data["title"] = chinese_alias
-                        else:
-                            fresh_data["name"] = chinese_alias
-                            if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                aggregated_tmdb_data["series_details"]["name"] = chinese_alias
-                    else:
-                        original_title = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
-                        logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
-                        if item_type == "Movie": fresh_data["title"] = original_title
-                        else:
-                            fresh_data["name"] = original_title
-                            if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
-                                aggregated_tmdb_data["series_details"]["name"] = original_title
-
-                douban_cast_raw = []
-                if fresh_data:
-                    dummy_emby_item = item_details_from_emby.copy()
-                    dummy_emby_item["Name"] = current_title or original_title or item_details_from_emby.get("Name")
-                    douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, fresh_data)
-
-                if self.ai_translator:
-                    from tasks.helpers import translate_tmdb_metadata_recursively
-                    target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
-                    
-                    translate_tmdb_metadata_recursively(
-                        item_type=item_type,
-                        tmdb_data=target_tmdb_data,
-                        ai_translator=self.ai_translator,
-                        item_name=item_name_for_log,
-                        tmdb_api_key=self.tmdb_api_key,
-                        config=self.config,
-                        douban_cast_data=douban_cast_raw
-                    )
-
-            if fresh_data:
-                tmdb_details_for_extra = construct_metadata_payload(
-                    item_type=item_type,
-                    tmdb_data=fresh_data,
-                    aggregated_tmdb_data=aggregated_tmdb_data,
-                    emby_data_fallback=item_details_from_emby
-                )
-                
-                if not item_details_from_emby.get("Genres") and fresh_data.get("genres"):
-                    item_details_from_emby["Genres"] = fresh_data.get("genres")
-                    logger.debug(f"  ➜ 检测到 Emby 缺少类型数据，已使用 TMDb 数据补全 Genres: {len(fresh_data.get('genres'))} 个")
-
-                if item_type == "Movie":
-                    credits_source = fresh_data.get('credits') or fresh_data.get('casts') or {}
-                    authoritative_cast_source = credits_source.get('cast', [])
-                elif item_type == "Series":
-                    if aggregated_tmdb_data:
-                        all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                        authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
-                    else:
-                        credits_source = fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}
-                        authoritative_cast_source = credits_source.get('cast', [])
-
-            if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
-                original_count = len(authoritative_cast_source)
-                actors_with_avatars = [actor for actor in authoritative_cast_source if actor.get("profile_path")]
-                
-                if len(actors_with_avatars) < original_count:
-                    removed_count = original_count - len(actors_with_avatars)
-                    logger.info(f"  ➜ 在核心处理前，已从源数据中移除 {removed_count} 位无头像的演员。")
-                    authoritative_cast_source = actors_with_avatars
-                else:
-                    logger.debug("  ➜ (预检查) 所有源数据中的演员均有头像，无需预先移除。")
-                
             final_processed_cast = None
             cache_row = None 
+
+            # =================================================================
+            # ★★★ 性能二次飞跃：提前检查本地缓存，跳过所有在线请求 ★★★
+            # =================================================================
             if not force_full_update:
                 cache_folder_name = "tmdb-movies2" if item_type == "Movie" else "tmdb-tv"
                 target_override_dir = os.path.join(self.local_data_path, "override", cache_folder_name, tmdb_id)
@@ -1752,7 +1692,7 @@ class MediaProcessor:
                 override_json_path = os.path.join(target_override_dir, main_json_filename)
                 
                 if os.path.exists(override_json_path):
-                    logger.info(f"  ➜ [快速模式] 发现本地覆盖文件，优先加载: {override_json_path}")
+                    logger.info(f"  ➜ [快速模式] 发现本地完美覆盖文件，直接加载并跳过 TMDB/豆瓣/AI 请求: {override_json_path}")
                     try:
                         override_data = _read_local_json(override_json_path)
                         if override_data:
@@ -1824,65 +1764,189 @@ class MediaProcessor:
                                     if aid in tmdb_to_emby_map:
                                         actor['emby_person_id'] = tmdb_to_emby_map[aid]
                     except Exception as e:
-                        logger.warning(f"  ➜ 读取覆盖文件失败: {e}，将尝试数据库缓存。")
+                        logger.warning(f"  ➜ 读取覆盖文件失败: {e}，将回退到在线刮削。")
+                        final_processed_cast = None
 
+            # =================================================================
+            # ★★★ 如果缓存未命中，执行完整的在线刮削、豆瓣匹配和 AI 翻译 ★★★
+            # =================================================================
             if final_processed_cast is None:
-                logger.info(f"  ➜ 未命中缓存或强制重处理，开始处理演员表...")
-
-                if not force_full_update and self.tmdb_api_key:
-                    logger.info(f"  ➜ 检测到本地无有效缓存，正在从 TMDb 补全元数据骨架(导演/分级/工作室)...")
+                logger.info(f"  ➜ 未命中缓存或强制重处理，开始在线获取数据...")
+                
+                if self.tmdb_api_key:
                     try:
                         if item_type == "Movie":
                             fresh_data = tmdb.get_movie_details(tmdb_id, self.tmdb_api_key)
-                            if fresh_data:
-                                tmdb_details_for_extra.update(fresh_data)
-                                if fresh_data.get("credits", {}).get("cast"):
-                                    authoritative_cast_source = fresh_data["credits"]["cast"]
-                                logger.info(f"  ➜ 电影元数据补全成功。")
+                            if fresh_data: logger.info(f"  ➜ 成功从 TMDb API 获取到最新电影元数据。")
 
                         elif item_type == "Series":
                             aggregated_tmdb_data = tmdb.aggregate_full_series_data_from_tmdb(int(tmdb_id), self.tmdb_api_key)
                             if aggregated_tmdb_data:
-                                series_details = aggregated_tmdb_data.get("series_details", {})
-                                tmdb_details_for_extra.update(series_details)
-                                all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                                authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(series_details, all_episodes)
-                                logger.info(f"  ➜ 剧集元数据补全成功。")
-                    except Exception as e_fetch:
-                        logger.warning(f"  ➜ 尝试补全元数据时失败，将使用 Emby 原始数据兜底: {e_fetch}")
+                                fresh_data = aggregated_tmdb_data.get("series_details")
+                                logger.info(f"  ➜ 成功从 TMDb API 获取到最新剧集聚合数据。")
 
-                with get_central_db_connection() as conn:
-                    cursor = conn.cursor()
-                    all_emby_people = item_details_from_emby.get("People", [])
-                    current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
-                    emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
-                    enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
+                    except Exception as e:
+                        logger.warning(f"  ➜ 从 TMDb API 获取数据失败: {e}")
 
-                    final_processed_cast = self._process_cast_list(
-                        tmdb_cast_people=authoritative_cast_source,
-                        emby_cast_people=enriched_emby_cast,
-                        douban_cast_list=douban_cast_raw,
-                        item_details_from_emby=item_details_from_emby,
-                        cursor=cursor,
-                        tmdb_api_key=self.tmdb_api_key,
-                        stop_event=self.get_stop_event()
+                if fresh_data:
+                    raw_title = fresh_data.get("title") if item_type == "Movie" else fresh_data.get("name")
+                    current_title = utils.clean_invisible_chars(raw_title)
+                    
+                    if utils.is_spam_title(current_title):
+                        logger.warning(f"  ➜ [拦截] 检测到恶意广告片名: '{current_title}'，准备寻找替代片名...")
+                        current_title = ""
+                    
+                    if not current_title or not utils.contains_chinese(current_title):
+                        chinese_alias = None
+                        alt_titles_data = fresh_data.get("alternative_titles", {})
+                        alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
+                        priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
+                        best_priority = 99
+                        
+                        for alt in alt_list:
+                            alt_title = utils.clean_invisible_chars(alt.get("title", ""))
+                            if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
+                                iso_country = alt.get("iso_3166_1", "").upper()
+                                current_priority = priority_map.get(iso_country, 5)
+                                if current_priority < best_priority:
+                                    chinese_alias = alt_title
+                                    best_priority = current_priority
+                                if best_priority == 1:
+                                    break
+                        
+                        if chinese_alias:
+                            logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                            if item_type == "Movie":
+                                fresh_data["title"] = chinese_alias
+                            else:
+                                fresh_data["name"] = chinese_alias
+                                if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
+                                    aggregated_tmdb_data["series_details"]["name"] = chinese_alias
+                        else:
+                            original_title = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
+                            logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
+                            if item_type == "Movie": fresh_data["title"] = original_title
+                            else:
+                                fresh_data["name"] = original_title
+                                if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
+                                    aggregated_tmdb_data["series_details"]["name"] = original_title
+
+                    # 获取豆瓣数据
+                    douban_cast_raw = []
+                    dummy_emby_item = item_details_from_emby.copy()
+                    dummy_emby_item["Name"] = current_title or original_title or item_details_from_emby.get("Name")
+                    try:
+                        douban_cast_raw, _ = self._fetch_douban_cast_data(dummy_emby_item, fresh_data)
+                    except Exception as e:
+                        logger.warning(f"  ➜ [提前拦截] 获取豆瓣数据失败: {e}")
+
+                    # =================================================================
+                    # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
+                    # =================================================================
+                    target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
+                    
+                    # 准备演员源数据
+                    if item_type == "Movie":
+                        credits_source = fresh_data.get('credits') or fresh_data.get('casts') or {}
+                        authoritative_cast_source = credits_source.get('cast', [])
+                    elif item_type == "Series":
+                        if aggregated_tmdb_data:
+                            all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
+                            authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
+                        else:
+                            credits_source = fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}
+                            authoritative_cast_source = credits_source.get('cast', [])
+
+                    # 移除无头像演员 (提前过滤，减少处理量)
+                    if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
+                        original_count = len(authoritative_cast_source)
+                        actors_with_avatars = [actor for actor in authoritative_cast_source if actor.get("profile_path")]
+                        if len(actors_with_avatars) < original_count:
+                            removed_count = original_count - len(actors_with_avatars)
+                            logger.info(f"  ➜ 在核心处理前，已从源数据中移除 {removed_count} 位无头像的演员。")
+                            authoritative_cast_source = actors_with_avatars
+
+                    with get_central_db_connection() as conn:
+                        cursor = conn.cursor()
+                        all_emby_people = item_details_from_emby.get("People", [])
+                        current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
+                        emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
+                        enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
+
+                        logger.info(f"  ➜ 启动演员表核心处理 (ID精准匹配/映射)...")
+                        final_processed_cast = self._process_cast_list(
+                            tmdb_cast_people=authoritative_cast_source,
+                            emby_cast_people=enriched_emby_cast,
+                            douban_cast_list=douban_cast_raw,
+                            item_details_from_emby=item_details_from_emby,
+                            cursor=cursor,
+                            tmdb_api_key=self.tmdb_api_key,
+                            stop_event=self.get_stop_event()
+                        )
+
+                    if not final_processed_cast:
+                        raise ValueError("未能生成有效的最终演员列表。")
+
+                    # =================================================================
+                    # ★★★ 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译 ★★★
+                    # =================================================================
+                    cast_payload = []
+                    for actor in final_processed_cast:
+                        cast_payload.append({
+                            "id": actor.get("id"), "name": actor.get("name"), "character": actor.get("character"),
+                            "order": actor.get("order")
+                        })
+                        
+                    if item_type == "Movie":
+                        if 'credits' not in target_tmdb_data: target_tmdb_data['credits'] = {}
+                        target_tmdb_data['credits']['cast'] = cast_payload
+                    elif item_type == "Series":
+                        if 'series_details' in target_tmdb_data:
+                            if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
+                            target_tmdb_data['series_details']['credits']['cast'] = cast_payload
+
+                    # =================================================================
+                    # ★★★ 大一统 AI 翻译引擎 (此时演员已经是中文，AI 会直接跳过演员翻译) ★★★
+                    # =================================================================
+                    if self.ai_translator:
+                        from tasks.helpers import translate_tmdb_metadata_recursively
+                        translate_tmdb_metadata_recursively(
+                            item_type=item_type,
+                            tmdb_data=target_tmdb_data,
+                            ai_translator=self.ai_translator,
+                            item_name=item_name_for_log,
+                            tmdb_api_key=self.tmdb_api_key,
+                            config=self.config,
+                            douban_cast_data=douban_cast_raw
+                        )
+
+                    # 构建最终的 override 骨架
+                    tmdb_details_for_extra = construct_metadata_payload(
+                        item_type=item_type,
+                        tmdb_data=fresh_data,
+                        aggregated_tmdb_data=aggregated_tmdb_data,
+                        emby_data_fallback=item_details_from_emby
                     )
+                    
+                    if not item_details_from_emby.get("Genres") and fresh_data.get("genres"):
+                        item_details_from_emby["Genres"] = fresh_data.get("genres")
+                        logger.debug(f"  ➜ 检测到 Emby 缺少类型数据，已使用 TMDb 数据补全 Genres: {len(fresh_data.get('genres'))} 个")
 
-            if final_processed_cast is None:
-                raise ValueError("未能生成有效的最终演员列表。")
-
-            if self.config.get("ai_joke_fallback", False) and self.ai_translator:
+            # ---------------------------------------------------------
+            # 老六笑话兜底 (基于 tmdb_details_for_extra)
+            # ---------------------------------------------------------
+            if self.config.get("ai_joke_fallback", False) and self.ai_translator and tmdb_details_for_extra:
                 jokes_to_generate = {}
 
                 if not tmdb_details_for_extra.get("overview"):
                     jokes_to_generate["main"] = tmdb_details_for_extra.get("title") or tmdb_details_for_extra.get("name")
 
                 ep_list = []
-                if item_type == "Series" and aggregated_tmdb_data and "episodes_details" in aggregated_tmdb_data:
-                    episodes = aggregated_tmdb_data["episodes_details"]
+                if item_type == "Series" and tmdb_details_for_extra.get("episodes_details"):
+                    episodes = tmdb_details_for_extra["episodes_details"]
                     ep_list = episodes.values() if isinstance(episodes, dict) else (episodes if isinstance(episodes, list) else [])
 
-                    # 尝试从数据库读取旧数据，继承已有笑话，省 Token！(极简直查版)
+                    # 尝试从数据库读取旧数据，继承已有笑话，省 Token！
                     old_episodes = {}
                     try:
                         with get_central_db_connection() as conn_joke:
@@ -1912,7 +1976,8 @@ class MediaProcessor:
 
                     if "main" in generated_jokes:
                         tmdb_details_for_extra["overview"] = generated_jokes["main"]
-                        if aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
+                        # 如果是新刮削的，同步更新 aggregated_tmdb_data
+                        if 'aggregated_tmdb_data' in locals() and aggregated_tmdb_data and "series_details" in aggregated_tmdb_data:
                             aggregated_tmdb_data["series_details"]["overview"] = generated_jokes["main"]
 
                     for ep in ep_list:
@@ -1920,7 +1985,9 @@ class MediaProcessor:
                         if ep_key in generated_jokes:
                             ep["overview"] = generated_jokes[ep_key]
 
-
+            # ---------------------------------------------------------
+            # 写入数据库、Emby 刷新等
+            # ---------------------------------------------------------
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
 
@@ -2212,6 +2279,11 @@ class MediaProcessor:
                     if douban_id_to_add:
                         l_actor["douban_id"] = douban_id_to_add
                     
+                    # ★★★ 修复：如果豆瓣有明确的中文角色名（非"演员"），强行覆盖AI翻译结果 ★★★
+                    d_role = d_actor.get("Role", "").strip()
+                    if d_role and utils.contains_chinese(d_role) and d_role != "演员":
+                        l_actor["character"] = d_role
+                    
                     merged_actors.append(unmatched_local_actors.pop(i))
                     match_found_for_this_douban_actor = True
                     break
@@ -2265,6 +2337,14 @@ class MediaProcessor:
                                     "emby_person_id": None
                                 }
                                 final_cast_map[tmdb_id_from_map] = new_actor_entry
+                            else:
+                                # ★★★ 修复：合并豆瓣角色名 ★★★
+                                existing_actor = final_cast_map[tmdb_id_from_map]
+                                if utils.contains_chinese(d_actor.get("Name", "")):
+                                    existing_actor["name"] = d_actor.get("Name")
+                                d_role = d_actor.get("Role", "").strip()
+                                if d_role and utils.contains_chinese(d_role) and d_role != "演员":
+                                    existing_actor["character"] = d_role
                             match_found = True
                     if not match_found:
                         still_unmatched.append(d_actor)
@@ -2313,6 +2393,14 @@ class MediaProcessor:
                                             "douban_id": d_douban_id, "emby_person_id": None
                                         }
                                         final_cast_map[tmdb_id_from_map] = new_actor_entry
+                                    else:
+                                        # ★★★ 修复：合并豆瓣角色名 ★★★
+                                        existing_actor = final_cast_map[tmdb_id_from_map]
+                                        if utils.contains_chinese(d_actor.get("Name", "")):
+                                            existing_actor["name"] = d_actor.get("Name")
+                                        d_role = d_actor.get("Role", "").strip()
+                                        if d_role and utils.contains_chinese(d_role) and d_role != "演员":
+                                            existing_actor["character"] = d_role
                                     match_found = True
                                 
                                 if not match_found:
@@ -2338,6 +2426,14 @@ class MediaProcessor:
                                                     "emby_person_id": None
                                                 }
                                                 final_cast_map[tmdb_id_from_find] = new_actor_entry
+                                            else:
+                                                # ★★★ 修复：合并豆瓣角色名 ★★★
+                                                existing_actor = final_cast_map[tmdb_id_from_find]
+                                                if utils.contains_chinese(d_actor.get("Name", "")):
+                                                    existing_actor["name"] = d_actor.get("Name")
+                                                d_role = d_actor.get("Role", "").strip()
+                                                if d_role and utils.contains_chinese(d_role) and d_role != "演员":
+                                                    existing_actor["character"] = d_role
                                             match_found = True
                         
                         if not match_found:
@@ -2360,6 +2456,12 @@ class MediaProcessor:
                                         existing_actor["name"] = new_name
                                         logger.debug(f"    ➜ [合并] 已将演员 (TMDb ID: {tmdb_id_to_process}) 的名字从 '{original_name}' 更新为 '{new_name}'")
                                         merged_count += 1
+                                    
+                                    # ★★★ 修复：优先使用豆瓣角色名更新 ★★★
+                                    d_role = d_actor.get("Role", "").strip()
+                                    if d_role and utils.contains_chinese(d_role) and d_role != "演员":
+                                        existing_actor["character"] = d_role
+                                        logger.debug(f"    ➜ [合并] 优先使用豆瓣角色名更新为: '{d_role}'")
                                 else:
                                     new_actor_entry = {
                                         "id": tmdb_id_to_process,
