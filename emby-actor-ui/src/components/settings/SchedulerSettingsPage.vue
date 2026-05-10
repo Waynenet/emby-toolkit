@@ -505,6 +505,11 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
 </script>
 
 <style scoped>
+/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
+:deep(.n-card__content) {
+  padding-top: 16px !important;
+}
+
 .center-container {
   display: flex;
   justify-content: center;

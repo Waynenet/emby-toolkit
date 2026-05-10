@@ -138,7 +138,7 @@
                         <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="1.0" style="width: 100%;" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item span="1 s:2" label="豆瓣登录 Cookie" path="douban_cookie">
+                      <n-form-item-grid-item label="豆瓣登录 Cookie" path="douban_cookie">
                         <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取"/>
                       </n-form-item-grid-item>
                     </n-grid>
@@ -1369,6 +1369,11 @@ onUnmounted(() => {
 /* 标签底部留白去除，提升空间利用率 */
 :deep(.n-form-item-label) {
   padding-bottom: 0px !important;
+}
+
+/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
+:deep(.n-card__content) {
+  padding-top: 16px !important;
 }
 
 .ai-settings-wrapper {

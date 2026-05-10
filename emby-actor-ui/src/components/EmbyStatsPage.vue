@@ -154,6 +154,11 @@ onMounted(() => { fetchData(); });
 </script>
 
 <style scoped>
+/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
+:deep(.n-card__content) {
+  padding-top: 16px !important;
+}
+
 .modular-page-container { padding: 24px; max-width: 1600px; margin: 0 auto; }
 .page-header-module { margin-bottom: 24px; }
 .greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: #fff; }

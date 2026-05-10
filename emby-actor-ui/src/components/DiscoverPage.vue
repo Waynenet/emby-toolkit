@@ -793,6 +793,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
+:deep(.n-card__content) {
+  padding-top: 16px !important;
+}
+
 /* ---------------- 新增：解决筛选表单宽度的 Flex 响应式布局 ---------------- */
 .filter-item {
   display: flex;
