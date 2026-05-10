@@ -23,7 +23,7 @@
               :options="batchActions"
               @select="handleBatchAction"
             >
-              <n-button type="primary">
+              <n-button size="small" type="primary">
                 批量操作 ({{ selectedItems.length }})
                 <template #icon><n-icon :component="CaretDownIcon" /></template>
               </n-button>
