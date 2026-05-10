@@ -8,6 +8,7 @@ import re
 import html
 import config_manager
 from extensions import admin_required
+from collections import deque
 
 logs_bp = Blueprint('logs', __name__, url_prefix='/api/logs')
 logger = logging.getLogger(__name__)
@@ -43,9 +44,16 @@ def view_log_file():
     """
     查看指定日志文件的内容
     支持 format=html 参数，返回美化后的 HTML
+    支持 limit 参数，限制最大返回行数以防卡顿
     """
     filename = secure_filename(request.args.get('filename', ''))
-    output_format = request.args.get('format', 'json').lower() # 新增参数
+    output_format = request.args.get('format', 'json').lower()
+    
+    # 🌟 新增：默认只读取最后 1000 行，前端可以传 ?limit=2000 来调整
+    try:
+        limit = int(request.args.get('limit', 1000))
+    except ValueError:
+        limit = 1000
 
     if not filename or not filename.startswith('app.log'):
         abort(403, "禁止访问非日志文件或无效的文件名。")
@@ -60,24 +68,22 @@ def view_log_file():
 
     try:
         with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
+            # 🌟 核心优化：使用 deque 只保留最后 limit 行。
+            # 这比 f.readlines() 节省极大的内存，且速度极快
+            lines = list(deque(f, maxlen=limit))
         
-        # ★★★ 核心：倒序排列，最新的在最上面 ★★★
+        # 倒序排列，最新的在最上面
         lines.reverse() 
         
         if output_format == 'html':
-            # 构造一个伪造的 block 结构，以便复用 render_log_html
-            # 这样普通查看和搜索查看的风格就完全一致了
             fake_blocks = [{
                 'file': filename,
-                'lines': lines # 已经是倒序的了
+                'lines': lines
             }]
-            # 调用渲染函数 (query为空，不进行高亮)
             html_response = render_log_html(fake_blocks, query='')
             return Response(html_response, mimetype='text/html')
         
         else:
-            # 保持原有的纯文本/JSON兼容性 (虽然前端可能不再用它了)
             content = "".join(lines)
             return Response(content, mimetype='text/plain')
         
@@ -88,16 +94,14 @@ def view_log_file():
 @logs_bp.route('/search', methods=['GET'])
 @admin_required
 def search_all_logs():
-    """
-    在所有日志文件 (app.log*) 中搜索关键词。
-    """
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify({"error": "搜索关键词不能为空"}), 400
+        
     TIMESTAMP_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
-
     search_results = []
-    
+    MAX_RESULTS = 1000  # 🌟 限制最大搜索结果数，防止前端崩溃
+
     try:
         # 1. 获取并排序所有日志文件，确保从新到旧搜索
         all_files = os.listdir(config_manager.LOG_DIRECTORY)
@@ -118,27 +122,28 @@ def search_all_logs():
 
         # 2. 遍历每个文件进行搜索
         for filename in log_files:
+            if len(search_results) >= MAX_RESULTS:
+                break # 🌟 如果已经找满 1000 条，提前结束搜索
+                
             full_path = os.path.join(config_manager.LOG_DIRECTORY, filename)
             try:
-                # --- 代码修改点 ---
-                # 移除了 opener 的判断，直接使用 open 函数
                 with open(full_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    # 逐行读取，避免内存爆炸
                     for line_num, line in enumerate(f, 1):
-                        # 不区分大小写搜索
                         if query.lower() in line.lower():
                             match = TIMESTAMP_REGEX.search(line)
-                            line_date = match.group(1) if match else "" # 如果匹配失败则为空字符串
+                            line_date = match.group(1) if match else ""
                             
-                            # 2. 将提取到的日期添加到返回结果中
                             search_results.append({
                                 "file": filename,
                                 "line_num": line_num,
                                 "content": line.strip(),
-                                "date": line_date  # <--- 新增的日期字段
+                                "date": line_date
                             })
+                            
+                            # 🌟 达到限制后立即跳出当前文件读取
+                            if len(search_results) >= MAX_RESULTS:
+                                break
             except Exception as e:
-                # 如果单个文件读取失败，记录错误并继续
                 logging.warning(f"API: 搜索时无法读取文件 '{filename}': {e}")
 
         search_results.sort(key=lambda x: x['date'], reverse=True)
@@ -199,7 +204,10 @@ def render_log_html(blocks, query):
         
         .line { 
             display: flex; 
-            align-items: flex-start; /* 顶部对齐 */
+            align-items: flex-start;
+            /* 🌟 核心优化：开启浏览器原生虚拟列表/懒渲染 */
+            content-visibility: auto; 
+            contain-intrinsic-size: 0 24px; /* 预估每行的高度，避免滚动条跳动 */
         }
         .line:hover { background-color: #2a2d2e; }
         
