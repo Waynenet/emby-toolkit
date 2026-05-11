@@ -208,8 +208,8 @@
                 换一个
               </n-tooltip>
             </template>
-            <n-skeleton v-if="isPoolLoading" text :repeat="8" style="margin-top: 12px;"/>
-              <div v-if="!isPoolLoading && currentRecommendation" class="recommendation-content">
+            <n-skeleton v-if="isPoolLoading" text :repeat="8"/>
+              <div v-if="!isPoolLoading && currentRecommendation" class="recommendation-content" style="margin-top: 12px;">
                 <div class="recommendation-grid">
                     <div class="poster-column">
                         <img :src="`https://image.tmdb.org/t/p/w500${currentRecommendation.poster_path}`" class="recommendation-poster" />
