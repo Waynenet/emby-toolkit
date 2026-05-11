@@ -514,10 +514,23 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
+  /* ★ 彻底重置手机端头像模块，强制完美正方形，绝对居中 */
   .user-module {
-    padding: 0 10px;
-    justify-content: center;
+    width: 36px !important;  /* 宽度和高度强行保持一致（本身高度是36px） */
+    padding: 0 !important;   /* 杀掉所有左右多余的内边距 */
+    gap: 0 !important;       /* 杀掉残留的元素间隙 */
+    justify-content: center !important;
+    align-items: center !important;
   }
+  
+  /* 顺手把左上角汉堡菜单和右上角的日夜切换按钮也变成完美正方形，让顶部更协调 */
+  .header-module.icon-module {
+    width: 36px !important;
+    padding: 0 !important;
+    justify-content: center !important;
+    align-items: center !important;
+  }
+
   .floating-task-pill { top: 70px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>
