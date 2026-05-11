@@ -86,7 +86,6 @@
                 round 
                 :size="22" 
                 object-fit="cover"
-                style="margin-right: 4px;"
               />
               <n-icon v-else size="18" :component="UserCenterIcon" />
               <span v-if="!isMobile" class="username-text">{{ accountInfo?.name || authStore.username }}</span>
