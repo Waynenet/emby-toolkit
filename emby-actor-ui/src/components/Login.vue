@@ -158,7 +158,9 @@ async function verifyToken() {
 <style scoped>
 .login-layout, .register-layout {
   height: 100vh;
-  width: 100vw;
+  /* 将 100vw 改为 100%，避免在某些浏览器下出现横向滚动条 */
+  width: 100%; 
+  box-sizing: border-box;
 }
 
 .login-container, .register-container {
@@ -168,6 +170,8 @@ async function verifyToken() {
   height: 100%;
   width: 100%;
   padding: 20px;
+  /* 关键修复：让 padding 包含在 100% 的宽度之内，防止撑破屏幕 */
+  box-sizing: border-box; 
 }
 
 .login-card, .register-card {
@@ -177,6 +181,8 @@ async function verifyToken() {
   height: auto !important;
   min-height: auto !important;
   flex: none !important;
+  /* 确保卡片内部的 padding 也不会撑破卡片 */
+  box-sizing: border-box; 
 }
 
 /* 登录框不需要上浮动画 */
