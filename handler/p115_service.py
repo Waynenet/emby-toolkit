@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 
 from collections import OrderedDict
 
+def get_115_ua(app_type):
+    """根据 APP 类型返回对应的真实 User-Agent，防止 115 风控"""
+    ua_map = {
+        'web': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'mac': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) 115Browser/25.0.3.2',
+        'linux': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 115Browser/25.0.3.2',
+        'tv': 'Mozilla/5.0 (Linux; Android 7.1.2; 115disk Build/NHG47K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.114 Safari/537.36',
+        'alipaymini': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 AlipayDefined(nt:WIFI,ws:390|844|3.0) AliApp(AP/10.5.33.8143) AlipayClient/10.5.33.8143 Language/zh-Hans Region/CN',
+        'wechatmini': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42(0x18002a2c) NetType/WIFI Language/zh_CN'
+    }
+    return ua_map.get(str(app_type).lower() if app_type else 'web', ua_map['web'])
+
 class LimitedCache(OrderedDict):
     """带容量限制的内存缓存，防止内存泄漏撑爆服务器"""
     def __init__(self, maxsize=1000, *args, **kwds):
@@ -59,17 +71,20 @@ def get_115_tokens():
     auth_data = settings_db.get_setting('p115_auth_tokens')
     if auth_data:
         cookie = auth_data.get('cookie')
-                
-        return auth_data.get('access_token'), auth_data.get('refresh_token'), cookie
-    return None, None, None
+        # ★ 新增：读取 app_type，老用户默认兼容为 web
+        app_type = auth_data.get('app_type', 'web')
+        return auth_data.get('access_token'), auth_data.get('refresh_token'), cookie, app_type
+    return None, None, None, 'web'
 
-def save_115_tokens(access_token, refresh_token, cookie=None):
+def save_115_tokens(access_token, refresh_token, cookie=None, app_type=None):
     """唯一真理：只写入独立数据库"""
     existing = settings_db.get_setting('p115_auth_tokens') or {}
     settings_db.save_setting('p115_auth_tokens', {
         'access_token': access_token if access_token is not None else existing.get('access_token'),
         'refresh_token': refresh_token if refresh_token is not None else existing.get('refresh_token'),
-        'cookie': cookie if cookie is not None else existing.get('cookie')
+        'cookie': cookie if cookie is not None else existing.get('cookie'),
+        # ★ 新增：保存 app_type
+        'app_type': app_type if app_type is not None else existing.get('app_type', 'web')
     })
 
 _refresh_lock = threading.Lock()
@@ -78,7 +93,7 @@ def refresh_115_token(failed_token=None):
     """使用 refresh_token 换取新的 access_token (纯数据库读写)"""
     with _refresh_lock:
         try:
-            current_access, current_refresh, _ = get_115_tokens()
+            current_access, current_refresh, _, _ = get_115_tokens()
             if not current_refresh:
                 return False
                 
@@ -370,14 +385,18 @@ class P115OpenAPIClient:
 # ======================================================================
 class P115CookieClient:
     """使用 Cookie 进行播放操作"""
-    def __init__(self, cookie_str):
+    # ★ 新增 app_type 参数
+    def __init__(self, cookie_str, app_type='web'):
         if not cookie_str:
             raise ValueError("Cookie 不能为空")
         self.cookie_str = cookie_str.strip()
+        self.app_type = app_type
+        self.user_agent = get_115_ua(app_type) # ★ 获取对应的真实 UA
         self.webapi = None
         if P115Client:
             try:
-                self.webapi = P115Client(self.cookie_str)
+                # ★ 尝试将 app 传给底层库 (如果 p115client 支持的话)
+                self.webapi = P115Client(self.cookie_str, app=self.app_type)
             except Exception as e:
                 logger.warning(f"  ➜ Cookie 客户端初始化失败: {e}")
                 raise
@@ -405,7 +424,7 @@ class P115CookieClient:
         
         # 兜底：使用 requests 手动发请求
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": self.user_agent, # ★ 核心：强制使用数据库中记录的 UA
             "Cookie": self.cookie_str
         }
         if 'headers' in kwargs:
@@ -475,7 +494,7 @@ class P115Service:
     @classmethod
     def get_openapi_client(cls):
         """获取管理客户端 (OpenAPI) - 启动时初始化"""
-        token, _, _ = get_115_tokens()
+        token, _, _, _ = get_115_tokens()
         if not token:
             return None
 
@@ -494,19 +513,20 @@ class P115Service:
     @classmethod
     def init_cookie_client(cls):
         """初始化 Cookie 客户端 (延迟到播放请求时)"""
-        _, _, cookie = get_115_tokens() # ★ 从数据库读
+        # ★ 接收 app_type
+        _, _, cookie, app_type = get_115_tokens() 
         cookie = (cookie or "").strip()
         
         if not cookie:
             return None
 
         with cls._lock:
-            # 双重检查：检查配置是否变化
             if cls._cookie_client is None or cookie != cls._cookie_cache:
                 try:
-                    cls._cookie_client = P115CookieClient(cookie)
+                    # ★ 将 app_type 传给 CookieClient
+                    cls._cookie_client = P115CookieClient(cookie, app_type)
                     cls._cookie_cache = cookie
-                    logger.info("  ➜ [115] Cookie 客户端已初始化")
+                    logger.info(f"  ➜ [115] Cookie 客户端已初始化 (App: {app_type})")
                 except Exception as e:
                     logger.error(f"  ➜ 115 Cookie 客户端初始化失败: {e}")
                     cls._cookie_client = None
@@ -782,13 +802,13 @@ class P115Service:
     @classmethod
     def get_cookies(cls):
         """获取 Cookie (用于直链下载等)"""
-        _, _, cookie = get_115_tokens()
+        _, _, cookie, _ = get_115_tokens()
         return cookie
     
     @classmethod
     def get_token(cls):
         """获取 Token (用于 API 调用)"""
-        token, _, _ = get_115_tokens()
+        token, _, _, _ = get_115_tokens()
         return token
 
 
@@ -1438,12 +1458,30 @@ class P115DeleteBuffer:
         if save_path:
             protected_cids.add(str(save_path))
 
-        # 保护“未识别”目录：优先通过待整理目录 + 未识别目录名查 CID
+        # ★★★ 核心修复：保护“未识别”目录 (三重保险) ★★★
         unidentified_name = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME, "未识别")
-        if save_path and unidentified_name:
+        
+        # 保险 1：优先读取用户明确配置的 CID
+        explicit_un_cid = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        if explicit_un_cid and str(explicit_un_cid) != '0':
+            protected_cids.add(str(explicit_un_cid))
+            
+        # 保险 2 & 3：如果没配置，尝试通过待整理目录推导
+        if save_path and str(save_path) != '0' and unidentified_name:
+            # 保险 2：查本地缓存
             unidentified_cid = P115CacheManager.get_cid(str(save_path), unidentified_name)
             if unidentified_cid:
                 protected_cids.add(str(unidentified_cid))
+            else:
+                # 保险 3：缓存穿透时，直接查 115 API (绝对兜底)
+                try:
+                    search_res = client.fs_files({'cid': save_path, 'search_value': unidentified_name, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                    for item in search_res.get('data', []):
+                        if item.get('fn') == unidentified_name and str(item.get('fc') if item.get('fc') is not None else item.get('type')) == '0':
+                            protected_cids.add(str(item.get('fid') or item.get('file_id')))
+                            break
+                except Exception:
+                    pass
 
         raw_rules = settings_db.get_setting('p115_sorting_rules')
         if raw_rules:
@@ -1461,11 +1499,21 @@ class P115DeleteBuffer:
                 if not current or current == '0':
                     break
 
+                # 1. 优先查本地缓存
                 node = P115CacheManager.get_node_info(current)
-                if not node:
-                    break
+                parent_id = None
+                
+                if node and node.get('parent_id'):
+                    parent_id = str(node.get('parent_id'))
+                else:
+                    # 2. ★ 核心修复：缓存穿透时，直接查 115 API 溯源 (终极防线)
+                    try:
+                        info_res = client.fs_get_info(current)
+                        if info_res and info_res.get('state') and info_res.get('data'):
+                            parent_id = str(info_res['data'].get('parent_id') or info_res['data'].get('cid') or '')
+                    except Exception:
+                        pass
 
-                parent_id = str(node.get('parent_id') or '')
                 if not parent_id or parent_id == '0':
                     break
 
@@ -1785,10 +1833,15 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         logger.debug(f"  🛑 [规则拦截] '第 {season_num} 季' 真实状态为 'Completed'，跳过连载规则。")
                         return False
                     else:
-                        # 状态是 'NONE'、空值、或者其他未知状态，主动向 TMDb 查连载状态！
-                        from tasks.helpers import evaluate_season_airing_status
                         logger.info(f"  ➜ 数据库状态为 '{season_status or '空'}'，正在向 TMDb 实时查询 '第 {season_num} 季' 的连载状态...")
-                        is_airing = evaluate_season_airing_status(self.tmdb_id, season_num, self.api_key)
+
+                        is_airing = helpers.check_series_completion(
+                            self.tmdb_id,
+                            self.api_key,
+                            season_number=season_num,
+                            series_name=getattr(self, "title", "未知剧集"),
+                            mode="airing"
+                            )
                         
                         if is_airing:
                             logger.info(f"  ➜ [连载判定] 确认 '第 {season_num} 季' 正在连载，命中连载规则！")
@@ -2914,15 +2967,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         base_title = original_title if cfg.get('main_title_lang', 'zh') == 'original' else title
         safe_title = re.sub(r'[\\/:*?"<>|]', '', base_title).strip()
 
-        if keep_original:
-            std_root_name = root_name
-            safe_title = root_name # 如果保留原名，safe_title 也退化为原名
-        else:
-            # ★ 使用新的乐高引擎生成主目录名 (可能包含 /)
-            main_format = cfg.get('main_dir_format', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
-            std_root_name = self._build_name_from_format(main_format, is_tv=(self.media_type=='tv'), original_title=original_title)
-            # 兜底防空
-            if not std_root_name: std_root_name = safe_title
+        # ★ 保留原名只影响文件名，不影响主目录
+        # batch 模式 root_name 可能是“批量文件”，绝不能拿它当目标主目录
+        main_format = cfg.get('main_dir_format', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
+        std_root_name = self._build_name_from_format(
+            main_format,
+            is_tv=(self.media_type == 'tv'),
+            original_title=original_title
+        )
+
+        # 兜底防空
+        if not std_root_name:
+            std_root_name = safe_title
 
         config = get_config()
         configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
@@ -3213,6 +3269,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
             ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
             file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+
+            # 每个文件先初始化通用字段，防止 keep_original 分支漏赋值
+            new_filename = file_name
+            season_num = None
+            episode_num = None
+            s_name = None
+            is_center_cached = False
+            has_real_info = False
+            video_info = {}
+            part_num = None
             
             # 1. 扩展名绝对白名单校验 (最高优先级)
             if ext not in allowed_exts:
@@ -3241,61 +3307,82 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except Exception:
                     pass
 
+            # =================================================================
+            # ★ 保留原名模式：只保留文件名，不跳过内部解析
+            # =================================================================
             if keep_original:
+                # 调用统一命名解析器，只取内部结构化字段，不使用它生成的新文件名
+                parsed_filename, season_num, episode_num, s_name, is_center_cached, video_info, has_real_info, part_num = self._rename_file_node(
+                    file_item,
+                    safe_title,
+                    year=year,
+                    is_tv=(self.media_type == 'tv'),
+                    original_title=original_title,
+                    pre_fetched_mediainfo=pre_fetched_mediainfo,
+                    local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
+                    silent_log=True
+                )
+
+                # ★ 核心：只保留文件名
                 new_filename = file_name
-                season_num = None
-                s_name = None
-                is_center_cached = False
+
+                # ★ 目录仍走标准逻辑
                 real_target_cid = final_home_cid
-                has_real_info = False
-                
-                # 即使保留原名，也要提取真实参数供洗版使用
-                video_info = self._extract_video_info(file_name)
-                if ext in known_video_exts:
-                    if file_sha1:
-                        real_info, is_center_cached = self._fetch_and_parse_mediainfo(file_sha1, video_info, pre_fetched_mediainfo, local_pre_fetched_mediainfo, file_node=file_item, silent_log=True)
-                        if real_info:
-                            video_info.update(real_info)
-                            has_real_info = True
-                
-                # 1:1 复刻原始目录架构
-                rel_path = file_item.get('rel_path', '')
-                if rel_path:
-                    current_parent = final_home_cid
-                    for part in rel_path.split('/'):
-                        if not part: continue
-                        
-                        # ★ 优先查内存缓存
-                        cache_key = f"{current_parent}_{part}"
-                        part_cid = memory_dir_cache.get(cache_key)
-                        
-                        # ★ 失败记忆体拦截
-                        if part_cid == 'FAILED':
-                            break
-                            
-                        if not part_cid:
-                            part_cid = P115CacheManager.get_cid(current_parent, part)
-                            
-                        if not part_cid:
-                            mk_res = self.client.fs_mkdir(part, current_parent)
-                            if mk_res.get('state'):
-                                part_cid = mk_res.get('cid')
-                            else:
-                                try:
-                                    s_search = self.client.fs_files({'cid': current_parent, 'search_value': part, 'limit': 1150, 'record_open_time': 0, 'count_folders': 0})
-                                    for s_item in s_search.get('data', []):
-                                        if s_item.get('fn') == part and str(s_item.get('fc', s_item.get('type'))) == '0':
-                                            part_cid = s_item.get('fid') or s_item.get('file_id')
-                                            break
-                                except: pass
-                        if part_cid:
-                            P115CacheManager.save_cid(part_cid, current_parent, part)
-                            memory_dir_cache[cache_key] = part_cid # ★ 写入内存缓存
-                            current_parent = part_cid
+
+                # 剧集仍然进入标准季目录
+                if self.media_type == 'tv' and season_num is not None and s_name:
+                    cache_key = f"{final_home_cid}_{s_name}"
+
+                    with _GLOBAL_DIR_LOCK:
+                        s_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+
+                    if s_cid == 'FAILED':
+                        real_target_cid = final_home_cid
+                    else:
+                        if not s_cid:
+                            s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
+
+                        if s_cid:
+                            real_target_cid = s_cid
+                            with _GLOBAL_DIR_LOCK:
+                                _GLOBAL_DIR_CACHE[cache_key] = s_cid
                         else:
-                            memory_dir_cache[cache_key] = 'FAILED' # ★ 写入失败记忆体
-                            break
-                    real_target_cid = current_parent
+                            s_mk = self.client.fs_mkdir(s_name, final_home_cid)
+                            s_cid = s_mk.get('cid') if s_mk.get('state') else None
+
+                            if not s_cid:
+                                try:
+                                    s_search = self.client.fs_files({
+                                        'cid': final_home_cid,
+                                        'search_value': s_name,
+                                        'limit': 100,
+                                        'show_dir': 1,
+                                        'record_open_time': 0
+                                    })
+                                    for item in s_search.get('data', []):
+                                        item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                                        item_cid = item.get('fid') or item.get('file_id')
+
+                                        if item_fc == '0' and item_name == s_name and item_cid:
+                                            s_cid = item_cid
+                                            break
+                                except Exception:
+                                    pass
+
+                            if s_cid:
+                                P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = s_cid
+                                real_target_cid = s_cid
+
+                                season_rel_path = f"{base_rel_path}/{s_name}"
+                                P115CacheManager.update_local_path(s_cid, season_rel_path)
+                            else:
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = 'FAILED'
+                                real_target_cid = final_home_cid
+
             else:
                 new_filename, season_num, episode_num, s_name, is_center_cached, video_info, has_real_info, part_num = self._rename_file_node(
                     file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), original_title=original_title,
@@ -3787,13 +3874,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     except Exception as e:
                                         relative_category_path = category_rule.get('dir_name', '未识别')
 
-                            if keep_original:
-                                rel_path = file_item.get('rel_path', '')
-                                if rel_path:
-                                    local_dir = os.path.join(local_root, relative_category_path, std_root_name, rel_path.replace('/', os.sep))
-                                else:
-                                    local_dir = os.path.join(local_root, relative_category_path, std_root_name)
-                            elif self.media_type == 'tv' and season_num is not None:
+                            # ★ 保留原名只影响文件名，本地目录仍走标准结构
+                            if self.media_type == 'tv' and season_num is not None and s_name:
                                 local_dir = os.path.join(local_root, relative_category_path, std_root_name, s_name)
                             else:
                                 local_dir = os.path.join(local_root, relative_category_path, std_root_name)
@@ -3803,11 +3885,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             try:
                                 main_folder_path = os.path.join(relative_category_path, std_root_name)
                                 P115CacheManager.update_local_path(final_home_cid, main_folder_path)
-                                if keep_original:
-                                    rel_path = file_item.get('rel_path', '')
-                                    if rel_path:
-                                        P115CacheManager.update_local_path(batch_target_cid, os.path.join(main_folder_path, rel_path.replace('/', os.sep)))
-                                elif self.media_type == 'tv' and season_num is not None:
+                                # ★ 保留原名不再复刻原始子目录，只按标准季目录更新缓存
+                                if self.media_type == 'tv' and season_num is not None and s_name:
                                     P115CacheManager.update_local_path(batch_target_cid, os.path.join(main_folder_path, s_name))
                             except Exception: pass 
 
@@ -3819,11 +3898,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 strm_filepath = os.path.join(local_dir, strm_filename)
                                 if not etk_url.startswith('http'):
                                     mount_prefix = etk_url
-                                    if keep_original:
-                                        rel_path = file_item.get('rel_path', '')
-                                        if rel_path: mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, rel_path.replace('/', os.sep), new_filename)
-                                        else: mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, new_filename)
-                                    elif self.media_type == 'tv' and season_num is not None:
+                                    # ★ 保留原名只影响 new_filename，挂载路径仍走标准目录
+                                    if self.media_type == 'tv' and season_num is not None and s_name:
                                         mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, s_name, new_filename)
                                     else:
                                         mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, new_filename)
@@ -3863,11 +3939,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     except Exception as e:
                                         logger.error(f"  ➜ 生成媒体信息文件失败: {e}")
 
-                                if keep_original:
-                                    rel_path = file_item.get('rel_path', '')
-                                    if rel_path: file_local_path = os.path.join(relative_category_path, std_root_name, rel_path.replace('/', os.sep), new_filename)
-                                    else: file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
-                                elif self.media_type == 'tv' and season_num is not None:
+                                # ★ 保留原名只影响文件名，缓存路径仍走标准目录
+                                if self.media_type == 'tv' and season_num is not None and s_name:
                                     file_local_path = os.path.join(relative_category_path, std_root_name, s_name, new_filename)
                                 else:
                                     file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
