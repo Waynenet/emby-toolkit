@@ -11,7 +11,7 @@
             <template #header>
               <span class="card-title">筛选条件</span>
             </template>
-            <n-space vertical size="large" style="width: 100%;">
+            <n-space vertical size="large" style="width: 100%; margin-top: 12px;">
               
               <div class="filter-item">
                 <label class="filter-label">搜索:</label>
@@ -208,7 +208,7 @@
                 换一个
               </n-tooltip>
             </template>
-            <n-skeleton v-if="isPoolLoading" text :repeat="8" />
+            <n-skeleton v-if="isPoolLoading" text :repeat="8" style="margin-top: 12px;"/>
               <div v-if="!isPoolLoading && currentRecommendation" class="recommendation-content">
                 <div class="recommendation-grid">
                     <div class="poster-column">
@@ -793,11 +793,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
-:deep(.n-card__content) {
-  padding-top: 16px !important;
-}
-
 /* ---------------- 新增：解决筛选表单宽度的 Flex 响应式布局 ---------------- */
 .filter-item {
   display: flex;
