@@ -62,7 +62,7 @@
                       <template #header><span class="card-title">豆瓣集成</span></template>
                       <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                         
-                        <n-form-item-grid-item label="启用辅助抓取" path="douban_enable_online_api">
+                        <n-form-item-grid-item label="启用信息辅助" path="douban_enable_online_api">
                           <n-switch v-model:value="configModel.douban_enable_online_api" />
                         </n-form-item-grid-item>
 
