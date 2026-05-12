@@ -85,7 +85,15 @@
                         </n-form-item-grid-item>
 
                         <n-form-item-grid-item span="1 s:2" label="同步 Emby 用户" path="douban_sync_users">
-                          <n-select v-model:value="configModel.douban_sync_users" multiple filterable tag placeholder="输入要同步的Emby用户名并回车" :options="[]" />
+                          <n-select 
+                            v-model:value="configModel.douban_sync_users" 
+                            multiple 
+                            filterable 
+                            tag
+                            :options="embyUserOptions"
+                            :loading="loadingEmbyUsers"
+                            placeholder="请下拉选择或输入用户名后回车" 
+                          />
                         </n-form-item-grid-item>
 
                         <n-form-item-grid-item span="1 s:2" label="剧集跳过第一集" path="douban_sync_skip_first">
@@ -94,7 +102,13 @@
                         </n-form-item-grid-item>
 
                         <n-form-item-grid-item span="1 s:2" label="媒体路径排除关键词" path="douban_sync_exclude">
-                          <n-select v-model:value="configModel.douban_sync_exclude" multiple filterable tag placeholder="包含此路径的媒体不触发同步" :options="[]" />
+                          <n-input-group>
+                            <n-select v-model:value="configModel.douban_sync_exclude" multiple filterable tag :show-arrow="false" placeholder="输入路径/关键词或点击右侧选择" :options="[]" style="flex: 1;" />
+                            <n-button type="primary" ghost @click="openLocalFolderSelector('douban_sync_exclude', true)">
+                              <template #icon><n-icon :component="FolderIcon" /></template>
+                            </n-button>
+                          </n-input-group>
+                          <template #feedback><n-text depth="3" style="font-size:0.8em;">命中选择的路径或包含输入的关键词，将跳过豆瓣同步。</n-text></template>
                         </n-form-item-grid-item>
 
                       </n-grid>
@@ -1004,6 +1018,35 @@ watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_na
   }
 }, { immediate: true });
 
+// --- 豆瓣同步：获取 Emby 用户列表 ---
+const embyUserOptions = ref([]);
+const loadingEmbyUsers = ref(false);
+
+const fetchEmbyUsersList = async () => {
+  if (!configModel.value?.emby_server_url || !configModel.value?.emby_api_key) {
+    embyUserOptions.value = [];
+    return;
+  }
+  if (loadingEmbyUsers.value) return;
+  loadingEmbyUsers.value = true;
+  try {
+    // 完美复用 UserList 里的后端路由
+    const response = await axios.get(`/api/admin/users`);
+    const users = response.data.data || response.data || [];
+    
+    // 组装成下拉菜单选项格式
+    embyUserOptions.value = users.map(user => ({
+      label: user.Name || user.name || user.id,
+      value: user.Name || user.name || user.id
+    }));
+  } catch (err) {
+    console.warn("获取 Emby 用户列表失败，将降级为手动输入模式:", err);
+    embyUserOptions.value = []; // 接口哪怕挂了，由于有 tag 属性，也能手动打字
+  } finally {
+    loadingEmbyUsers.value = false;
+  }
+};
+
 const aiProviderOptions = ref([
   { label: 'OpenAI (及兼容服务)', value: 'openai' },
   { label: '智谱AI (ZhipuAI)', value: 'zhipuai' },
@@ -1143,7 +1186,6 @@ const confirmLocalFolder = () => {
     
     showLocalFolderModal.value = false
 }
-
 
 const save = async () => {
   try {
@@ -1383,6 +1425,7 @@ onMounted(async () => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
+        fetchEmbyUsersList();
       }
       if (unwatchGlobal) { unwatchGlobal(); }
     }
@@ -1391,6 +1434,7 @@ onMounted(async () => {
     if (componentIsMounted.value && oldValues) {
       if (newValues[0] !== oldValues[0] || newValues[1] !== oldValues[1]) {
         fetchEmbyLibrariesInternal();
+        fetchEmbyUsersList();
       }
     }
   });
