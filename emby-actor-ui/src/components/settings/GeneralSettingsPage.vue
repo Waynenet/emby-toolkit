@@ -141,6 +141,30 @@
                       <n-form-item-grid-item label="豆瓣登录 Cookie" path="douban_cookie">
                         <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取"/>
                       </n-form-item-grid-item>
+
+                      <!-- ★★★ 新增：豆瓣记录同步 UI ★★★ -->
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">在看/看过记录同步</n-divider></n-gi>
+                      
+                      <n-form-item-grid-item label="启用同步" path="douban_sync_enabled">
+                        <n-switch v-model:value="configModel.douban_sync_enabled" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="仅自己可见" path="douban_sync_private">
+                        <n-switch v-model:value="configModel.douban_sync_private" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="同步 Emby 用户" path="douban_sync_users">
+                        <n-select v-model:value="configModel.douban_sync_users" multiple filterable tag placeholder="输入要同步的Emby用户名并回车" :options="[]" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="剧集跳过第一集" path="douban_sync_skip_first">
+                        <n-switch v-model:value="configModel.douban_sync_skip_first" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">不把试看第一集的剧集同步到豆瓣。</n-text></template>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="媒体路径排除关键词" path="douban_sync_exclude">
+                        <n-select v-model:value="configModel.douban_sync_exclude" multiple filterable tag placeholder="包含此路径的媒体不触发同步" :options="[]" />
+                      </n-form-item-grid-item>
                     </n-grid>
                   </n-card>
                 </n-gi>

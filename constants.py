@@ -114,6 +114,13 @@ CONFIG_OPTION_DOUBAN_DEFAULT_COOLDOWN = "api_douban_default_cooldown_seconds" # 
 CONFIG_OPTION_DOUBAN_COOKIE = "douban_cookie" # 用于身份验证的豆瓣登录Cookie
 CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API = "douban_enable_online_api" # 是否启用豆瓣在线API
 
+# ★★★ 新增：豆瓣状态同步相关常量 ★★★
+CONFIG_OPTION_DOUBAN_SYNC_ENABLED = "douban_sync_enabled"         # 启用同步
+CONFIG_OPTION_DOUBAN_SYNC_USERS = "douban_sync_users"             # 允许同步的 Emby 用户列表
+CONFIG_OPTION_DOUBAN_SYNC_EXCLUDE = "douban_sync_exclude"         # 路径排除关键词列表
+CONFIG_OPTION_DOUBAN_SYNC_PRIVATE = "douban_sync_private"         # 仅自己可见
+CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST = "douban_sync_skip_first"   # 剧集跳过第一集
+
 # --- 本地数据源 (神医模式) ---
 CONFIG_SECTION_LOCAL_DATA = "LocalDataSource"
 CONFIG_OPTION_LOCAL_DATA_PATH = "local_data_path" # 本地JSON元数据（TMDbHelper等生成）的根路径

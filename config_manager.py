@@ -84,6 +84,13 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_DOUBAN_DEFAULT_COOLDOWN: (constants.CONFIG_SECTION_API_DOUBAN, 'float', 1.0),
     constants.CONFIG_OPTION_DOUBAN_COOKIE: (constants.CONFIG_SECTION_API_DOUBAN, 'string', ""),
     constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', True),
+    
+    # ★★★ 新增：豆瓣同步配置定义 ★★★
+    constants.CONFIG_OPTION_DOUBAN_SYNC_ENABLED: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', False),
+    constants.CONFIG_OPTION_DOUBAN_SYNC_USERS: (constants.CONFIG_SECTION_API_DOUBAN, 'list', []),
+    constants.CONFIG_OPTION_DOUBAN_SYNC_EXCLUDE: (constants.CONFIG_SECTION_API_DOUBAN, 'list', []),
+    constants.CONFIG_OPTION_DOUBAN_SYNC_PRIVATE: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', True),
+    constants.CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', True),
 
     # [MoviePilot]
     constants.CONFIG_OPTION_MOVIEPILOT_URL: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),

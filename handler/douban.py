@@ -15,6 +15,7 @@ from urllib import parse
 from datetime import datetime
 from random import choice
 import threading
+from http.cookies import SimpleCookie
 # --- 标准库导入结束 ---
 
 logger = logging.getLogger(__name__)
@@ -491,6 +492,90 @@ class DoubanApi:
             logger.error(f"  ➜ 无法获取豆瓣ID '{douban_id}' 的详情: {details.get('message')}")
             return None # 如果有错误，返回 None
         return details # 成功时返回完整的 details 字典
+
+    def _get_web_ck(self) -> str:
+        """从 Web 端获取/刷新 ck (用于状态同步)"""
+        if not DoubanApi._user_cookie:
+            return ""
+        
+        cookie_obj = SimpleCookie(DoubanApi._user_cookie)
+        ck_cookie = cookie_obj.get("ck")
+        if ck_cookie and ck_cookie.value and ck_cookie.value != '"deleted"':
+            return ck_cookie.value
+            
+        # 如果 Cookie 中没有有效的 ck，模拟访问首页获取
+        headers = {
+            'User-Agent': choice(DoubanApi._user_agents),
+            'Cookie': DoubanApi._user_cookie,
+            'Referer': 'https://movie.douban.com/'
+        }
+        try:
+            DoubanApi._ensure_session()
+            resp = DoubanApi._session.get("https://www.douban.com/", headers=headers, timeout=10)
+            ck_str = resp.headers.get('Set-Cookie', '')
+            if ck_str:
+                new_cookie = SimpleCookie(ck_str)
+                new_ck = new_cookie.get("ck")
+                if new_ck and new_ck.value and new_ck.value != '"deleted"':
+                    # 更新内存中的 Cookie 供下次使用
+                    DoubanApi._user_cookie += f"; ck={new_ck.value}"
+                    return new_ck.value
+        except Exception as e:
+            logger.error(f"  ➜ 获取豆瓣状态同步 ck 失败: {e}")
+        return ""
+
+    def set_watching_status(self, subject_id: str, status: str = "do", private: bool = True) -> bool:
+        """
+        同步豆瓣观影状态
+        :param subject_id: 豆瓣条目ID
+        :param status: do(在看)/collect(看过)
+        :param private: 是否仅自己可见
+        """
+        ck = self._get_web_ck()
+        if not ck:
+            logger.error("  ➜ 豆瓣状态同步失败：无法获取有效的 ck，请检查 Cookie。")
+            return False
+            
+        headers = {
+            'User-Agent': choice(DoubanApi._user_agents),
+            'Cookie': DoubanApi._user_cookie,
+            'Referer': f"https://movie.douban.com/subject/{subject_id}/",
+            'Origin': "https://movie.douban.com",
+            'Host': "movie.douban.com",
+            'Content-Type': "application/x-www-form-urlencoded"
+        }
+        data = {
+            "ck": ck,
+            "interest": status,
+            "rating": "",
+            "foldcollect": "U",
+            "tags": "",
+            "comment": ""
+        }
+        if private:
+            data["private"] = "on"
+            
+        try:
+            DoubanApi._ensure_session()
+            # 豆瓣修改状态是通过 web 端的 API
+            req_url = f"https://movie.douban.com/j/subject/{subject_id}/interest"
+            resp = DoubanApi._session.post(req_url, headers=headers, data=data, timeout=10)
+            
+            if resp.status_code == 200:
+                ret = resp.json().get("r")
+                if ret == 0:
+                    return True
+                if isinstance(ret, bool) and ret is False:
+                    logger.warning(f"  ➜ 豆瓣同步失败：条目可能尚未开播。")
+                    return False
+            elif resp.status_code == 403:
+                logger.warning(f"  ➜ 豆瓣同步 403 拒绝访问，可能遇到风控或 ck 失效。")
+                
+            logger.error(f"  ➜ 豆瓣状态同步异常: HTTP {resp.status_code} - {resp.text}")
+            return False
+        except Exception as e:
+            logger.error(f"  ➜ 豆瓣状态同步请求崩溃: {e}")
+            return False
 
 if __name__ == '__main__':
     # 测试代码现在不再需要创建数据库文件

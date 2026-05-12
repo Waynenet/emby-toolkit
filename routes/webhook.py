@@ -260,7 +260,6 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         # 启动协程，不等待结果，直接让当前 Webhook 任务结束
         spawn(_async_trigger_watchlist)
 
-
 def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, known_rating=None):
     """
     自动打标 (支持分级过滤)。
@@ -319,6 +318,83 @@ def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, kno
     except Exception as e:
         logger.error(f"  ➜ [自动打标] 失败: {e}")
 
+def _task_sync_douban_status(item_id, item_type, is_played):
+    """异步执行豆瓣在看/看过状态同步，由 Webhook 触发"""
+    app_config = config_manager.APP_CONFIG
+    if not app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_ENABLED):
+        return
+        
+    try:
+        processor = extensions.media_processor_instance
+        item_details = emby.get_emby_item_details(item_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id, fields="Path,ProviderIds")
+        if not item_details:
+            return
+            
+        item_name = item_details.get("Name", "")
+        item_path = item_details.get("Path", "")
+        
+        # 排除路径过滤
+        excludes = app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_EXCLUDE, [])
+        if item_path and any(k and k in item_path for k in excludes):
+            logger.debug(f"  ➜ [豆瓣同步] 媒体路径 '{item_path}' 包含排除关键词，跳过同步。")
+            return
+
+        target_name = item_name
+        target_year = item_details.get("ProductionYear")
+        tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
+        
+        # 判断类型和状态
+        status = "collect" if is_played else "do" 
+        mtype = 'movie'
+
+        if item_type == "Episode":
+            mtype = 'tv'
+            season_idx = item_details.get("ParentIndexNumber", 1)
+            episode_idx = item_details.get("IndexNumber", 1)
+            target_name = item_details.get("SeriesName", item_name)
+            
+            if episode_idx < 2 and app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST, True):
+                logger.debug(f"  ➜ [豆瓣同步] 已开启跳过第1集，跳过: {target_name} S{season_idx}E{episode_idx}")
+                return
+            # 看完某集不代表看完该剧，所以单集同步一律作为“在看 (do)”处理
+            status = "do"
+            
+        elif item_type == "Movie":
+            mtype = 'movie'
+        elif item_type in ["Series", "Season"]:
+            mtype = 'tv'
+            target_name = item_name if item_type == "Series" else item_details.get("SeriesName", item_name)
+        else:
+            return
+
+        from handler.douban import DoubanApi
+        api = DoubanApi()
+        
+        # 极速匹配：先查本地数据库避免滥用豆瓣API
+        douban_id = None
+        if tmdb_id:
+            db_record = media_db.get_media_details(str(tmdb_id), 'Movie' if mtype == 'movie' else 'Series')
+            if db_record and db_record.get('douban_id'):
+                douban_id = db_record.get('douban_id')
+
+        # 如果数据库没有，回退搜索匹配
+        if not douban_id:
+            match_res = api.match_info(name=target_name, year=str(target_year) if target_year else None, mtype=mtype)
+            if match_res and match_res.get('id'):
+                douban_id = match_res['id']
+
+        if not douban_id:
+            logger.warning(f"  ➜ [豆瓣同步] 无法匹配 '{target_name}' 的豆瓣ID，跳过同步。")
+            return
+
+        is_private = app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_PRIVATE, True)
+        success = api.set_watching_status(str(douban_id), status, is_private)
+        
+        if success:
+            logger.info(f"  ➜ [豆瓣同步] 已成功将 '{target_name}' 标记为 {'看过' if status == 'collect' else '在看'}")
+
+    except Exception as e:
+        logger.error(f"  ➜ [豆瓣同步] 执行任务时发生异常: {e}", exc_info=True)
 
 def _process_batch_webhook_events():
     global WEBHOOK_BATCH_DEBOUNCER
@@ -792,7 +868,20 @@ def emby_webhook():
 
         try:
             if len(update_data) > 2:
-                user_db.upsert_user_media_data(update_data)
+                # ====== 触发豆瓣状态同步 ======
+                if event_type in ["playback.start", "item.markplayed", "playback.stop"]:
+                    playback_info = data.get("PlaybackInfo", {})
+                    # 判断是否是播放完成/标记看过
+                    is_played = event_type == "item.markplayed" or (event_type == "playback.stop" and playback_info.get('PlayedToCompletion') is True)
+                    # 判断是否是开始播放
+                    is_start = event_type == "playback.start"
+                    
+                    if is_played or is_start:
+                        sync_users = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_DOUBAN_SYNC_USERS, [])
+                        if user_name in sync_users:
+                            # 创建异步任务不阻塞 Webhook，并将 Webhook 里的 item_id 直接丢过去
+                            spawn(_task_sync_douban_status, item_id_from_webhook, item_type_from_webhook, is_played)
+                # ==============================
                 user_db.upsert_user_media_data(update_data)
                 item_name_for_log = f"ID:{id_to_update_in_db}"
                 try:
