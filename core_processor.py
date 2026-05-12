@@ -2833,13 +2833,16 @@ class MediaProcessor:
 
                 # === 处理剧集 (校验旗下所有分集) ===
                 elif item_type == "Series":
+                    # ★★★ 核心修复：把 emby_item_ids_json 也查出来，用于提取每集的真实 Emby ID ★★★
                     cursor.execute("""
-                        SELECT season_number, episode_number, asset_details_json 
+                        SELECT season_number, episode_number, asset_details_json, emby_item_ids_json 
                         FROM media_metadata 
                         WHERE parent_series_tmdb_id = %s AND item_type = 'Episode' AND in_library = TRUE
                     """, (str(tmdb_id),))
                     db_episodes = cursor.fetchall()
-                    bad_eps = []
+                    
+                    bad_eps_names = []
+                    emby_ids_to_heal = []
                     files_to_watch = []
                     
                     for db_ep in db_episodes:
@@ -2849,13 +2852,24 @@ class MediaProcessor:
                         if ep_path:
                             minfo_path = os.path.splitext(ep_path)[0] + "-mediainfo.json"
                             if not os.path.exists(minfo_path):
-                                bad_eps.append(f"S{db_ep['season_number']}E{db_ep['episode_number']}")
+                                bad_eps_names.append(f"S{db_ep['season_number']}E{db_ep['episode_number']}")
                                 files_to_watch.append(minfo_path)
+                                
+                                # 提取这个缺失分集的真实 Emby ID
+                                try:
+                                    emby_ids = json.loads(db_ep['emby_item_ids_json']) if isinstance(db_ep['emby_item_ids_json'], str) else db_ep['emby_item_ids_json']
+                                    if emby_ids and len(emby_ids) > 0:
+                                        emby_ids_to_heal.append(emby_ids[0])
+                                except Exception:
+                                    pass
                     
                     # ★ 触发神医 API 并进行智能短轮询等待 ★
-                    if bad_eps:
-                        logger.info(f"  ➜ [轻量补全] 剧集发现 {len(bad_eps)} 集缺失 JSON，触发 API 唤醒神医处理整部剧...")
-                        emby.trigger_media_info_refresh(item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
+                    if bad_eps_names:
+                        logger.info(f"  ➜ [轻量补全] 剧集发现 {len(bad_eps_names)} 集缺失 JSON，触发 API 逐集唤醒神医...")
+                        
+                        # 遍历发送具体视频文件的播放请求，Emby 就能正确处理了！
+                        for eid in emby_ids_to_heal:
+                            emby.trigger_media_info_refresh(eid, self.emby_url, self.emby_api_key, self.emby_user_id)
                         
                         # 剧集分集多，最多等 10 秒
                         for i in range(5):
@@ -2865,7 +2879,7 @@ class MediaProcessor:
                                 break
                         
                         if not all(os.path.exists(f) for f in files_to_watch):
-                            return False, f"已向神医催更 {len(bad_eps)} 个分集！因网盘读取耗时较长，请稍候再试。"
+                            return False, f"已向神医催更 {len(bad_eps_names)} 个分集！因网盘读取耗时较长，请稍候再试。"
 
                 else:
                     return False, f"不支持的补全类型: {item_type}"
