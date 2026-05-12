@@ -256,7 +256,7 @@ class MediaProcessor:
                         logger.warning(f"  ➜ [质检] 剧集《{item_name}》检测到坏分集: {reason}")
                         break 
             except Exception as e_db_check:
-                logger.warning(f"  ➜ [质检] 数据库验证分集信息流时出错: {e_db_check}")
+                logger.warning(f"  ➜ [质检] 数据库验证分集流信息时出错: {e_db_check}")
 
         raw_genres = item_details.get("Genres", [])
         if raw_genres and isinstance(raw_genres[0], dict):
@@ -2718,16 +2718,16 @@ class MediaProcessor:
                 logger.trace(f"已清理 ItemID {item_id} 的手动编辑会话缓存。")
 
     # =========================================================================
-    # [新增] 手动处理增强：轻量级视频信息流补全
+    # [最终完美进化版] 轻量级流信息补全 + 原生 API 唤醒 + 智能短轮询等待
     # =========================================================================
     def sync_media_info_only(self, item_id: str) -> Tuple[bool, str]:
         """
-        轻量级补全视频信息流。
-        不重新刮削TMDB/豆瓣，不请求AI，仅读取本地最新生成的 -mediainfo.json，
-        更新数据库中的 asset_details_json，并尝试将其从“待复核(失败日志)”中移除。
+        轻量级补全视频流信息。
+        如果发现缺失，触发原生 API 唤醒神医，并最多等待 8 秒。
+        如果是本地秒提取，则一次点击即可完成；若是慢速网盘，则安全退出提示用户稍候。
         """
         try:
-            logger.info(f"  ➜ [轻量补全] 开始为 ItemID: {item_id} 补全媒体信息流...")
+            logger.info(f"  ➜ [轻量补全] 开始为 ItemID: {item_id} 补全媒体流信息...")
             item_details = emby.get_emby_item_details(item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
             if not item_details:
                 return False, f"无法在 Emby 中找到项目 (ID: {item_id})"
@@ -2739,7 +2739,6 @@ class MediaProcessor:
             if not tmdb_id:
                 return False, f"项目 '{item_name}' 缺少 TMDb ID，无法定位数据库记录。"
 
-            # 准备基础爬树数据 (用于解析媒体库路径)
             source_lib_id = str(item_details.get('_SourceLibraryId') or "")
             if not source_lib_id:
                 lib_info = emby.get_library_root_for_item(item_id, self.emby_url, self.emby_api_key, self.emby_user_id, item_details.get("Path"))
@@ -2750,18 +2749,17 @@ class MediaProcessor:
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
 
-                # 验证数据库中是否已有该记录的主元数据
                 cursor.execute("SELECT actors_json FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(tmdb_id), item_type))
                 db_record = cursor.fetchone()
                 if not db_record:
-                    return False, f"数据库中未找到 '{item_name}' 的主元数据，说明之前刮削彻底失败，请执行'重新处理'。"
-
-                all_assets = []
-                all_ids = []
-                stream_check_passed = False
+                    return False, f"数据库中未找到 '{item_name}' 的主元数据，请执行'重新处理'。"
 
                 # === 处理电影和单集 ===
                 if item_type in ["Movie", "Episode"]:
+                    sources_to_parse = []
+                    emby_ids_to_heal = []
+                    files_to_watch = []
+
                     media_sources = item_details.get('MediaSources', [])
                     if media_sources:
                         for source in media_sources:
@@ -2772,39 +2770,58 @@ class MediaProcessor:
                             emby_path = raw_path if not raw_path.startswith('http') else item_details.get('Path', '')
                             mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                             
-                            # 核心检查：迟到的神医 JSON 到底有没有生成？
-                            if mediainfo_path and os.path.exists(mediainfo_path):
-                                stream_check_passed = True
+                            sources_to_parse.append((source_id, emby_path, mediainfo_path, source))
                             
-                            temp_item = item_details.copy()
-                            temp_item['Id'] = source_id 
-                            temp_item['Path'] = emby_path
+                            # 收集缺失的文件
+                            if mediainfo_path and not os.path.exists(mediainfo_path):
+                                emby_ids_to_heal.append(source_id)
+                                files_to_watch.append(mediainfo_path)
+                    else:
+                        emby_path = item_details.get('Path', '')
+                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
+                        
+                        sources_to_parse.append((item_id, emby_path, mediainfo_path, None))
+                        
+                        if mediainfo_path and not os.path.exists(mediainfo_path):
+                            emby_ids_to_heal.append(item_id)
+                            files_to_watch.append(mediainfo_path)
+
+                    # ★ 触发神医 API 并进行智能短轮询等待 ★
+                    if emby_ids_to_heal:
+                        logger.info(f"  ➜ [轻量补全] 发现缺失 JSON，触发 API 唤醒神医处理 {len(emby_ids_to_heal)} 个文件...")
+                        for eid in emby_ids_to_heal:
+                            emby.trigger_media_info_refresh(eid, self.emby_url, self.emby_api_key, self.emby_user_id)
+                        
+                        # 短轮询等待：最多循环 4 次，每次 2 秒（总共 8 秒），防止前端网页请求超时
+                        for i in range(4):
+                            time.sleep(2)
+                            if all(os.path.exists(f) for f in files_to_watch):
+                                logger.info(f"  ➜ [轻量补全] 神医提取完成！(等待了 {(i+1)*2} 秒)")
+                                break
+                        
+                        # 8 秒后还是没生成完，优雅退出
+                        if not all(os.path.exists(f) for f in files_to_watch):
+                            return False, "已触发神医提取，但因网盘读取原因耗时较长。请去泡杯茶，几分钟后再点击补全。"
+
+                    # 神医文件齐了！开始安全解析并写入数据库
+                    all_assets = []
+                    all_ids = []
+                    for source_id, emby_path, mediainfo_path, source in sources_to_parse:
+                        temp_item = item_details.copy()
+                        temp_item['Id'] = source_id 
+                        temp_item['Path'] = emby_path
+                        if source:
                             if 'Container' in source: temp_item['Container'] = source['Container']
                             if 'Size' in source: temp_item['Size'] = source['Size']
                             if 'RunTimeTicks' in source: temp_item['RunTimeTicks'] = source['RunTimeTicks']
                             temp_item['MediaSources'] = [source]
-                            
-                            # 这里会深度解析神医生成的 json 并返回音视频格式结构体
-                            asset_details = parse_full_asset_details(temp_item, id_to_parent_map=id_to_parent_map, library_guid=lib_guid, local_mediainfo_path=mediainfo_path)
-                            asset_details['source_library_id'] = source_lib_id
-
-                            all_assets.append(asset_details)
-                            all_ids.append(source_id)
-                    else:
-                        emby_path = item_details.get('Path', '')
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                        if mediainfo_path and os.path.exists(mediainfo_path):
-                            stream_check_passed = True
-
-                        asset_details = parse_full_asset_details(item_details, id_to_parent_map=id_to_parent_map, library_guid=lib_guid, local_mediainfo_path=mediainfo_path)
+                        
+                        asset_details = parse_full_asset_details(temp_item, id_to_parent_map=id_to_parent_map, library_guid=lib_guid, local_mediainfo_path=mediainfo_path)
                         asset_details['source_library_id'] = source_lib_id
+
                         all_assets.append(asset_details)
-                        all_ids.append(item_id)
+                        all_ids.append(source_id)
 
-                    if not stream_check_passed:
-                        return False, f"仍未检测到 '{item_name}' 的媒体流文件 (-mediainfo.json)，请确认神医已完成提取。"
-
-                    # 神医文件存在！极速更新数据库
                     assets_json_str = json.dumps(all_assets, ensure_ascii=False)
                     ids_json_str = json.dumps(list(dict.fromkeys(all_ids)))
                     
@@ -2823,52 +2840,59 @@ class MediaProcessor:
                     """, (str(tmdb_id),))
                     db_episodes = cursor.fetchall()
                     bad_eps = []
+                    files_to_watch = []
+                    
                     for db_ep in db_episodes:
                         assets = json.loads(db_ep['asset_details_json']) if isinstance(db_ep['asset_details_json'], str) else db_ep['asset_details_json']
                         ep_path = assets[0].get('path') if assets else None
+                        
                         if ep_path:
                             minfo_path = os.path.splitext(ep_path)[0] + "-mediainfo.json"
                             if not os.path.exists(minfo_path):
                                 bad_eps.append(f"S{db_ep['season_number']}E{db_ep['episode_number']}")
+                                files_to_watch.append(minfo_path)
                     
+                    # ★ 触发神医 API 并进行智能短轮询等待 ★
                     if bad_eps:
-                        return False, f"剧集 '{item_name}' 仍有分集缺失信息流: {', '.join(bad_eps[:3])} 等。您可以尝试针对单集进行补全。"
-                    
-                    stream_check_passed = True
+                        logger.info(f"  ➜ [轻量补全] 剧集发现 {len(bad_eps)} 集缺失 JSON，触发 API 唤醒神医处理整部剧...")
+                        emby.trigger_media_info_refresh(item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
+                        
+                        # 剧集分集多，最多等 10 秒
+                        for i in range(5):
+                            time.sleep(2)
+                            if all(os.path.exists(f) for f in files_to_watch):
+                                logger.info(f"  ➜ [轻量补全] 所有分集神医提取完成！(等待了 {(i+1)*2} 秒)")
+                                break
+                        
+                        if not all(os.path.exists(f) for f in files_to_watch):
+                            return False, f"已向神医催更 {len(bad_eps)} 个分集！因网盘读取耗时较长，请稍候再试。"
+
                 else:
                     return False, f"不支持的补全类型: {item_type}"
 
-                # === 信息流补全完毕，重新算分并洗白 ===
-                if stream_check_passed:
-                    # 重新提取演员计算最终分数 (不再是0分了)
-                    raw_actors = db_record.get('actors_json', '[]')
-                    final_cast = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
-                    original_cast_count = len([p for p in item_details.get("People", []) if p.get("Type") == "Actor"])
-                    
-                    raw_genres = item_details.get("Genres", [])
-                    genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
-                    is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres
-                    
-                    new_score = actor_utils.evaluate_cast_processing_quality(final_cast, original_cast_count, len(final_cast), is_animation)
-                    min_score = float(self.config.get("min_score_for_review", constants.DEFAULT_MIN_SCORE_FOR_REVIEW))
-                    
-                    if new_score >= min_score:
-                        # 完美！移除失败日志，加入成功日志
-                        self.log_db_manager.remove_from_failed_log(cursor, item_id)
-                        self._mark_item_as_processed(cursor, item_id, item_name, score=new_score)
-                        conn.commit()
-                        logger.info(f"  ➜ [轻量补全] 成功！'{item_name}' 信息流已录入数据库，重新打分 {new_score:.2f}，正式移出待复核区。")
-                        return True, f"补全成功！已提取媒体流数据并移出待复核区。(最终评分: {new_score:.2f})"
-                    else:
-                        # 虽然信息流有了，但演员分数本来就很低
-                        cursor.execute("""
-                            UPDATE failed_log 
-                            SET error_message = %s, score = %s 
-                            WHERE item_id = %s
-                        """, (f"处理评分 ({new_score:.2f}) 低于阈值", new_score, item_id))
-                        conn.commit()
-                        logger.info(f"  ➜ [轻量补全] 信息流已录入，但演员评分仅 {new_score:.2f}，仍需手动复核演员。")
-                        return True, f"流数据已补全，但因演员翻译质量问题，仍需您手动校对。新评分: {new_score:.2f}"
+                # === 流信息补全完毕，重新算分并洗白 ===
+                raw_actors = db_record.get('actors_json', '[]')
+                final_cast = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
+                original_cast_count = len([p for p in item_details.get("People", []) if p.get("Type") == "Actor"])
+                
+                raw_genres = item_details.get("Genres", [])
+                genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
+                is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres
+                
+                new_score = actor_utils.evaluate_cast_processing_quality(final_cast, original_cast_count, len(final_cast), is_animation)
+                min_score = float(self.config.get("min_score_for_review", constants.DEFAULT_MIN_SCORE_FOR_REVIEW))
+                
+                if new_score >= min_score:
+                    self.log_db_manager.remove_from_failed_log(cursor, item_id)
+                    self._mark_item_as_processed(cursor, item_id, item_name, score=new_score)
+                    conn.commit()
+                    logger.info(f"  ➜ [轻量补全] 成功！'{item_name}' 流信息已录入数据库，重新打分 {new_score:.2f}，正式移出待复核区。")
+                    return True, f"补全成功！已提取媒体流数据并移出待复核区。(最终评分: {new_score:.2f})"
+                else:
+                    cursor.execute("UPDATE failed_log SET error_message = %s, score = %s WHERE item_id = %s", (f"处理评分 ({new_score:.2f}) 低于阈值", new_score, item_id))
+                    conn.commit()
+                    logger.info(f"  ➜ [轻量补全] 流信息已录入，但演员评分仅 {new_score:.2f}，仍需手动复核演员。")
+                    return True, f"流数据已补全，但因演员翻译质量问题，仍需您手动校对。新评分: {new_score:.2f}"
 
         except Exception as e:
             logger.error(f"  ➜ [轻量补全] 补全 {item_id} 时发生异常: {e}", exc_info=True)

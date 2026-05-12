@@ -48,8 +48,8 @@ UPDATE_DEBOUNCE_LOCK = threading.Lock()
 UPDATE_DEBOUNCE_TIME = 15
 
 # --- 视频流预检常量 ---
-STREAM_CHECK_MAX_RETRIES = 10   # 最大重试次数 
-STREAM_CHECK_INTERVAL = 30      # 每次轮询间隔(秒)
+STREAM_CHECK_MAX_RETRIES = 6   # 最大重试次数 
+STREAM_CHECK_INTERVAL = 10      # 每次轮询间隔(秒)
 STREAM_CHECK_SEMAPHORE = Semaphore(5) # 限制并发预检的数量，防止大量入库时查挂 Emby
 
 def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True):

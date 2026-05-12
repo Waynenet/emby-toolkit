@@ -103,14 +103,14 @@ def api_update_edited_cast_sa(item_id):
     return jsonify({"message": "手动更新任务已在后台启动。"}), 202
 
 # ======================================================================
-# ★★★ [新增] 轻量级信息流补全 API ★★★
+# ★★★ [新增] 轻量级流信息补全 API ★★★
 # ======================================================================
 @media_api_bp.route('/actions/sync_media_info/<item_id>', methods=['POST'])
 @admin_required
 @processor_ready_required
 def api_sync_media_info(item_id):
     """
-    前端点击“补全信息流”按钮时调用。
+    前端点击“补全流信息”按钮时调用。
     仅读取神医的 mediainfo.json，不重新刮削。
     """
     try:

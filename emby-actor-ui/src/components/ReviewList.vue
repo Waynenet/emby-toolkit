@@ -109,7 +109,7 @@ import {
     useMessage
 } from 'naive-ui';
 import { HeartOutline as AddToWatchlistIcon } from '@vicons/ionicons5';
-// ★ [新增] 引入了 VideocamOutline 用于"补全信息流"按钮图标
+// ★ [新增] 引入了 VideocamOutline 用于"补全流信息"按钮图标
 import { SearchOutline as SearchIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, TrashOutline as TrashIcon, VideocamOutline } from '@vicons/ionicons5';
 
 const props = defineProps({
@@ -236,13 +236,13 @@ const handleMarkAsProcessed = async (row) => {
   }
 };
 
-// ★ [新增] 处理补全信息流的点击事件
+// ★ [新增] 处理补全流信息的点击事件
 const handleSyncMediaInfo = async (row) => {
   currentRowId.value = row.item_id;
   loadingAction.value[row.item_id] = true;
   try {
     const response = await axios.post(`/api/actions/sync_media_info/${row.item_id}`);
-    message.success(response.data.message || `项目 "${row.item_name}" 信息流补全成功。`);
+    message.success(response.data.message || `项目 "${row.item_name}" 流信息补全成功。`);
     
     // 如果补全后成功移出了待复核列表，刷新列表
     if (!isShowingSearchResults.value) {
@@ -250,7 +250,7 @@ const handleSyncMediaInfo = async (row) => {
         await fetchReasons();
     }
   } catch (err) {
-    console.error("补全信息流失败:", err);
+    console.error("补全流信息失败:", err);
     message.error(`补全失败: ${err.response?.data?.error || err.message}`);
   } finally {
     loadingAction.value[row.item_id] = false;
@@ -325,7 +325,7 @@ const columns = computed(() => [
         })
       );
 
-      // ★ [新增] 只有在失败原因包含“缺失”两字时，才展示“补全信息流”按钮
+      // ★ [新增] 只有在失败原因包含“缺失”两字时，才展示“补全流信息”按钮
       if (row.reason && row.reason.includes('缺失')) {
           actionButtons.push(
             h(NButton, {
@@ -337,7 +337,7 @@ const columns = computed(() => [
               onClick: () => handleSyncMediaInfo(row)
             }, { 
                 icon: () => h(NIcon, { component: VideocamOutline }),
-                default: () => '补全信息流' 
+                default: () => '补全流信息' 
             })
           );
       }
