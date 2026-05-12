@@ -84,7 +84,7 @@
                           <n-switch v-model:value="configModel.douban_sync_private" />
                         </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="同步 Emby 用户" path="douban_sync_users">
+                        <n-form-item-grid-item label="同步 Emby 用户" path="douban_sync_users">
                           <n-select 
                             v-model:value="configModel.douban_sync_users" 
                             multiple 
@@ -96,7 +96,7 @@
                           />
                         </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="剧集跳过第一集" path="douban_sync_skip_first">
+                        <n-form-item-grid-item label="剧集跳过第一集" path="douban_sync_skip_first">
                           <n-switch v-model:value="configModel.douban_sync_skip_first" />
                           <template #feedback><n-text depth="3" style="font-size:0.8em;">不把试看第一集的剧集同步到豆瓣。</n-text></template>
                         </n-form-item-grid-item>
