@@ -27,7 +27,7 @@
               :options="batchActions"
               @select="handleBatchAction"
             >
-              <n-button type="primary">
+              <n-button size="small" type="primary">
                 批量操作 ({{ selectedItems.length }})
                 <template #icon><n-icon :component="CaretDownIcon" /></template>
               </n-button>
@@ -65,7 +65,7 @@
               size="small" 
               style="width: 120px;" 
             />
-            <n-button @click="showStrategyModal = true" type="warning" ghost>
+            <n-button size="small" @click="showStrategyModal = true" type="warning" ghost>
               <template #icon><n-icon :component="SettingsIcon" /></template>
               策略配置
             </n-button>
