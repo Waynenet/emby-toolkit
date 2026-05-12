@@ -11,7 +11,7 @@ import requests
 from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app
 from extensions import admin_required
 from database import settings_db
-from handler.p115_service import P115Service, get_config
+from handler.p115_service import P115Service, get_config, get_115_api_priority
 import constants
 from functools import lru_cache, wraps
 
@@ -521,23 +521,35 @@ def list_115_directories():
         
         dirs = []
         for item in data:
-            # ★★★ 核心修复：兼容 fs_files 和 fs_search 的字段名差异 ★★★
-            # fs_files 用 fc, fid, fn, pid
-            # fs_search 用 file_category, file_id, file_name, parent_id
-            
-            item_type = str(item.get('fc') if item.get('fc') is not None else item.get('file_category'))
+            # 兼容 OpenAPI / Cookie webapi / appapi 字段差异。
+            # OpenAPI 常见：fid/fn/fc/pid；Cookie /files 目录项常见：cid/n/pid，未必有 fid。
+            item_type = item.get('fc')
+            if item_type is None:
+                item_type = item.get('file_category')
+            if item_type is None:
+                icon = str(item.get('ico') or item.get('icon') or '').lower()
+                if icon in ('folder', 'dir', 'directory') or str(item.get('is_dir')).lower() in ('1', 'true'):
+                    item_type = '0'
+            item_type = str(item_type)
             
             # '0' 代表文件夹
             if item_type == '0':
+                dir_id = item.get('fid') or item.get('file_id') or item.get('id') or item.get('cid')
+                if dir_id is None:
+                    continue
                 dirs.append({
-                    "id": str(item.get('fid') or item.get('file_id')),
-                    "name": item.get('fn') or item.get('file_name'),
+                    "id": str(dir_id),
+                    "name": item.get('fn') or item.get('file_name') or item.get('n') or item.get('name'),
                     "parent_id": item.get('pid') or item.get('parent_id') or str(cid)
                 })
         
         current_name = '根目录'
         if cid != 0 and resp.get('path'):
-            current_name = resp.get('path')[-1].get('file_name') or resp.get('path')[-1].get('fn', '未知目录')
+            last_path = resp.get('path')[-1]
+            current_name = (
+                last_path.get('file_name') or last_path.get('fn') or
+                last_path.get('n') or last_path.get('name') or '未知目录'
+            )
                 
         return jsonify({
             "success": True, 
@@ -757,8 +769,7 @@ def play_115_video(pick_code, filename=None):
             
         max_retries = 4
         real_url = None
-        config = get_config()
-        api_priority = config.get(constants.CONFIG_OPTION_115_PLAYBACK_API_PRIORITY, 'openapi')
+        api_priority = get_115_api_priority('openapi')
         use_openapi = (api_priority != 'cookie')
         
         for i in range(max_retries):

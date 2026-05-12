@@ -380,11 +380,243 @@ class P115OpenAPIClient:
         raise Exception(f"未知的上传状态: {status}")
 
 
+def _p115_as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _p115_success(resp):
+    """兼容 OpenAPI / Cookie(webapi/appapi) 的成功判断。"""
+    if not isinstance(resp, dict):
+        return False
+    state = resp.get('state')
+    if state is True or state == 1 or state == '1' or str(state).lower() == 'true':
+        return True
+    # 个别 Cookie 接口只返回 errno/code
+    if resp.get('errno') in (0, '0') and not resp.get('error'):
+        return True
+    if resp.get('code') in (0, 200, '0', '200') and not (resp.get('error') or resp.get('error_msg') or resp.get('message')):
+        return True
+    return False
+
+
+def _p115_error_text(resp):
+    if isinstance(resp, dict):
+        return str(resp.get('error_msg') or resp.get('error') or resp.get('message') or resp.get('msg') or resp)
+    return str(resp)
+
+
+def _p115_is_severe_failure(resp_or_exc):
+    """405 / HTML / 非 JSON / 登录失效这类情况，允许自动切换另一套接口。"""
+    text = _p115_error_text(resp_or_exc)
+    lowered = text.lower()
+    return any(k in lowered for k in [
+        '405', 'method not allowed', '<html', '<!doctype', 'waf',
+        'expecting value', 'jsondecode', 'login', '重新登录', '登录超时', '登陆超时'
+    ])
+
+
+def _p115_truthy_dir_flag(value):
+    """115 各套接口里目录标记比较散，这里统一判断。"""
+    if value is True:
+        return True
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {'1', 'true', 'yes', 'y', 'folder', 'dir', 'directory'}
+
+
+def _p115_normalize_item(item):
+    """把 Cookie(webapi/appapi) / OpenAPI 的文件字段统一成 ETK 内部习惯字段。
+
+    重点兼容 Cookie /files 的目录项：
+    - 文件通常是 fid = 文件ID，cid = 父目录ID；
+    - 目录经常是 cid = 目录自身ID，pid = 父目录ID，未必有 fid；
+    如果无脑把 cid 当 parent_id，就会导致前端目录 id 为空，浏览目录点不开。
+    """
+    if not isinstance(item, dict):
+        return item
+    item = dict(item)
+
+    # 原始字段先取出来，后面根据“是否目录”再决定 cid 到底是自身ID还是父ID。
+    raw_fid = item.get('fid') or item.get('file_id') or item.get('id')
+    raw_cid = item.get('cid')
+    raw_pid = item.get('pid') or item.get('parent_id') or item.get('parentId')
+
+    name = (
+        item.get('fn') or item.get('n') or item.get('file_name') or
+        item.get('name') or item.get('title')
+    )
+    pick_code = item.get('pc') or item.get('pick_code') or item.get('pickcode')
+    sha1 = item.get('sha1') or item.get('sha') or item.get('file_sha1')
+    size = item.get('fs') or item.get('size') or item.get('file_size') or item.get('s')
+
+    # fc: ETK 内部约定 0=目录，1=文件。
+    fc = item.get('fc')
+    if fc is None:
+        fc = item.get('file_category')
+    if fc is None:
+        fc = item.get('type')
+
+    icon = item.get('ico') or item.get('icon') or item.get('class')
+    folder_flag = (
+        _p115_truthy_dir_flag(item.get('is_dir')) or
+        _p115_truthy_dir_flag(item.get('is_directory')) or
+        _p115_truthy_dir_flag(item.get('is_folder')) or
+        _p115_truthy_dir_flag(icon)
+    )
+
+    # Cookie /files 的面包屑、目录项常见只有 cid/name/pid，没有 fid/pc/sha/size。
+    cid_looks_like_folder_id = raw_cid is not None and raw_fid is None and not any([pick_code, sha1, size])
+
+    if fc is None:
+        if folder_flag or cid_looks_like_folder_id:
+            fc = '0'
+        elif pick_code or sha1 or size or raw_fid is not None:
+            fc = '1'
+
+    is_folder = str(fc) == '0'
+
+    # 关键修复：目录项没有 fid 时，用 cid 作为目录自身 ID；文件项的 cid 仍然保留为父目录 ID。
+    fid = raw_fid
+    if fid is None and is_folder:
+        fid = raw_cid
+
+    parent_id = raw_pid
+    if parent_id is None and not is_folder:
+        parent_id = raw_cid
+
+    if fid is not None:
+        item.setdefault('fid', str(fid))
+        item.setdefault('file_id', str(fid))
+    if name is not None:
+        item.setdefault('fn', name)
+        item.setdefault('n', name)
+        item.setdefault('file_name', name)
+        item.setdefault('name', name)
+    if parent_id is not None:
+        item.setdefault('pid', str(parent_id))
+        item.setdefault('parent_id', str(parent_id))
+    if pick_code is not None:
+        item.setdefault('pc', pick_code)
+        item.setdefault('pick_code', pick_code)
+    if sha1 is not None:
+        item.setdefault('sha1', sha1)
+        item.setdefault('sha', sha1)
+    if size is not None:
+        item.setdefault('fs', size)
+        item.setdefault('size', size)
+    if fc is not None:
+        item['fc'] = str(fc)
+        item.setdefault('file_category', str(fc))
+
+    return item
+
+def _p115_normalize_list_response(resp):
+    """统一目录列表/搜索列表响应，保证 resp['data'] 是 list。"""
+    if not isinstance(resp, dict):
+        return {'state': False, 'error_msg': str(resp)}
+    resp = dict(resp)
+
+    data = resp.get('data')
+    if isinstance(data, dict):
+        # OpenAPI / webapi 不同接口可能把列表包在这些字段里
+        for key in ('list', 'items', 'files', 'data'):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+    elif data is None:
+        for key in ('list', 'items', 'files'):
+            if isinstance(resp.get(key), list):
+                data = resp[key]
+                break
+
+    if data is None:
+        data = []
+    if isinstance(data, list):
+        data = [_p115_normalize_item(i) for i in data]
+
+    # Cookie /files 的 path/paths/breadcrumb 字段也顺手归一化，方便前端显示当前目录名。
+    path_data = resp.get('path') or resp.get('paths') or resp.get('breadcrumb')
+    if isinstance(path_data, list):
+        resp['path'] = [_p115_normalize_item(i) for i in path_data]
+
+    resp['state'] = _p115_success(resp)
+    resp['data'] = data
+    return resp
+
+
+def _p115_normalize_info_response(resp):
+    """统一文件/目录详情响应，保证 resp['data'] 是单个 dict。"""
+    if not isinstance(resp, dict):
+        return {'state': False, 'error_msg': str(resp)}
+    resp = dict(resp)
+    data = resp.get('data')
+
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    elif isinstance(data, dict):
+        for key in ('file_info', 'info'):
+            if isinstance(data.get(key), dict):
+                data = data[key]
+                break
+            if isinstance(data.get(key), list):
+                data = data[key][0] if data[key] else {}
+                break
+    elif data is None:
+        # webapi /files/file 有些版本直接把 info 放顶层或放 file_info
+        if isinstance(resp.get('file_info'), list):
+            data = resp['file_info'][0] if resp['file_info'] else {}
+        elif isinstance(resp.get('file_info'), dict):
+            data = resp['file_info']
+        else:
+            data = {k: v for k, v in resp.items() if k not in ('state', 'errno', 'error', 'error_msg', 'message', 'msg')}
+
+    data = _p115_normalize_item(data or {})
+    resp['state'] = _p115_success(resp)
+    resp['data'] = data
+    return resp
+
+
+def _p115_normalize_mkdir_response(resp):
+    """统一新建目录响应，补齐 cid。"""
+    resp = _p115_normalize_info_response(resp)
+    data = resp.get('data') if isinstance(resp, dict) else {}
+    if isinstance(data, dict):
+        cid = data.get('cid') or data.get('file_id') or data.get('fid') or data.get('id')
+        if cid is not None:
+            resp['cid'] = str(cid)
+    return resp
+
+
+def _p115_normalize_common_response(resp):
+    """移动/删除/重命名等只关心 state 的接口。"""
+    if not isinstance(resp, dict):
+        return {'state': False, 'error_msg': str(resp)}
+    resp = dict(resp)
+    resp['state'] = _p115_success(resp)
+    return resp
+
+
+def get_115_api_priority(default='openapi'):
+    """
+    115 API 优先级。
+    当前可选值：openapi / cookie。
+    """
+    cfg = config_manager.APP_CONFIG or {}
+    val = cfg.get(constants.CONFIG_OPTION_115_API_PRIORITY, default)
+    val = str(val or default).strip().lower()
+    return 'cookie' if val == 'cookie' else 'openapi'
+
+
 # ======================================================================
-# ★★★ 115 Cookie 客户端 (仅播放：获取直链) ★★★
+# ★★★ 115 Cookie 客户端 (播放 + Cookie 可承载的文件管理操作) ★★★
 # ======================================================================
 class P115CookieClient:
-    """使用 Cookie 进行播放操作"""
+    """使用 Cookie 执行播放、目录列表、移动、重命名、删除等 webapi 操作"""
     # ★ 新增 app_type 参数
     def __init__(self, cookie_str, app_type='web'):
         if not cookie_str:
@@ -397,6 +629,11 @@ class P115CookieClient:
             try:
                 # ★ 尝试将 app 传给底层库 (如果 p115client 支持的话)
                 self.webapi = P115Client(self.cookie_str, app=self.app_type)
+                # P115Client 的 app 主要用于重新登录设备类型，普通 webapi 请求仍要显式注入 UA。
+                try:
+                    self.webapi.headers["user-agent"] = self.user_agent
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"  ➜ Cookie 客户端初始化失败: {e}")
                 raise
@@ -430,8 +667,127 @@ class P115CookieClient:
         if 'headers' in kwargs:
             headers.update(kwargs['headers'])
             del kwargs['headers']
-        
+        kwargs.setdefault('timeout', 30)
         return requests.request(method, url, headers=headers, **kwargs)
+
+    def _json_result(self, resp):
+        if isinstance(resp, dict):
+            return resp
+        if hasattr(resp, 'json'):
+            try:
+                return resp.json()
+            except Exception as e:
+                text = getattr(resp, 'text', '')
+                return {'state': False, 'error_msg': f'Cookie 接口返回非 JSON: {e}; {text[:200]}'}
+        return {'state': False, 'error_msg': str(resp)}
+
+    def fs_files(self, payload):
+        """Cookie/webapi 获取目录列表，返回格式向 OpenAPI 对齐。"""
+        params = {'aid': 1, 'show_dir': 1, 'limit': 1000, 'offset': 0, 'record_open_time': 0, 'count_folders': 0}
+        if isinstance(payload, dict):
+            params.update(payload)
+        elif payload is not None:
+            params['cid'] = payload
+        if self.webapi and hasattr(self.webapi, 'fs_files'):
+            try:
+                return _p115_normalize_list_response(self.webapi.fs_files(params))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        url = "https://webapi.115.com/files"
+        r = self.request(url, method='GET', params=params)
+        return _p115_normalize_list_response(self._json_result(r))
+
+    def fs_files_app(self, payload):
+        return self.fs_files(payload)
+
+    def fs_search(self, payload):
+        """Cookie/webapi 搜索文件，返回格式向 OpenAPI 对齐。"""
+        params = {'aid': 1, 'cid': 0, 'show_dir': 1, 'limit': 100, 'offset': 0, 'search_value': '.'}
+        if isinstance(payload, str):
+            params['search_value'] = payload
+        elif isinstance(payload, dict):
+            params.update(payload)
+        if self.webapi and hasattr(self.webapi, 'fs_search'):
+            try:
+                return _p115_normalize_list_response(self.webapi.fs_search(params))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        url = "https://webapi.115.com/files/search"
+        r = self.request(url, method='GET', params=params)
+        return _p115_normalize_list_response(self._json_result(r))
+
+    def fs_get_info(self, file_id):
+        """Cookie/webapi 获取单个文件/目录信息，返回格式向 OpenAPI 对齐。"""
+        payload = {'file_id': str(file_id)}
+        if self.webapi and hasattr(self.webapi, 'fs_file_skim'):
+            try:
+                return _p115_normalize_info_response(self.webapi.fs_file_skim(payload))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        url = "https://webapi.115.com/files/file"
+        r = self.request(url, method='GET', params=payload)
+        return _p115_normalize_info_response(self._json_result(r))
+
+    def fs_mkdir(self, name, pid):
+        payload = {'cname': str(name), 'pid': str(pid)}
+        if self.webapi and hasattr(self.webapi, 'fs_mkdir'):
+            try:
+                return _p115_normalize_mkdir_response(self.webapi.fs_mkdir(str(name), pid=str(pid)))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        url = "https://webapi.115.com/files/add"
+        r = self.request(url, method='POST', data=payload)
+        return _p115_normalize_mkdir_response(self._json_result(r))
+
+    def fs_move(self, fids, to_cid):
+        ids = [str(i) for i in _p115_as_list(fids) if i is not None]
+        if self.webapi and hasattr(self.webapi, 'fs_move'):
+            try:
+                return _p115_normalize_common_response(self.webapi.fs_move(ids, pid=str(to_cid)))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        payload = {'pid': str(to_cid)}
+        if len(ids) == 1:
+            payload['fid'] = ids[0]
+        else:
+            payload.update({f'fid[{i}]': fid for i, fid in enumerate(ids)})
+        url = "https://webapi.115.com/files/move"
+        r = self.request(url, method='POST', data=payload)
+        return _p115_normalize_common_response(self._json_result(r))
+
+    def fs_rename(self, fid_name_tuple):
+        fid, new_name = fid_name_tuple
+        if self.webapi and hasattr(self.webapi, 'fs_rename'):
+            try:
+                return _p115_normalize_common_response(self.webapi.fs_rename((str(fid), str(new_name))))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        url = "https://webapi.115.com/files/batch_rename"
+        r = self.request(url, method='POST', data={f'files_new_name[{fid}]': str(new_name)})
+        return _p115_normalize_common_response(self._json_result(r))
+
+    def fs_delete(self, fids):
+        ids = [str(i) for i in _p115_as_list(fids) if i is not None]
+        if self.webapi and hasattr(self.webapi, 'fs_delete'):
+            try:
+                return _p115_normalize_common_response(self.webapi.fs_delete(ids))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        payload = {'ignore_warn': 1}
+        if len(ids) == 1:
+            payload['fid'] = ids[0]
+        else:
+            payload.update({f'fid[{i}]': fid for i, fid in enumerate(ids)})
+        url = "https://webapi.115.com/rb/delete"
+        r = self.request(url, method='POST', data=payload)
+        return _p115_normalize_common_response(self._json_result(r))
 
     def offline_add_urls(self, payload):
         if self.webapi and hasattr(self.webapi, 'offline_add_urls'):
@@ -440,7 +796,7 @@ class P115CookieClient:
         # 兜底：手动调用离线接口
         url = "https://115.com/web/lixian/?ct=lixian&ac=add_task_urls"
         r = self.request(url, method='POST', data=payload)
-        return r.json() if hasattr(r, 'json') else r
+        return self._json_result(r)
 
     def share_import(self, share_code, receive_code, cid):
         # 放弃调用第三方库的 share_receive，直接使用最稳妥的官方原生 API
@@ -554,9 +910,10 @@ class P115Service:
     @classmethod
     def get_client(cls):
         """
-        获取严格分离客户端：
-        管理操作 -> 强制走 OpenAPI
-        播放操作 -> 强制走 Cookie
+        获取统一客户端：
+        文件管理/整理操作 -> 按 115 API 优先级 Cookie/OpenAPI 自动切换
+        清空回收站/上传初始化 -> 强制 OpenAPI
+        转存/离线/生活事件 -> 强制 Cookie
         """
         openapi = cls.get_openapi_client()
         cookie = cls.get_cookie_client()
@@ -599,73 +956,321 @@ class P115Service:
                         time.sleep((interval - elapsed) + jitter)
                     P115Service._last_request_time = time.time()
 
+            def _api_order(self, force_openapi=False, force_cookie=False):
+                if force_openapi:
+                    return [('OpenAPI', self._openapi)]
+                if force_cookie:
+                    return [('Cookie', self._cookie)]
+                primary = get_115_api_priority()
+                if primary == 'cookie':
+                    return [('Cookie', self._cookie), ('OpenAPI', self._openapi)]
+                return [('OpenAPI', self._openapi), ('Cookie', self._cookie)]
+
+            def _iter_management_clients(self, method_name):
+                for label, api in self._api_order():
+                    if api and hasattr(api, method_name):
+                        yield label.lower(), api
+
+            def _call_api(self, method_name, *args, normalizer=None, force_openapi=False, force_cookie=False, **kwargs):
+                """按 115 API 优先级调用；失败自动切换另一个接口，并统一返回 dict。"""
+                last_resp = None
+                last_err = None
+                attempted = []
+                for label, api in self._api_order(force_openapi=force_openapi, force_cookie=force_cookie):
+                    if not api or not hasattr(api, method_name):
+                        continue
+                    attempted.append(label)
+                    try:
+                        self._rate_limit()
+                        resp = getattr(api, method_name)(*args, **kwargs)
+                        if normalizer:
+                            resp = normalizer(resp)
+                        last_resp = resp
+                        if _p115_success(resp):
+                            if len(attempted) > 1:
+                                logger.info(f"  ➜ [115] {method_name} 已自动切换到 {label} 接口成功。")
+                            return resp
+                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，准备尝试备用接口: {e}")
+                        if label == 'Cookie' and _p115_is_severe_failure(e):
+                            P115Service.reset_cookie_client()
+                    time.sleep(0.3)
+
+                if last_resp is not None:
+                    return last_resp
+                if last_err is not None:
+                    return {'state': False, 'error_msg': str(last_err)}
+                return {'state': False, 'error_msg': f"{method_name} 无可用 115 接口，请检查 Token/Cookie 配置"}
+
             def get_user_info(self):
+                # 用户信息优先走 OpenAPI；没有 Token 时才尝试 Cookie。
                 self._rate_limit()
                 if self._openapi: return self._openapi.get_user_info()
                 if self._cookie: return self._cookie.get_user_info()
                 return None
 
             def fs_files(self, payload):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_files(payload)
+                return self._call_api('fs_files', payload, normalizer=_p115_normalize_list_response)
 
             def fs_files_app(self, payload):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_files_app(payload)
+                return self._call_api('fs_files_app', payload, normalizer=_p115_normalize_list_response)
             
             def fs_search(self, payload):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_search(payload)
+                return self._call_api('fs_search', payload, normalizer=_p115_normalize_list_response)
             
             def fs_get_info(self, file_id):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_get_info(file_id)
+                return self._call_api('fs_get_info', file_id, normalizer=_p115_normalize_info_response)
+
+            def _is_exists_error(self, resp):
+                text = json.dumps(resp, ensure_ascii=False).lower() if resp is not None else ""
+                return any(k in text for k in [
+                    "已存在",
+                    "目录名称已存在",
+                    "该目录名称已存在",
+                    "already",
+                    "exist",
+                    "exists",
+                    "same_name",
+                    "文件名重复",
+                    "重复"
+                ])
+
+
+            def _find_child_dir(self, parent_cid, name):
+                """
+                在 parent_cid 下精准查找同名子目录。
+                用于 mkdir 返回“已存在”后的 CID 回收。
+                """
+                if not parent_cid or not name:
+                    return None
+
+                try:
+                    search_res = self.fs_files({
+                        "cid": parent_cid,
+                        "search_value": name,
+                        "limit": 100,
+                        "show_dir": 1,
+                        "record_open_time": 0,
+                        "count_folders": 0
+                    })
+
+                    for item in search_res.get("data", []):
+                        item_name = (
+                            item.get("fn")
+                            or item.get("n")
+                            or item.get("file_name")
+                            or item.get("name")
+                        )
+
+                        item_fc = str(
+                            item.get("fc")
+                            if item.get("fc") is not None
+                            else item.get("type")
+                        )
+
+                        # Cookie 目录项可能 cid 才是目录自身 ID
+                        item_cid = (
+                            item.get("fid")
+                            or item.get("file_id")
+                            or item.get("id")
+                            or item.get("cid")
+                        )
+
+                        if item_name == name and item_fc == "0" and item_cid:
+                            return str(item_cid)
+
+                except Exception as e:
+                    logger.debug(f"  ➜ [115] mkdir 已存在后回查目录失败: parent={parent_cid}, name={name}, err={e}")
+
+                return None
+
 
             def fs_mkdir(self, name, pid):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_mkdir(name, pid)
+                """
+                创建目录：
+                1. 先查内存缓存
+                2. 再查 DB 缓存
+                3. API 创建
+                4. 如果 API 返回“已存在”，不切备用接口，直接回查同级目录并写缓存
+                """
+                parent_cid = str(pid)
+                folder_name = str(name).strip()
+
+                if not folder_name:
+                    return {"state": False, "message": "目录名称不能为空"}
+
+                cache_key = f"{parent_cid}_{folder_name}"
+
+                # 1. 全局内存缓存
+                try:
+                    with _GLOBAL_DIR_LOCK:
+                        cached_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+                    if cached_cid and cached_cid != "FAILED":
+                        return {
+                            "state": True,
+                            "cid": str(cached_cid),
+                            "data": {"file_id": str(cached_cid), "cid": str(cached_cid)},
+                            "_from_cache": "memory"
+                        }
+                except Exception:
+                    pass
+
+                # 2. DB 缓存
+                try:
+                    cached_cid = P115CacheManager.get_cid(parent_cid, folder_name)
+                    if cached_cid:
+                        with _GLOBAL_DIR_LOCK:
+                            _GLOBAL_DIR_CACHE[cache_key] = str(cached_cid)
+
+                        return {
+                            "state": True,
+                            "cid": str(cached_cid),
+                            "data": {"file_id": str(cached_cid), "cid": str(cached_cid)},
+                            "_from_cache": "db"
+                        }
+                except Exception as e:
+                    logger.debug(f"  ➜ [115] mkdir 前读取目录缓存失败: parent={parent_cid}, name={folder_name}, err={e}")
+
+                last_resp = None
+
+                # 2.5 DB 缓存没命中时，先远程回查同级目录，避免对已存在目录执行 POST mkdir
+                # 尤其是 2026 / Season 01 / 分类目录这种高复用目录，缓存可能因为同步/旧数据缺失而穿透。
+                try:
+                    existed_cid = self._find_child_dir(parent_cid, folder_name)
+                    if existed_cid:
+                        P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
+                        with _GLOBAL_DIR_LOCK:
+                            _GLOBAL_DIR_CACHE[cache_key] = existed_cid
+
+                        logger.info(f"  ➜ [115] DB缓存未命中，但远程目录已存在，已回填缓存: {folder_name} -> {existed_cid}")
+
+                        return {
+                            "state": True,
+                            "cid": existed_cid,
+                            "data": {
+                                "file_id": existed_cid,
+                                "cid": existed_cid,
+                                "file_name": folder_name,
+                                "name": folder_name,
+                                "parent_id": parent_cid
+                            },
+                            "_from_remote_prefetch": True
+                        }
+                except Exception as e:
+                    logger.debug(f"  ➜ [115] mkdir 前远程预查目录失败，继续创建流程: parent={parent_cid}, name={folder_name}, err={e}")
+
+                # 3. 按优先级尝试接口
+                for api_name, api_client in self._iter_management_clients("fs_mkdir"):
+                    try:
+                        self._rate_limit()
+
+                        resp = api_client.fs_mkdir(folder_name, parent_cid)
+                        last_resp = resp
+
+                        # 创建成功
+                        if resp and resp.get("state"):
+                            new_cid = (
+                                resp.get("cid")
+                                or resp.get("file_id")
+                                or resp.get("id")
+                                or resp.get("data", {}).get("file_id")
+                                or resp.get("data", {}).get("cid")
+                                or resp.get("data", {}).get("id")
+                            )
+
+                            if new_cid:
+                                new_cid = str(new_cid)
+                                P115CacheManager.save_cid(new_cid, parent_cid, folder_name)
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = new_cid
+
+                                resp["cid"] = new_cid
+                                resp.setdefault("data", {})
+                                resp["data"]["file_id"] = new_cid
+                                resp["data"]["cid"] = new_cid
+
+                            return resp
+
+                        # 已存在不是接口失败，直接回查，不要切备用接口
+                        if self._is_exists_error(resp):
+                            existed_cid = self._find_child_dir(parent_cid, folder_name)
+                            if existed_cid:
+                                P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = existed_cid
+
+                                logger.info(f"  ➜ [115] 目录已存在，已回收 CID: {folder_name} -> {existed_cid}")
+
+                                return {
+                                    "state": True,
+                                    "cid": existed_cid,
+                                    "data": {
+                                        "file_id": existed_cid,
+                                        "cid": existed_cid,
+                                        "file_name": folder_name,
+                                        "name": folder_name,
+                                        "parent_id": parent_cid
+                                    },
+                                    "_from_exists_recovery": api_name
+                                }
+
+                            logger.warning(f"  ➜ [115] 目录已存在但暂未回查到 CID: parent={parent_cid}, name={folder_name}")
+                            return resp
+
+                        logger.warning(
+                            f"  ➜ [115] {api_name} 接口 fs_mkdir 返回失败，准备尝试备用接口: "
+                            f"{resp.get('message') or resp.get('error') or resp.get('error_msg') or resp}"
+                        )
+
+                    except Exception as e:
+                        last_resp = {"state": False, "message": str(e)}
+                        if self._is_exists_error(last_resp):
+                            existed_cid = self._find_child_dir(parent_cid, folder_name)
+                            if existed_cid:
+                                P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
+                                with _GLOBAL_DIR_LOCK:
+                                    _GLOBAL_DIR_CACHE[cache_key] = existed_cid
+
+                                return {
+                                    "state": True,
+                                    "cid": existed_cid,
+                                    "data": {"file_id": existed_cid, "cid": existed_cid},
+                                    "_from_exists_recovery": "exception"
+                                }
+
+                        logger.warning(f"  ➜ [115] {api_name} 接口 fs_mkdir 异常，准备尝试备用接口: {e}")
+
+                return last_resp or {"state": False, "message": "创建目录失败"}
 
             def fs_move(self, fids, to_cid):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_move(fids, to_cid)
+                return self._call_api('fs_move', fids, to_cid, normalizer=_p115_normalize_common_response)
 
             def fs_rename(self, fid_name_tuple):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_rename(fid_name_tuple)
+                return self._call_api('fs_rename', fid_name_tuple, normalizer=_p115_normalize_common_response)
 
             def fs_delete(self, fids):
-                self._check_openapi()
-                self._rate_limit()
-                return self._openapi.fs_delete(fids)
+                return self._call_api('fs_delete', fids, normalizer=_p115_normalize_common_response)
             
             def rb_del(self, tids=None):
+                # 清空回收站是 OpenAPI 独有，强制 OpenAPI，不参与 Cookie 优先级。
                 self._check_openapi()
-                self._rate_limit()
-                return self._openapi.rb_del(tids)
+                return self._call_api('rb_del', tids, normalizer=_p115_normalize_common_response, force_openapi=True)
             
             def life_behavior_detail(self, payload=None):
-                self._rate_limit()
-                if not self._cookie:
-                    raise Exception("未配置 115 Cookie，无法获取生活事件")
-                return self._cookie.life_behavior_detail(payload)
+                # 生活事件仍是 Cookie/webapi 能力。
+                res = self._call_api('life_behavior_detail', payload, force_cookie=True)
+                return res
 
             def life_batch_delete(self, delete_data_list):
-                self._rate_limit()
-                if not self._cookie:
-                    raise Exception("未配置 115 Cookie，无法删除生活事件")
-                return self._cookie.life_batch_delete(delete_data_list)
+                res = self._call_api('life_batch_delete', delete_data_list, force_cookie=True)
+                return res
             
             def upload_file_stream(self, file_stream, file_name, target_cid):
+                # 上传初始化/OSS 调度走 OpenAPI。
                 self._check_openapi()
-                self._rate_limit() 
-                return self._openapi.upload_file_stream(file_stream, file_name, target_cid)
+                return self._call_api('upload_file_stream', file_stream, file_name, target_cid, force_openapi=True)
 
             def download_url(self, pick_code, user_agent=None):
                 if not self._cookie:
@@ -3067,7 +3672,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 for item in search_res.get('data', []):
                                     item_name = item.get('fn') or item.get('n') or item.get('file_name')
                                     item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                                    item_cid = item.get('fid') or item.get('file_id')
+                                    item_cid = (
+                                        item.get('fid')
+                                        or item.get('file_id')
+                                        or item.get('id')
+                                        or item.get('cid')
+                                    )
                                     
                                     if item_fc == '0' and item_name == part_name and item_cid:
                                         part_cid = item_cid
@@ -3362,7 +3972,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     for item in s_search.get('data', []):
                                         item_name = item.get('fn') or item.get('n') or item.get('file_name')
                                         item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                                        item_cid = item.get('fid') or item.get('file_id')
+                                        item_cid = (
+                                            item.get('fid')
+                                            or item.get('file_id')
+                                            or item.get('id')
+                                            or item.get('cid')
+                                        )
 
                                         if item_fc == '0' and item_name == s_name and item_cid:
                                             s_cid = item_cid
@@ -3426,7 +4041,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     for item in s_search.get('data', []):
                                         item_name = item.get('fn') or item.get('n') or item.get('file_name')
                                         item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                                        item_cid = item.get('fid') or item.get('file_id')
+                                        item_cid = (
+                                            item.get('fid')
+                                            or item.get('file_id')
+                                            or item.get('id')
+                                            or item.get('cid')
+                                        )
                                         
                                         if item_fc == '0' and item_name == s_name and item_cid:
                                             s_cid = item_cid
