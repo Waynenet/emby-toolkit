@@ -1199,7 +1199,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 .setting-desc {
   font-size: 13px;
-  color: var(--n-text-color-depth-3, #888);
+  color: var(--n-text-color-depth-3);
   line-height: 1.5;
 }
 
@@ -1225,7 +1225,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 .sub-label {
   font-size: 13px;
-  color: var(--n-text-color-depth-2, #666);
+  color: var(--n-text-color-depth-2);
 }
 
 /* 洗版订阅子选项 */
@@ -1238,7 +1238,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 .resub-label {
   font-size: 13px;
-  color: var(--n-text-color-depth-2, #666);
+  color: var(--n-text-color-depth-2);
 }
 
 /* 策略配置：移动端响应式 */
