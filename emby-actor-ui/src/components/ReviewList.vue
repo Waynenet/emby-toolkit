@@ -109,7 +109,8 @@ import {
     useMessage
 } from 'naive-ui';
 import { HeartOutline as AddToWatchlistIcon } from '@vicons/ionicons5';
-import { SearchOutline as SearchIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, TrashOutline as TrashIcon } from '@vicons/ionicons5';
+// ★ [新增] 引入了 VideocamOutline 用于"补全信息流"按钮图标
+import { SearchOutline as SearchIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, TrashOutline as TrashIcon, VideocamOutline } from '@vicons/ionicons5';
 
 const props = defineProps({
   taskStatus: {
@@ -225,10 +226,32 @@ const handleMarkAsProcessed = async (row) => {
     await axios.post(`/api/actions/mark_item_processed/${row.item_id}`);
     message.success(`项目 "${row.item_name}" 已标记为已处理。`);
     await fetchReviewItems();
-    await fetchReasons(); // 标记处理后可能原因列表变了
+    await fetchReasons(); 
   } catch (err) {
     console.error("标记为已处理失败:", err);
     message.error(`标记项目 "${row.item_name}" 为已处理失败: ${err.response?.data?.error || err.message}`);
+  } finally {
+    loadingAction.value[row.item_id] = false;
+    currentRowId.value = null;
+  }
+};
+
+// ★ [新增] 处理补全信息流的点击事件
+const handleSyncMediaInfo = async (row) => {
+  currentRowId.value = row.item_id;
+  loadingAction.value[row.item_id] = true;
+  try {
+    const response = await axios.post(`/api/actions/sync_media_info/${row.item_id}`);
+    message.success(response.data.message || `项目 "${row.item_name}" 信息流补全成功。`);
+    
+    // 如果补全后成功移出了待复核列表，刷新列表
+    if (!isShowingSearchResults.value) {
+        await fetchReviewItems();
+        await fetchReasons();
+    }
+  } catch (err) {
+    console.error("补全信息流失败:", err);
+    message.error(`补全失败: ${err.response?.data?.error || err.message}`);
   } finally {
     loadingAction.value[row.item_id] = false;
     currentRowId.value = null;
@@ -280,7 +303,7 @@ const columns = computed(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 280,
+    width: 360, // 稍微调宽一点，容纳新按钮
     align: 'center',
     fixed: 'right',
     render(row) {
@@ -301,6 +324,23 @@ const columns = computed(() => [
             default: () => `确定要重新处理 "${row.item_name}" 吗？`
         })
       );
+
+      // ★ [新增] 只有在失败原因包含“缺失”两字时，才展示“补全信息流”按钮
+      if (row.reason && row.reason.includes('缺失')) {
+          actionButtons.push(
+            h(NButton, {
+              size: 'small',
+              type: 'info',
+              ghost: true,
+              loading: loadingAction.value[row.item_id] && currentRowId.value === row.item_id,
+              disabled: loadingAction.value[row.item_id] || props.taskStatus?.is_running,
+              onClick: () => handleSyncMediaInfo(row)
+            }, { 
+                icon: () => h(NIcon, { component: VideocamOutline }),
+                default: () => '补全信息流' 
+            })
+          );
+      }
 
       actionButtons.push(
         h(NButton, {

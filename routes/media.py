@@ -102,6 +102,27 @@ def api_update_edited_cast_sa(item_id):
     
     return jsonify({"message": "手动更新任务已在后台启动。"}), 202
 
+# ======================================================================
+# ★★★ [新增] 轻量级信息流补全 API ★★★
+# ======================================================================
+@media_api_bp.route('/actions/sync_media_info/<item_id>', methods=['POST'])
+@admin_required
+@processor_ready_required
+def api_sync_media_info(item_id):
+    """
+    前端点击“补全信息流”按钮时调用。
+    仅读取神医的 mediainfo.json，不重新刮削。
+    """
+    try:
+        success, msg = extensions.media_processor_instance.sync_media_info_only(item_id)
+        if success:
+            return jsonify({"message": msg}), 200
+        else:
+            return jsonify({"error": msg}), 400
+    except Exception as e:
+        logger.error(f"API /actions/sync_media_info 发生异常: {e}", exc_info=True)
+        return jsonify({"error": f"内部服务器错误: {str(e)}"}), 500
+
 # ▼▼▼ 通用外部图片代理接口 ▼▼▼
 @media_api_bp.route('/image_proxy', methods=['GET'])
 def proxy_external_image():
