@@ -15,189 +15,142 @@
             
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general" tab="通用设置">
-              <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
+              <!-- 基础设置、TMDB元数据、豆瓣集成 3个一行显示 -->
+              <n-grid cols="1 m:2 l:3" :x-gap="12" :y-gap="12" responsive="screen">
                 
-                <!-- ====== 左列 ====== -->
+                <!-- 卡片 1: 基础设置 -->
                 <n-gi>
-                  <n-space vertical :size="12" style="height: 100%;">
-                    
-                    <!-- 卡片 1: 基础设置 -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header><span class="card-title">基础设置</span></template>
-                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item span="1 s:2" label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
-                          <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5" style="width: 100%;" />
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item span="1 s:2" label="需手动处理的最低评分阈值" path="min_score_for_review">
-                          <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0" style="width: 100%;" />
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">评分低于此值的项目将进入待复核。</n-text></template>
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item span="1 s:2" label="最大演员数" path="max_actors_to_process">
-                          <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100" style="width: 100%;" />
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">最终演员表数量，超过截断，优先保留有头像。</n-text></template>
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="角色名加前缀" path="actor_role_add_prefix">
-                          <n-switch v-model:value="configModel.actor_role_add_prefix" />
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="移除无头像演员" path="remove_actors_without_avatars">
-                          <n-switch v-model:value="configModel.remove_actors_without_avatars" />
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
-                          <n-switch v-model:value="configModel.keyword_to_tags" />
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="工作室中文化" path="studio_to_chinese">
-                          <n-switch v-model:value="configModel.studio_to_chinese" />
-                        </n-form-item-grid-item>
-                      </n-grid>
-                    </n-card>
-
-                    <!-- 卡片 2: 豆瓣集成 (新独立卡片) -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header><span class="card-title">豆瓣集成</span></template>
-                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        
-                        <n-form-item-grid-item label="启用信息辅助" path="douban_enable_online_api">
-                          <n-switch v-model:value="configModel.douban_enable_online_api" />
-                        </n-form-item-grid-item>
-
-                        <n-form-item-grid-item label="豆瓣冷却(秒)" path="api_douban_default_cooldown_seconds">
-                          <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="1.0" style="width: 100%;" />
-                        </n-form-item-grid-item>
-
-                        <n-form-item-grid-item span="1 s:2" label="豆瓣登录 Cookie" path="douban_cookie">
-                          <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取，状态同步需填写"/>
-                        </n-form-item-grid-item>
-
-                        <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">在看/看过记录同步</n-divider></n-gi>
-                        
-                        <n-form-item-grid-item label="启用状态同步" path="douban_sync_enabled">
-                          <n-switch v-model:value="configModel.douban_sync_enabled" />
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="仅自己可见" path="douban_sync_private">
-                          <n-switch v-model:value="configModel.douban_sync_private" />
-                        </n-form-item-grid-item>
-
-                        <n-form-item-grid-item label="同步 Emby 用户" path="douban_sync_users">
-                          <n-select 
-                            v-model:value="configModel.douban_sync_users" 
-                            multiple 
-                            filterable 
-                            tag
-                            :options="embyUserOptions"
-                            :loading="loadingEmbyUsers"
-                            placeholder="请下拉选择或输入用户名后回车" 
-                          />
-                        </n-form-item-grid-item>
-
-                        <n-form-item-grid-item label="剧集跳过第一集" path="douban_sync_skip_first">
-                          <n-switch v-model:value="configModel.douban_sync_skip_first" />
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">不把试看第一集的剧集同步到豆瓣。</n-text></template>
-                        </n-form-item-grid-item>
-
-                        <n-form-item-grid-item span="1 s:2" label="媒体路径排除关键词" path="douban_sync_exclude">
-                          <n-input-group>
-                            <n-select v-model:value="configModel.douban_sync_exclude" multiple filterable tag :show-arrow="false" placeholder="输入路径/关键词或点击右侧选择" :options="[]" style="flex: 1;" />
-                            <n-button type="primary" ghost @click="openLocalFolderSelector('douban_sync_exclude', true)">
-                              <template #icon><n-icon :component="FolderIcon" /></template>
-                            </n-button>
-                          </n-input-group>
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">命中选择的路径或包含输入的关键词，将跳过豆瓣同步。</n-text></template>
-                        </n-form-item-grid-item>
-
-                      </n-grid>
-                    </n-card>
-
-                  </n-space>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">基础设置</span></template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
+                        <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5" style="width: 100%;" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="需手动处理的最低评分阈值" path="min_score_for_review">
+                        <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0" style="width: 100%;" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">评分低于此值的项目将进入待复核。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="最大演员数" path="max_actors_to_process">
+                        <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100" style="width: 100%;" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">最终演员表数量，超过截断，优先保留有头像。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="角色名加前缀" path="actor_role_add_prefix">
+                        <n-switch v-model:value="configModel.actor_role_add_prefix" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="移除无头像演员" path="remove_actors_without_avatars">
+                        <n-switch v-model:value="configModel.remove_actors_without_avatars" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="关键词写入标签" path="keyword_to_tags">
+                        <n-switch v-model:value="configModel.keyword_to_tags" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="工作室中文化" path="studio_to_chinese">
+                        <n-switch v-model:value="configModel.studio_to_chinese" />
+                      </n-form-item-grid-item>
+                    </n-grid>
+                  </n-card>
                 </n-gi>
 
-                <!-- ====== 右列 ====== -->
+                <!-- 卡片 2: TMDB元数据 -->
                 <n-gi>
-                  <n-space vertical :size="12" style="height: 100%;">
-                    
-                    <!-- 卡片 3：实时监控 -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header><span class="card-title">实时监控</span></template>
-                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item label="启用文件监控" path="monitor_enabled">
-                          <n-switch v-model:value="configModel.monitor_enabled">
-                            <template #checked>开启</template>
-                            <template #unchecked>关闭</template>
-                          </n-switch>
-                        </n-form-item-grid-item>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">TMDB元数据</span></template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      
+                      <n-form-item-grid-item span="1 s:2" label="本地数据源路径" path="local_data_path">
+                        <n-input-group>
+                          <n-input v-model:value="configModel.local_data_path" placeholder="缓存目录路径" @click="openLocalFolderSelector('local_data_path', false)"><template #prefix><n-icon :component="FolderIcon" /></template></n-input>
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
+                        </n-input-group>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="TMDB API Key" path="tmdb_api_key">
+                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入 TMDB API Key" />
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item label="图片语言偏好" path="tmdb_image_language_preference">
-                          <n-radio-group v-model:value="configModel.tmdb_image_language_preference" name="image_lang_group">
-                            <n-space :size="8">
-                              <n-radio value="zh">中文</n-radio>
-                              <n-radio value="original">原语</n-radio>
-                            </n-space>
-                          </n-radio-group>
-                        </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="TMDB API Base URL" path="tmdb_api_base_url">
+                        <n-input v-model:value="configModel.tmdb_api_base_url" placeholder="https://api.themoviedb.org/3" />
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="监控路径" path="monitor_paths">
-                          <n-input-group>
-                            <n-select v-model:value="configModel.monitor_paths" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
-                            <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_paths', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
-                          </n-input-group>
-                        </n-form-item-grid-item>
+                      <n-form-item-grid-item label="成人内容探索" path="tmdb_include_adult">
+                        <n-switch v-model:value="configModel.tmdb_include_adult" />
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="排除路径" path="monitor_exclude_dirs">
-                          <n-input-group>
-                            <n-select v-model:value="configModel.monitor_exclude_dirs" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
-                            <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_exclude_dirs', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
-                          </n-input-group>
-                          <template #feedback><n-text depth="3" style="font-size:0.8em;">命中路径将跳过刮削，仅刷新。</n-text></template>
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item label="排除刷新延迟" path="monitor_exclude_refresh_delay">
-                          <n-input-number v-model:value="configModel.monitor_exclude_refresh_delay" :min="0" :step="10" placeholder="0" style="width: 100%"><template #suffix>秒</template></n-input-number>
-                        </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="图片语言偏好" path="tmdb_image_language_preference">
+                        <n-radio-group v-model:value="configModel.tmdb_image_language_preference" name="image_lang_group">
+                          <n-space :size="8">
+                            <n-radio value="zh">中文</n-radio>
+                            <n-radio value="original">原语</n-radio>
+                          </n-space>
+                        </n-radio-group>
+                      </n-form-item-grid-item>
+                      
+                    </n-grid>
+                  </n-card>
+                </n-gi>
 
-                        <n-form-item-grid-item label="定时扫描回溯" path="monitor_scan_lookback_days">
-                          <n-input-number v-model:value="configModel.monitor_scan_lookback_days" :min="0" :max="365" placeholder="1" style="width: 100%"><template #suffix>天</template></n-input-number>
-                        </n-form-item-grid-item>
+                <!-- 卡片 3: 豆瓣集成 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">豆瓣集成</span></template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      
+                      <n-form-item-grid-item label="启用信息辅助" path="douban_enable_online_api">
+                        <n-switch v-model:value="configModel.douban_enable_online_api" />
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="监控扩展名" path="monitor_extensions">
-                          <n-select v-model:value="configModel.monitor_extensions" multiple filterable tag placeholder="输入扩展名并回车" :options="[]" />
-                        </n-form-item-grid-item>
-                      </n-grid>
-                    </n-card>
+                      <n-form-item-grid-item label="豆瓣冷却(秒)" path="api_douban_default_cooldown_seconds">
+                        <n-input-number v-model:value="configModel.api_douban_default_cooldown_seconds" :min="0.1" :step="0.1" placeholder="1.0" style="width: 100%;" />
+                      </n-form-item-grid-item>
 
-                    <!-- 卡片 4：元数据与 TMDB (剥离出来的) -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header><span class="card-title">元数据与 TMDB</span></template>
-                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        
-                        <n-form-item-grid-item span="1 s:2" label="本地数据源路径" path="local_data_path">
-                          <n-input-group>
-                            <n-input v-model:value="configModel.local_data_path" placeholder="缓存目录路径" @click="openLocalFolderSelector('local_data_path', false)"><template #prefix><n-icon :component="FolderIcon" /></template></n-input>
-                            <n-button type="primary" ghost @click="openLocalFolderSelector('local_data_path', false)">选择</n-button>
-                          </n-input-group>
-                        </n-form-item-grid-item>
-                        
-                        <n-form-item-grid-item span="1 s:2" label="TMDB API Key" path="tmdb_api_key">
-                          <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入 TMDB API Key" />
-                        </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="豆瓣登录 Cookie" path="douban_cookie">
+                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取，状态同步需填写"/>
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 s:2" label="TMDB API Base URL" path="tmdb_api_base_url">
-                          <n-input v-model:value="configModel.tmdb_api_base_url" placeholder="https://api.themoviedb.org/3" />
-                        </n-form-item-grid-item>
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">在看/看过记录同步</n-divider></n-gi>
+                      
+                      <n-form-item-grid-item label="启用状态同步" path="douban_sync_enabled">
+                        <n-switch v-model:value="configModel.douban_sync_enabled" />
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item label="仅自己可见" path="douban_sync_private">
+                        <n-switch v-model:value="configModel.douban_sync_private" />
+                      </n-form-item-grid-item>
 
-                        <n-form-item-grid-item label="成人内容探索" path="tmdb_include_adult">
-                          <n-switch v-model:value="configModel.tmdb_include_adult" />
-                        </n-form-item-grid-item>
-                        
-                      </n-grid>
-                    </n-card>
+                      <n-form-item-grid-item span="1 s:2" label="同步 Emby 用户" path="douban_sync_users">
+                        <n-select 
+                          v-model:value="configModel.douban_sync_users" 
+                          multiple 
+                          filterable 
+                          tag
+                          :options="embyUserOptions"
+                          :loading="loadingEmbyUsers"
+                          placeholder="请下拉选择或输入用户名后回车" 
+                        />
+                      </n-form-item-grid-item>
 
-                  </n-space>
+                      <n-form-item-grid-item span="1 s:2" label="剧集跳过第一集" path="douban_sync_skip_first">
+                        <n-switch v-model:value="configModel.douban_sync_skip_first" />
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">不把试看第一集的剧集同步到豆瓣。</n-text></template>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="媒体路径排除关键词" path="douban_sync_exclude">
+                        <n-input-group>
+                          <n-select v-model:value="configModel.douban_sync_exclude" multiple filterable tag :show-arrow="false" placeholder="输入路径/关键词或点击右侧选择" :options="[]" style="flex: 1;" />
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('douban_sync_exclude', true)">
+                            <template #icon><n-icon :component="FolderIcon" /></template>
+                          </n-button>
+                        </n-input-group>
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">命中选择的路径或包含输入的关键词，将跳过豆瓣同步。</n-text></template>
+                      </n-form-item-grid-item>
+
+                    </n-grid>
+                  </n-card>
                 </n-gi>
 
               </n-grid>
@@ -205,12 +158,13 @@
 
             <!-- ================== 标签页 2: Emby ================== -->
             <n-tab-pane name="emby" tab="媒体服务">
-              <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
+              <!-- Emby 设置、实时监控、302反代 3个一行显示 -->
+              <n-grid cols="1 m:2 l:3" :x-gap="12" :y-gap="12" responsive="screen">
 
-                <!-- 左侧卡片: Emby 连接设置 -->
+                <!-- 卡片 1: Emby 设置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">Emby 连接设置</span></template>
+                    <template #header><span class="card-title">Emby 设置</span></template>
                     <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 m:2">
                         <template #label>
@@ -224,24 +178,25 @@
                         <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item label="外网URL" path="emby_public_url">
+                      <n-form-item-grid-item span="1 m:2" label="外网URL" path="emby_public_url">
                         <n-input v-model:value="configModel.emby_public_url" placeholder="留空不开启" />
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item label="APIKey" path="emby_api_key">
+                      
+                      <n-form-item-grid-item span="1 m:2" label="APIKey" path="emby_api_key">
                         <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="API Key" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id">
+                      <n-form-item-grid-item span="1 m:2" label="用户ID" :rule="embyUserIdRule" path="emby_user_id">
                         <n-input v-model:value="configModel.emby_user_id" placeholder="32位" />
                         <template #feedback><div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！</div></template>
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item label="超时时间 (秒)" path="emby_api_timeout">
+                      <n-form-item-grid-item span="1 m:2" label="超时时间 (秒)" path="emby_api_timeout">
                         <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
                       </n-form-item-grid-item>
 
                       <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员凭证 (选填)</n-divider></n-gi>
-                      <n-form-item-grid-item label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
-                      <n-form-item-grid-item label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 m:2" label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 m:2" label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
 
                       <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择处理的媒体库</n-divider></n-gi>
                       <n-form-item-grid-item label-placement="top" span="1 m:2">
@@ -259,11 +214,53 @@
                   </n-card>
                 </n-gi>
 
-                <!-- 右侧卡片: 虚拟库 -->
+                <!-- 卡片 2: 实时监控 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">实时监控</span></template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="启用文件监控" path="monitor_enabled">
+                        <n-switch v-model:value="configModel.monitor_enabled">
+                          <template #checked>开启</template>
+                          <template #unchecked>关闭</template>
+                        </n-switch>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="监控路径" path="monitor_paths">
+                        <n-input-group>
+                          <n-select v-model:value="configModel.monitor_paths" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_paths', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
+                        </n-input-group>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="排除路径" path="monitor_exclude_dirs">
+                        <n-input-group>
+                          <n-select v-model:value="configModel.monitor_exclude_dirs" multiple filterable tag :show-arrow="false" placeholder="输入路径或点击右侧选择" :options="[]" style="flex: 1;" />
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('monitor_exclude_dirs', true)"><template #icon><n-icon :component="FolderIcon" /></template></n-button>
+                        </n-input-group>
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">命中路径将跳过刮削，仅刷新。</n-text></template>
+                      </n-form-item-grid-item>
+                      
+                      <n-form-item-grid-item span="1 s:2" label="排除刷新延迟" path="monitor_exclude_refresh_delay">
+                        <n-input-number v-model:value="configModel.monitor_exclude_refresh_delay" :min="0" :step="10" placeholder="0" style="width: 100%"><template #suffix>秒</template></n-input-number>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="定时扫描回溯" path="monitor_scan_lookback_days">
+                        <n-input-number v-model:value="configModel.monitor_scan_lookback_days" :min="0" :max="365" placeholder="1" style="width: 100%"><template #suffix>天</template></n-input-number>
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="监控扩展名" path="monitor_extensions">
+                        <n-select v-model:value="configModel.monitor_extensions" multiple filterable tag placeholder="输入扩展名并回车" :options="[]" />
+                      </n-form-item-grid-item>
+                    </n-grid>
+                  </n-card>
+                </n-gi>
+
+                <!-- 卡片 3: 虚拟库(302反代) -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">302反代</span></template>
-                    <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item label="启用反代" path="proxy_enabled">
                         <n-switch v-model:value="configModel.proxy_enabled" />
                       </n-form-item-grid-item>
@@ -277,7 +274,6 @@
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
                       
-                      <!-- ★ 修改：合并原生库放在前面，显示缺失海报放在后面 -->
                       <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries">
                         <n-switch v-model:value="configModel.proxy_merge_native_libraries" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
@@ -285,14 +281,14 @@
                          <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item label="合并显示位置" path="proxy_native_view_order">
+                      <n-form-item-grid-item span="1 s:2" label="合并显示位置" path="proxy_native_view_order">
                         <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
                           <n-radio value="before">原生在前</n-radio>
                           <n-radio value="after">原生在后</n-radio>
                         </n-radio-group>
                       </n-form-item-grid-item>
                       
-                      <n-form-item-grid-item label="STRM直链缓存 (秒)" path="proxy_strm_cache_ttl">
+                      <n-form-item-grid-item span="1 s:2" label="STRM直链缓存 (秒)" path="proxy_strm_cache_ttl">
                         <n-input-group>
                           <n-input-number 
                             v-model:value="configModel.proxy_strm_cache_ttl" 
@@ -316,8 +312,8 @@
                         </template>
                       </n-form-item-grid-item>
 
-                      <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择合并原生库</n-divider></n-gi>
-                      <n-form-item-grid-item span="1 m:2" v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" path="proxy_native_view_selection">
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0;">选择合并原生库</n-divider></n-gi>
+                      <n-form-item-grid-item span="1 s:2" v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" path="proxy_native_view_selection">
                         <n-spin :show="loadingNativeLibraries">
                           <n-checkbox-group v-model:value="configModel.proxy_native_view_selection">
                             <n-space item-style="display: flex; flex-wrap: wrap;">
@@ -329,14 +325,16 @@
                     </n-grid>
                   </n-card>
                 </n-gi>
+
               </n-grid>
             </n-tab-pane>
 
             <!-- ================== 标签页 3: 智能服务  ================== -->
             <n-tab-pane name="services" tab="智能服务">
-              <n-grid cols="1 l:2" :x-gap="12" :y-gap="12" responsive="screen">
+              <!-- AI增强、MoviePilot 设置、Telegram 设置 3个一行显示 -->
+              <n-grid cols="1 m:2 l:3" :x-gap="12" :y-gap="12" responsive="screen">
                 
-                <!-- 左侧: AI增强 -->
+                <!-- 卡片 1: AI增强 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header>
@@ -350,37 +348,36 @@
                     </template>
                     
                     <div class="ai-settings-wrapper">
-                      <!-- ★ 修改：AI服务商和翻译模式并排，且都是下拉框 -->
-                      <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item span="1" label="AI 服务商" path="ai_provider">
+                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                        <n-form-item-grid-item span="1 s:2" label="AI 服务商" path="ai_provider">
                           <n-select v-model:value="configModel.ai_provider" :options="aiProviderOptions" />
                         </n-form-item-grid-item>
                         
-                        <n-form-item-grid-item span="1" label="翻译模式" path="ai_translation_mode">
+                        <n-form-item-grid-item span="1 s:2" label="翻译模式" path="ai_translation_mode">
                           <n-select v-model:value="configModel.ai_translation_mode" :options="aiTranslationModeOptions" />
                         </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1" label="模型名称" path="ai_model_name">
+                        <n-form-item-grid-item span="1 s:2" label="模型名称" path="ai_model_name">
                           <n-input v-model:value="configModel.ai_model_name" placeholder="gpt-3.5-turbo等" />
                         </n-form-item-grid-item>
                         
-                        <n-form-item-grid-item span="1" label="API Key" path="ai_api_key">
+                        <n-form-item-grid-item span="1 s:2" label="API Key" path="ai_api_key">
                           <n-input type="password" show-password-on="mousedown" v-model:value="configModel.ai_api_key" placeholder="输入 API Key" />
                         </n-form-item-grid-item>
                         
-                        <n-form-item-grid-item span="1 m:2" label="API Base URL (可选)" path="ai_base_url">
+                        <n-form-item-grid-item span="1 s:2" label="API Base URL (可选)" path="ai_base_url">
                           <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或兼容服务" />
                         </n-form-item-grid-item>
 
-                        <n-form-item-grid-item span="1 m:2" label="启用功能">
+                        <n-form-item-grid-item span="1 s:2" label="启用功能">
                           <n-grid cols="2 sm:3" :y-gap="16" :x-gap="8" style="width: 100%">
-                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_actor_role">演员角色翻译</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_translate_actor_role">演员角色</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_title">片名翻译</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_overview">简介翻译</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_episode_overview">分集简介</n-checkbox></n-gi>
-                            <n-gi><n-checkbox v-model:checked="configModel.ai_vector">生成媒体向量</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_vector">生成向量</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_recognition">辅助识别</n-checkbox></n-gi>
-                            <n-gi><n-checkbox v-model:checked="configModel.ai_joke_fallback">无简介小笑话占位</n-checkbox></n-gi>
+                            <n-gi><n-checkbox v-model:checked="configModel.ai_joke_fallback">笑话占位</n-checkbox></n-gi>
                           </n-grid>
                         </n-form-item-grid-item>
                       </n-grid>
@@ -388,98 +385,87 @@
                   </n-card>
                 </n-gi>
 
-                <!-- 右侧: MoviePilot & Telegram -->
+                <!-- 卡片 2: MoviePilot 设置 -->
                 <n-gi>
-                  <n-space vertical :size="12" style="height: 100%;">
-                    
-                    <!-- 卡片 A: MoviePilot 订阅 -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header><span class="card-title">MoviePilot 订阅</span></template>
-                      <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item span="1 m:2" label="MoviePilot URL" path="moviepilot_url">
-                          <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
-                        </n-form-item-grid-item> 
-                        <n-form-item-grid-item label="用户名" path="moviepilot_username">
-                          <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="密码" path="moviepilot_password">
-                          <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="每日上限 (订阅规则)" path="resubscribe_daily_cap">
-                          <n-input-number v-model:value="configModel.resubscribe_daily_cap" :min="1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="请求间隔(秒)" path="resubscribe_delay_seconds">
-                          <n-input-number v-model:value="configModel.resubscribe_delay_seconds" :min="0.1" :step="0.1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="联动删除整理记录" path="link_delete_transfer_history">
-                          <n-switch v-model:value="configModel.link_delete_transfer_history" />
-                          <template #feedback>
-                            <n-text style="font-size:0.8em;">
-                              Emby删除媒体项时，同步删除 MoviePilot 中匹配的整理记录
-                            </n-text>
-                          </template>
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="联动删除种子及源文件" path="link_delete_download_files">
-                          <n-switch v-model:value="configModel.link_delete_download_files" />
-                          <template #feedback>
-                            <n-text style="font-size:0.8em;">
-                              Emby删除媒体项时，同步删除下载器的种子和源文件（含辅种）
-                            </n-text>
-                          </template>
-                        </n-form-item-grid-item>
-                      </n-grid>
-                    </n-card>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">MoviePilot 设置</span></template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="MoviePilot URL" path="moviepilot_url">
+                        <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
+                      </n-form-item-grid-item> 
+                      <n-form-item-grid-item span="1 s:2" label="用户名" path="moviepilot_username">
+                        <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="密码" path="moviepilot_password">
+                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item label="每日上限(订阅规则)" path="resubscribe_daily_cap">
+                        <n-input-number v-model:value="configModel.resubscribe_daily_cap" :min="1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item label="请求间隔(秒)" path="resubscribe_delay_seconds">
+                        <n-input-number v-model:value="configModel.resubscribe_delay_seconds" :min="0.1" :step="0.1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="联动删除整理记录" path="link_delete_transfer_history">
+                        <n-switch v-model:value="configModel.link_delete_transfer_history" />
+                        <template #feedback>
+                          <n-text style="font-size:0.8em;">Emby删除媒体项时，同步删除 MoviePilot 记录</n-text>
+                        </template>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="联动删除种子及源文件" path="link_delete_download_files">
+                        <n-switch v-model:value="configModel.link_delete_download_files" />
+                        <template #feedback>
+                          <n-text style="font-size:0.8em;">Emby删除媒体项时，同步删除下载器的种子和源文件</n-text>
+                        </template>
+                      </n-form-item-grid-item>
+                    </n-grid>
+                  </n-card>
+                </n-gi>
 
-                    <!-- 在 卡片 B: Telegram 设置 中找到如下代码并进行替换/追加 -->
-                    <n-card :bordered="false" class="dashboard-card">
-                      <template #header><span class="card-title">Telegram 设置</span></template>
-                      <template #header-extra>
-                        <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">测试</n-button>
-                      </template>
-                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
-                          <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="频道/群组 ID" path="telegram_channel_id">
-                          <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
-                          <template #feedback>
-                            <n-text style="font-size:0.8em;">
-                              -100开头ID、公开频道名（@your_channel_name）或专属邀请链接
-                            </n-text>
-                          </template>
-                        </n-form-item-grid-item>
-                        <n-form-item-grid-item label="通知事件" path="telegram_notify_types">
-                          <n-checkbox-group v-model:value="configModel.telegram_notify_types">
-                            <n-space :size="16">
-                              <n-checkbox value="library_new" label="入库" />
-                              <n-checkbox value="playback" label="播放" />
-                            </n-space>
-                          </n-checkbox-group>
-                          <template #feedback>
-                            <n-text style="font-size:0.8em;">
-                              入库通知无限制，播放只通知机器人
-                            </n-text>
-                          </template>
-                        </n-form-item-grid-item>
-                        
-                        <!-- ★ 新增: 管理员个人 Chat ID 绑定区 -->
-                        <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员私人通知</n-divider></n-gi>
-                        <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
-                          <n-input-group>
-                            <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
-                            <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
-                          </n-input-group>
-                          <template #feedback>
-                            <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
-                              <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
-                              <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取</n-button>
-                            </n-space>
-                          </template>
-                        </n-form-item-grid-item>
-                      </n-grid>
-                    </n-card>
-
-                  </n-space>
+                <!-- 卡片 3: Telegram 设置 -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
+                    <template #header><span class="card-title">Telegram 设置</span></template>
+                    <template #header-extra>
+                      <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">测试</n-button>
+                    </template>
+                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                      <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
+                        <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="频道/群组 ID" path="telegram_channel_id">
+                        <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
+                        <template #feedback>
+                          <n-text style="font-size:0.8em;">公开频道名（@your_channel_name）或邀请链接</n-text>
+                        </template>
+                      </n-form-item-grid-item>
+                      <n-form-item-grid-item span="1 s:2" label="通知事件" path="telegram_notify_types">
+                        <n-checkbox-group v-model:value="configModel.telegram_notify_types">
+                          <n-space :size="16">
+                            <n-checkbox value="library_new" label="入库" />
+                            <n-checkbox value="playback" label="播放" />
+                          </n-space>
+                        </n-checkbox-group>
+                        <template #feedback>
+                          <n-text style="font-size:0.8em;">入库通知无限制，播放只通知机器人</n-text>
+                        </template>
+                      </n-form-item-grid-item>
+                      
+                      <!-- ★ 新增: 管理员私人通知绑定区 -->
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员私人通知</n-divider></n-gi>
+                      <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
+                        <n-input-group>
+                          <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
+                          <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
+                            <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
+                            <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取</n-button>
+                          </n-space>
+                        </template>
+                      </n-form-item-grid-item>
+                    </n-grid>
+                  </n-card>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
@@ -497,7 +483,6 @@
                       <!-- 网络代理 -->
                       <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 0; font-size: 0.9em;">网络代理</n-divider></n-gi>
                       
-                      <!-- ★ 修改：网络代理启用和输入框放在同一行 -->
                       <n-form-item-grid-item span="1" label="启用网络代理" path="network_proxy_enabled">
                         <n-switch v-model:value="configModel.network_proxy_enabled" />
                       </n-form-item-grid-item>
@@ -742,7 +727,7 @@ import {
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
   NFormItemGridItem, NCheckboxGroup, NCheckbox, NText, NRadioGroup, NRadio,
-  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip
+  NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip, NPopconfirm, NList, NListItem, NEmpty
 } from 'naive-ui';
 import { 
   DownloadOutline as ExportIcon, 
@@ -767,6 +752,49 @@ import {
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
+
+// ★ 新增：管理员个人私人通知设置状态与方法
+const personalChatId = ref('');
+const isSavingChatId = ref(false);
+const isFetchingBotLink = ref(false);
+
+const fetchPersonalChatId = async () => {
+  try {
+    const res = await axios.get('/api/portal/account-info');
+    personalChatId.value = res.data?.telegram_chat_id || '';
+  } catch (e) {
+    console.error('获取个人 Chat ID 失败', e);
+  }
+};
+
+const saveChatId = async () => {
+  isSavingChatId.value = true;
+  try {
+    const response = await axios.post('/api/portal/telegram-chat-id', { chat_id: personalChatId.value });
+    message.success(response.data.message || '私人 Chat ID 保存成功！');
+  } catch (error) {
+    message.error(error.response?.data?.message || '保存失败');
+  } finally {
+    isSavingChatId.value = false;
+  }
+};
+
+const openBotChat = async () => {
+  isFetchingBotLink.value = true;
+  try {
+    const response = await axios.get('/api/portal/telegram-bot-info');
+    const botName = response.data.bot_username;
+    if (botName) {
+      window.open(`https://t.me/${botName}`, '_blank');
+    } else {
+      message.error(response.data.error || '未能获取到机器人信息', { duration: 8000 });
+    }
+  } catch (error) {
+    message.error('请求机器人信息失败');
+  } finally {
+    isFetchingBotLink.value = false;
+  }
+};
 
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
@@ -876,7 +904,6 @@ const isCleaningOffline = ref(false);
 const isClearingVectors = ref(false);
 const isTestingAI = ref(false);
 
-// ★ 新增：清空缓存状态与方法
 const isClearingStrmCache = ref(false);
 const clearStrmCache = async () => {
   isClearingStrmCache.value = true;
@@ -1053,62 +1080,17 @@ const fetchEmbyUsersList = async () => {
   if (loadingEmbyUsers.value) return;
   loadingEmbyUsers.value = true;
   try {
-    // 完美复用 UserList 里的后端路由
     const response = await axios.get(`/api/admin/users`);
     const users = response.data.data || response.data || [];
-    
-    // 组装成下拉菜单选项格式
     embyUserOptions.value = users.map(user => ({
       label: user.Name || user.name || user.id,
       value: user.Name || user.name || user.id
     }));
   } catch (err) {
     console.warn("获取 Emby 用户列表失败，将降级为手动输入模式:", err);
-    embyUserOptions.value = []; // 接口哪怕挂了，由于有 tag 属性，也能手动打字
+    embyUserOptions.value = [];
   } finally {
     loadingEmbyUsers.value = false;
-  }
-};
-
-const personalChatId = ref('');
-const isSavingChatId = ref(false);
-const isFetchingBotLink = ref(false);
-
-const fetchPersonalChatId = async () => {
-  try {
-    const res = await axios.get('/api/portal/account-info');
-    personalChatId.value = res.data?.telegram_chat_id || '';
-  } catch (e) {
-    console.error('获取个人 Chat ID 失败', e);
-  }
-};
-
-const saveChatId = async () => {
-  isSavingChatId.value = true;
-  try {
-    const response = await axios.post('/api/portal/telegram-chat-id', { chat_id: personalChatId.value });
-    message.success(response.data.message || '私人 Chat ID 保存成功！');
-  } catch (error) {
-    message.error(error.response?.data?.message || '保存失败');
-  } finally {
-    isSavingChatId.value = false;
-  }
-};
-
-const openBotChat = async () => {
-  isFetchingBotLink.value = true;
-  try {
-    const response = await axios.get('/api/portal/telegram-bot-info');
-    const botName = response.data.bot_username;
-    if (botName) {
-      window.open(`https://t.me/${botName}`, '_blank');
-    } else {
-      message.error(response.data.error || '未能获取到机器人信息', { duration: 8000 });
-    }
-  } catch (error) {
-    message.error('请求机器人信息失败');
-  } finally {
-    isFetchingBotLink.value = false;
   }
 };
 
@@ -1183,12 +1165,10 @@ const openLocalFolderSelector = (targetField, isArray = false) => {
     currentLocalTargetField.value = targetField
     isCurrentLocalTargetArray.value = isArray
     
-    // 决定初始路径
     let startPath = '/'
     if (!isArray && configModel.value[targetField]) {
         startPath = configModel.value[targetField]
     } else if (isArray && configModel.value[targetField] && configModel.value[targetField].length > 0) {
-        // 如果是数组且有值，取最后一个值的父目录作为起点，方便连续添加
         const lastPath = configModel.value[targetField][configModel.value[targetField].length - 1]
         startPath = lastPath.substring(0, lastPath.lastIndexOf('/')) || '/'
     }
@@ -1224,12 +1204,10 @@ const fetchLocalFolders = async (path) => {
     }
 }
 
-// 点击列表中的文件夹
 const selectLocalFolder = (folder) => {
     fetchLocalFolders(folder.path)
 }
 
-// 确认选择
 const confirmLocalFolder = () => {
     const field = currentLocalTargetField.value
     const path = currentLocalPath.value
@@ -1486,7 +1464,8 @@ const handleCorrectSequences = async () => {
 
 onMounted(async () => {
   componentIsMounted.value = true;
-  fetchPersonalChatId(); // ★ 新增初始化拉取调用
+  fetchPersonalChatId(); // 初始化拉取个人 Chat ID
+  
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
