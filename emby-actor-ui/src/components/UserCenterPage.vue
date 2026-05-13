@@ -20,40 +20,49 @@
     <!-- 2. 中部模块：账户信息 & 播放记录 (电脑端并列显示) -->
     <n-grid :x-gap="24" :y-gap="24" cols="1 m:2" responsive="screen" style="margin-bottom: 24px;">
       
-      <!-- 左侧/上方：账户信息卡片 -->
+      <!-- 左侧：账户信息卡片 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">账户详情</span></template>
           
-          <!-- 用户信息与等级信息同行显示 -->
+          <!-- 用户信息同行显示 -->
           <div class="account-info-horizontal">
-            <!-- 头像与昵称 -->
+            <!-- 恢复原作者的头像悬浮上传提示 -->
             <div class="profile-header">
-              <div class="avatar-wrapper" @click="triggerFileUpload">
-                <n-avatar :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1);">
-                  <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
-                </n-avatar>
-                <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
-              </div>
+              <n-tooltip trigger="hover" placement="right">
+                <template #trigger>
+                  <div class="avatar-wrapper" @click="triggerFileUpload">
+                    <n-avatar :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1);">
+                      <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
+                    </n-avatar>
+                    <!-- 悬浮遮罩 -->
+                    <div class="avatar-overlay">更换</div>
+                    <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
+                  </div>
+                </template>
+                点击更换头像
+              </n-tooltip>
+
               <div class="profile-text">
                 <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
                 <n-tag :type="statusType" size="small" round :bordered="false">{{ statusText }}</n-tag>
               </div>
             </div>
             
-            <!-- 等级与权限信息 (背景透明，分散居中) -->
+            <!-- 等级与权限信息 -->
             <div class="info-grid">
               <div class="info-row">
                 <span class="info-label">账户等级</span>
                 <span class="info-value">{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span>
               </div>
+              <!-- 恢复原作者的注册时间展示 -->
               <div class="info-row">
-                <span class="info-label">到期时间</span>
-                <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
+                <span class="info-label">注册时间</span>
+                <span class="info-value" style="font-size: 12px;">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
               </div>
               <div class="info-row">
-                <span class="info-label">订阅权限</span>
-                <span class="info-value">{{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核' : '需审核' }}</span>
+                <span class="info-label">到期时间</span>
+                <span class="info-value" style="font-size: 12px;">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
               </div>
             </div>
           </div>
@@ -62,34 +71,83 @@
           
           <!-- Telegram 绑定区域 -->
           <div class="action-form">
-            <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
-            <n-input-group>
-              <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
-              <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
-            </n-input-group>
-            <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
-              绑定 Telegram 机器人
-            </n-button>
+            <!-- 管理员视图 -->
+            <template v-if="authStore.isAdmin">
+              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID (管理员专属)</span>
+              <n-input-group>
+                <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
+                <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
+              </n-input-group>
+              <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
+                绑定 Telegram 机器人
+              </n-button>
+            </template>
+
+            <!-- 恢复原作者的普通用户频道逻辑 (使用 globalChannelLink) -->
+            <template v-else>
+              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">获取最新资讯与帮助</span>
+              <n-button 
+                v-if="globalChannelLink !== '#'"
+                block ghost type="info" 
+                tag="a" :href="globalChannelLink" target="_blank"
+                style="background: rgba(255,255,255,0.05);"
+              >
+                关注 Telegram 频道
+              </n-button>
+              <span v-else style="font-size: 12px; color: rgba(255,255,255,0.3);">管理员尚未配置频道链接</span>
+            </template>
           </div>
         </n-card>
       </n-gi>
 
-      <!-- 右侧/下方：播放记录卡片 -->
+      <!-- 右侧：播放记录卡片 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">近期播放</span></template>
-          <!-- 播放数据 (去除了黑色背景，改为透明) -->
-          <n-grid :cols="2" style="margin-bottom: 16px; text-align: center; padding: 12px 0;">
+          <!-- 恢复原作者的筛选器 -->
+          <template #header-extra>
+            <n-radio-group v-model:value="playbackFilter" size="small" @update:value="handleFilterChange">
+              <n-radio-button value="all">全部</n-radio-button>
+              <n-radio-button value="Movie">电影</n-radio-button>
+              <n-radio-button value="Episode">剧集</n-radio-button>
+            </n-radio-group>
+          </template>
+
+          <!-- 播放总计 -->
+          <n-grid :cols="2" style="margin-bottom: 12px; text-align: center; padding-top: 8px;">
             <n-gi>
-              <div style="font-size: 28px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
-              <div style="font-size: 13px; color: rgba(255,255,255,0.5); margin-top: 4px;">观看次数</div>
+              <div style="font-size: 24px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
+              <div style="font-size: 12px; color: rgba(255,255,255,0.5);">观看次数</div>
             </n-gi>
             <n-gi>
-              <div style="font-size: 28px; font-weight: bold; color: #fff;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</div>
-              <div style="font-size: 13px; color: rgba(255,255,255,0.5); margin-top: 4px;">累计小时</div>
+              <div style="font-size: 24px; font-weight: bold; color: #fff;">{{ (playbackData?.personal?.total_minutes / 60).toFixed(1) }}</div>
+              <div style="font-size: 12px; color: rgba(255,255,255,0.5);">累计小时</div>
             </n-gi>
           </n-grid>
-          <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 30px;" />
+
+          <n-divider style="margin: 12px 0; opacity: 0.1;" />
+
+          <!-- 恢复原作者的详细历史列表 -->
+          <n-scrollbar style="max-height: 200px;">
+            <n-list hoverable clickable size="small" class="transparent-list">
+              <n-list-item v-for="(item, index) in playbackData?.personal?.history_list" :key="index" style="padding: 8px;">
+                <n-thing :title="item.title" content-style="margin-top: 0;">
+                  <template #header>
+                    <span style="font-size: 13px; color: #fff; font-weight: 500;">{{ item.title }}</span>
+                  </template>
+                  <template #description>
+                    <div style="font-size: 11px; color: rgba(255,255,255,0.4);">
+                      {{ new Date(item.date).toLocaleDateString() }} · {{ item.duration }} 分钟
+                    </div>
+                  </template>
+                  <template #header-extra>
+                    <n-tag :type="getTypeTagColor(item.item_type)" size="tiny" round :bordered="false">{{ ITEM_TYPE_MAP[item.item_type] || item.item_type }}</n-tag>
+                  </template>
+                </n-thing>
+              </n-list-item>
+            </n-list>
+            <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 20px;" />
+          </n-scrollbar>
         </n-card>
       </n-gi>
     </n-grid>
@@ -121,7 +179,9 @@
                 <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
                   {{ getStatusText(item.status) }}
                 </n-tag>
-                <span v-if="item.notes">备注: {{ item.notes }}</span>
+                <span v-if="item.notes" style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px;">
+                  备注: {{ item.notes }}
+                </span>
               </div>
             </div>
             <!-- 右侧时间 -->
@@ -142,14 +202,13 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, h, watch } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
 import { 
-  NPageHeader, NCard, NDescriptions, NDescriptionsItem, NTag, NEmpty, NGrid, NGi, 
-  NDataTable, NInputGroup, NInput, NButton, NText, useMessage, NPagination, 
-  NStatistic, NRadioGroup, NRadioButton, NAvatar, NIcon, NDivider, NTooltip, NSpin,
-  NTabs, NTabPane, NList, NListItem, NThing, NSpace, NAlert
+  NCard, NTag, NEmpty, NGrid, NGi, NInputGroup, NInput, NButton, 
+  useMessage, NPagination, NStatistic, NRadioGroup, NRadioButton, 
+  NAvatar, NDivider, NTooltip, NSpin, NList, NListItem, NThing, NScrollbar
 } from 'naive-ui';
 
 const authStore = useAuthStore();
@@ -160,6 +219,8 @@ const telegramChatId = ref('');
 const isSavingChatId = ref(false);
 const message = useMessage();
 const isFetchingBotLink = ref(false);
+
+// 恢复原作者的播放记录逻辑变量
 const playbackData = ref(null);
 const playbackFilter = ref('all');
 const playbackLoading = ref(false);
@@ -171,6 +232,23 @@ const stats = ref({ total: 0, completed: 0, processing: 0, pending: 0, failed: 0
 const filterStatus = ref('all');
 const fileInput = ref(null);
 
+// 恢复原作者的标签字典
+const ITEM_TYPE_MAP = {
+  Movie: '电影',
+  Episode: '剧集',
+  Audio: '音乐',
+  Video: '视频'
+};
+const getTypeTagColor = (type) => {
+    switch(type) {
+        case 'Movie': return 'info';
+        case 'Episode': return 'success';
+        case 'Audio': return 'warning';
+        case 'Video': return 'error';
+        default: return 'default';
+    }
+};
+
 const avatarUrl = computed(() => {
   const tag = accountInfo.value?.profile_image_tag;
   const userId = accountInfo.value?.id;
@@ -178,6 +256,15 @@ const avatarUrl = computed(() => {
     return `/image_proxy/Users/${userId}/Images/Primary?tag=${tag}`;
   }
   return null;
+});
+
+// 恢复原作者的 Telegram 频道动态链接计算属性
+const globalChannelLink = computed(() => {
+  if (!accountInfo.value || !accountInfo.value.telegram_channel_id) return '#';
+  const channelId = accountInfo.value.telegram_channel_id.trim();
+  if (channelId.startsWith('https://t.me/')) return channelId;
+  if (channelId.startsWith('@')) return `https://t.me/${channelId.substring(1)}`;
+  return `https://t.me/${channelId}`;
 });
 
 const triggerFileUpload = () => { fileInput.value?.click(); };
@@ -288,6 +375,7 @@ const fetchSubscriptionHistory = async (page = 1) => {
   }
 };
 
+// 恢复原作者的播放统计抓取和筛选逻辑
 const fetchPlaybackStats = async () => {
   playbackLoading.value = true;
   try {
@@ -299,6 +387,8 @@ const fetchPlaybackStats = async () => {
     playbackLoading.value = false;
   }
 };
+
+const handleFilterChange = () => { fetchPlaybackStats(); };
 
 watch(filterStatus, () => { fetchSubscriptionHistory(1); });
 
@@ -319,162 +409,82 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
-:deep(.n-card__content) {
-  padding-top: 16px !important;
-}
+/* 给当前页面所有卡片的内容区顶部增加一点内边距 */
+:deep(.n-card__content) { padding-top: 16px !important; }
 
 /* 模块化页面基础容器 */
-.modular-page-container {
-  padding: 24px;
-  max-width: 1600px;
-  margin: 0 auto;
-}
+.modular-page-container { padding: 24px; max-width: 1600px; margin: 0 auto; }
 
 /* 头部问候语 */
-.page-header-module {
-  margin-bottom: 24px;
-}
-.greeting-title {
-  font-size: 28px;
-  font-weight: 700;
-  margin: 0 0 8px 0;
-  color: #fff;
-  line-height: 1.3;
-}
-.greeting-subtitle {
-  font-size: 14px;
-  color: rgba(255,255,255,0.6);
-  margin: 0;
-}
+.page-header-module { margin-bottom: 24px; }
+.greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: #fff; line-height: 1.3; }
+.greeting-subtitle { font-size: 14px; color: rgba(255,255,255,0.6); margin: 0; }
 .mobile-break { display: none; }
 
 /* 强制统计模块字体为白色 */
-.stat-module :deep(.n-statistic__label) {
-  color: rgba(255, 255, 255, 0.7) !important; 
-}
-.stat-module :deep(.n-statistic-value__content) {
-  color: var(--n-value-text-color, #ffffff) !important; 
-  font-size: 28px;
-  font-weight: bold;
-}
+.stat-module :deep(.n-statistic__label) { color: rgba(255, 255, 255, 0.7) !important; }
+.stat-module :deep(.n-statistic-value__content) { color: var(--n-value-text-color, #ffffff) !important; font-size: 28px; font-weight: bold; }
 
 /* 账户信息同行显示布局 */
-.account-info-horizontal {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-}
-.profile-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-shrink: 0;
-}
-.avatar-wrapper {
-  cursor: pointer;
-  border-radius: 50%;
-  transition: transform 0.2s;
-}
-.avatar-wrapper:hover { transform: scale(1.05); }
-.profile-name {
-  font-size: 18px;
-  font-weight: bold;
-  color: #fff;
-  margin-bottom: 4px;
-}
+.account-info-horizontal { display: flex; align-items: center; gap: 24px; }
+.profile-header { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
 
-/* 账户等级信息网格 (去背景，分散居中) */
-.info-grid {
-  flex: 1;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr); /* 内部三列平分 */
-  gap: 16px;
-  align-items: center; /* 垂直居中 */
+/* 恢复原作者的头像悬浮遮罩 CSS */
+.avatar-wrapper { position: relative; cursor: pointer; border-radius: 50%; overflow: hidden; transition: transform 0.2s; }
+.avatar-wrapper:hover { transform: scale(1.05); }
+.avatar-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex; justify-content: center; align-items: center;
+  opacity: 0; transition: opacity 0.2s;
+  color: #fff; font-size: 12px; font-weight: bold; border-radius: 50%;
 }
-.info-row {
-  display: flex;
-  flex-direction: column; 
-  align-items: center; /* 水平居中，实现分散居中效果 */
-  gap: 4px;
-}
+.avatar-wrapper:hover .avatar-overlay { opacity: 1; }
+
+.profile-name { font-size: 18px; font-weight: bold; color: #fff; margin-bottom: 4px; }
+
+/* 账户等级信息网格 */
+.info-grid { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: center; }
+.info-row { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .info-label { color: rgba(255,255,255,0.5); font-size: 12px; }
 .info-value { color: #fff; font-weight: 500; font-size: 14px; }
 
+/* 重写 List 组件底色，匹配深色模块化主题 */
+.transparent-list { background: transparent !important; }
+.transparent-list :deep(.n-list-item) { transition: background 0.2s; border-radius: 8px; }
+.transparent-list :deep(.n-list-item:hover) { background: rgba(255,255,255,0.05); }
 
 /* 自定义列表样式 */
-.custom-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+.custom-list { display: flex; flex-direction: column; gap: 12px; }
 .custom-list-item {
-  display: flex;
-  align-items: center;
-  padding: 16px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: background 0.2s;
+  display: flex; align-items: center; padding: 16px;
+  background: rgba(0, 0, 0, 0.2); border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05); transition: background 0.2s;
 }
-.custom-list-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-}
+.custom-list-item:hover { background: rgba(255, 255, 255, 0.05); }
 .item-icon-block {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
-  font-size: 12px;
-  margin-right: 16px;
-  flex-shrink: 0;
+  width: 48px; height: 48px; border-radius: 12px; display: flex;
+  align-items: center; justify-content: center; font-weight: bold;
+  font-size: 12px; margin-right: 16px; flex-shrink: 0;
 }
-/* 图标块颜色映射 */
 .item-icon-block.success { background: rgba(99, 226, 183, 0.2); color: #63e2b7; }
 .item-icon-block.warning { background: rgba(242, 201, 125, 0.2); color: #f2c97d; }
 .item-icon-block.info { background: rgba(112, 192, 232, 0.2); color: #70c0e8; }
 .item-icon-block.error { background: rgba(232, 128, 128, 0.2); color: #e88080; }
 .item-icon-block.default { background: rgba(255, 255, 255, 0.1); color: #fff; }
 
-.item-content {
-  flex: 1;
-  min-width: 0;
-}
-.item-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #fff;
-  margin-bottom: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.item-desc {
-  font-size: 12px;
-  color: rgba(255,255,255,0.5);
-  display: flex;
-  align-items: center;
-}
-.item-meta {
-  text-align: right;
-  flex-shrink: 0;
-  margin-left: 16px;
-}
-.item-time {
-  font-size: 12px;
-  color: rgba(255,255,255,0.4);
-}
+.item-content { flex: 1; min-width: 0; }
+.item-title { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-desc { font-size: 12px; color: rgba(255,255,255,0.5); display: flex; align-items: center; }
+.item-meta { text-align: right; flex-shrink: 0; margin-left: 16px; }
+.item-time { font-size: 12px; color: rgba(255,255,255,0.4); }
 
-/* 手机端适配 */
+/* 手机端适配 (保留你新写的纯 CSS 响应式布局，抛弃了原来繁琐的 js 判断) */
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
   .mobile-break { display: block; }
   
-  /* 手机端账户信息改为上下折行，并恢复左右对齐以节省空间 */
   .account-info-horizontal { flex-direction: column; align-items: flex-start; gap: 16px; }
   .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
   .info-row { flex-direction: row; justify-content: space-between; align-items: center; }
