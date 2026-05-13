@@ -583,9 +583,9 @@ const extractYear = (dateStr) => { if (!dateStr) return null; return dateStr.sub
   width: 100%; /* 确保占满容器宽度 */
 }
 
-/* 放大所有底部图标 */
+/* 底部图标 */
 .card-actions .n-button {
-  font-size: 22px; 
+  font-size: 20px; 
   display: flex;
   justify-content: center;
 }

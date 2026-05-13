@@ -1139,7 +1139,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 /* 放大所有底部文本按钮里的图标 */
 .card-actions .n-button {
-  font-size: 22px;
+  font-size: 20px;
   display: flex;
   justify-content: center;
 }

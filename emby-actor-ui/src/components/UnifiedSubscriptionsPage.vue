@@ -759,7 +759,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 .card-actions .n-button {
-  font-size: 22px; 
+  font-size: 20px; 
   display: flex;
   justify-content: center;
 }
