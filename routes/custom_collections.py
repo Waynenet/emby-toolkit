@@ -1008,7 +1008,7 @@ def api_get_rating_priority_defaults():
 # ==========================================
 
 @custom_collections_bp.route('/config/unified_ratings_options', methods=['GET'])
-@admin_required
+@any_login_required
 def api_get_unified_ratings_for_filter():
     """
     为前端筛选器提供简单的分级字符串列表。
