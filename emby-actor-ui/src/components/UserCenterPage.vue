@@ -27,8 +27,8 @@
           
           <!-- 用户信息垂直居中显示 -->
           <div class="account-info-vertical">
-            <!-- 头部同行显示区：头像、名字、状态 -->
-            <div class="profile-header-inline">
+            <!-- 头部垂直居中显示区：头像、名字 -->
+            <div class="profile-header-vertical">
               <div class="avatar-wrapper" @click="triggerFileUpload">
                 <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
                   <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
@@ -38,37 +38,46 @@
                 <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
               </div>
 
-              <!-- 名字和标签同行 -->
-              <div class="profile-text-inline">
-                <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
-                <n-tag :type="statusType" size="small" round :bordered="false">{{ statusText }}</n-tag>
-              </div>
+              <!-- 名字单独显示在头像正下方 -->
+              <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
             </div>
             
-            <!-- 等级与权限信息网格 -->
+            <!-- 等级与权限信息网格（三行两列，居中对齐） -->
             <div class="info-grid">
+              <!-- 1. 账户等级 -->
               <div class="info-row">
                 <span class="info-label">账户等级</span>
                 <span class="info-value">{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span>
               </div>
+              <!-- 2. 等级说明 -->
               <div class="info-row">
-                <span class="info-label">订阅权限</span>
-                <span class="info-value" :class="{'text-success': authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions, 'text-warning': !authStore.isAdmin && !accountInfo?.allow_unrestricted_subscriptions}">
-                  {{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核订阅' : '需审核订阅' }}
+                <span class="info-label">等级说明</span>
+                <span class="info-value desc-text">
+                  {{ authStore.isAdmin ? '拥有系统所有管理权限' : (accountInfo?.template_description || '暂无说明') }}
                 </span>
               </div>
-              <div class="info-row">
-                <span class="info-label">到期时间</span>
-                <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
-              </div>
+              <!-- 3. 注册时间 -->
               <div class="info-row">
                 <span class="info-label">注册时间</span>
                 <span class="info-value">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
               </div>
-              <div class="info-row desc-row">
-                <span class="info-label">等级说明</span>
-                <span class="info-value desc-text">
-                  {{ authStore.isAdmin ? '拥有系统所有管理权限' : (accountInfo?.template_description || '暂无说明') }}
+              <!-- 4. 到期时间 -->
+              <div class="info-row">
+                <span class="info-label">到期时间</span>
+                <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
+              </div>
+              <!-- 5. 账号状态 (文字颜色随状态变化) -->
+              <div class="info-row">
+                <span class="info-label">账号状态</span>
+                <span class="info-value" :class="`text-${statusType}`">
+                  {{ statusText }}
+                </span>
+              </div>
+              <!-- 6. 订阅权限 -->
+              <div class="info-row">
+                <span class="info-label">订阅权限</span>
+                <span class="info-value" :class="{'text-success': authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions, 'text-warning': !authStore.isAdmin && !accountInfo?.allow_unrestricted_subscriptions}">
+                  {{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核订阅' : '需审核订阅' }}
                 </span>
               </div>
             </div>
@@ -400,11 +409,10 @@ onMounted(async () => {
 
 /* 垂直排布样式 */
 .account-info-vertical { display: flex; flex-direction: column; align-items: center; gap: 24px; }
-.profile-header-inline { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 20px; margin-top: 10px; width: 100%; }
 
-/* 用户名和标签同行显示 */
-.profile-text-inline { display: flex; flex-direction: row; align-items: center; gap: 12px; }
-.profile-name { font-size: 20px; font-weight: bold; color: #fff; margin: 0; }
+/* 头像和名字垂直居中显示 */
+.profile-header-vertical { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; width: 100%; }
+.profile-name { font-size: 20px; font-weight: bold; color: #fff; margin: 0; text-align: center; }
 
 .avatar-wrapper { 
   width: 64px; 
@@ -426,17 +434,21 @@ onMounted(async () => {
 }
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
 
+/* 信息网格：三行两列居中排列 */
 .info-grid { 
   width: 100%; box-sizing: border-box; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; 
-  align-items: start; background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px;
+  align-items: center; background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px;
 }
-.info-row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.desc-row { grid-column: span 2; margin-top: 4px; }
+.info-row { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; }
 .info-label { color: rgba(255,255,255,0.5); font-size: 12px; }
 .info-value { color: #fff; font-weight: 500; font-size: 13px; }
 .desc-text { color: rgba(255,255,255,0.7); font-size: 12px; line-height: 1.4; }
+
+/* 文字颜色类 */
 .text-success { color: #63e2b7 !important; }
 .text-warning { color: #f2c97d !important; }
+.text-error { color: #e88080 !important; }
+.text-default { color: #ffffff !important; }
 
 .transparent-list { background: transparent !important; }
 .transparent-list :deep(.n-list-item) { transition: background 0.2s; border-radius: 8px; }
@@ -472,11 +484,11 @@ onMounted(async () => {
   .mobile-break { display: block; }
   
   .account-info-vertical { gap: 16px; }
-  .profile-header-inline { gap: 16px; }
+  .profile-header-vertical { gap: 8px; }
   
-  .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
-  .info-row { flex-direction: row; justify-content: space-between; align-items: center; }
-  .desc-row { grid-column: span 1; flex-direction: column; align-items: flex-start; }
+  /* 移动端依然保持两列居中对齐 */
+  .info-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .info-row { flex-direction: column; justify-content: center; align-items: center; }
   
   .custom-list-item { padding: 12px; }
   .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
