@@ -48,11 +48,27 @@
       
       <!-- 顶部模块化操作栏 -->
       <div class="top-header-bar">
-        <!-- 左侧：移动端菜单按钮 -->
+        <!-- 左侧：移动端菜单按钮 & 任务状态胶囊 -->
         <div class="header-left">
           <div v-if="isMobile" class="header-module icon-module" @click="collapsed = !collapsed">
             <n-icon :component="MenuOutline" size="20" />
           </div>
+
+          <!-- 任务状态胶囊 (移入左上角操作栏，完美对齐) -->
+          <transition name="fade">
+            <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="header-task-pill">
+              <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
+              <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
+              <div class="pill-text-area">
+                <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
+                <span class="pill-divider">-</span>
+                <span class="pill-msg">{{ props.taskStatus.message }}</span>
+              </div>
+              <n-button v-if="props.taskStatus.is_running" type="error" size="tiny" circle secondary @click="triggerStopTask" class="pill-stop-btn">
+                <template #icon><n-icon :component="StopIcon" /></template>
+              </n-button>
+            </div>
+          </transition>
         </div>
 
         <!-- 右侧：操作模块 -->
@@ -93,22 +109,6 @@
           </n-dropdown>
         </div>
       </div>
-
-      <!-- 悬浮任务状态胶囊 -->
-      <transition name="fade">
-        <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="floating-task-pill">
-          <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
-          <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
-          <div class="pill-text-area">
-            <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
-            <span class="pill-divider">-</span>
-            <span class="pill-msg">{{ props.taskStatus.message }}</span>
-          </div>
-          <n-button v-if="props.taskStatus.is_running" type="error" size="tiny" circle secondary @click="triggerStopTask" class="pill-stop-btn">
-            <template #icon><n-icon :component="StopIcon" /></template>
-          </n-button>
-        </div>
-      </transition>
 
       <!-- 路由视图 -->
       <div class="page-content-inner-wrapper">
@@ -301,7 +301,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 .sider-logo.collapsed { padding: 30px 0 20px 0; }
 
-/* ★ 修复：同步 Logo 缩放的动画曲线 */
 .logo-img { 
   height: 48px; 
   width: auto; 
@@ -317,7 +316,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   overflow-y: auto; 
   overflow-x: hidden;
   padding: 0 12px; 
-  /* ★ 核心修复1：让 padding 的变化与侧边栏宽度的动画保持完全一致的贝塞尔曲线，消除左右跳动 */
   transition: padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -327,7 +325,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 
 .n-menu-item { margin-top: 4px; }
 
-/* ★ 核心修复2：给分组标题添加高度和边距的过渡，消除上下跳动 */
 .n-menu .n-menu-item-group-title { 
   font-size: 12px; 
   font-weight: 500; 
@@ -339,7 +336,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   overflow: hidden;
 }
 
-/* 折叠时平滑隐藏分组标题 */
 .n-menu.n-menu--collapsed .n-menu-item-group-title {
   margin-top: 0;
   margin-bottom: 0;
@@ -471,12 +467,23 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   font-weight: 600;
 }
 
-.floating-task-pill {
-  position: absolute; top: 60px; left: 50%; transform: translateX(-50%); z-index: 50; 
-  display: flex; align-items: center;
-  background: var(--glass-bg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border); border-radius: 30px; padding: 6px 16px;
-  box-shadow: var(--glass-shadow); max-width: 400px; color: var(--text-primary);
+/* ==============================================
+   将任务胶囊放入 header 中，作为标准流元素并适配高度
+   ============================================== */
+.header-task-pill {
+  display: flex; 
+  align-items: center;
+  background: var(--glass-bg); 
+  backdrop-filter: var(--glass-blur); 
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); 
+  border-radius: 18px; /* 胶囊圆角 */
+  padding: 0 14px;
+  height: 36px; /* 强制与右侧 header-module 高度 100% 一致 */
+  box-sizing: border-box;
+  box-shadow: var(--glass-shadow); 
+  max-width: 400px; 
+  color: var(--text-primary);
 }
 .pill-icon { margin-right: 8px; }
 .pill-text-area { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 13px; margin-right: 8px;}
@@ -484,8 +491,9 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .pill-msg { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
 .pill-stop-btn { margin-left: 4px; }
 
+/* 调整淡入淡出动画，让它横向展开更自然 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s, transform 0.3s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; transform: translateY(-10px); }
+.fade-enter-from, .fade-leave-to { opacity: 0; transform: translateX(-10px); }
 
 @media (max-width: 768px) {
   .app-main-layout { padding: 0; }
@@ -513,7 +521,5 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
-
-  .floating-task-pill { top: 70px; left: 50%; transform: translateX(-50%); max-width: 85%; }
 }
 </style>
