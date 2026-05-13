@@ -27,23 +27,19 @@
           
           <!-- 用户信息同行显示 -->
           <div class="account-info-horizontal">
-            <!-- 修复：完美的正圆头像包裹层 -->
+            <!-- 修复：完美的正圆头像包裹层，移除多余 tooltip -->
             <div class="profile-header">
-              <n-tooltip trigger="hover" placement="right">
-                <template #trigger>
-                  <div class="avatar-wrapper" @click="triggerFileUpload">
-                    <!-- 加上 round 属性 -->
-                    <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
-                      <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
-                    </n-avatar>
-                    <!-- 悬浮遮罩 -->
-                    <div class="avatar-overlay">更换</div>
-                    <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
-                  </div>
-                </template>
-                点击更换头像
-              </n-tooltip>
+              <div class="avatar-wrapper" @click="triggerFileUpload">
+                <!-- 加上 round 属性 -->
+                <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
+                  <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
+                </n-avatar>
+                <!-- 悬浮遮罩 -->
+                <div class="avatar-overlay">更换</div>
+                <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
+              </div>
 
+              <!-- 修复：让名字和标签整体居中 -->
               <div class="profile-text">
                 <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
                 <n-tag :type="statusType" size="small" round :bordered="false">{{ statusText }}</n-tag>
@@ -215,7 +211,7 @@ import { useAuthStore } from '../stores/auth';
 import { 
   NCard, NTag, NEmpty, NGrid, NGi, NInputGroup, NInput, NButton, 
   useMessage, NPagination, NStatistic, NRadioGroup, NRadioButton, 
-  NAvatar, NDivider, NTooltip, NSpin, NList, NListItem, NThing, NScrollbar
+  NAvatar, NDivider, NSpin, NList, NListItem, NThing, NScrollbar
 } from 'naive-ui';
 
 const authStore = useAuthStore();
@@ -454,6 +450,10 @@ onMounted(async () => {
 .account-info-horizontal { display: flex; align-items: flex-start; gap: 24px; }
 .profile-header { display: flex; flex-direction: column; align-items: center; gap: 12px; flex-shrink: 0; margin-top: 10px; }
 
+/* 用户名和标签居中对齐 */
+.profile-text { display: flex; flex-direction: column; align-items: center; }
+.profile-name { font-size: 16px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; }
+
 /* 修复：给外层包裹强制设定正方形宽高，确保头像为正圆 */
 .avatar-wrapper { 
   width: 64px; 
@@ -474,8 +474,6 @@ onMounted(async () => {
   color: #fff; font-size: 12px; font-weight: bold; border-radius: 50%;
 }
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
-
-.profile-name { font-size: 16px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; }
 
 .info-grid { 
   flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; 
