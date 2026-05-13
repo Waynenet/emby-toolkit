@@ -27,12 +27,13 @@
           
           <!-- 用户信息同行显示 -->
           <div class="account-info-horizontal">
-            <!-- 恢复原作者的头像悬浮上传提示 -->
+            <!-- 修复：完美的正圆头像包裹层 -->
             <div class="profile-header">
               <n-tooltip trigger="hover" placement="right">
                 <template #trigger>
                   <div class="avatar-wrapper" @click="triggerFileUpload">
-                    <n-avatar :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1);">
+                    <!-- 加上 round 属性 -->
+                    <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
                       <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
                     </n-avatar>
                     <!-- 悬浮遮罩 -->
@@ -49,7 +50,7 @@
               </div>
             </div>
             
-            <!-- 等级与权限信息 (已补全所有丢失项，采用紧凑网格布局) -->
+            <!-- 等级与权限信息网格 -->
             <div class="info-grid">
               <div class="info-row">
                 <span class="info-label">账户等级</span>
@@ -69,7 +70,6 @@
                 <span class="info-label">注册时间</span>
                 <span class="info-value">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
               </div>
-              <!-- 等级说明横跨展示，避免文字过长挤占空间 -->
               <div class="info-row desc-row">
                 <span class="info-label">等级说明</span>
                 <span class="info-value desc-text">
@@ -83,26 +83,26 @@
           
           <!-- Telegram 绑定区域 -->
           <div class="action-form">
-            <!-- 管理员视图 (遵照你的要求：仅管理员可见配置和绑定) -->
+            <!-- 管理员视图 -->
             <template v-if="authStore.isAdmin">
               <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
               <n-input-group>
                 <n-input v-model:value="telegramChatId" placeholder="用于接收通知的 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
                 <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
               </n-input-group>
-              <!-- 恢复原作者的 /start 文案提示 -->
               <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
                 点此找机器人发送 /start
               </n-button>
             </template>
 
-            <!-- 普通用户视图 (遵照你的要求：仅显示频道链接) -->
+            <!-- 普通用户视图 -->
             <template v-else>
               <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">获取最新资讯与帮助</span>
+              <!-- 修复：移除 tag="a"，改用 @click 程序化跳转，防止溢出和点击失效 -->
               <n-button 
                 v-if="globalChannelLink !== '#'"
                 block ghost type="info" 
-                tag="a" :href="globalChannelLink" target="_blank"
+                @click="openTelegramChannel"
                 style="background: rgba(255,255,255,0.05);"
               >
                 点击加入频道 / 群组
@@ -117,7 +117,6 @@
       <n-gi>
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">近期播放</span></template>
-          <!-- 恢复原作者的筛选器 -->
           <template #header-extra>
             <n-radio-group v-model:value="playbackFilter" size="small" @update:value="handleFilterChange">
               <n-radio-button value="all">全部</n-radio-button>
@@ -126,7 +125,6 @@
             </n-radio-group>
           </template>
 
-          <!-- 播放总计 -->
           <n-grid :cols="2" style="margin-bottom: 12px; text-align: center; padding-top: 8px;">
             <n-gi>
               <div style="font-size: 24px; font-weight: bold; color: #fff;">{{ playbackData?.personal?.total_count || 0 }}</div>
@@ -140,7 +138,6 @@
 
           <n-divider style="margin: 12px 0; opacity: 0.1;" />
 
-          <!-- 恢复原作者的详细历史列表 -->
           <n-scrollbar style="max-height: 200px;">
             <n-list hoverable clickable size="small" class="transparent-list">
               <n-list-item v-for="(item, index) in playbackData?.personal?.history_list" :key="index" style="padding: 8px;">
@@ -165,7 +162,7 @@
       </n-gi>
     </n-grid>
 
-    <!-- 3. 底部模块：订阅历史列表 (独占一行) -->
+    <!-- 3. 底部模块：订阅历史列表 -->
     <n-card :bordered="false" class="dashboard-card list-module">
       <template #header>
         <span class="card-title">最近的订阅动态</span>
@@ -181,11 +178,9 @@
       <n-spin :show="loading">
         <div v-if="subscriptionHistory.length > 0" class="custom-list">
           <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
-            <!-- 左侧图标块 -->
             <div class="item-icon-block" :class="getStatusType(item.status)">
               {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
             </div>
-            <!-- 中间内容 -->
             <div class="item-content">
               <div class="item-title">{{ item.title }}</div>
               <div class="item-desc">
@@ -197,7 +192,6 @@
                 </span>
               </div>
             </div>
-            <!-- 右侧时间 -->
             <div class="item-meta">
               <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
             </div>
@@ -269,13 +263,40 @@ const avatarUrl = computed(() => {
   return null;
 });
 
+// 智能解析 Telegram 链接
 const globalChannelLink = computed(() => {
   if (!accountInfo.value || !accountInfo.value.telegram_channel_id) return '#';
   const channelId = accountInfo.value.telegram_channel_id.trim();
+
+  // 拦截：如果是 -100 开头的纯数字（Telegram 内部 ID），标记为特殊状态
+  if (channelId.startsWith('-100') || /^-?\d+$/.test(channelId)) {
+    return 'INTERNAL_ID';
+  }
+
+  // 正常处理公开链接或用户名
   if (channelId.startsWith('https://t.me/')) return channelId;
   if (channelId.startsWith('@')) return `https://t.me/${channelId.substring(1)}`;
   return `https://t.me/${channelId}`;
 });
+
+// 手动处理按钮点击跳转，防止内部 ID 错误跳转
+const openTelegramChannel = () => {
+  const link = globalChannelLink.value;
+  
+  if (link === 'INTERNAL_ID') {
+    message.warning(
+      '无法跳转：管理员配置了内部群组 ID (-100开头)。请管理员在后台将其修改为公开频道名 (如 @name) 或邀请链接。', 
+      { duration: 6000 }
+    );
+    return;
+  }
+  
+  if (link && link !== '#') {
+    window.open(link, '_blank');
+  } else {
+    message.warning('管理员尚未配置有效的频道链接');
+  }
+};
 
 const triggerFileUpload = () => { fileInput.value?.click(); };
 
@@ -418,28 +439,32 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* 给当前页面所有卡片的内容区顶部增加一点内边距 */
 :deep(.n-card__content) { padding-top: 16px !important; }
 
-/* 模块化页面基础容器 */
 .modular-page-container { padding: 24px; max-width: 1600px; margin: 0 auto; }
 
-/* 头部问候语 */
 .page-header-module { margin-bottom: 24px; }
 .greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: #fff; line-height: 1.3; }
 .greeting-subtitle { font-size: 14px; color: rgba(255,255,255,0.6); margin: 0; }
 .mobile-break { display: none; }
 
-/* 强制统计模块字体为白色 */
 .stat-module :deep(.n-statistic__label) { color: rgba(255, 255, 255, 0.7) !important; }
 .stat-module :deep(.n-statistic-value__content) { color: var(--n-value-text-color, #ffffff) !important; font-size: 28px; font-weight: bold; }
 
-/* 账户信息同行显示布局 */
 .account-info-horizontal { display: flex; align-items: flex-start; gap: 24px; }
 .profile-header { display: flex; flex-direction: column; align-items: center; gap: 12px; flex-shrink: 0; margin-top: 10px; }
 
-/* 恢复原作者的头像悬浮遮罩 CSS */
-.avatar-wrapper { position: relative; cursor: pointer; border-radius: 50%; overflow: hidden; transition: transform 0.2s; }
+/* 修复：给外层包裹强制设定正方形宽高，确保头像为正圆 */
+.avatar-wrapper { 
+  width: 64px; 
+  height: 64px; 
+  position: relative; 
+  cursor: pointer; 
+  border-radius: 50%; 
+  overflow: hidden; 
+  transition: transform 0.2s; 
+  flex-shrink: 0; /* 防止被 flex 挤压变形 */
+}
 .avatar-wrapper:hover { transform: scale(1.05); }
 .avatar-overlay {
   position: absolute; top: 0; left: 0; width: 100%; height: 100%;
@@ -452,33 +477,22 @@ onMounted(async () => {
 
 .profile-name { font-size: 16px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; }
 
-/* ★★★ 重新设计的等级权限信息网格 (兼容文字多的情况) ★★★ */
 .info-grid { 
-  flex: 1; 
-  display: grid; 
-  grid-template-columns: repeat(2, 1fr); /* 默认排成两列 */
-  gap: 16px; 
-  align-items: start; 
-  background: rgba(255,255,255,0.02);
-  padding: 16px;
-  border-radius: 8px;
+  flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; 
+  align-items: start; background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px;
 }
 .info-row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-/* 说明文本独占一行 (跨越两列) */
 .desc-row { grid-column: span 2; margin-top: 4px; }
 .info-label { color: rgba(255,255,255,0.5); font-size: 12px; }
 .info-value { color: #fff; font-weight: 500; font-size: 13px; }
 .desc-text { color: rgba(255,255,255,0.7); font-size: 12px; line-height: 1.4; }
-/* 动态文字颜色 */
 .text-success { color: #63e2b7 !important; }
 .text-warning { color: #f2c97d !important; }
 
-/* 重写 List 组件底色，匹配深色模块化主题 */
 .transparent-list { background: transparent !important; }
 .transparent-list :deep(.n-list-item) { transition: background 0.2s; border-radius: 8px; }
 .transparent-list :deep(.n-list-item:hover) { background: rgba(255,255,255,0.05); }
 
-/* 自定义列表样式 */
 .custom-list { display: flex; flex-direction: column; gap: 12px; }
 .custom-list-item {
   display: flex; align-items: center; padding: 16px;
@@ -503,7 +517,6 @@ onMounted(async () => {
 .item-meta { text-align: right; flex-shrink: 0; margin-left: 16px; }
 .item-time { font-size: 12px; color: rgba(255,255,255,0.4); }
 
-/* 手机端适配 (保留纯 CSS 响应式布局) */
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
@@ -511,7 +524,6 @@ onMounted(async () => {
   
   .account-info-horizontal { flex-direction: column; align-items: center; gap: 16px; }
   
-  /* 手机端等级信息恢复为上下排列，但内部左右对齐展示 */
   .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
   .info-row { flex-direction: row; justify-content: space-between; align-items: center; }
   .desc-row { grid-column: span 1; flex-direction: column; align-items: flex-start; }
