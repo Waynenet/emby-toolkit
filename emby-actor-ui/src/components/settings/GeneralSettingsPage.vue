@@ -372,10 +372,8 @@
                           <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或兼容服务" />
                         </n-form-item-grid-item>
 
-                        <!-- ★ 修改：删除了“功能与模式”这行字样 -->
-
                         <n-form-item-grid-item span="1 m:2" label="启用功能">
-                          <n-grid cols="2 sm:3" :y-gap="8" :x-gap="8" style="width: 100%">
+                          <n-grid cols="2 sm:3" :y-gap="16" :x-gap="8" style="width: 100%">
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_actor_role">演员角色翻译</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_title">片名翻译</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_overview">简介翻译</n-checkbox></n-gi>
