@@ -444,6 +444,11 @@
                         </n-form-item-grid-item>
                         <n-form-item-grid-item label="频道/群组 ID" path="telegram_channel_id">
                           <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">
+                              公开频道名（@your_channel_name），或专属邀请链接（https://t.me/+Abcdefg）也可
+                            </n-text>
+                          </template>
                         </n-form-item-grid-item>
                         <n-form-item-grid-item label="通知事件" path="telegram_notify_types">
                           <n-checkbox-group v-model:value="configModel.telegram_notify_types">
