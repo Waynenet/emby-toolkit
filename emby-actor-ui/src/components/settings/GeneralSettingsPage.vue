@@ -417,7 +417,7 @@
                           <n-switch v-model:value="configModel.link_delete_transfer_history" />
                           <template #feedback>
                             <n-text style="font-size:0.8em;">
-                              Emby删除媒体项时，同步删除 MoviePilot 中匹配的整理记录。
+                              Emby删除媒体项时，同步删除 MoviePilot 中匹配的整理记录
                             </n-text>
                           </template>
                         </n-form-item-grid-item>
@@ -425,7 +425,7 @@
                           <n-switch v-model:value="configModel.link_delete_download_files" />
                           <template #feedback>
                             <n-text style="font-size:0.8em;">
-                              Emby删除媒体项时，同步删除下载器的种子和源文件（含辅种）。
+                              Emby删除媒体项时，同步删除下载器的种子和源文件（含辅种）
                             </n-text>
                           </template>
                         </n-form-item-grid-item>
@@ -457,6 +457,11 @@
                               <n-checkbox value="playback" label="播放" />
                             </n-space>
                           </n-checkbox-group>
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">
+                              入库通知无限制，播放只通知机器人
+                            </n-text>
+                          </template>
                         </n-form-item-grid-item>
                       </n-grid>
                     </n-card>
