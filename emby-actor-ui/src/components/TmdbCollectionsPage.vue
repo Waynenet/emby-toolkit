@@ -124,7 +124,7 @@
                   <div class="card-header">
                     <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.name }}</n-ellipsis>
                     
-                    <!-- 绝对定位到卡片右上角的删除按钮，防止标题过长时挤压 -->
+                    <!-- 绝对定位到卡片右上角的删除按钮 -->
                     <div class="card-delete-btn">
                       <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
                         <template #trigger>
@@ -133,8 +133,8 @@
                           </n-button>
                         </template>
                         <div style="max-width: 240px;">
-                          <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
-                          <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
+                          <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p >
+                          <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p >
                         </div>
                       </n-popconfirm>
                     </div>
@@ -171,15 +171,31 @@
                   <div class="card-actions">
                     <n-tooltip>
                       <template #trigger>
-                        <n-button text @click.stop="() => openMissingMoviesModal(item)">
+                        <!-- 修改点：使用 quaternary circle 实现纯透明+圆形 -->
+                        <n-button quaternary circle @click.stop="() => openMissingMoviesModal(item)">
                           <template #icon><n-icon :component="EyeIcon" /></template>
                         </n-button>
                       </template>
                       查看详情
                     </n-tooltip>
                     
-                    <n-tooltip><template #trigger><n-button text @click.stop="openInEmby(item.emby_collection_id)"><template #icon><n-icon :component="EmbyIcon" /></template></n-button></template>在 Emby 中打开</n-tooltip>
-                    <n-tooltip><template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>在 TMDb 中打开</n-tooltip>
+                    <n-tooltip>
+                      <template #trigger>
+                        <n-button quaternary circle @click.stop="openInEmby(item.emby_collection_id)">
+                          <template #icon><n-icon :component="EmbyIcon" /></template>
+                        </n-button>
+                      </template>
+                      在 Emby 中打开
+                    </n-tooltip>
+                    
+                    <n-tooltip>
+                      <template #trigger>
+                        <n-button quaternary circle tag="a" :href="`https://www.themoviedb.org/collection/${item.tmdb_collection_id}`" target="_blank" :disabled="!item.tmdb_collection_id" @click.stop>
+                          <template #icon><n-icon :component="TMDbIcon" /></template>
+                        </n-button>
+                      </template>
+                      在 TMDb 中打开
+                    </n-tooltip>
                   </div>
                 </div>
               </div>
@@ -569,8 +585,7 @@ const extractYear = (dateStr) => { if (!dateStr) return null; return dateStr.sub
 
 /* 放大所有底部图标 */
 .card-actions .n-button {
-  font-size: 20px; 
-  flex: 1; /* 让按钮平分点击区域，更容易点中 */
+  font-size: 22px; 
   display: flex;
   justify-content: center;
 }

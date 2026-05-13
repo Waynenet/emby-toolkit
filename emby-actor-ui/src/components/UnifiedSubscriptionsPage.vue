@@ -116,7 +116,9 @@
                 <div class="card-poster-container">
                   <!-- 绝对定位包裹 Checkbox -->
                   <div class="poster-checkbox-wrap" @click.stop>
+                    <!-- 修改点：添加 size="small" -->
                     <n-checkbox
+                      size="small"
                       :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
                       @update:checked="(checked, event) => toggleSelection(item, event, i)"
                     />
@@ -167,32 +169,32 @@
                     </n-space>
                   </div>
                   
-                  <!-- 操作区域：所有按钮添加 @click.stop 防止触发卡片选中 -->
+                  <!-- 操作区域：统一把 ghost circle 换成 quaternary circle -->
                   <div class="card-actions">
-                  <template v-if="item.subscription_status === 'REQUESTED'">
-                    <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>批准</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
-                  </template>
+                    <template v-if="item.subscription_status === 'REQUESTED'">
+                      <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" quaternary circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>批准</n-tooltip>
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" quaternary circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
+                    </template>
+                    
+                    <template v-if="item.subscription_status === 'WANTED'">
+                      <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" quaternary circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>订阅</n-tooltip>
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" quaternary circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
+                    </template>
                   
-                  <template v-if="item.subscription_status === 'WANTED'">
-                    <n-tooltip><template #trigger><n-button @click.stop="() => subscribeItem(item)" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>订阅</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>忽略</n-tooltip>
-                  </template>
-
-                  <template v-else-if="item.subscription_status === 'SUBSCRIBED' || item.subscription_status === 'PENDING_RELEASE'">
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消订阅</n-tooltip>
-                  </template>
-
-                  <template v-else-if="item.subscription_status === 'PAUSED'">
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'SUBSCRIBED')" type="primary" ghost circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>恢复</n-tooltip>
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" ghost circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消</n-tooltip>
-                  </template>
-
-                  <template v-else-if="item.subscription_status === 'IGNORED'">
-                    <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'WANTED', true)" type="primary" ghost circle><template #icon><n-icon :component="WantedIcon" /></template></n-button></template>取消忽略</n-tooltip>
-                  </template>
-
-                  <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>TMDb</n-tooltip>
+                    <template v-else-if="item.subscription_status === 'SUBSCRIBED' || item.subscription_status === 'PENDING_RELEASE'">
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" quaternary circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消订阅</n-tooltip>
+                    </template>
+                  
+                    <template v-else-if="item.subscription_status === 'PAUSED'">
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'SUBSCRIBED')" type="primary" quaternary circle><template #icon><n-icon :component="SubscribedIcon" /></template></n-button></template>恢复</n-tooltip>
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'IGNORED')" type="error" quaternary circle><template #icon><n-icon :component="IgnoredIcon" /></template></n-button></template>取消</n-tooltip>
+                    </template>
+                  
+                    <template v-else-if="item.subscription_status === 'IGNORED'">
+                      <n-tooltip><template #trigger><n-button @click.stop="() => updateItemStatus(item, 'WANTED', true)" type="primary" quaternary circle><template #icon><n-icon :component="WantedIcon" /></template></n-button></template>取消忽略</n-tooltip>
+                    </template>
+                  
+                    <n-tooltip><template #trigger><n-button quaternary circle tag="a" :href="getTMDbLink(item)" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>TMDb</n-tooltip>
                   </div>
                 </div>
               </div>
@@ -320,7 +322,7 @@
 import { ref, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NCheckboxGroup, NRadio, NForm, NFormItem, NInputNumber, NModal, NPopconfirm } from 'naive-ui';
-import { FilmOutline as FilmIcon, TvOutline as TvIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, CaretDownOutline as CaretDownIcon, CheckmarkCircleOutline as WantedIcon, HourglassOutline as PendingIcon, BanOutline as IgnoredIcon, DownloadOutline as SubscribedIcon, PersonCircleOutline as SourceIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon, PauseCircleOutline as PausedIcon, ReaderOutline as AuditIcon, CloseOutline as CloseIcon } from '@vicons/ionicons5';
+import { FilmOutline as FilmIcon, TvOutline as TvIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, CaretDownOutline as CaretDownIcon, CheckmarkCircleOutline as WantedIcon, HourglassOutline as PendingIcon, BanOutline as IgnoredIcon, HeartOutline as SubscribedIcon, PersonCircleOutline as SourceIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon, PauseCircleOutline as PausedIcon, ReaderOutline as AuditIcon, CloseOutline as CloseIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns'
 
 const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "1em", height: "1em" }, [
@@ -708,6 +710,8 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   background: rgba(0, 0, 0, 0.4);
   padding: 2px 4px;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
 }
 
 /* ★★★ 绝对定位：右上角影视类型角标 ★★★ */
@@ -754,10 +758,8 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   width: 100%; /* 确保占满容器宽度 */
 }
 
-/* 图标稍作放大 */
 .card-actions .n-button {
-  font-size: 20px; 
-  flex: 1; /* 让按钮平分点击区域，更容易点中 */
+  font-size: 22px; 
   display: flex;
   justify-content: center;
 }

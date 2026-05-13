@@ -122,7 +122,9 @@
                 <div class="card-poster-container">
                   <!-- 移动到这里，绝对定位漂浮在图片上 -->
                   <div class="poster-checkbox-wrap" @click.stop>
+                    <!-- 修改点：加上 size="small" -->
                     <n-checkbox
+                      size="small"
                       :checked="selectedItems.includes(item.tmdb_id)"
                       @update:checked="(checked, event) => toggleSelection(item.tmdb_id, event, i)"
                     />
@@ -182,7 +184,11 @@
                   <div class="card-header">
                     <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.item_name }}</n-ellipsis>
                     <n-popconfirm @positive-click="() => removeFromWatchlist(item.parent_tmdb_id, item.item_name)" @click.stop>
-                      <template #trigger><n-button text type="error" circle title="移除" size="small"><template #icon><n-icon :component="TrashIcon" /></template></n-button></template>
+                      <template #trigger>
+                        <n-button text type="error" size="small" @click.stop>
+                          <template #icon><n-icon :component="TrashIcon" /></template>
+                        </n-button>
+                      </template>
                       确定要从追剧列表中移除《{{ item.item_name }}》吗？
                     </n-popconfirm>
                   </div>
@@ -278,10 +284,11 @@
                   <div class="card-actions">
                     <n-tooltip v-if="hasMissing(item)">
                       <template #trigger>
+                        <!-- 修改点：quaternary circle 保持透明圆底，指定 type="warning" 让图标带颜色 -->
                         <n-button
-                          type="warning"
-                          size="small"
+                          quaternary
                           circle
+                          type="warning"
                           @click.stop="() => openMissingInfoModal(item)"
                         >
                           <template #icon><n-icon :component="EyeIcon" /></template>
@@ -289,10 +296,12 @@
                       </template>
                       {{ getMissingCountText(item) }} (点击查看详情)
                     </n-tooltip>
+
                     <n-tooltip>
                       <template #trigger>
                         <n-button
-                          text
+                          quaternary
+                          circle
                           :loading="refreshingItems[item.parent_tmdb_id]" 
                           @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)"
                         >
@@ -301,12 +310,22 @@
                       </template>
                       立即刷新此剧集
                     </n-tooltip>
+
                     <n-tooltip>
-                      <template #trigger><n-button text @click.stop="openInEmby(item.emby_item_ids_json)"><template #icon><n-icon :component="EmbyIcon" /></template></n-button></template>
+                      <template #trigger>
+                        <n-button quaternary circle @click.stop="openInEmby(item.emby_item_ids_json)">
+                          <template #icon><n-icon :component="EmbyIcon" /></template>
+                        </n-button>
+                      </template>
                       在 Emby 中打开
                     </n-tooltip>
+
                     <n-tooltip>
-                      <template #trigger><n-button text tag="a" :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" target="_blank" @click.stop><template #icon><n-icon :component="TMDbIcon" /></template></n-button></template>
+                      <template #trigger>
+                        <n-button quaternary circle tag="a" :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" target="_blank" @click.stop>
+                          <template #icon><n-icon :component="TMDbIcon" /></template>
+                        </n-button>
+                      </template>
                       在 TMDb 中打开
                     </n-tooltip>
                   </div>
@@ -1065,12 +1084,14 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 /* 绝对定位复选框包裹层 */
 .poster-checkbox-wrap {
   position: absolute;
-  top: 8px;
-  left: 8px;
+  top: 6px;
+  left: 6px;
   z-index: 10;
   background: rgba(0, 0, 0, 0.4);
   padding: 2px 4px;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
 }
 
 /* 海报底部集数遮罩 */
@@ -1118,12 +1139,10 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 /* 放大所有底部文本按钮里的图标 */
 .card-actions .n-button {
-  font-size: 20px; 
-  flex: 1; /* 让按钮平分点击区域，更容易点中 */
+  font-size: 22px;
   display: flex;
   justify-content: center;
 }
-
 
 /* ★★★ 策略配置模态框专属样式 ★★★ */
 .settings-layout {
