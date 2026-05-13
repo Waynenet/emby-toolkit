@@ -122,7 +122,7 @@
                         <n-switch v-model:value="configModel.douban_sync_private" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item span="1 s:2" label="同步 Emby 用户" path="douban_sync_users">
+                      <n-form-item-grid-item label="同步 Emby 用户" path="douban_sync_users">
                         <n-select 
                           v-model:value="configModel.douban_sync_users" 
                           multiple 
@@ -134,7 +134,7 @@
                         />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item span="1 s:2" label="剧集跳过第一集" path="douban_sync_skip_first">
+                      <n-form-item-grid-item label="剧集跳过第一集" path="douban_sync_skip_first">
                         <n-switch v-model:value="configModel.douban_sync_skip_first" />
                         <template #feedback><n-text depth="3" style="font-size:0.8em;">不把试看第一集的剧集同步到豆瓣。</n-text></template>
                       </n-form-item-grid-item>
@@ -166,7 +166,7 @@
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">Emby 设置</span></template>
                     <n-grid cols="1 m:2" :x-gap="10" :y-gap="4" responsive="screen">
-                      <n-form-item-grid-item span="1 m:2">
+                      <n-form-item-grid-item>
                         <template #label>
                           <div style="display: flex; align-items: center; gap: 4px;">
                             <span>Emby URL</span>
@@ -178,25 +178,26 @@
                         <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item span="1 m:2" label="外网URL" path="emby_public_url">
+                      <n-form-item-grid-item label="外网URL" path="emby_public_url">
                         <n-input v-model:value="configModel.emby_public_url" placeholder="留空不开启" />
-                      </n-form-item-grid-item>
-                      
-                      <n-form-item-grid-item span="1 m:2" label="APIKey" path="emby_api_key">
-                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="API Key" />
                       </n-form-item-grid-item>
 
                       <n-form-item-grid-item span="1 m:2" label="用户ID" :rule="embyUserIdRule" path="emby_user_id">
                         <n-input v-model:value="configModel.emby_user_id" placeholder="32位" />
                         <template #feedback><div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！</div></template>
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 m:2" label="超时时间 (秒)" path="emby_api_timeout">
+
+                      <n-form-item-grid-item label="APIKey" path="emby_api_key">
+                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="API Key" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="超时时间 (秒)" path="emby_api_timeout">
                         <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
                       </n-form-item-grid-item>
 
                       <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员凭证 (选填)</n-divider></n-gi>
-                      <n-form-item-grid-item span="1 m:2" label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 m:2" label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
+                      <n-form-item-grid-item label="用户名" path="emby_admin_user"><n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" /></n-form-item-grid-item>
+                      <n-form-item-grid-item label="密码" path="emby_admin_pass"><n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" /></n-form-item-grid-item>
 
                       <n-gi span="1 m:2"><n-divider title-placement="left" style="margin: 4px 0;">选择处理的媒体库</n-divider></n-gi>
                       <n-form-item-grid-item label-placement="top" span="1 m:2">
@@ -241,11 +242,11 @@
                         <template #feedback><n-text depth="3" style="font-size:0.8em;">命中路径将跳过刮削，仅刷新。</n-text></template>
                       </n-form-item-grid-item>
                       
-                      <n-form-item-grid-item span="1 s:2" label="排除刷新延迟" path="monitor_exclude_refresh_delay">
+                      <n-form-item-grid-item label="排除刷新延迟" path="monitor_exclude_refresh_delay">
                         <n-input-number v-model:value="configModel.monitor_exclude_refresh_delay" :min="0" :step="10" placeholder="0" style="width: 100%"><template #suffix>秒</template></n-input-number>
                       </n-form-item-grid-item>
 
-                      <n-form-item-grid-item span="1 s:2" label="定时扫描回溯" path="monitor_scan_lookback_days">
+                      <n-form-item-grid-item label="定时扫描回溯" path="monitor_scan_lookback_days">
                         <n-input-number v-model:value="configModel.monitor_scan_lookback_days" :min="0" :max="365" placeholder="1" style="width: 100%"><template #suffix>天</template></n-input-number>
                       </n-form-item-grid-item>
 
@@ -349,11 +350,11 @@
                     
                     <div class="ai-settings-wrapper">
                       <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                        <n-form-item-grid-item span="1 s:2" label="AI 服务商" path="ai_provider">
+                        <n-form-item-grid-item label="AI 服务商" path="ai_provider">
                           <n-select v-model:value="configModel.ai_provider" :options="aiProviderOptions" />
                         </n-form-item-grid-item>
                         
-                        <n-form-item-grid-item span="1 s:2" label="翻译模式" path="ai_translation_mode">
+                        <n-form-item-grid-item label="翻译模式" path="ai_translation_mode">
                           <n-select v-model:value="configModel.ai_translation_mode" :options="aiTranslationModeOptions" />
                         </n-form-item-grid-item>
 
@@ -370,7 +371,7 @@
                         </n-form-item-grid-item>
 
                         <n-form-item-grid-item span="1 s:2" label="启用功能">
-                          <n-grid cols="2 sm:3" :y-gap="16" :x-gap="8" style="width: 100%">
+                          <n-grid cols="2 sm:3" :y-gap="8" :x-gap="8" style="width: 100%">
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_actor_role">演员角色</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_title">片名翻译</n-checkbox></n-gi>
                             <n-gi><n-checkbox v-model:checked="configModel.ai_translate_overview">简介翻译</n-checkbox></n-gi>
@@ -393,10 +394,10 @@
                       <n-form-item-grid-item span="1 s:2" label="MoviePilot URL" path="moviepilot_url">
                         <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
                       </n-form-item-grid-item> 
-                      <n-form-item-grid-item span="1 s:2" label="用户名" path="moviepilot_username">
+                      <n-form-item-grid-item label="用户名" path="moviepilot_username">
                         <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
                       </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 s:2" label="密码" path="moviepilot_password">
+                      <n-form-item-grid-item label="密码" path="moviepilot_password">
                         <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
                       </n-form-item-grid-item>
                       <n-form-item-grid-item label="每日上限(订阅规则)" path="resubscribe_daily_cap">
@@ -438,6 +439,20 @@
                           <n-text style="font-size:0.8em;">公开频道名（@your_channel_name）或邀请链接</n-text>
                         </template>
                       </n-form-item-grid-item>
+
+                      <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
+                        <n-input-group>
+                          <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
+                          <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
+                            <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
+                            <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取播报</n-button>
+                          </n-space>
+                        </template>
+                      </n-form-item-grid-item>
+
                       <n-form-item-grid-item span="1 s:2" label="通知事件" path="telegram_notify_types">
                         <n-checkbox-group v-model:value="configModel.telegram_notify_types">
                           <n-space :size="16">
@@ -450,20 +465,6 @@
                         </template>
                       </n-form-item-grid-item>
                       
-                      <!-- ★ 新增: 管理员私人通知绑定区 -->
-                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员私人通知</n-divider></n-gi>
-                      <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
-                        <n-input-group>
-                          <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
-                          <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
-                        </n-input-group>
-                        <template #feedback>
-                          <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
-                            <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
-                            <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取</n-button>
-                          </n-space>
-                        </template>
-                      </n-form-item-grid-item>
                     </n-grid>
                   </n-card>
                 </n-gi>
