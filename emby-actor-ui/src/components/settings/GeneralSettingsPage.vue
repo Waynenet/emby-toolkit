@@ -446,7 +446,7 @@
                           <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
                         </n-input-group>
                         <template #feedback>
-                          <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
+                          <n-space style="margin-top: 4px; margin-bottom: 8px; width: 100%;" justify="space-between" align="center" :wrap="false">
                             <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
                             <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取播报</n-button>
                           </n-space>
