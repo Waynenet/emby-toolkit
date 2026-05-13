@@ -25,12 +25,11 @@
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">账户详情</span></template>
           
-          <!-- 用户信息同行显示 -->
-          <div class="account-info-horizontal">
-            <!-- 修复：完美的正圆头像包裹层，移除多余 tooltip -->
-            <div class="profile-header">
+          <!-- 用户信息垂直居中显示 -->
+          <div class="account-info-vertical">
+            <!-- 头部同行显示区：头像、名字、状态 -->
+            <div class="profile-header-inline">
               <div class="avatar-wrapper" @click="triggerFileUpload">
-                <!-- 加上 round 属性 -->
                 <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
                   <span v-if="!avatarUrl">{{ authStore.username ? authStore.username.charAt(0).toUpperCase() : 'U' }}</span>
                 </n-avatar>
@@ -39,8 +38,8 @@
                 <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
               </div>
 
-              <!-- 修复：让名字和标签整体居中 -->
-              <div class="profile-text">
+              <!-- 名字和标签同行 -->
+              <div class="profile-text-inline">
                 <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
                 <n-tag :type="statusType" size="small" round :bordered="false">{{ statusText }}</n-tag>
               </div>
@@ -74,27 +73,12 @@
               </div>
             </div>
           </div>
-
-          <n-divider style="margin: 16px 0; opacity: 0.2;" />
           
-          <!-- Telegram 绑定区域 -->
-          <div class="action-form">
-            <!-- 管理员视图 -->
-            <template v-if="authStore.isAdmin">
-              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
-              <n-input-group>
-                <n-input v-model:value="telegramChatId" placeholder="用于接收通知的 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
-                <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
-              </n-input-group>
-              <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
-                点此找机器人发送 /start
-              </n-button>
-            </template>
-
-            <!-- 普通用户视图 -->
-            <template v-else>
+          <!-- Telegram 绑定区域 (仅普通用户显示频道按钮) -->
+          <template v-if="!authStore.isAdmin">
+            <n-divider style="margin: 16px 0; opacity: 0.2;" />
+            <div class="action-form">
               <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">获取最新资讯与帮助</span>
-              <!-- 修复：移除 tag="a"，改用 @click 程序化跳转，防止溢出和点击失效 -->
               <n-button 
                 v-if="globalChannelLink !== '#'"
                 block ghost type="info" 
@@ -104,8 +88,8 @@
                 点击加入频道 / 群组
               </n-button>
               <span v-else style="font-size: 12px; color: rgba(255,255,255,0.3);">管理员尚未配置频道链接</span>
-            </template>
-          </div>
+            </div>
+          </template>
         </n-card>
       </n-gi>
 
@@ -209,7 +193,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
 import { 
-  NCard, NTag, NEmpty, NGrid, NGi, NInputGroup, NInput, NButton, 
+  NCard, NTag, NEmpty, NGrid, NGi, NButton, 
   useMessage, NPagination, NStatistic, NRadioGroup, NRadioButton, 
   NAvatar, NDivider, NSpin, NList, NListItem, NThing, NScrollbar
 } from 'naive-ui';
@@ -218,10 +202,7 @@ const authStore = useAuthStore();
 const loading = ref(true);
 const accountInfo = ref(null);
 const subscriptionHistory = ref([]);
-const telegramChatId = ref('');
-const isSavingChatId = ref(false);
 const message = useMessage();
-const isFetchingBotLink = ref(false);
 
 const playbackData = ref(null);
 const playbackFilter = ref('all');
@@ -350,35 +331,6 @@ const getStatusInfo = (status) => {
 const getStatusType = (status) => getStatusInfo(status).type;
 const getStatusText = (status) => getStatusInfo(status).text;
 
-const saveChatId = async () => {
-  isSavingChatId.value = true;
-  try {
-    const response = await axios.post('/api/portal/telegram-chat-id', { chat_id: telegramChatId.value });
-    message.success(response.data.message || '保存成功！');
-  } catch (error) {
-    message.error(error.response?.data?.message || '保存失败');
-  } finally {
-    isSavingChatId.value = false;
-  }
-};
-
-const openBotChat = async () => {
-  isFetchingBotLink.value = true;
-  try {
-    const response = await axios.get('/api/portal/telegram-bot-info');
-    const botName = response.data.bot_username;
-    if (botName) {
-      window.open(`https://t.me/${botName}`, '_blank');
-    } else {
-      message.error(response.data.error || '未能获取到机器人信息', { duration: 8000 });
-    }
-  } catch (error) {
-    message.error('请求机器人信息失败');
-  } finally {
-    isFetchingBotLink.value = false;
-  }
-};
-
 const fetchStats = async () => {
   try {
     const res = await axios.get('/api/portal/subscription-stats');
@@ -422,7 +374,6 @@ onMounted(async () => {
   try {
     const [accountResponse] = await Promise.all([ axios.get('/api/portal/account-info') ]);
     accountInfo.value = accountResponse.data;
-    if (accountInfo.value) telegramChatId.value = accountInfo.value.telegram_chat_id || '';
     fetchStats();
     await fetchSubscriptionHistory();
   } catch (error) {
@@ -447,14 +398,14 @@ onMounted(async () => {
 .stat-module :deep(.n-statistic__label) { color: rgba(255, 255, 255, 0.7) !important; }
 .stat-module :deep(.n-statistic-value__content) { color: var(--n-value-text-color, #ffffff) !important; font-size: 28px; font-weight: bold; }
 
-.account-info-horizontal { display: flex; align-items: flex-start; gap: 24px; }
-.profile-header { display: flex; flex-direction: column; align-items: center; gap: 12px; flex-shrink: 0; margin-top: 10px; }
+/* 垂直排布样式 */
+.account-info-vertical { display: flex; flex-direction: column; align-items: center; gap: 24px; }
+.profile-header-inline { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 20px; margin-top: 10px; width: 100%; }
 
-/* 用户名和标签居中对齐 */
-.profile-text { display: flex; flex-direction: column; align-items: center; }
-.profile-name { font-size: 16px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; }
+/* 用户名和标签同行显示 */
+.profile-text-inline { display: flex; flex-direction: row; align-items: center; gap: 12px; }
+.profile-name { font-size: 20px; font-weight: bold; color: #fff; margin: 0; }
 
-/* 修复：给外层包裹强制设定正方形宽高，确保头像为正圆 */
 .avatar-wrapper { 
   width: 64px; 
   height: 64px; 
@@ -463,7 +414,7 @@ onMounted(async () => {
   border-radius: 50%; 
   overflow: hidden; 
   transition: transform 0.2s; 
-  flex-shrink: 0; /* 防止被 flex 挤压变形 */
+  flex-shrink: 0; 
 }
 .avatar-wrapper:hover { transform: scale(1.05); }
 .avatar-overlay {
@@ -476,7 +427,7 @@ onMounted(async () => {
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
 
 .info-grid { 
-  flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; 
+  width: 100%; box-sizing: border-box; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; 
   align-items: start; background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px;
 }
 .info-row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
@@ -520,7 +471,8 @@ onMounted(async () => {
   .greeting-title { font-size: 22px; }
   .mobile-break { display: block; }
   
-  .account-info-horizontal { flex-direction: column; align-items: center; gap: 16px; }
+  .account-info-vertical { gap: 16px; }
+  .profile-header-inline { gap: 16px; }
   
   .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
   .info-row { flex-direction: row; justify-content: space-between; align-items: center; }

@@ -430,7 +430,7 @@
                       </n-grid>
                     </n-card>
 
-                    <!-- 卡片 B: Telegram 设置 -->
+                    <!-- 在 卡片 B: Telegram 设置 中找到如下代码并进行替换/追加 -->
                     <n-card :bordered="false" class="dashboard-card">
                       <template #header><span class="card-title">Telegram 设置</span></template>
                       <template #header-extra>
@@ -444,7 +444,7 @@
                           <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
                           <template #feedback>
                             <n-text style="font-size:0.8em;">
-                              公开频道名（@your_channel_name），或专属邀请链接（https://t.me/+Abcdefg）也可
+                              -100开头ID、公开频道名（@your_channel_name）或专属邀请链接
                             </n-text>
                           </template>
                         </n-form-item-grid-item>
@@ -459,6 +459,21 @@
                             <n-text style="font-size:0.8em;">
                               入库通知无限制，播放只通知机器人
                             </n-text>
+                          </template>
+                        </n-form-item-grid-item>
+                        
+                        <!-- ★ 新增: 管理员个人 Chat ID 绑定区 -->
+                        <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">管理员私人通知</n-divider></n-gi>
+                        <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
+                          <n-input-group>
+                            <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
+                            <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
+                          </n-input-group>
+                          <template #feedback>
+                            <n-space style="margin-top: 4px; width: 100%;" justify="space-between" align="center" :wrap="false">
+                              <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
+                              <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取</n-button>
+                            </n-space>
                           </template>
                         </n-form-item-grid-item>
                       </n-grid>
@@ -1055,6 +1070,48 @@ const fetchEmbyUsersList = async () => {
   }
 };
 
+const personalChatId = ref('');
+const isSavingChatId = ref(false);
+const isFetchingBotLink = ref(false);
+
+const fetchPersonalChatId = async () => {
+  try {
+    const res = await axios.get('/api/portal/account-info');
+    personalChatId.value = res.data?.telegram_chat_id || '';
+  } catch (e) {
+    console.error('获取个人 Chat ID 失败', e);
+  }
+};
+
+const saveChatId = async () => {
+  isSavingChatId.value = true;
+  try {
+    const response = await axios.post('/api/portal/telegram-chat-id', { chat_id: personalChatId.value });
+    message.success(response.data.message || '私人 Chat ID 保存成功！');
+  } catch (error) {
+    message.error(error.response?.data?.message || '保存失败');
+  } finally {
+    isSavingChatId.value = false;
+  }
+};
+
+const openBotChat = async () => {
+  isFetchingBotLink.value = true;
+  try {
+    const response = await axios.get('/api/portal/telegram-bot-info');
+    const botName = response.data.bot_username;
+    if (botName) {
+      window.open(`https://t.me/${botName}`, '_blank');
+    } else {
+      message.error(response.data.error || '未能获取到机器人信息', { duration: 8000 });
+    }
+  } catch (error) {
+    message.error('请求机器人信息失败');
+  } finally {
+    isFetchingBotLink.value = false;
+  }
+};
+
 const aiProviderOptions = ref([
   { label: 'OpenAI (及兼容服务)', value: 'openai' },
   { label: '智谱AI (ZhipuAI)', value: 'zhipuai' },
@@ -1429,6 +1486,7 @@ const handleCorrectSequences = async () => {
 
 onMounted(async () => {
   componentIsMounted.value = true;
+  fetchPersonalChatId(); // ★ 新增初始化拉取调用
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
