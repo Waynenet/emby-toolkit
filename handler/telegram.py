@@ -495,18 +495,16 @@ def send_playback_notification(data: dict):
         )
         
         # --- 收集发送目标 ---
-        global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
+        # 遵照需求：播放通知仅发送给管理员，不再发送给公共频道/群组
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
 
         targets = set()
-        if global_channel_id:
-            targets.add(str(global_channel_id))
         for aid in admin_ids:
             if aid:
                 targets.add(str(aid))
 
         if not targets:
-            logger.debug("  ➜ [播放通知] 未配置接收人 (频道或管理员均为空)，跳过发送。")
+            logger.debug("  ➜ [播放通知] 未配置管理员接收人，跳过发送。")
             return
 
         for target in targets:
