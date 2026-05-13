@@ -208,12 +208,28 @@ watch(() => authStore.isLoggedIn, (isLoggedIn) => {
 const userOptions = computed(() => [{ label: '退出登录', key: 'logout', icon: renderIcon(LogoutIcon) }]);
 const handleUserSelect = async (key) => { if (key === 'logout') { await authStore.logout(); router.push({ name: 'Login' }); } };
 
+// ===== 修改后的菜单栏顺序 =====
 const menuOptions = computed(() => {
   const discoveryGroup = { label: '发现', key: 'group-discovery', icon: renderIcon(CompassOutline), children: [] };
-  if (authStore.isAdmin) discoveryGroup.children.push({ label: '数据看板', key: 'DatabaseStats', icon: renderIcon(StatsIcon) });
+  
   if (authStore.isLoggedIn) {
-    discoveryGroup.children.push({ label: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon) }, { label: '影视探索', key: 'Discover', icon: renderIcon(DiscoverIcon) });
-    if (authStore.isAdmin) discoveryGroup.children.push({ label: '播放统计', key: 'EmbyStats', icon: renderIcon(EmbyStatsIcon) });
+    // 1. 最先推入“用户中心”，让它排第一
+    discoveryGroup.children.push({ label: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon) });
+  }
+
+  // 2. 然后推入“数据看板”（仅管理员）
+  if (authStore.isAdmin) {
+    discoveryGroup.children.push({ label: '数据看板', key: 'DatabaseStats', icon: renderIcon(StatsIcon) });
+  }
+
+  // 3. 然后推入“影视探索”
+  if (authStore.isLoggedIn) {
+    discoveryGroup.children.push({ label: '影视探索', key: 'Discover', icon: renderIcon(DiscoverIcon) });
+  }
+
+  // 4. 然后推入“播放统计”（仅管理员）
+  if (authStore.isAdmin) {
+    discoveryGroup.children.push({ label: '播放统计', key: 'EmbyStats', icon: renderIcon(EmbyStatsIcon) });
   }
 
   const finalMenu = [discoveryGroup];
@@ -247,6 +263,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 </script>
 
 <style>
+/* CSS 保持不变 */
 .app-main-layout {
   height: 100vh;
   background: transparent !important;
@@ -467,15 +484,12 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   font-weight: 600;
 }
 
-/* ==============================================
-   全局悬浮任务胶囊 (绝对基于屏幕视口)
-   ============================================== */
 .global-floating-task-pill {
-  position: fixed;            /* 固定定位，不会随页面滚动而消失 */
-  top: 24px;                  /* 紧贴屏幕上方 */
-  left: 50%;                  /* 严格依据全屏幕宽度居中 */
-  transform: translateX(-50%);/* 回退自身一半宽度实现绝对居中 */
-  z-index: 9999;              /* 最高层级，保证盖在任何元素之上 */
+  position: fixed;            
+  top: 24px;                  
+  left: 50%;                  
+  transform: translateX(-50%);
+  z-index: 9999;              
   display: flex; 
   align-items: center;
   background: var(--glass-bg); 
@@ -484,7 +498,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border: 1px solid var(--glass-border); 
   border-radius: 30px; 
   padding: 6px 16px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3); /* 增加悬浮阴影 */
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3); 
   max-width: 400px; 
   color: var(--text-primary);
 }
@@ -494,13 +508,11 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .pill-msg { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
 .pill-stop-btn { margin-left: 4px; }
 
-/* 专门定制的一个从顶部平滑下落的过渡动画 */
 .fade-down-enter-active, .fade-down-leave-active { 
   transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); 
 }
 .fade-down-enter-from, .fade-down-leave-to { 
   opacity: 0; 
-  /* 注意这里必须携带 translateX(-50%)，否则动画时会失去居中状态 */
   transform: translate(-50%, -20px); 
 }
 

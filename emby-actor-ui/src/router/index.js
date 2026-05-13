@@ -16,7 +16,7 @@ import RegisterPage from '../components/RegisterPage.vue';
 import CoverGeneratorConfig from '../components/CoverGeneratorConfig.vue';
 import UserManagementPage from '../components/UserManagementPage.vue';
 import DiscoverPage from '../components/DiscoverPage.vue';
-import UserCenterPage from '../components/UserCenterPage.vue'
+import UserCenterPage from '../components/UserCenterPage.vue';
 import SetupPage from '../components/Setup.vue';
 import EmbyStatsPage from '../components/EmbyStatsPage.vue';
 
@@ -52,7 +52,8 @@ const routes = [
   },
   {
     path: '/',
-    redirect: '/DatabaseStats' 
+    // ★ 这里是关键修改：把原来的 DatabaseStats 改成了 user-center
+    redirect: '/user-center' 
   },
   // --- 下面所有后台页面的路由，保持原样，不需要加 public 标签 ---
   {
@@ -204,7 +205,7 @@ router.beforeEach(async (to, from, next) => {
     // ★★★ 核心逻辑：捕获 SETUP_REQUIRED 错误 ★★★
     // 这个错误是由 auth.js 中的 checkAuthStatus 抛出的
     if (error.message === 'SETUP_REQUIRED') {
-      // 如果目标已经是 Setup 页面，就不要再跳了，防止死循环（虽然上面 meta.public 已经挡了一层，但双重保险）
+      // 如果目标已经是 Setup 页面，就不要再跳了，防止死循环
       if (to.name === 'Setup') {
         next();
       } else {
