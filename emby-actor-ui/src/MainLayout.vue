@@ -3,6 +3,22 @@
   <n-layout has-sider class="app-main-layout">
     <div v-if="isMobile && !collapsed" class="mobile-sider-mask" @click="collapsed = true"></div>
 
+    <!-- 全局悬浮任务状态胶囊 (固定在屏幕正上方，不受滚动和侧边栏影响) -->
+    <transition name="fade-down">
+      <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="global-floating-task-pill">
+        <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
+        <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
+        <div class="pill-text-area">
+          <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
+          <span class="pill-divider">-</span>
+          <span class="pill-msg">{{ props.taskStatus.message }}</span>
+        </div>
+        <n-button v-if="props.taskStatus.is_running" type="error" size="tiny" circle secondary @click="triggerStopTask" class="pill-stop-btn">
+          <template #icon><n-icon :component="StopIcon" /></template>
+        </n-button>
+      </div>
+    </transition>
+
     <!-- 侧边栏 (玻璃拟态) -->
     <n-layout-sider
       :bordered="false"
@@ -48,27 +64,11 @@
       
       <!-- 顶部模块化操作栏 -->
       <div class="top-header-bar">
-        <!-- 左侧：移动端菜单按钮 & 任务状态胶囊 -->
+        <!-- 左侧：移动端菜单按钮 -->
         <div class="header-left">
           <div v-if="isMobile" class="header-module icon-module" @click="collapsed = !collapsed">
             <n-icon :component="MenuOutline" size="20" />
           </div>
-
-          <!-- 任务状态胶囊 (移入左上角操作栏，完美对齐) -->
-          <transition name="fade">
-            <div v-if="!isMobile && authStore.isAdmin && props.taskStatus && props.taskStatus.current_action !== '空闲' && props.taskStatus.current_action !== '无'" class="header-task-pill">
-              <n-spin v-if="props.taskStatus.is_running" size="small" class="pill-icon" />
-              <n-icon v-else :component="SchedulerIcon" class="pill-icon" style="opacity: 0.6;" />
-              <div class="pill-text-area">
-                <strong :style="{ color: props.taskStatus.is_running ? 'var(--n-primary-color)' : 'inherit' }">{{ props.taskStatus.current_action }}</strong>
-                <span class="pill-divider">-</span>
-                <span class="pill-msg">{{ props.taskStatus.message }}</span>
-              </div>
-              <n-button v-if="props.taskStatus.is_running" type="error" size="tiny" circle secondary @click="triggerStopTask" class="pill-stop-btn">
-                <template #icon><n-icon :component="StopIcon" /></template>
-              </n-button>
-            </div>
-          </transition>
         </div>
 
         <!-- 右侧：操作模块 -->
@@ -468,20 +468,23 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 }
 
 /* ==============================================
-   将任务胶囊放入 header 中，作为标准流元素并适配高度
+   全局悬浮任务胶囊 (绝对基于屏幕视口)
    ============================================== */
-.header-task-pill {
+.global-floating-task-pill {
+  position: fixed;            /* 固定定位，不会随页面滚动而消失 */
+  top: 24px;                  /* 紧贴屏幕上方 */
+  left: 50%;                  /* 严格依据全屏幕宽度居中 */
+  transform: translateX(-50%);/* 回退自身一半宽度实现绝对居中 */
+  z-index: 9999;              /* 最高层级，保证盖在任何元素之上 */
   display: flex; 
   align-items: center;
   background: var(--glass-bg); 
   backdrop-filter: var(--glass-blur); 
   -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border); 
-  border-radius: 18px; /* 胶囊圆角 */
-  padding: 0 14px;
-  height: 36px; /* 强制与右侧 header-module 高度 100% 一致 */
-  box-sizing: border-box;
-  box-shadow: var(--glass-shadow); 
+  border-radius: 30px; 
+  padding: 6px 16px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3); /* 增加悬浮阴影 */
   max-width: 400px; 
   color: var(--text-primary);
 }
@@ -491,9 +494,15 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .pill-msg { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
 .pill-stop-btn { margin-left: 4px; }
 
-/* 调整淡入淡出动画，让它横向展开更自然 */
-.fade-enter-active, .fade-leave-active { transition: opacity 0.3s, transform 0.3s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; transform: translateX(-10px); }
+/* 专门定制的一个从顶部平滑下落的过渡动画 */
+.fade-down-enter-active, .fade-down-leave-active { 
+  transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); 
+}
+.fade-down-enter-from, .fade-down-leave-to { 
+  opacity: 0; 
+  /* 注意这里必须携带 translateX(-50%)，否则动画时会失去居中状态 */
+  transform: translate(-50%, -20px); 
+}
 
 @media (max-width: 768px) {
   .app-main-layout { padding: 0; }
