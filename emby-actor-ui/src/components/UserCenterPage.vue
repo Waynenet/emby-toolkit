@@ -49,20 +49,32 @@
               </div>
             </div>
             
-            <!-- 等级与权限信息 -->
+            <!-- 等级与权限信息 (已补全所有丢失项，采用紧凑网格布局) -->
             <div class="info-grid">
               <div class="info-row">
                 <span class="info-label">账户等级</span>
                 <span class="info-value">{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span>
               </div>
-              <!-- 恢复原作者的注册时间展示 -->
               <div class="info-row">
-                <span class="info-label">注册时间</span>
-                <span class="info-value" style="font-size: 12px;">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
+                <span class="info-label">订阅权限</span>
+                <span class="info-value" :class="{'text-success': authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions, 'text-warning': !authStore.isAdmin && !accountInfo?.allow_unrestricted_subscriptions}">
+                  {{ authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions ? '免审核订阅' : '需审核订阅' }}
+                </span>
               </div>
               <div class="info-row">
                 <span class="info-label">到期时间</span>
-                <span class="info-value" style="font-size: 12px;">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
+                <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">注册时间</span>
+                <span class="info-value">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
+              </div>
+              <!-- 等级说明横跨展示，避免文字过长挤占空间 -->
+              <div class="info-row desc-row">
+                <span class="info-label">等级说明</span>
+                <span class="info-value desc-text">
+                  {{ authStore.isAdmin ? '拥有系统所有管理权限' : (accountInfo?.template_description || '暂无说明') }}
+                </span>
               </div>
             </div>
           </div>
@@ -71,19 +83,20 @@
           
           <!-- Telegram 绑定区域 -->
           <div class="action-form">
-            <!-- 管理员视图 -->
+            <!-- 管理员视图 (遵照你的要求：仅管理员可见配置和绑定) -->
             <template v-if="authStore.isAdmin">
-              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID (管理员专属)</span>
+              <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">Telegram 通知 ID</span>
               <n-input-group>
-                <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
+                <n-input v-model:value="telegramChatId" placeholder="用于接收通知的 Chat ID" size="small" style="background: rgba(255,255,255,0.05);" />
                 <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId" size="small">保存</n-button>
               </n-input-group>
+              <!-- 恢复原作者的 /start 文案提示 -->
               <n-button block ghost type="primary" style="margin-top: 12px; background: rgba(255,255,255,0.05);" @click="openBotChat">
-                绑定 Telegram 机器人
+                点此找机器人发送 /start
               </n-button>
             </template>
 
-            <!-- 恢复原作者的普通用户频道逻辑 (使用 globalChannelLink) -->
+            <!-- 普通用户视图 (遵照你的要求：仅显示频道链接) -->
             <template v-else>
               <span style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px; display: block;">获取最新资讯与帮助</span>
               <n-button 
@@ -92,7 +105,7 @@
                 tag="a" :href="globalChannelLink" target="_blank"
                 style="background: rgba(255,255,255,0.05);"
               >
-                关注 Telegram 频道
+                点击加入频道 / 群组
               </n-button>
               <span v-else style="font-size: 12px; color: rgba(255,255,255,0.3);">管理员尚未配置频道链接</span>
             </template>
@@ -220,7 +233,6 @@ const isSavingChatId = ref(false);
 const message = useMessage();
 const isFetchingBotLink = ref(false);
 
-// 恢复原作者的播放记录逻辑变量
 const playbackData = ref(null);
 const playbackFilter = ref('all');
 const playbackLoading = ref(false);
@@ -232,7 +244,6 @@ const stats = ref({ total: 0, completed: 0, processing: 0, pending: 0, failed: 0
 const filterStatus = ref('all');
 const fileInput = ref(null);
 
-// 恢复原作者的标签字典
 const ITEM_TYPE_MAP = {
   Movie: '电影',
   Episode: '剧集',
@@ -258,7 +269,6 @@ const avatarUrl = computed(() => {
   return null;
 });
 
-// 恢复原作者的 Telegram 频道动态链接计算属性
 const globalChannelLink = computed(() => {
   if (!accountInfo.value || !accountInfo.value.telegram_channel_id) return '#';
   const channelId = accountInfo.value.telegram_channel_id.trim();
@@ -375,7 +385,6 @@ const fetchSubscriptionHistory = async (page = 1) => {
   }
 };
 
-// 恢复原作者的播放统计抓取和筛选逻辑
 const fetchPlaybackStats = async () => {
   playbackLoading.value = true;
   try {
@@ -426,8 +435,8 @@ onMounted(async () => {
 .stat-module :deep(.n-statistic-value__content) { color: var(--n-value-text-color, #ffffff) !important; font-size: 28px; font-weight: bold; }
 
 /* 账户信息同行显示布局 */
-.account-info-horizontal { display: flex; align-items: center; gap: 24px; }
-.profile-header { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+.account-info-horizontal { display: flex; align-items: flex-start; gap: 24px; }
+.profile-header { display: flex; flex-direction: column; align-items: center; gap: 12px; flex-shrink: 0; margin-top: 10px; }
 
 /* 恢复原作者的头像悬浮遮罩 CSS */
 .avatar-wrapper { position: relative; cursor: pointer; border-radius: 50%; overflow: hidden; transition: transform 0.2s; }
@@ -441,13 +450,28 @@ onMounted(async () => {
 }
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
 
-.profile-name { font-size: 18px; font-weight: bold; color: #fff; margin-bottom: 4px; }
+.profile-name { font-size: 16px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; }
 
-/* 账户等级信息网格 */
-.info-grid { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: center; }
-.info-row { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+/* ★★★ 重新设计的等级权限信息网格 (兼容文字多的情况) ★★★ */
+.info-grid { 
+  flex: 1; 
+  display: grid; 
+  grid-template-columns: repeat(2, 1fr); /* 默认排成两列 */
+  gap: 16px; 
+  align-items: start; 
+  background: rgba(255,255,255,0.02);
+  padding: 16px;
+  border-radius: 8px;
+}
+.info-row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* 说明文本独占一行 (跨越两列) */
+.desc-row { grid-column: span 2; margin-top: 4px; }
 .info-label { color: rgba(255,255,255,0.5); font-size: 12px; }
-.info-value { color: #fff; font-weight: 500; font-size: 14px; }
+.info-value { color: #fff; font-weight: 500; font-size: 13px; }
+.desc-text { color: rgba(255,255,255,0.7); font-size: 12px; line-height: 1.4; }
+/* 动态文字颜色 */
+.text-success { color: #63e2b7 !important; }
+.text-warning { color: #f2c97d !important; }
 
 /* 重写 List 组件底色，匹配深色模块化主题 */
 .transparent-list { background: transparent !important; }
@@ -479,15 +503,18 @@ onMounted(async () => {
 .item-meta { text-align: right; flex-shrink: 0; margin-left: 16px; }
 .item-time { font-size: 12px; color: rgba(255,255,255,0.4); }
 
-/* 手机端适配 (保留你新写的纯 CSS 响应式布局，抛弃了原来繁琐的 js 判断) */
+/* 手机端适配 (保留纯 CSS 响应式布局) */
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
   .mobile-break { display: block; }
   
-  .account-info-horizontal { flex-direction: column; align-items: flex-start; gap: 16px; }
+  .account-info-horizontal { flex-direction: column; align-items: center; gap: 16px; }
+  
+  /* 手机端等级信息恢复为上下排列，但内部左右对齐展示 */
   .info-grid { grid-template-columns: 1fr; width: 100%; box-sizing: border-box; gap: 12px; }
   .info-row { flex-direction: row; justify-content: space-between; align-items: center; }
+  .desc-row { grid-column: span 1; flex-direction: column; align-items: flex-start; }
   
   .custom-list-item { padding: 12px; }
   .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
