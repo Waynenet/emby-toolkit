@@ -349,34 +349,31 @@
                     </n-form-item>
 
                     <!-- 方式一：网页登录授权 -->
-                    <n-form-item label="登录授权" v-if="configModel.p115_auth_method === 'web' || !configModel.p115_auth_method">
+                    <n-form-item label="OpenAPI" v-if="configModel.p115_auth_method === 'web' || !configModel.p115_auth_method">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
                           <n-tag :type="p115Info?.has_token ? 'success' : 'default'" size="small">
                             <template #icon>
                               <n-icon :component="p115Info?.has_token ? CheckIcon : CloseIcon" />
                             </template>
-                            {{ p115Info?.has_token ? '已授权' : '未授权 (请登录)' }}
+                            {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
                           </n-tag>
                           <n-button size="small" type="warning" @click="startWebAuth" :loading="isWebAuthing">
                             {{ p115Info?.has_token ? '重新登录' : '登录授权' }}
                           </n-button>
                         </n-space>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          官方接口。
-                        </n-text>
                       </n-space>
                     </n-form-item>
 
                     <!-- 方式二：自定义 AppID 扫码 -->
-                    <n-form-item label="扫码授权" path="p115_app_id" v-if="configModel.p115_auth_method === 'qrcode'">
+                    <n-form-item label="OpenAPI" path="p115_app_id" v-if="configModel.p115_auth_method === 'qrcode'">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
                           <n-tag :type="p115Info?.has_token ? 'success' : 'default'" size="small">
                             <template #icon>
                               <n-icon :component="p115Info?.has_token ? CheckIcon : CloseIcon" />
                             </template>
-                            {{ p115Info?.has_token ? '已授权' : '未授权 (请扫码)' }}
+                            {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
                           </n-tag>
                           <n-button size="small" type="primary" @click="handleOpenQrcodeModal">
                             {{ p115Info?.has_token ? '重新扫码' : '扫码授权' }}
@@ -397,19 +394,20 @@
                     <n-form-item label="Cookie">
                       <n-space vertical :size="8" style="width: 100%;">
                         <n-space align="center" justify="space-between">
-                          <n-tag :type="p115Info?.has_cookie ? 'success' : 'default'" size="small">
+                          <n-tag
+                            :type="!p115Info?.has_cookie ? 'default' : (p115Info?.cookie_valid === false ? 'error' : 'success')"
+                            size="small"
+                          >
                             <template #icon>
                               <n-icon :component="p115Info?.has_cookie ? CheckIcon : CloseIcon" />
                             </template>
-                            {{ p115Info?.has_cookie ? '已配置' : '未配置' }}
+                            {{ p115Info?.has_cookie ? cookieAppLabel : '未配置' }}
                           </n-tag>
+
                           <n-button size="small" type="primary" @click="openCookieModal">
                             {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
                           </n-button>
                         </n-space>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          传统接口。
-                        </n-text>
                       </n-space>
                     </n-form-item>
 
@@ -2566,12 +2564,10 @@ const showCookieModal = ref(false);
 const tempCookieInput = ref('');
 const cookieAppType = ref('alipaymini');
 const cookieAppOptions = [
-  { label: '115生活(支付宝小程序)', value: 'alipaymini' },
+  { label: '支付宝小程序', value: 'alipaymini' },
   { label: '网页版', value: 'web' },
-  { label: '115生活(微信小程序)', value: 'wechatmini' },
-  { label: '115生活(Android端)', value: 'android' },
-  { label: '115生活(iOS端)', value: 'ios' },
-  { label: '115网盘(Android电视端)', value: 'tv' }
+  { label: '微信小程序', value: 'wechatmini' },
+  { label: '安卓电视端', value: 'tv' }
 ];
 
 const cookieQrcodeUrl = ref('');
@@ -2651,7 +2647,10 @@ const saveManualCookie = async () => {
     return;
   }
   try {
-    const res = await axios.post('/api/p115/cookie', { cookie: tempCookieInput.value.trim() });
+    const res = await axios.post('/api/p115/cookie', {
+      cookie: tempCookieInput.value,
+      app_type: cookieAppType.value
+    });
     if (res.data.success) {
       message.success('手动 Cookie 保存成功');
       showCookieModal.value = false;
@@ -2661,6 +2660,17 @@ const saveManualCookie = async () => {
     message.error('保存失败: ' + (e.response?.data?.message || e.message));
   }
 };
+
+const openApiAuthLabel = computed(() => {
+  if (configModel.value?.p115_auth_method === 'qrcode') {
+    return '自定义 AppID';
+  }
+  return '网页登录授权';
+});
+
+const cookieAppLabel = computed(() => {
+  return p115Info.value?.cookie_app_label || '未配置';
+});
 
 // --- 本地目录浏览器状态 ---
 const showLocalFolderModal = ref(false)
