@@ -356,8 +356,44 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
             if episode_idx < 2 and app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST, True):
                 logger.debug(f"  ➜ [豆瓣同步] 已开启跳过第1集，跳过: {target_name} S{season_idx}E{episode_idx}")
                 return
-            # 看完某集不代表看完该剧，所以单集同步一律作为“在看 (do)”处理
+            
+            # 默认状态为在看
             status = "do"
+            
+            # ★★★ 智能大结局判断 (深度联动智能追剧数据库) ★★★
+            if is_played and tmdb_id:
+                try:
+                    real_total_eps = None
+                    
+                    # 1. 优先尝试从智能追剧的“分季锁定配置”中获取最准确的集数 (防 TMDb 乱改)
+                    lock_map = watchlist_db.get_series_seasons_lock_info(str(tmdb_id))
+                    if lock_map and season_idx in lock_map:
+                        real_total_eps = lock_map[season_idx].get('count')
+                    
+                    # 2. 如果没获取到锁定信息，回退查本地媒体库的 Season 记录 (获取 TMDb 官方总集数)
+                    if not real_total_eps:
+                        with get_db_connection() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT total_episodes FROM media_metadata WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Season'", 
+                                    (str(tmdb_id), season_idx)
+                                )
+                                row = cursor.fetchone()
+                                if row and row['total_episodes']:
+                                    real_total_eps = int(row['total_episodes'])
+                    
+                    # 3. 核心判定：只和真正的官方总集数对比，无视 Emby 本地下载了多少集
+                    if real_total_eps and real_total_eps > 0:
+                        if episode_idx >= real_total_eps:
+                            logger.info(f"  ➜ [豆瓣同步] 恭喜！通过智能追剧数据库确认《{target_name}》季终 (S{season_idx}E{episode_idx}/{real_total_eps})，将向豆瓣同步 '看过' 状态。")
+                            status = "collect"
+                        else:
+                            logger.debug(f"  ➜ [豆瓣同步] 《{target_name}》S{season_idx} 尚未完结 (当前 E{episode_idx} / 官方总集数 {real_total_eps})，保持 '在看' 状态。")
+                    else:
+                        logger.debug(f"  ➜ [豆瓣同步] 无法从数据库获取《{target_name}》S{season_idx} 的官方总集数，为安全起见，保持 '在看' 状态。")
+
+                except Exception as e:
+                    logger.warning(f"  ➜ [豆瓣同步] 联动追剧数据库判断大结局时发生错误，退回在看状态: {e}")
             
         elif item_type == "Movie":
             mtype = 'movie'
