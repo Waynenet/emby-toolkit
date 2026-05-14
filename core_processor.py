@@ -2117,12 +2117,11 @@ class MediaProcessor:
         final_cast_map = {str(actor['id']): actor for actor in current_cast_list if actor.get('id') and str(actor.get('id')) != 'None'}
 
         # ======================================================================
-        # 步骤 3: 补充缺失的豆瓣演员 (查库补全)
+        # 步骤 3: 补充缺失的豆瓣演员 (查库补全) - [优化版: 限制新增，不限制更新]
         # ======================================================================
         if not unmatched_douban_actors:
             logger.info("  ➜ 豆瓣API未返回演员或所有演员已匹配，跳过补充演员流程。")
         else:
-            logger.info(f"  ➜ 发现 {len(unmatched_douban_actors)} 位潜在的豆瓣补充演员，开始执行匹配与筛选...")
             limit = self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
             try:
                 limit = int(limit)
@@ -2130,25 +2129,34 @@ class MediaProcessor:
             except (ValueError, TypeError):
                 limit = 30
 
-            current_actor_count = len(final_cast_map)
-            if current_actor_count >= limit:
-                logger.info(f"  ➜ 当前演员数 ({current_actor_count}) 已达上限 ({limit})，将跳过所有豆瓣补充演员的流程。")
-                still_unmatched_final = unmatched_douban_actors
-            else:
-                logger.info(f"  ➜ 匹配阶段 2: 用豆瓣ID查'演员映射表' ({len(unmatched_douban_actors)} 位演员)")
-                still_unmatched = []
-                for d_actor in unmatched_douban_actors:
-                    if self.is_stop_requested(): raise InterruptedError("任务中止")
-                    d_douban_id = d_actor.get("DoubanCelebrityId")
-                    match_found = False
-                    if d_douban_id:
-                        entry = self.actor_db_manager.find_person_by_any_id(cursor, douban_id=d_douban_id)
-                        if entry and entry.get("tmdb_person_id"):
-                            tmdb_id_from_map = str(entry.get("tmdb_person_id"))
-                            valid_d_role = _extract_douban_role(d_actor)
+            logger.info(f"  ➜ 匹配阶段 2: 用豆瓣ID查'演员映射表' ({len(unmatched_douban_actors)} 位演员)")
+            still_unmatched = []
+            
+            # 无论是否超限，都执行查库匹配，用于“更新/洗白”现有的英文名演员
+            for d_actor in unmatched_douban_actors:
+                if self.is_stop_requested(): raise InterruptedError("任务中止")
+                d_douban_id = d_actor.get("DoubanCelebrityId")
+                match_found = False
+                
+                if d_douban_id:
+                    entry = self.actor_db_manager.find_person_by_any_id(cursor, douban_id=d_douban_id)
+                    if entry and entry.get("tmdb_person_id"):
+                        tmdb_id_from_map = str(entry.get("tmdb_person_id"))
+                        valid_d_role = _extract_douban_role(d_actor)
 
-                            if tmdb_id_from_map not in final_cast_map:
-                                logger.info(f"    ├─ 匹配成功 (通过 豆瓣ID映射): 豆瓣演员 '{d_actor.get('Name')}' -> 加入最终演员表")
+                        if tmdb_id_from_map in final_cast_map:
+                            # 【优化】如果演员已存在，无视 limit 限制，强制更新中文名和角色
+                            existing_actor = final_cast_map[tmdb_id_from_map]
+                            if utils.contains_chinese(d_actor.get("Name", "")):
+                                existing_actor["name"] = d_actor.get("Name")
+                            if valid_d_role:
+                                existing_actor["character"] = valid_d_role
+                            match_found = True
+                            logger.debug(f"    ├─ 匹配成功 (查库更新): '{existing_actor['name']}' 的信息已补全")
+                        else:
+                            # 【优化】如果是新演员，才判断是否超限
+                            if len(final_cast_map) < limit:
+                                logger.info(f"    ├─ 匹配成功 (查库新增): 豆瓣演员 '{d_actor.get('Name')}' -> 加入最终演员表")
                                 cached_metadata_map = self.actor_db_manager.get_full_actor_details_by_tmdb_ids(cursor, [int(tmdb_id_from_map)])
                                 cached_metadata = cached_metadata_map.get(int(tmdb_id_from_map), {})
                                 
@@ -2161,96 +2169,76 @@ class MediaProcessor:
                                     "emby_person_id": None
                                 }
                                 final_cast_map[tmdb_id_from_map] = new_actor_entry
+                                match_found = True
                             else:
-                                existing_actor = final_cast_map[tmdb_id_from_map]
-                                if utils.contains_chinese(d_actor.get("Name", "")):
-                                    existing_actor["name"] = d_actor.get("Name")
-                                if valid_d_role:
-                                    existing_actor["character"] = valid_d_role
-                            match_found = True
-                    if not match_found:
-                        still_unmatched.append(d_actor)
-                unmatched_douban_actors = still_unmatched
+                                # 数量超限，拒绝新增，但标记为已处理以跳过后续 API 请求
+                                match_found = True 
+                
+                if not match_found:
+                    still_unmatched.append(d_actor)
+            
+            unmatched_douban_actors = still_unmatched
+            still_unmatched_final = list(unmatched_douban_actors) # 兜底变量
 
-                if self.config.get(constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API, False):
-                    logger.info(f"  ➜ 匹配阶段 3: 用IMDb ID进行最终匹配和新增 ({len(unmatched_douban_actors)} 位演员)")
-                    still_unmatched_final = []
-                    for i, d_actor in enumerate(unmatched_douban_actors):
-                        if self.is_stop_requested(): raise InterruptedError("任务中止")
+            # 阶段 3: 如果还有没匹配上的，且启用了在线 API
+            if unmatched_douban_actors and self.config.get(constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API, False):
+                logger.info(f"  ➜ 匹配阶段 3: 用IMDb ID进行最终在线匹配 ({len(unmatched_douban_actors)} 位演员)")
+                still_unmatched_final = []
+                
+                for i, d_actor in enumerate(unmatched_douban_actors):
+                    if self.is_stop_requested(): raise InterruptedError("任务中止")
+                    
+                    d_douban_id = d_actor.get("DoubanCelebrityId")
+                    match_found = False
+                    
+                    if d_douban_id and self.douban_api and self.tmdb_api_key:
+                        details = self.douban_api.celebrity_details(d_douban_id)
+                        time_module.sleep(0.3)
+                        d_imdb_id = None
                         
-                        if len(final_cast_map) >= limit:
-                            still_unmatched_final.extend(unmatched_douban_actors[i:])
-                            break
-
-                        d_douban_id = d_actor.get("DoubanCelebrityId")
-                        match_found = False
-                        if d_douban_id and self.douban_api and self.tmdb_api_key:
-                            details = self.douban_api.celebrity_details(d_douban_id)
-                            time_module.sleep(0.3)
-                            d_imdb_id = None
-                            if details and not details.get("error"):
-                                try:
-                                    info_list = details.get("extra", {}).get("info", [])
-                                    if isinstance(info_list, list):
-                                        for item in info_list:
-                                            if isinstance(item, list) and len(item) == 2 and item[0] == 'IMDb编号':
-                                                d_imdb_id = item[1]
-                                                break
-                                except Exception as e_parse:
-                                    logger.warning(f"  ➜ 解析 IMDb ID 失败: {e_parse}")
-                            
-                            if d_imdb_id:
-                                entry_from_map = self.actor_db_manager.find_person_by_any_id(cursor, imdb_id=d_imdb_id)
+                        if details and not details.get("error"):
+                            try:
+                                info_list = details.get("extra", {}).get("info", [])
+                                if isinstance(info_list, list):
+                                    for item in info_list:
+                                        if isinstance(item, list) and len(item) == 2 and item[0] == 'IMDb编号':
+                                            d_imdb_id = item[1]
+                                            break
+                            except Exception as e_parse:
+                                pass
+                        
+                        if d_imdb_id:
+                            person_from_tmdb = tmdb.find_person_by_external_id(
+                                external_id=d_imdb_id, api_key=self.tmdb_api_key, source="imdb_id"
+                            )
+                            if person_from_tmdb and person_from_tmdb.get("id"):
+                                tmdb_id_from_find = str(person_from_tmdb.get("id"))
                                 valid_d_role = _extract_douban_role(d_actor)
 
-                                if entry_from_map and entry_from_map.get("tmdb_person_id"):
-                                    tmdb_id_from_map = str(entry_from_map.get("tmdb_person_id"))
-                                    if tmdb_id_from_map not in final_cast_map:
+                                if tmdb_id_from_find in final_cast_map:
+                                    # 【优化】如果演员已存在，无视 limit 限制，强制更新中文名和角色
+                                    existing_actor = final_cast_map[tmdb_id_from_find]
+                                    if utils.contains_chinese(d_actor.get("Name", "")):
+                                        existing_actor["name"] = d_actor.get("Name")
+                                    if valid_d_role:
+                                        existing_actor["character"] = valid_d_role
+                                    match_found = True
+                                else:
+                                    # 【优化】如果是新演员，才判断是否超限
+                                    if len(final_cast_map) < limit:
                                         new_actor_entry = {
-                                            "id": tmdb_id_from_map, "name": d_actor.get("Name"),
+                                            "id": tmdb_id_from_find, "name": d_actor.get("Name"),
                                             "character": valid_d_role if valid_d_role else "演员", 
                                             "order": 999, "imdb_id": d_imdb_id,
                                             "douban_id": d_douban_id, "emby_person_id": None
                                         }
-                                        final_cast_map[tmdb_id_from_map] = new_actor_entry
+                                        final_cast_map[tmdb_id_from_find] = new_actor_entry
+                                        match_found = True
                                     else:
-                                        existing_actor = final_cast_map[tmdb_id_from_map]
-                                        if utils.contains_chinese(d_actor.get("Name", "")):
-                                            existing_actor["name"] = d_actor.get("Name")
-                                        if valid_d_role:
-                                            existing_actor["character"] = valid_d_role
-                                    match_found = True
-                                
-                                if not match_found:
-                                    person_from_tmdb = tmdb.find_person_by_external_id(
-                                        external_id=d_imdb_id, api_key=self.tmdb_api_key, source="imdb_id"
-                                    )
-                                    if person_from_tmdb and person_from_tmdb.get("id"):
-                                        tmdb_id_from_find = str(person_from_tmdb.get("id"))
-                                        d_actor['tmdb_id_from_api'] = tmdb_id_from_find
-                                        d_actor['imdb_id_from_api'] = d_imdb_id
-
-                                        final_check_row = self.actor_db_manager.find_person_by_any_id(cursor, tmdb_id=tmdb_id_from_find)
-                                        if final_check_row:
-                                            if tmdb_id_from_find not in final_cast_map:
-                                                new_actor_entry = {
-                                                    "id": tmdb_id_from_find, "name": d_actor.get("Name"),
-                                                    "character": valid_d_role if valid_d_role else "演员", 
-                                                    "order": 999,
-                                                    "imdb_id": d_imdb_id, "douban_id": d_douban_id,
-                                                    "emby_person_id": None
-                                                }
-                                                final_cast_map[tmdb_id_from_find] = new_actor_entry
-                                            else:
-                                                existing_actor = final_cast_map[tmdb_id_from_find]
-                                                if utils.contains_chinese(d_actor.get("Name", "")):
-                                                    existing_actor["name"] = d_actor.get("Name")
-                                                if valid_d_role:
-                                                    existing_actor["character"] = valid_d_role
-                                            match_found = True
-                        
-                        if not match_found:
-                            still_unmatched_final.append(d_actor)
+                                        match_found = True # 超限不加，跳过
+                    
+                    if not match_found:
+                        still_unmatched_final.append(d_actor)
 
                     if still_unmatched_final:
                         logger.info(f"  ➜ 检查 {len(still_unmatched_final)} 位未匹配演员，尝试合并或加入最终列表...")
