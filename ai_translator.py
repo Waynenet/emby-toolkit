@@ -129,27 +129,62 @@ class AITranslator:
 
     def _normalize_translation_result(self, raw_result: Any, original_texts: List[str]) -> Dict[str, str]:
         """
-        将 AI 返回的各种奇葩格式强制归一化为标准的 Dict[str, str]
+        【终极防御版】将 AI 返回的各种奇葩格式强制降维清洗，
+        绝对保证返回标准的 Dict[str, str]，没有嵌套、没有 None。
         """
         if not raw_result:
             return {}
+
+        normalized_dict = {}
+
+        def _extract_string(val: Any) -> str:
+            """强制从任意结构中提取出纯字符串"""
+            if val is None:
+                return ""
+            if isinstance(val, str):
+                return val.strip()
+            if isinstance(val, list):
+                # 遇到列表 ["约翰", "史密斯"]，尝试取第一个非空字符串
+                for item in val:
+                    if item is not None and str(item).strip():
+                        return str(item).strip()
+                return ""
+            if isinstance(val, dict):
+                # 遇到字典 {"zh": "约翰"}，尝试取第一个值
+                if val:
+                    first_v = list(val.values())[0]
+                    return _extract_string(first_v)
+                return ""
+            # 数字或布尔值直接转字符串
+            return str(val).strip()
         
-        # 1. 如果 AI 乖乖返回了字典
+        # 1. 如果 AI 返回的是字典
         if isinstance(raw_result, dict):
-            # 防御：有些 AI 喜欢包一层，比如 {"translations": {"John": "约翰"}} 或 {"result": ["约翰", "史密斯"]}
+            # 防御：如果 AI 喜欢包一层，比如 {"translations": {"John": "约翰"}} 或 {"result": ["约翰", "史密斯"]}
             if len(raw_result) == 1:
                 first_val = list(raw_result.values())[0]
                 if isinstance(first_val, dict):
-                    return first_val
+                    # 情况：{"translations": {"John": "约翰"}}
+                    for k, v in first_val.items():
+                        normalized_dict[str(k).strip()] = _extract_string(v)
+                    return normalized_dict
                 elif isinstance(first_val, list) and len(first_val) == len(original_texts):
-                    return {original_texts[i]: str(first_val[i]) for i in range(len(original_texts))}
-            return raw_result
+                    # 情况：{"result": ["约翰", "史密斯"]}
+                    for i, orig_text in enumerate(original_texts):
+                        normalized_dict[orig_text] = _extract_string(first_val[i])
+                    return normalized_dict
+
+            # 正常字典结构 {"John": "约翰"}，也需清洗 value 以防混入了 null 或 list
+            for k, v in raw_result.items():
+                normalized_dict[str(k).strip()] = _extract_string(v)
+            return normalized_dict
             
-        # 2. 如果 AI 脑抽返回了列表 ["约翰", "史密斯"]
+        # 2. 如果 AI 脑抽返回了纯列表 ["约翰", "史密斯"]
         if isinstance(raw_result, list):
             if len(raw_result) == len(original_texts):
-                # 将原文和译文打包成字典
-                return {original_texts[i]: str(raw_result[i]) for i in range(len(original_texts))}
+                for i, orig_text in enumerate(original_texts):
+                    normalized_dict[orig_text] = _extract_string(raw_result[i])
+                return normalized_dict
             else:
                 logger.error(f"  ➜ AI返回的列表长度({len(raw_result)})与原文长度({len(original_texts)})不一致！已丢弃该批次。")
                 return {}
@@ -242,7 +277,8 @@ class AITranslator:
 
             result = _safe_json_loads(response_content)
             if result and "translation" in result:
-                return result["translation"]
+                # 保底转字符串
+                return str(result["translation"]).strip() if result["translation"] else None
             return None
 
         except Exception as e:
@@ -283,7 +319,7 @@ class AITranslator:
 
             result = _safe_json_loads(response_content)
             if result and "translation" in result:
-                return result["translation"]
+                return str(result["translation"]).strip() if result["translation"] else None
             return None
 
         except Exception as e:
@@ -325,7 +361,9 @@ class AITranslator:
                 response_content = resp.text
 
             result = _safe_json_loads(response_content)
-            return result if isinstance(result, dict) else {}
+            if isinstance(result, dict):
+                return {str(k): str(v) if not isinstance(v, (list, dict)) else str(v) for k, v in result.items()}
+            return {}
 
         except Exception as e:
             logger.error(f"  ➜ [批量简介翻译] 翻译失败: {e}")
@@ -366,7 +404,9 @@ class AITranslator:
                 response_content = resp.text
 
             result = _safe_json_loads(response_content)
-            return result if isinstance(result, dict) else {}
+            if isinstance(result, dict):
+                return {str(k): str(v) if not isinstance(v, (list, dict)) else str(v) for k, v in result.items()}
+            return {}
 
         except Exception as e:
             logger.error(f"  ➜ [批量标题翻译] 翻译失败: {e}")
@@ -407,7 +447,9 @@ class AITranslator:
                 response_content = resp.text
 
             result = _safe_json_loads(response_content)
-            return result if isinstance(result, dict) else {}
+            if isinstance(result, dict):
+                return {str(k): str(v) if not isinstance(v, (list, dict)) else str(v) for k, v in result.items()}
+            return {}
 
         except Exception as e:
             logger.error(f"  ➜ [老六笑话生成] AI 翻车了: {e}")
@@ -660,7 +702,7 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            raw_result = _safe_json_loads(response_content)
+            raw_result = _safe_json_loads(response.text)
             return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [翻译模式-Gemini] 翻译时发生错误: {e}", exc_info=True)
@@ -683,7 +725,7 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            raw_result = _safe_json_loads(response_content)
+            raw_result = _safe_json_loads(response.text)
             return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [顾问模式-Gemini] 翻译时发生错误: {e}", exc_info=True)
@@ -751,7 +793,7 @@ class AITranslator:
                 contents=user_prompt,
                 config=config
             )
-            raw_result = _safe_json_loads(response_content)
+            raw_result = _safe_json_loads(response.text)
             return self._normalize_translation_result(raw_result, texts)
         except Exception as e:
             logger.error(f"  ➜ [音译模式-Gemini] 翻译时发生错误: {e}", exc_info=True)

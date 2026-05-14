@@ -1957,14 +1957,15 @@ def translate_tmdb_metadata_recursively(
     if translate_role_enabled and (actor_terms['person'] or actor_terms['role']):
         from database.connection import get_db_connection
         from database.actor_db import ActorDBManager
+        
+        final_actor_translation_map = {}
+        api_submit_list = []
+        all_actor_terms = list(actor_terms['person'].union(actor_terms['role']))
+        actor_db = ActorDBManager()
+
+        # Phase 1: 查库 (开启数据库连接)
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            actor_db = ActorDBManager()
-            
-            final_actor_translation_map = {}
-            api_submit_list = []
-
-            all_actor_terms = list(actor_terms['person'].union(actor_terms['role']))
             for term in all_actor_terms:
                 cached = actor_db.get_translation_from_db(cursor, term)
                 if cached and cached.get('translated_text'):
@@ -1976,37 +1977,36 @@ def translate_tmdb_metadata_recursively(
                     if term in actor_terms['person']: stats['person_ai_calls'] += 1
                     if term in actor_terms['role']: stats['role_ai_calls'] += 1
 
-            if api_submit_list:
-                api_results = ai_translator.batch_translate(api_submit_list, mode=translation_mode, title=item_name)
-                for term, translated in api_results.items():
-                    # --- 新增防御：强制提取字符串 ---
-                    if isinstance(translated, list):
-                        translated = str(translated[0]) if translated else ""
-                    elif translated is not None and not isinstance(translated, str):
-                        translated = str(translated)
-                    # ----------------------------
-
-                    final_actor_translation_map[term] = translated
-                    actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
-
-            # =========================================================
-            # ★★★ 智能回填与终极兜底判断 ★★★
-            # =========================================================
-            # 1. 回填 AI 结果
-            for actor_dict, field_key, orig_text, t_type in actor_refs:
-                if orig_text in final_actor_translation_map:
-                    actor_dict[field_key] = final_actor_translation_map[orig_text]
+        # Phase 2: 调用 AI API (数据库连接已释放)
+        if api_submit_list:
+            api_results = ai_translator.batch_translate(api_submit_list, mode=translation_mode, title=item_name)
             
-            # 2. 全局统一兜底
-            for actor_dict, field_key, orig_text, t_type in actor_refs:
-                if t_type == 'role':
-                    current_val = actor_dict.get(field_key, '')
-                    # 规则：只要是角色名，且最终(无论是原版还是AI翻译后)没有中文，一律强行设为"演员"
-                    if not utils.contains_chinese(current_val):
-                        actor_dict[field_key] = "演员"
-                
-                # 清理临时字段
-                actor_dict.pop('_douban_fallback_role', None)
+            # Phase 3: 写库 (重新开启数据库连接)
+            if api_results:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    for term, translated in api_results.items():
+                        final_actor_translation_map[term] = translated
+                        actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
+
+        # =========================================================
+        # ★★★ 智能回填与终极兜底判断 ★★★
+        # =========================================================
+        # 1. 回填 AI 结果
+        for actor_dict, field_key, orig_text, t_type in actor_refs:
+            if orig_text in final_actor_translation_map:
+                actor_dict[field_key] = final_actor_translation_map[orig_text]
+        
+        # 2. 全局统一兜底
+        for actor_dict, field_key, orig_text, t_type in actor_refs:
+            if t_type == 'role':
+                current_val = actor_dict.get(field_key, '')
+                # 规则：只要是角色名，且最终(无论是原版还是AI翻译后)没有中文，一律强行设为"演员"
+                if not utils.contains_chinese(current_val):
+                    actor_dict[field_key] = "演员"
+            
+            # 清理临时字段
+            actor_dict.pop('_douban_fallback_role', None)
 
     # --- 3. 统计汇总日志输出 ---
     total_pending = (
