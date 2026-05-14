@@ -542,6 +542,14 @@
                           </template>
                           更换Embedding模型必须执行此操作，确定吗？
                         </n-popconfirm>
+                        <n-popconfirm @positive-click="handleClearDoubanSync">
+                          <template #trigger>
+                            <n-button type="warning" ghost :loading="isClearingDouban" size="small">
+                              <template #icon><n-icon :component="SyncIcon" /></template>清空豆瓣同步
+                            </n-button>
+                          </template>
+                          更换豆瓣账号，或想重新触发所有已看剧集的同步请求时执行。确定吗？
+                        </n-popconfirm>
                         <n-popconfirm @positive-click="handleCorrectSequences">
                           <template #trigger>
                             <n-button type="warning" ghost :loading="isCorrecting" size="small"><template #icon><n-icon :component="BuildIcon" /></template>校准自增</n-button>
@@ -824,11 +832,11 @@ const tableInfo = {
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },
   'emby_users': { cn: 'Emby用户', isSharable: false },
-  'user_media_data': { cn: 'Emby用户数据', isSharable: false },
+  'user_media_data': { cn: '用户媒体数据', isSharable: false },
   'user_templates': { cn: '用户权限模板', isSharable: false },
   'invitations': { cn: '邀请链接', isSharable: false },
   'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
-  'douban_api_cache': { cn: '豆瓣缓存', isSharable: false }, 
+  'douban_api_cache': { cn: '豆瓣数据缓存', isSharable: false }, 
   'title_parse_whitelist': { cn: '剧名防抖白名单', isSharable: false }
 };
 const tableDependencies = {
@@ -906,6 +914,21 @@ const embyUserIdRegex = /^[a-f0-9]{32}$/i;
 const isCleaningOffline = ref(false);
 const isClearingVectors = ref(false);
 const isTestingAI = ref(false);
+
+const isClearingDouban = ref(false);
+
+const handleClearDoubanSync = async () => {
+  isClearingDouban.value = true;
+  try {
+    // 假设你的后端路由叫这个，你需要自己在后端添加一行对应的路由代码
+    const response = await axios.post('/api/actions/clear-douban-cache');
+    message.success(response.data.message || '豆瓣同步缓存已清空！');
+  } catch (error) {
+    message.error(error.response?.data?.error || '操作失败，请检查后端日志。');
+  } finally {
+    isClearingDouban.value = false;
+  }
+};
 
 const isClearingStrmCache = ref(false);
 const clearStrmCache = async () => {

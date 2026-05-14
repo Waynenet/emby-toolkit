@@ -134,6 +134,7 @@ def init_db():
                         playback_position_ticks BIGINT DEFAULT 0,
                         play_count INTEGER DEFAULT 0,
                         last_played_date TIMESTAMP WITH TIME ZONE,
+                        douban_sync_status TEXT,  -- ★★★ 新增：豆瓣同步状态缓存 ★★★
                         last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         PRIMARY KEY (user_id, item_id)
                     )
@@ -462,6 +463,9 @@ def init_db():
                         all_existing_columns[table].add(row['column_name'])
 
                     schema_upgrades = {
+                        'user_media_data': {
+                            "douban_sync_status": "TEXT"
+                        },
                         'emby_users': {
                             "policy_json": "JSONB"  
                         },

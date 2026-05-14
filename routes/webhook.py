@@ -318,7 +318,7 @@ def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, kno
     except Exception as e:
         logger.error(f"  ➜ [自动打标] 失败: {e}")
 
-def _task_sync_douban_status(item_id, item_type, is_played):
+def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, emby_parent_id):
     """异步执行豆瓣在看/看过状态同步，由 Webhook 触发"""
     app_config = config_manager.APP_CONFIG
     if not app_config.get(constants.CONFIG_OPTION_DOUBAN_SYNC_ENABLED):
@@ -361,7 +361,7 @@ def _task_sync_douban_status(item_id, item_type, is_played):
             
         elif item_type == "Movie":
             mtype = 'movie'
-            # ★★★ 新增：电影没有“在看”状态，因此如果是“开始播放(do)”，直接跳过，只等播完同步“看过(collect)”
+            # 电影没有“在看”状态，因此如果是“开始播放(do)”，直接跳过，只等播完同步“看过(collect)”
             if status == "do":
                 logger.debug(f"  ➜ [豆瓣同步] 电影 '{target_name}' 不支持'在看'状态，跳过开始播放事件，等待播放完成...")
                 return
@@ -370,6 +370,13 @@ def _task_sync_douban_status(item_id, item_type, is_played):
             mtype = 'tv'
             target_name = item_name if item_type == "Series" else item_details.get("SeriesName", item_name)
         else:
+            return
+
+        # ★★★ 核心优化：直接利用数据库原有的用户媒体交互表作为防重复缓存 ★★★
+        # 使用 emby_parent_id 保证整部剧的所有集数都命中同一个记录
+        cached_status = media_db.get_user_douban_sync_status(user_id, emby_parent_id)
+        if cached_status == status:
+            logger.debug(f"  ➜ [豆瓣同步] 用户 '{user_name}' 的 '{target_name}' 已经是 '{'看过' if status == 'collect' else '在看'}' 状态，跳过重复请求。")
             return
 
         from handler.douban import DoubanApi
@@ -396,6 +403,8 @@ def _task_sync_douban_status(item_id, item_type, is_played):
         success = api.set_watching_status(str(douban_id), status, is_private)
         
         if success:
+            # ★★★ 请求成功后，更新数据库中的状态字段 ★★★
+            media_db.update_user_douban_sync_status(user_id, emby_parent_id, status)
             logger.info(f"  ➜ [豆瓣同步] 已成功将 '{target_name}' 标记为 {'看过' if status == 'collect' else '在看'}")
 
     except Exception as e:
@@ -885,7 +894,7 @@ def emby_webhook():
                         sync_users = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_DOUBAN_SYNC_USERS, [])
                         if user_name in sync_users:
                             # 创建异步任务不阻塞 Webhook，并将 Webhook 里的 item_id 直接丢过去
-                            spawn(_task_sync_douban_status, item_id_from_webhook, item_type_from_webhook, is_played)
+                            spawn(_task_sync_douban_status, item_id_from_webhook, item_type_from_webhook, is_played, user_name, user_id, id_to_update_in_db)
                 # ==============================
                 user_db.upsert_user_media_data(update_data)
                 item_name_for_log = f"ID:{id_to_update_in_db}"

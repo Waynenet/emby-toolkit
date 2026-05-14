@@ -1241,3 +1241,51 @@ def get_notification_media_info_by_tmdb_id(tmdb_id: str) -> dict:
     except Exception as e:
         logger.error(f"DB: 获取转存通知图片信息(TMDB ID)失败: {e}")
     return {}
+
+# ======================================================================
+# ★★★ 新增：豆瓣同步状态缓存读写 (依附于 user_media_data 表) ★★★
+# ======================================================================
+
+def get_user_douban_sync_status(user_id: str, item_id: str) -> Optional[str]:
+    """获取用户在某部媒体上的豆瓣同步状态"""
+    if not user_id or not item_id:
+        return None
+    sql = "SELECT douban_sync_status FROM user_media_data WHERE user_id = %s AND item_id = %s"
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, (user_id, item_id))
+                row = cursor.fetchone()
+                return row['douban_sync_status'] if row else None
+    except Exception as e:
+        logger.error(f"DB: 获取豆瓣同步状态失败: {e}")
+        return None
+
+def update_user_douban_sync_status(user_id: str, item_id: str, status: str):
+    """更新用户在某部媒体上的豆瓣同步状态"""
+    sql = "UPDATE user_media_data SET douban_sync_status = %s WHERE user_id = %s AND item_id = %s"
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, (status, user_id, item_id))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"DB: 更新豆瓣同步状态失败: {e}")
+
+def clear_all_douban_sync_status() -> int:
+    """
+    【数据解耦】仅清空所有用户的豆瓣同步状态缓存，
+    绝对不影响用户的播放进度、喜爱状态等其他核心数据。
+    """
+    sql = "UPDATE user_media_data SET douban_sync_status = NULL WHERE douban_sync_status IS NOT NULL"
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                count = cursor.rowcount
+            conn.commit()
+            logger.info(f"  ➜ 已安全清空 {count} 条豆瓣状态同步缓存。")
+            return count
+    except Exception as e:
+        logger.error(f"DB: 清空豆瓣同步缓存失败: {e}", exc_info=True)
+        return 0

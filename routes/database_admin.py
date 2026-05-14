@@ -12,7 +12,7 @@ from datetime import datetime, date
 import config_manager
 import task_manager
 import constants
-from database import log_db, maintenance_db, settings_db
+from database import log_db, maintenance_db, settings_db, media_db
 
 # 导入共享模块
 import extensions
@@ -494,4 +494,27 @@ def api_clear_vectors():
         
     except Exception as e:
         logger.error(f"API调用 api_clear_vectors 时发生错误: {e}", exc_info=True)
+        return jsonify({"error": "服务器在处理时发生内部错误"}), 500
+
+# --- 清空豆瓣同步状态缓存 ---
+@db_admin_bp.route('/actions/clear-douban-cache', methods=['POST'])
+@admin_required
+def api_clear_douban_cache():
+    """
+    触发清空豆瓣同步状态缓存的操作。
+    仅重置缓存标记，不影响用户核心数据。
+    """
+    logger.info("  ➜ 接收到清空豆瓣同步缓存请求。")
+    try:
+        count = media_db.clear_all_douban_sync_status()
+        
+        if count > 0:
+            message = f"操作成功！已安全清空 {count} 条用户的豆瓣同步状态缓存。"
+        else:
+            message = "数据库中没有发现需要清理的豆瓣同步状态，无需清理。"
+            
+        return jsonify({"message": message}), 200
+        
+    except Exception as e:
+        logger.error(f"API调用 api_clear_douban_cache 时发生错误: {e}", exc_info=True)
         return jsonify({"error": "服务器在处理时发生内部错误"}), 500
