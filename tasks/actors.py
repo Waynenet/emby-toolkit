@@ -218,56 +218,51 @@ def task_persons_translation(processor):
         total_names = len(all_names_list)
         total_batches = (total_names + batch_size - 1) // batch_size
         
+        # 【优化】将线程池的声明移到批处理循环的外部，全局复用这10个线程
         total_updated_count = 0
+        with ThreadPoolExecutor(max_workers=10) as executor: # <--- 移到这里
+            for i in range(0, total_names, batch_size):
+                if processor.is_stop_requested():
+                    logger.info("任务在翻译阶段被用户中断。")
+                    break
 
-        for i in range(0, total_names, batch_size):
-            if processor.is_stop_requested():
-                logger.info("任务在翻译阶段被用户中断。")
-                break
+                current_batch_names = all_names_list[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
+                progress = int(20 + (i / total_names) * 80) if total_names else 100
 
-            current_batch_names = all_names_list[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
-            progress = int(20 + (i / total_names) * 80) if total_names else 100
-
-            task_manager.update_status_from_thread(
-                progress,
-                f"阶段 3/3: 正在翻译批次 {batch_num}/{total_batches} (已成功 {total_updated_count} 个)"
-            )
-
-            try:
-                translation_map = processor.ai_translator.batch_translate(
-                    texts=current_batch_names,
-                    mode="fast"
+                task_manager.update_status_from_thread(
+                    progress,
+                    f"阶段 3/3: 正在翻译批次 {batch_num}/{total_batches} (已成功 {total_updated_count} 个)"
                 )
-            except Exception as e_trans:
-                logger.error(f"翻译批次 {batch_num} 时发生错误: {e_trans}，将跳过此批次。")
-                continue
 
-            if not translation_map:
-                logger.warning(f"翻译批次 {batch_num} 未能返回任何结果。")
-                continue
-
-            update_tasks = []
-            for original_name, translated_name in translation_map.items():
-                if not translated_name:
-                    logger.warning(f"    - ➜ [跳过] 原名: '{original_name}' -> 翻译结果为空")
+                try:
+                    translation_map = processor.ai_translator.batch_translate(
+                        texts=current_batch_names,
+                        mode="fast"
+                    )
+                except Exception as e_trans:
+                    logger.error(f"翻译批次 {batch_num} 时发生错误: {e_trans}，将跳过此批次。")
                     continue
 
-                if original_name == translated_name:
-                    logger.info(f"  ➜ [跳过] 原名: '{original_name}' -> 结果与原文相同 (未变)")
+                if not translation_map:
                     continue
 
-                emby_name = original_to_emby_name_map.get(original_name, original_name)
-                persons_to_update = name_to_persons_map.get(emby_name, [])
-                for person in persons_to_update:
-                    update_tasks.append((person.get("Id"), translated_name))
+                update_tasks = []
+                for original_name, translated_name in translation_map.items():
+                    if not translated_name or original_name == translated_name:
+                        continue
 
-            if not update_tasks:
-                logger.info(f"  ➜ 批次 {batch_num}: 翻译结果经比对后无有效变更，跳过写入。")
-                continue
+                    emby_name = original_to_emby_name_map.get(original_name, original_name)
+                    persons_to_update = name_to_persons_map.get(emby_name, [])
+                    for person in persons_to_update:
+                        update_tasks.append((person.get("Id"), translated_name))
 
-            batch_updated_count = 0
-            with ThreadPoolExecutor(max_workers=10) as executor:
+                if not update_tasks:
+                    continue
+
+                batch_updated_count = 0
+                
+                # 【优化】直接使用外部复用的 executor 提交任务
                 future_to_task = {
                     executor.submit(
                         emby.update_person_details,
@@ -288,14 +283,12 @@ def task_persons_translation(processor):
                         success = future.result()
                         if success:
                             batch_updated_count += 1
-                        else:
-                            logger.warning(f"    - ➜ [更新失败] Emby API 拒绝更新人物 ID: {task_info[0]} -> '{task_info[1]}'")
                     except Exception as exc:
                         logger.error(f"    - ➜ [异常] 更新人物 (ID: {task_info[0]}) 时发生错误: {exc}")
 
-            total_updated_count += batch_updated_count
-            if batch_updated_count > 0:
-                logger.info(f"  ➜ 批次 {batch_num}/{total_batches} 完成，成功更新 {batch_updated_count} 个人物名。")
+                total_updated_count += batch_updated_count
+                if batch_updated_count > 0:
+                    logger.info(f"  ➜ 批次 {batch_num}/{total_batches} 完成，成功更新 {batch_updated_count} 个人物名。")
 
         final_message = f"  ➜ 任务完成！共成功翻译并更新了 {total_updated_count} 个人物名。"
         if processor.is_stop_requested():
@@ -461,7 +454,6 @@ def task_merge_duplicate_actors(processor):
                 for media_id in media_ids_to_update:
                     item_details = emby.get_emby_item_details(media_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
                     if not item_details:
-                        logger.error(f"    - 获取媒体项 {media_id} 详情失败，跳过此项的合并。")
                         all_media_updates_succeeded = False
                         continue
                     
@@ -489,10 +481,12 @@ def task_merge_duplicate_actors(processor):
 
                     if update_success:
                         merged_item_count += 1
-                        logger.debug(f"    - ➜ 成功更新媒体项 '{item_details.get('Name')}' 的演员列表。")
                     else:
                         all_media_updates_succeeded = False
                         logger.error(f"    - ➜ 更新媒体项 '{item_details.get('Name')}' 失败！")
+                    
+                    # 【优化】每转移一部作品，让 Emby 的 SQLite 数据库喘息 0.1 秒，防止写入锁死
+                    time.sleep(0.1)
 
             if all_media_updates_succeeded:
                 logger.info(f"  ➜ 所有媒体项已成功转移，准备删除“小号”演员 '{deletee['Name']}' (ID: {deletee['Id']})...")
@@ -534,7 +528,7 @@ def task_purge_ghost_actors(processor):
         # 阶段 1: 全局扫描所有媒体库，获取所有关联的人物ID (白名单)
         # ======================================================================
         task_manager.update_status_from_thread(0, "准备阶段: 正在扫描所有媒体库...")
-        
+
         # 1.1 获取服务器上所有可见的媒体库ID
         all_libraries = emby.get_emby_libraries(processor.emby_url, processor.emby_api_key, processor.emby_user_id)
         if not all_libraries:
@@ -555,10 +549,14 @@ def task_purge_ghost_actors(processor):
 
         # 1.3 建立白名单
         whitelist_person_ids = set()
-        for item in all_media_items:
+        
+        # 【优化】用 pop() 边遍历边销毁原列表对象，及时释放巨型列表占用的内存
+        while all_media_items:
             if processor.is_stop_requested():
                 logger.info("任务在建立白名单阶段被用户中断。")
                 return
+            
+            item = all_media_items.pop() # 弹出并处理，内存逐步回收
             for person in item.get("People", []):
                 if person_id := person.get("Id"):
                     whitelist_person_ids.add(person_id)
