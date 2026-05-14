@@ -361,6 +361,11 @@ def _task_sync_douban_status(item_id, item_type, is_played):
             
         elif item_type == "Movie":
             mtype = 'movie'
+            # ★★★ 新增：电影没有“在看”状态，因此如果是“开始播放(do)”，直接跳过，只等播完同步“看过(collect)”
+            if status == "do":
+                logger.debug(f"  ➜ [豆瓣同步] 电影 '{target_name}' 不支持'在看'状态，跳过开始播放事件，等待播放完成...")
+                return
+                
         elif item_type in ["Series", "Season"]:
             mtype = 'tv'
             target_name = item_name if item_type == "Series" else item_details.get("SeriesName", item_name)
