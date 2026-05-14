@@ -59,10 +59,12 @@
           <n-gi>
             <n-card :bordered="false" class="dashboard-card auto-task-block tint-orange">
               <div class="auto-task-title">基础缓存</div>
+              <!-- 骨架屏改为 repeat 3，完美契合三行数据 -->
               <div v-if="loading.core || loading.system" class="auto-task-stats"><n-skeleton text :repeat="3" /></div>
               <div v-else class="auto-task-stats">
                 <span>媒体缓存数: <b>{{ stats.media_library.cached_total }}</b></span>
                 <span>翻译缓存数: <b>{{ stats.system.translation_cache_count }}</b></span>
+                <span>豆瓣缓存数: <b>{{ stats.system.douban_cache_count }}</b></span>
               </div>
             </n-card>
           </n-gi>
@@ -244,7 +246,7 @@ const isAnyLoading = computed(() => {
 
 const stats = reactive({
   media_library: { cached_total: 0, mediainfo_backed_up_total: 0, mediainfo_hits_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, resolution_stats: [] },
-  system: { translation_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
+  system: { translation_cache_count: 0, douban_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
   subscriptions_card: {
     watchlist: { watching: 0, paused: 0, completed: 0 },
     actors: { subscriptions: 0, tracked_total: 0, tracked_in_library: 0 },

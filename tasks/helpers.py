@@ -18,6 +18,43 @@ from database.actor_db import ActorDBManager
 
 logger = logging.getLogger(__name__)
 
+# =================================================================
+# ★★★ 新增：基于 PostgreSQL 的“之”字标题防抖白名单管理器 ★★★
+# =================================================================
+_TITLE_SPLIT_IGNORE_CACHE = None
+
+def get_title_ignore_cache() -> set:
+    """获取白名单（内存缓存，首次调用时从数据库加载）"""
+    global _TITLE_SPLIT_IGNORE_CACHE
+    if _TITLE_SPLIT_IGNORE_CACHE is None:
+        _TITLE_SPLIT_IGNORE_CACHE = set()
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT title FROM title_parse_whitelist")
+                    for row in cursor.fetchall():
+                        _TITLE_SPLIT_IGNORE_CACHE.add(row['title'])
+            logger.debug(f"  ➜ 已从数据库加载 {len(_TITLE_SPLIT_IGNORE_CACHE)} 条剧名防抖白名单。")
+        except Exception as e:
+            logger.warning(f"  ➜ 读取剧名白名单失败: {e}")
+    return _TITLE_SPLIT_IGNORE_CACHE
+
+def add_to_title_ignore_cache(title: str):
+    """加入白名单（同步更新内存与数据库）"""
+    cache = get_title_ignore_cache()
+    if title not in cache:
+        cache.add(title)
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO title_parse_whitelist (title) 
+                        VALUES (%s) ON CONFLICT (title) DO NOTHING
+                    """, (title,))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"  ➜ 写入剧名白名单到数据库失败: {e}")
+
 AUDIO_SUBTITLE_KEYWORD_MAP = {
     "chi": ["Mandarin", "CHI", "ZHO", "国语", "国配", "国英双语", "公映", "台配", "京译", "上译", "央译"],
     "yue": ["Cantonese", "YUE", "粤语"],
@@ -776,8 +813,8 @@ def parse_series_title_and_season(title: str, api_key: str = None) -> Tuple[Opti
     normalized_title = normalize_full_width_chars(title)
 
     # --- 1. 优先处理 "主标题之副标题" 格式 (严格校验逻辑) ---
-    # 仅当提供了 API Key 时才尝试这种高风险解析
-    if '之' in normalized_title and api_key:
+    # 仅当提供了 API Key 且该剧名不在数据库白名单中时才尝试这种高风险解析
+    if '之' in normalized_title and api_key and normalized_title not in get_title_ignore_cache():
         parts = normalized_title.split('之', 1)
         if len(parts) == 2:
             parent_candidate = parts[0].strip()
@@ -809,8 +846,9 @@ def parse_series_title_and_season(title: str, api_key: str = None) -> Tuple[Opti
                                         return parent_candidate, season_num
                                         
                     # 如果代码走到这里，说明虽然有'之'，但没匹配到任何季信息
-                    # 此时记录日志，并放弃拆分，防止将 "亦舞之城" 错误拆分为 "亦舞"
-                    logger.debug(f"  ➜ [智能解析] '{title}' 包含'之'字，但未匹配到TMDb季信息，将作为完整剧名处理。")
+                    # 加入数据库白名单，下次看到直接放行，永远省去 TMDb 的网络请求！
+                    add_to_title_ignore_cache(normalized_title)
+                    logger.debug(f"  ➜ [智能解析] '{title}' 包含'之'字但未匹配到季信息，已加入数据库白名单，后续永久免检。")
                     
                 except Exception as e:
                     logger.warning(f"  ➜ 解析 '之' 字标题时 TMDb 查询出错: {e}，将回退到普通模式。")

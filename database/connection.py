@@ -424,6 +424,25 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'douban_api_cache' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS douban_api_cache (
+                        id SERIAL PRIMARY KEY,
+                        imdb_id TEXT,
+                        douban_id TEXT,
+                        actors_json JSONB NOT NULL,
+                        last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'title_parse_whitelist' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS title_parse_whitelist (
+                        title TEXT PRIMARY KEY,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
                 # ======================================================================
                 # ★★★ 数据库平滑升级 (START) ★★★
                 # 此处代码用于新增在新版本中添加的列。
@@ -559,6 +578,10 @@ def init_db():
                     # 12. 【海量数据优化】加速追剧列表的聚合查询
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, parent_series_tmdb_id);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watching_status ON media_metadata (watching_status) WHERE watching_status != 'NONE';")
+
+                    # 13. 【外部API缓存优化】加速豆瓣数据缓存的精准命中
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_douban_cache_imdb ON douban_api_cache(imdb_id);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_douban_cache_douban ON douban_api_cache(douban_id);")
 
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)

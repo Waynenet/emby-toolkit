@@ -253,6 +253,8 @@ def task_import_database(processor, file_content: str, tables_to_import: List[st
     TABLE_TRANSLATIONS = {
         'person_metadata': '人物元数据',
         'translation_cache': '翻译缓存',
+        'douban_api_cache': '豆瓣缓存',
+        'title_parse_whitelist': '剧名防抖白名单',
         'actor_subscriptions': '演员订阅配置', 
         'collections_info': '电影合集信息', 
         'processed_log': '已处理列表', 
