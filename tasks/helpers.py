@@ -1768,9 +1768,7 @@ def translate_tmdb_metadata_recursively(
                 # 先用本地缓存回填，避免重复翻译
                 if local_info and local_info.get('tagline') and utils.contains_chinese(local_info['tagline']):
                     data_dict['tagline'] = local_info['tagline']
-                    stats['tagline_pending_count'] += 1
                     stats['tagline_cache_hits'] += 1
-
                 else:
                     # 本地没有中文标语，再去补英文原文，准备送翻译
                     if not tagline and tmdb_api_key:
@@ -1787,7 +1785,6 @@ def translate_tmdb_metadata_recursively(
                     if data_dict.get('tagline'):
                         needs_tagline = True
                         stats['tagline_pending_count'] += 1
-                        stats['tagline_needs_translation'] += 1
 
         if needs_title or needs_overview or needs_tagline:
             pending_media[tmdb_id_str] = {
@@ -1878,8 +1875,11 @@ def translate_tmdb_metadata_recursively(
     
     # [A] 处理媒体信息
     if pending_media:
+        # 1. 简介
         overviews_to_translate = {k: v["overview"] for k, v in pending_media.items() if v["overview"]}
         if overviews_to_translate:
+            # 修复：在这里一次性加上实际准备提交给 API 的总数
+            stats['overview_needs_translation'] += len(overviews_to_translate)
             items_list = list(overviews_to_translate.items())
             for i in range(0, len(items_list), BATCH_SIZE):
                 batch_dict = dict(items_list[i:i+BATCH_SIZE])
@@ -1887,10 +1887,12 @@ def translate_tmdb_metadata_recursively(
                 for tid, trans_text in trans_results.items():
                     if trans_text and utils.contains_chinese(trans_text) and tid in pending_media:
                         pending_media[tid]["ref"]['overview'] = trans_text
-                        stats['overview_needs_translation'] += 1
 
+        # 2. 标语
         taglines_to_translate = {k: v["tagline"] for k, v in pending_media.items() if v["tagline"]}
         if taglines_to_translate:
+            # 修复：在这里一次性加上实际准备提交给 API 的总数
+            stats['tagline_needs_translation'] += len(taglines_to_translate)
             items_list = list(taglines_to_translate.items())
             for i in range(0, len(items_list), BATCH_SIZE):
                 batch_dict = dict(items_list[i:i+BATCH_SIZE])
@@ -1898,10 +1900,12 @@ def translate_tmdb_metadata_recursively(
                 for tid, trans_text in trans_results.items():
                     if trans_text and utils.contains_chinese(trans_text) and tid in pending_media:
                         pending_media[tid]["ref"]['tagline'] = trans_text
-                        stats['tagline_needs_translation'] += 1
 
+        # 3. 标题
         titles_to_translate = {k: v["title"] for k, v in pending_media.items() if v["title"]}
         if titles_to_translate:
+            # 修复：在这里一次性加上实际准备提交给 API 的总数
+            stats['title_needs_translation'] += len(titles_to_translate)
             items_list = list(titles_to_translate.items())
             for i in range(0, len(items_list), BATCH_SIZE):
                 batch_dict = dict(items_list[i:i+BATCH_SIZE])
@@ -1910,7 +1914,6 @@ def translate_tmdb_metadata_recursively(
                     if trans_text and utils.contains_chinese(trans_text) and tid in pending_media:
                         title_key = pending_media[tid]["title_key"]
                         pending_media[tid]["ref"][title_key] = trans_text
-                        stats['title_needs_translation'] += 1
 
     # [B] 处理演员信息
     if translate_role_enabled and (actor_terms['person'] or actor_terms['role']):
