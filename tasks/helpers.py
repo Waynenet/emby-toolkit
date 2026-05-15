@@ -1968,31 +1968,60 @@ def translate_tmdb_metadata_recursively(
         all_actor_terms = list(actor_terms['person'].union(actor_terms['role']))
         actor_db = ActorDBManager()
 
+        # 将人名和角色名拆分处理
+        person_submit_list = []
+        role_submit_list = []
+
         # Phase 1: 查库 (开启数据库连接)
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            for term in all_actor_terms:
+            # 查人名缓存
+            for term in actor_terms['person']:
                 cached = actor_db.get_translation_from_db(cursor, term)
                 if cached and cached.get('translated_text'):
                     final_actor_translation_map[term] = cached['translated_text']
-                    if term in actor_terms['person']: stats['person_cache_hits'] += 1
-                    if term in actor_terms['role']: stats['role_cache_hits'] += 1
+                    stats['person_cache_hits'] += 1
                 else:
-                    api_submit_list.append(term)
-                    if term in actor_terms['person']: stats['person_ai_calls'] += 1
-                    if term in actor_terms['role']: stats['role_ai_calls'] += 1
+                    person_submit_list.append(term)
+                    stats['person_ai_calls'] += 1
+                    
+            # 查角色名缓存
+            for term in actor_terms['role']:
+                cached = actor_db.get_translation_from_db(cursor, term)
+                if cached and cached.get('translated_text'):
+                    final_actor_translation_map[term] = cached['translated_text']
+                    stats['role_cache_hits'] += 1
+                else:
+                    role_submit_list.append(term)
+                    stats['role_ai_calls'] += 1
 
         # Phase 2: 调用 AI API (数据库连接已释放)
-        if api_submit_list:
-            api_results = ai_translator.batch_translate(api_submit_list, mode=translation_mode, title=item_name)
-            
-            # Phase 3: 写库 (重新开启数据库连接)
-            if api_results:
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    for term, translated in api_results.items():
-                        final_actor_translation_map[term] = translated
-                        actor_db.save_translation_to_db(cursor, term, translated, f"{ai_translator.provider}_{translation_mode}")
+        api_results_to_save = {}
+        
+        # 1. 人名：强制使用音译模式 (transliterate)
+        if person_submit_list:
+            logger.info(f"  ➜ 启动【音译模式】处理 {len(person_submit_list)} 个人名...")
+            person_results = ai_translator.batch_translate(person_submit_list, mode="transliterate", title=item_name)
+            if person_results:
+                final_actor_translation_map.update(person_results)
+                for k, v in person_results.items():
+                    api_results_to_save[k] = (v, f"{ai_translator.provider}_transliterate")
+                    
+        # 2. 角色名：使用用户配置的模式 (fast 或 quality)
+        if role_submit_list:
+            logger.info(f"  ➜ 启动【{translation_mode}模式】处理 {len(role_submit_list)} 个角色名...")
+            role_results = ai_translator.batch_translate(role_submit_list, mode=translation_mode, title=item_name)
+            if role_results:
+                final_actor_translation_map.update(role_results)
+                for k, v in role_results.items():
+                    api_results_to_save[k] = (v, f"{ai_translator.provider}_{translation_mode}")
+
+        # Phase 3: 写库 (重新开启数据库连接)
+        if api_results_to_save:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                for term, (translated, engine_used) in api_results_to_save.items():
+                    actor_db.save_translation_to_db(cursor, term, translated, engine_used)
 
         # =========================================================
         # ★★★ 智能回填与终极兜底判断 ★★★
