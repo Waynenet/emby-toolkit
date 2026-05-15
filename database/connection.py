@@ -41,24 +41,55 @@ def _init_pool():
 def get_db_connection():
     """
     【中央函数】获取一个配置好 RealDictCursor 的 PostgreSQL 数据库连接。
-    使用上下文管理器，确保高并发下连接用完瞬间回收，绝不泄漏。
+    加入：连接健康检查(Ping)、防二次报错的安全回滚、坏连接自动销毁机制。
     """
     global _db_pool
     if _db_pool is None:
         _init_pool()
         
-    # 从连接池借出一个连接
-    conn = _db_pool.getconn()
+    conn = None
+    # --- 1. 获取连接并进行健康检查 (最多重试3次) ---
+    for attempt in range(3):
+        try:
+            conn = _db_pool.getconn()
+            # 极轻量的 Ping 测试，检查连接是否被数据库/防火墙悄悄掐断
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+            break  # 测试通过，跳出重试循环
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            logger.warning(f"  ➜ 获取到的数据库连接已失效，正在重试 ({attempt+1}/3)...")
+            if conn:
+                # ★ 核心：把死连接彻底销毁，不要放回池子污染环境
+                _db_pool.putconn(conn, close=True)
+            conn = None
+
+    if not conn:
+        raise Exception("无法从连接池获取有效的数据库连接，连接可能已彻底断开。")
+
+    is_conn_broken = False
+    
+    # --- 2. 业务执行与异常处理 ---
     try:
         conn.cursor_factory = RealDictCursor
         yield conn
-    except Exception:
-        # 如果发生异常，回滚未提交的事务，保证归还给池子的连接是干净的
-        conn.rollback()
-        raise
+    except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+        # 如果是数据库主动断开（网络闪断/重启），标记为坏连接，【跳过回滚】避免二次报错
+        is_conn_broken = True
+        logger.error(f"  ➜ 数据库连接在查询期间意外断开: {e}")
+        raise  # 直接抛出原始掉线错误
+    except Exception as e:
+        # 如果是其他常规业务报错（如SQL语法错误、主键冲突），尝试安全回滚
+        try:
+            if conn and not conn.closed:
+                conn.rollback()
+        except psycopg2.InterfaceError:
+            is_conn_broken = True
+        raise  # 抛出真正的业务错误
     finally:
-        # ★ 核心：无论成功失败，用完立刻归还给连接池
-        _db_pool.putconn(conn)
+        # --- 3. 归还连接 ---
+        if conn:
+            # ★ 核心：如果连接坏了，close=True 会将其销毁；如果连接健康，则正常归还复用
+            _db_pool.putconn(conn, close=is_conn_broken)
 
 def init_db():
     """
