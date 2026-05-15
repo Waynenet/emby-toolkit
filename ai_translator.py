@@ -138,25 +138,31 @@ class AITranslator:
         normalized_dict = {}
 
         def _extract_string(val: Any) -> str:
-            """强制从任意结构中提取出纯字符串"""
+            """强制从任意结构中提取出纯字符串，并物理拦截AI发疯的乱码"""
             if val is None:
                 return ""
+            
+            result_str = ""
             if isinstance(val, str):
-                return val.strip()
-            if isinstance(val, list):
-                # 遇到列表 ["约翰", "史密斯"]，尝试取第一个非空字符串
+                result_str = val.strip()
+            elif isinstance(val, list):
                 for item in val:
                     if item is not None and str(item).strip():
-                        return str(item).strip()
-                return ""
-            if isinstance(val, dict):
-                # 遇到字典 {"zh": "约翰"}，尝试取第一个值
+                        result_str = str(item).strip()
+                        break
+            elif isinstance(val, dict):
                 if val:
                     first_v = list(val.values())[0]
-                    return _extract_string(first_v)
+                    result_str = _extract_string(first_v)
+            else:
+                result_str = str(val).strip()
+
+            # ★★★ 物理拦截器：如果字符太长，或者存在连续重复字符(例如 D D D D)，直接当作没翻译出来丢弃 ★★★
+            if len(result_str) > 50 or re.search(r'(.{1,3})\1{8,}', result_str):
+                logger.warning(f"  ➜ [防御] 拦截到 AI 疑似复读机乱码，已丢弃。内容片段: {result_str[:20]}...")
                 return ""
-            # 数字或布尔值直接转字符串
-            return str(val).strip()
+                
+            return result_str
         
         # 1. 如果 AI 返回的是字典
         if isinstance(raw_result, dict):
