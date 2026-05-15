@@ -1666,7 +1666,7 @@ def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[
 
     return payload
 
-# 1. 在参数中新增 douban_cast_data
+# 1. 在参数中新增 text_only
 def translate_tmdb_metadata_recursively(
     item_type: str, 
     tmdb_data: Dict[str, Any], 
@@ -1674,7 +1674,8 @@ def translate_tmdb_metadata_recursively(
     item_name: str = "",
     tmdb_api_key: str = None,
     config: dict = None,
-    douban_cast_data: list = None
+    douban_cast_data: list = None,
+    text_only: bool = False  # <--- 【新增参数】默认 False 保持兼容，True 时跳过演员
 ):
     """
     【大一统翻译引擎】递归翻译 TMDb 数据的标题、简介、标语、演员名和角色名。
@@ -1834,6 +1835,10 @@ def translate_tmdb_metadata_recursively(
             }
 
         # ========== B. 演员信息收集与截断 ==========
+        # ★★★ 关键修改：如果启用了 text_only，直接退出，不处理演员 ★★★
+        if text_only:
+            return
+
         credits_dict = data_dict.get('credits') or data_dict.get('aggregate_credits') or data_dict.get('casts')
         if not credits_dict or 'cast' not in credits_dict: return
 

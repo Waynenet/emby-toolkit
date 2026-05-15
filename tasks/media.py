@@ -942,7 +942,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                             ai_translator=processor.ai_translator,
                             item_name=item.get('Name', ''),
                             tmdb_api_key=processor.tmdb_api_key,
-                            config=processor.config
+                            config=processor.config,
+                            text_only=True  # <--- 【关键添加】告诉引擎：只翻译文本，别碰演员！
                         )
 
             metadata_batch = []
