@@ -607,7 +607,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"},
                 timeout=300
             )
@@ -630,7 +630,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"},
                 timeout=300
             )
@@ -653,7 +653,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
@@ -675,7 +675,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
@@ -693,7 +693,7 @@ class AITranslator:
         
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.0,
+            temperature=0.2,
             system_instruction=system_prompt
         )
         try:
@@ -716,7 +716,7 @@ class AITranslator:
         
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.0,
+            temperature=0.2,
             system_instruction=system_prompt
         )
         try:
@@ -743,7 +743,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"},
                 timeout=300
             )
@@ -766,7 +766,7 @@ class AITranslator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
+                temperature=0.2,
                 response_format={"type": "json_object"}
             )
             response_content = response.choices[0].message.content
@@ -784,7 +784,7 @@ class AITranslator:
         
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.0,
+            temperature=0.2,
             system_instruction=system_prompt
         )
         try:
