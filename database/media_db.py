@@ -1262,12 +1262,18 @@ def get_user_douban_sync_status(user_id: str, item_id: str) -> Optional[str]:
         return None
 
 def update_user_douban_sync_status(user_id: str, item_id: str, status: str):
-    """更新用户在某部媒体上的豆瓣同步状态"""
-    sql = "UPDATE user_media_data SET douban_sync_status = %s WHERE user_id = %s AND item_id = %s"
+    """更新用户在某部媒体上的豆瓣同步状态 (支持UPSERT，解决分季缓存问题)"""
+    sql = """
+        INSERT INTO user_media_data (user_id, item_id, douban_sync_status, last_updated_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (user_id, item_id) DO UPDATE SET
+            douban_sync_status = EXCLUDED.douban_sync_status,
+            last_updated_at = NOW();
+    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(sql, (status, user_id, item_id))
+                cursor.execute(sql, (user_id, item_id, status))
             conn.commit()
     except Exception as e:
         logger.error(f"DB: 更新豆瓣同步状态失败: {e}")
