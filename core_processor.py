@@ -695,6 +695,10 @@ class MediaProcessor:
                             
                     actors_source = raw_actors
 
+                    # ★★★ 彻底清空原始 Crew 数据，防止出现两次及无头像杂鱼乱入 ★★★
+                    if 'credits' in details: details['credits']['crew'] = []
+                    if 'casts' in details: details['casts']['crew'] = []
+
                 elif item_type == "Series":
                     if aggregated_tmdb_data:
                         all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
@@ -725,6 +729,11 @@ class MediaProcessor:
                             c_copy['order'] = 1000 + len(other_crew_source)
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
+
+                    # ★★★ 彻底清空原始 Crew 和 Created_by 数据 ★★★
+                    if 'aggregate_credits' in details: details['aggregate_credits']['crew'] = []
+                    if 'credits' in details: details['credits']['crew'] = []
+                    if 'created_by' in details: details['created_by'] = []
 
                 # 3. 合并队列：导演在前 -> 演员在中 -> 其他幕后在后
                 authoritative_cast_source = directors_source + actors_source + other_crew_source
@@ -2103,7 +2112,7 @@ class MediaProcessor:
                             o = actor.get('order', 0)
                             if isinstance(o, (int, float)) and (o < 0 or o >= 1000):
                                 char_str = actor.get('character', '')
-                                actor['character'] = re.sub(r'^(饰\s*|配\s*)', '', char_str).strip()
+                                actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
 
                         # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
                         for actor in final_processed_cast:
@@ -2213,6 +2222,7 @@ class MediaProcessor:
         cleaned_tmdb_cast = []
         seen_names = {} 
         
+        # 排序时移除大于0的限制，允许负数
         tmdb_cast_people.sort(key=lambda x: x.get('order') if isinstance(x.get('order'), (int, float)) else 999)
 
         for actor in tmdb_cast_people:
