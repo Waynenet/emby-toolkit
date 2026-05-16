@@ -62,6 +62,7 @@ def api_get_stats_system():
         raw = maintenance_db.get_stats_system()
         formatted_data = {
             "translation_cache_count": raw.get('translation_cache_count', 0),
+            "douban_cache_count": raw.get('douban_cache_count', 0), # ★★★ 把豆瓣缓存数据加进来，传给前端 ★★★
             "processed_log_count": raw.get('processed_log_count', 0),
             "failed_log_count": raw.get('failed_log_count', 0),
         }
