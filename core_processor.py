@@ -2160,10 +2160,20 @@ class MediaProcessor:
                 local_name = str(l_actor.get("name") or "").lower().strip()
                 local_original_name = str(l_actor.get("original_name") or "").lower().strip()
                 
+                # [优化] 更强大的名字匹配逻辑，支持姓名反转 (Zhengye Gong vs Gong Zhengye) 和空格剔除
+                def _is_name_match(n1: str, n2: str) -> bool:
+                    if not n1 or not n2: return False
+                    if n1 == n2: return True
+                    if n1.replace(" ", "") == n2.replace(" ", ""): return True
+                    p1, p2 = n1.split(), n2.split()
+                    if len(p1) == 2 and len(p2) == 2 and p1[0] == p2[1] and p1[1] == p2[0]:
+                        return True
+                    return False
+
                 is_match = False
-                if douban_name_zh and (douban_name_zh == local_name or douban_name_zh == local_original_name):
+                if _is_name_match(douban_name_zh, local_name) or _is_name_match(douban_name_zh, local_original_name):
                     is_match = True
-                elif douban_name_en and (douban_name_en == local_name or douban_name_en == local_original_name):
+                elif _is_name_match(douban_name_en, local_name) or _is_name_match(douban_name_en, local_original_name):
                     is_match = True
                 
                 if is_match:
