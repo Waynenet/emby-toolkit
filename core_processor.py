@@ -817,6 +817,29 @@ class MediaProcessor:
                     aggregated_tmdb_data=aggregated_tmdb_data
                 )
 
+                # =============================================================
+                # ★★★ 核弹级清理：强制抹除所有层级的独立 Crew/Created_by 节点 ★★★
+                # 因为我们已经把有价值的幕后人员全部融合进了 Cast(演员表)，
+                # 此时必须把所有原生的 Crew 节点物理销毁，防止任何没头像的杂兵乱入！
+                # =============================================================
+                if 'casts' in formatted_metadata: formatted_metadata['casts']['crew'] = []
+                if 'credits' in formatted_metadata: formatted_metadata['credits']['crew'] = []
+                if 'created_by' in formatted_metadata: formatted_metadata['created_by'] = []
+                
+                if item_type == "Series":
+                    # 1. 物理清洗所有分季的 Crew
+                    for s in formatted_metadata.get('seasons_details', []):
+                        if 'credits' in s: s['credits']['crew'] = []
+                    # 2. 物理清洗所有分集的 Crew
+                    ep_data = formatted_metadata.get('episodes_details')
+                    if isinstance(ep_data, dict):
+                        for ep in ep_data.values():
+                            if 'credits' in ep: ep['credits']['crew'] = []
+                    elif isinstance(ep_data, list):
+                        for ep in ep_data:
+                            if 'credits' in ep: ep['credits']['crew'] = []
+                # =============================================================
+
                 logger.info(f"  ➜ [实时监控] 正在写入本地元数据文件...")
                 self.sync_item_metadata(
                     item_details=fake_item_details,
@@ -2114,8 +2137,8 @@ class MediaProcessor:
                             char_str = actor.get('character', '')
                             is_crew_flag = actor.get('_is_crew', False)
                             
-                            # ★★★ 完美判断：只要身上有幕后烙印，或者角色名含有典型的幕后词汇，一律杀掉前缀
-                            crew_keywords = ['导演', '编剧', '制片', '执行', '美术', '剪辑', '原著', '原创', '配乐', '摄影']
+                            # ★★★ 完美判断：扩大词库，只要含有这些幕后词汇，一律杀掉前缀
+                            crew_keywords = ['导演', '编剧', '制片', '出品', '执行', '美术', '剪辑', '原著', '原创', '配乐', '摄影', '策划', '监制', '动作', '视效']
                             if is_crew_flag or any(k in char_str for k in crew_keywords):
                                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
 
@@ -2127,6 +2150,22 @@ class MediaProcessor:
                                 if str(t_actor.get('id')) == aid: t_actor['character'] = final_char_with_prefix
 
                         tmdb_details_for_extra = construct_metadata_payload(item_type, fresh_data, aggregated_tmdb_data, item_details_from_emby)
+                        
+                        # [加入核弹清洗]
+                        if 'casts' in tmdb_details_for_extra: tmdb_details_for_extra['casts']['crew'] = []
+                        if 'credits' in tmdb_details_for_extra: tmdb_details_for_extra['credits']['crew'] = []
+                        if 'created_by' in tmdb_details_for_extra: tmdb_details_for_extra['created_by'] = []
+                        if item_type == "Series":
+                            for s in tmdb_details_for_extra.get('seasons_details', []):
+                                if 'credits' in s: s['credits']['crew'] = []
+                            ep_data = tmdb_details_for_extra.get('episodes_details')
+                            if isinstance(ep_data, dict):
+                                for ep in ep_data.values():
+                                    if 'credits' in ep: ep['credits']['crew'] = []
+                            elif isinstance(ep_data, list):
+                                for ep in ep_data:
+                                    if 'credits' in ep: ep['credits']['crew'] = []
+
                         if not item_details_from_emby.get("Genres") and fresh_data.get("genres"): item_details_from_emby["Genres"] = fresh_data.get("genres")
                         
                         conn.commit() # [优化] 提前提交演员处理的结果，尽早释放部分锁
@@ -3955,8 +3994,8 @@ class MediaProcessor:
                     if filtered_guests:
                         credits_node['guest_stars'] = filtered_guests
                     
-                    if specific_tmdb_data.get('credits', {}).get('crew'):
-                        credits_node['crew'] = specific_tmdb_data['credits']['crew']
+                    # if specific_tmdb_data.get('credits', {}).get('crew'):
+                    #     credits_node['crew'] = specific_tmdb_data['credits']['crew']
                 
                 elif is_episode_file:
                     if not credits_node.get('cast'):
