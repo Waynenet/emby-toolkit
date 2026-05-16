@@ -720,9 +720,21 @@ class MediaProcessor:
                             c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
-                            
-                    # 2. 提取其他幕后工作人员
+
                     raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
+
+                    # 1.5 ★★★ 修复：专门从剧集的 crew 中捞出导演，防止被当成打杂的沉底被切掉 ★★★
+                    for c in raw_crew:
+                        c_id = c.get('id')
+                        if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                            c_copy = c.copy()
+                            c_copy['character'] = '导演'
+                            c_copy['order'] = -100 + len(directors_source)
+                            c_copy['_is_crew'] = True # ★★★ 核心标记
+                            directors_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+
+                    # 2. 提取其他幕后工作人员
                     for c in raw_crew:
                         c_id = c.get('id')
                         if c_id not in seen_crew_ids and len(other_crew_source) < 8:
@@ -2069,9 +2081,21 @@ class MediaProcessor:
                                 c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                                 directors_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
+
+                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
+
+                        # 1.5 ★★★ 修复：专门从剧集的 crew 中捞出导演，防止被当成打杂的沉底被切掉 ★★★
+                        for c in raw_crew:
+                            c_id = c.get('id')
+                            if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                                c_copy = c.copy()
+                                c_copy['character'] = '导演'
+                                c_copy['order'] = -100 + len(directors_source)
+                                c_copy['_is_crew'] = True # ★★★ 核心标记
+                                directors_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
                                 
                         # 2. 提取其他幕后工作人员
-                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
                         for c in raw_crew:
                             c_id = c.get('id')
                             if c_id not in seen_crew_ids and len(other_crew_source) < 8:
@@ -2436,34 +2460,28 @@ class MediaProcessor:
                         valid_d_role = _extract_douban_role(d_actor)
 
                         if tmdb_id_from_map in final_cast_map:
-                            # 【优化】如果演员已存在，无视 limit 限制，强制更新中文名和角色
                             existing_actor = final_cast_map[tmdb_id_from_map]
-                            if utils.contains_chinese(d_actor.get("Name", "")):
-                                existing_actor["name"] = d_actor.get("Name")
-                            if valid_d_role:
-                                existing_actor["character"] = valid_d_role
+                            if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
+                            if valid_d_role: existing_actor["character"] = valid_d_role
                             match_found = True
-                            logger.debug(f"    ├─ 匹配成功 (查库更新): '{existing_actor['name']}' 的信息已补全")
                         else:
-                            # 【优化】如果是新演员，才判断是否超限
-                            if len(final_cast_map) < limit:
-                                logger.info(f"    ├─ 匹配成功 (查库新增): 豆瓣演员 '{d_actor.get('Name')}' -> 加入最终演员表")
+                            # ★★★ 修复：判断是否为核心主创 ★★★
+                            is_important_crew = valid_d_role and any(k in valid_d_role for k in ['导演', '编剧', '制片', '出品'])
+                            
+                            # 【优化】如果还没满 30 人，或者他是核心主创，无视限制强行塞进去置顶！
+                            if len(final_cast_map) < limit or is_important_crew:
                                 cached_metadata_map = self.actor_db_manager.get_full_actor_details_by_tmdb_ids(cursor, [int(tmdb_id_from_map)])
                                 cached_metadata = cached_metadata_map.get(int(tmdb_id_from_map), {})
-                                
-                                new_actor_entry = {
+                                final_cast_map[tmdb_id_from_map] = {
                                     "id": tmdb_id_from_map, "name": d_actor.get("Name"),
                                     "original_name": cached_metadata.get("original_name") or d_actor.get("OriginalName"),
-                                    "character": valid_d_role if valid_d_role else "演员", 
-                                    "order": 999,
-                                    "imdb_id": entry.get("imdb_id"), "douban_id": d_douban_id,
-                                    "emby_person_id": None
+                                    "character": valid_d_role if is_important_crew else (valid_d_role if valid_d_role else "演员"), 
+                                    "order": -50 if is_important_crew else 999, # 导演强制给负数排前面
+                                    "_is_crew": True if is_important_crew else False, # 打上免死烙印
+                                    "imdb_id": entry.get("imdb_id"), "douban_id": d_douban_id, "emby_person_id": None
                                 }
-                                final_cast_map[tmdb_id_from_map] = new_actor_entry
                                 match_found = True
-                            else:
-                                # 数量超限，拒绝新增，但标记为已处理以跳过后续 API 请求
-                                match_found = True 
+                            else: match_found = True
                 
                 if not match_found:
                     still_unmatched.append(d_actor)
@@ -2507,26 +2525,24 @@ class MediaProcessor:
                                 valid_d_role = _extract_douban_role(d_actor)
 
                                 if tmdb_id_from_find in final_cast_map:
-                                    # 【优化】如果演员已存在，无视 limit 限制，强制更新中文名和角色
                                     existing_actor = final_cast_map[tmdb_id_from_find]
-                                    if utils.contains_chinese(d_actor.get("Name", "")):
-                                        existing_actor["name"] = d_actor.get("Name")
-                                    if valid_d_role:
-                                        existing_actor["character"] = valid_d_role
+                                    if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
+                                    if valid_d_role: existing_actor["character"] = valid_d_role
                                     match_found = True
                                 else:
-                                    # 【优化】如果是新演员，才判断是否超限
-                                    if len(final_cast_map) < limit:
-                                        new_actor_entry = {
+                                    # ★★★ 修复：判断是否为核心主创 ★★★
+                                    is_important_crew = valid_d_role and any(k in valid_d_role for k in ['导演', '编剧', '制片', '出品'])
+                                    
+                                    if len(final_cast_map) < limit or is_important_crew:
+                                        final_cast_map[tmdb_id_from_find] = {
                                             "id": tmdb_id_from_find, "name": d_actor.get("Name"),
-                                            "character": valid_d_role if valid_d_role else "演员", 
-                                            "order": 999, "imdb_id": d_imdb_id,
-                                            "douban_id": d_douban_id, "emby_person_id": None
+                                            "character": valid_d_role if is_important_crew else (valid_d_role if valid_d_role else "演员"), 
+                                            "order": -50 if is_important_crew else 999, 
+                                            "_is_crew": True if is_important_crew else False,
+                                            "imdb_id": d_imdb_id, "douban_id": d_douban_id, "emby_person_id": None
                                         }
-                                        final_cast_map[tmdb_id_from_find] = new_actor_entry
                                         match_found = True
-                                    else:
-                                        match_found = True # 超限不加，跳过
+                                    else: match_found = True
                     
                     if not match_found:
                         still_unmatched_final.append(d_actor)
