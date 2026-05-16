@@ -2381,10 +2381,12 @@ class MediaProcessor:
         unmatched_douban_actors = []
         logger.info(f"  ➜ 匹配阶段 1: 提取豆瓣ID及具体角色名")
         
-        for d_actor in douban_candidates:
-            # 【终极修复】防止数据库缓存(小写键)和API(大写键)的差异导致漏读数据
-            raw_zh = d_actor.get("Name") or d_actor.get("name") or ""
-            raw_en = d_actor.get("OriginalName") or d_actor.get("original_name") or d_actor.get("Original_Name") or ""
+        for idx, d_actor in enumerate(douban_candidates):
+            # ★★★ 病根 1 修复：绕过 format 造成的字段丢失，直接从原始列表里把原滋原味的英文名抠出来
+            raw_actor = douban_cast_list[idx] if idx < len(douban_cast_list) else {}
+            
+            raw_zh = d_actor.get("Name") or raw_actor.get("name") or ""
+            raw_en = raw_actor.get("original_name") or d_actor.get("OriginalName") or ""
             
             douban_name_zh = str(raw_zh).lower().strip()
             douban_name_en = str(raw_en).lower().strip()
@@ -2412,20 +2414,26 @@ class MediaProcessor:
                 
                 if is_match:
                     # 兼容不同格式的 ID 键
-                    douban_id_to_add = d_actor.get("DoubanCelebrityId") or d_actor.get("id")
+                    douban_id_to_add = d_actor.get("DoubanCelebrityId") or raw_actor.get("id")
                     if douban_id_to_add:
                         l_actor["douban_id"] = douban_id_to_add
                     
                     # 使用提取到的有效豆瓣具体角色覆盖TMDB
-                    valid_d_role = _extract_douban_role(d_actor)
+                    valid_d_role = _extract_douban_role(d_actor) or _extract_douban_role(raw_actor)
                     if valid_d_role:
                         l_actor["character"] = valid_d_role
+                        
+                    # ★★★ 病根 2 修复：匹配成功后，必须把 TMDb 的英文名替换为豆瓣的中文名！
+                    if raw_zh and utils.contains_chinese(raw_zh):
+                        l_actor["name"] = raw_zh
                     
                     merged_actors.append(unmatched_local_actors.pop(i))
                     match_found_for_this_douban_actor = True
                     break
                     
             if not match_found_for_this_douban_actor:
+                # 兜底：把原滋原味的英文名塞回去，防止后续阶段继续丢失
+                d_actor["original_name"] = raw_en
                 unmatched_douban_actors.append(d_actor)
 
         current_cast_list = merged_actors + unmatched_local_actors
