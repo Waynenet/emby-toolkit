@@ -2931,6 +2931,14 @@ class MediaProcessor:
             )
             final_cast_for_json = self._build_cast_from_final_data(final_formatted_cast)
 
+            # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有 Crew 节点 ★★★
+            # 这一步是为了防止旧的 JSON 文件里残留无头像的幕后杂鱼
+            if 'casts' in data: data['casts']['crew'] = []
+            if 'credits' in data: data['credits']['crew'] = []
+            if 'created_by' in data: data['created_by'] = []
+            # =============================================================
+
+            # 重新赋值修正后的演员表
             if 'casts' in data:
                 data['casts']['cast'] = final_cast_for_json
             elif 'credits' in data:
@@ -2938,6 +2946,7 @@ class MediaProcessor:
             else:
                 data.setdefault('credits', {})['cast'] = final_cast_for_json
             
+            # 写入文件...
             with open(main_json_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -2968,6 +2977,25 @@ class MediaProcessor:
                         aggregated_tmdb_data=aggregated_tmdb_data_manual,
                         emby_data_fallback=item_details
                     )
+                    
+                    # =============================================================
+                    # ★★★ 核弹级清理：手动编辑入口处的强制抹除 ★★★
+                    # =============================================================
+                    if 'casts' in formatted_manual_metadata: formatted_manual_metadata['casts']['crew'] = []
+                    if 'credits' in formatted_manual_metadata: formatted_manual_metadata['credits']['crew'] = []
+                    if 'created_by' in formatted_manual_metadata: formatted_manual_metadata['created_by'] = []
+                    
+                    if item_type == "Series":
+                        for s in formatted_manual_metadata.get('seasons_details', []):
+                            if 'credits' in s: s['credits']['crew'] = []
+                        ep_data = formatted_manual_metadata.get('episodes_details')
+                        if isinstance(ep_data, dict):
+                            for ep in ep_data.values():
+                                if 'credits' in ep: ep['credits']['crew'] = []
+                        elif isinstance(ep_data, list):
+                            for ep in ep_data:
+                                if 'credits' in ep: ep['credits']['crew'] = []
+
                 self._upsert_media_metadata(
                     cursor=cursor,
                     item_type=item_type,
