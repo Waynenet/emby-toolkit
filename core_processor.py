@@ -678,6 +678,7 @@ class MediaProcessor:
                             c_copy = c.copy()
                             c_copy['character'] = '导演'
                             c_copy['order'] = -100 + len(directors_source) 
+                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
                             
@@ -687,9 +688,9 @@ class MediaProcessor:
                         # 限制最多提取前15个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
                         if c_id not in seen_crew_ids and len(other_crew_source) < 15: 
                             c_copy = c.copy()
-                            # 提取原本的英文职务，后续大一统 AI 引擎会自动把它翻译成中文 (如 Producer -> 制片人)
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source) 
+                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
                             
@@ -716,6 +717,7 @@ class MediaProcessor:
                             c_copy = c.copy()
                             c_copy['character'] = '导演/主创'
                             c_copy['order'] = -100 + len(directors_source)
+                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
                             
@@ -727,6 +729,7 @@ class MediaProcessor:
                             c_copy = c.copy()
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source)
+                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
@@ -2108,10 +2111,12 @@ class MediaProcessor:
 
                         # [新增] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀
                         for actor in final_processed_cast:
-                            # 通过我们之前设定的极端 order 值来判断是否为幕后人员
-                            o = actor.get('order', 0)
-                            if isinstance(o, (int, float)) and (o < 0 or o >= 1000):
-                                char_str = actor.get('character', '')
+                            char_str = actor.get('character', '')
+                            is_crew_flag = actor.get('_is_crew', False)
+                            
+                            # ★★★ 完美判断：只要身上有幕后烙印，或者角色名含有典型的幕后词汇，一律杀掉前缀
+                            crew_keywords = ['导演', '编剧', '制片', '执行', '美术', '剪辑', '原著', '原创', '配乐', '摄影']
+                            if is_crew_flag or any(k in char_str for k in crew_keywords):
                                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
 
                         # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
