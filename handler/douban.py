@@ -417,15 +417,33 @@ class DoubanApi:
             return self._make_error_dict(response.get("error", "api_error") if response else "no_response", err_msg, {"cast": []})
 
         data: Dict[str, List[Dict[str, Any]]] = {"cast": []}
-        actors_list = response.get("celebrities", response.get("actors", []))
-        if actors_list is None: actors_list = []
+        
+        # =====================================================================
+        # ✨ 核心升级：扩大揽收范围，确保导演、编剧、制片人等幕后人员全部捕获 ✨
+        # =====================================================================
+        raw_people_list = []
+        if isinstance(response.get("celebrities"), list): raw_people_list.extend(response["celebrities"])
+        if isinstance(response.get("actors"), list): raw_people_list.extend(response["actors"])
+        if isinstance(response.get("directors"), list): raw_people_list.extend(response["directors"])
+        if isinstance(response.get("writers"), list): raw_people_list.extend(response["writers"])
+        
+        # 去重（防止同一大佬既在 directors 又在 celebrities 中导致重复抓取）
+        seen_douban_ids = set()
+        actors_list = []
+        for p in raw_people_list:
+            if not isinstance(p, dict): continue
+            p_id = str(p.get("id", ""))
+            if p_id and p_id not in seen_douban_ids:
+                seen_douban_ids.add(p_id)
+                actors_list.append(p)
 
         for idx, item in enumerate(actors_list):
-            if not isinstance(item, dict): continue
+            # ✨ 核心升级：不仅提取角色名(character)，还要提取职务数组(roles)，里面通常包含 '导演', '制片人', '原著' 等
             character_str_raw = item.get("character", "")
-            if not character_str_raw and item.get("attrs", {}).get("role"):
-                roles = item.get("attrs").get("role")
-                if isinstance(roles, list) and roles: character_str_raw = " / ".join(r for r in roles if isinstance(r, str))
+            if not character_str_raw:
+                roles = item.get("roles") or item.get("attrs", {}).get("role")
+                if isinstance(roles, list) and roles: 
+                    character_str_raw = " / ".join(r for r in roles if isinstance(r, str))
             
             cleaned_char_name = clean_character_name_static(character_str_raw)
             actor_id_str = str(item.get("id", "")).strip()
@@ -439,8 +457,8 @@ class DoubanApi:
                 "name": item.get("name"), "character": cleaned_char_name, "id": actor_id_int,
                 "original_name": item.get("latin_name", item.get("name_en")),
                 "profile_path": profile_path_val, "order": item.get("rank", idx)
-                # 可以添加更多TMDb兼容的字段，如果豆瓣API提供或可以转换
             })
+            
         return data # 成功时返回包含 cast 的字典
 
     def movie_celebrities(self, subject_id: str) -> Dict[str, Any]:

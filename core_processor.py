@@ -662,16 +662,76 @@ class MediaProcessor:
                 # =================================================================
                 # 准备演员源数据
                 authoritative_cast_source = []
+                directors_source = []
+                other_crew_source = []
+
                 if item_type == "Movie":
                     credits_source = details.get('credits') or details.get('casts') or {}
-                    authoritative_cast_source = credits_source.get('cast', [])
+                    raw_actors = credits_source.get('cast', [])
+                    raw_crew = credits_source.get('crew', [])
+                    
+                    seen_crew_ids = set()
+                    # 1. 提取主要导演 (最多2个，Order设为负数确保排在最前面)
+                    for c in raw_crew:
+                        c_id = c.get('id')
+                        if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                            c_copy = c.copy()
+                            c_copy['character'] = '导演'
+                            c_copy['order'] = -100 + len(directors_source) 
+                            directors_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+                            
+                    # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
+                    for c in raw_crew:
+                        c_id = c.get('id')
+                        # 限制最多提取前15个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 15: 
+                            c_copy = c.copy()
+                            # 提取原本的英文职务，后续大一统 AI 引擎会自动把它翻译成中文 (如 Producer -> 制片人)
+                            c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
+                            c_copy['order'] = 1000 + len(other_crew_source) 
+                            other_crew_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+                            
+                    actors_source = raw_actors
+
                 elif item_type == "Series":
                     if aggregated_tmdb_data:
                         all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                        authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(details, all_episodes)
+                        actors_source = _aggregate_series_cast_from_tmdb_data(details, all_episodes)
                     else:
                         credits_source = details.get('aggregate_credits') or details.get('credits') or {}
-                        authoritative_cast_source = credits_source.get('cast', [])
+                        actors_source = credits_source.get('cast', [])
+                        
+                    seen_crew_ids = set()
+                    # 1. 提取主要导演/主创 (最多2个)
+                    creators = details.get('created_by', [])
+                    for c in creators:
+                        c_id = c.get('id')
+                        if len(directors_source) < 2 and c_id not in seen_crew_ids:
+                            c_copy = c.copy()
+                            c_copy['character'] = '导演/主创'
+                            c_copy['order'] = -100 + len(directors_source)
+                            directors_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+                            
+                    # 2. 提取其他幕后工作人员
+                    raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
+                    for c in raw_crew:
+                        c_id = c.get('id')
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 15:
+                            c_copy = c.copy()
+                            c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
+                            c_copy['order'] = 1000 + len(other_crew_source)
+                            other_crew_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+
+                # 3. 合并队列：导演在前 -> 演员在中 -> 其他幕后在后
+                authoritative_cast_source = directors_source + actors_source + other_crew_source
+
+                # ★★★ 全局应用隐藏无头像规则（给 API 减负，没头像的幕后统统在这里被杀掉） ★★★
+                if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
+                    authoritative_cast_source = [a for a in authoritative_cast_source if a.get("profile_path")]
 
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
@@ -1914,9 +1974,79 @@ class MediaProcessor:
 
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
                     
-                    if item_type == "Movie": authoritative_cast_source = (fresh_data.get('credits') or fresh_data.get('casts') or {}).get('cast', [])
-                    elif item_type == "Series": authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(fresh_data, list(aggregated_tmdb_data.get("episodes_details", {}).values()) if aggregated_tmdb_data else [])
-                    
+                    # =================================================================
+                    # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
+                    # =================================================================
+                    # 准备演员源数据
+                    authoritative_cast_source = []
+                    directors_source = []
+                    other_crew_source = []
+
+                    if item_type == "Movie":
+                        credits_source = fresh_data.get('credits') or fresh_data.get('casts') or {}
+                        raw_actors = credits_source.get('cast', [])
+                        raw_crew = credits_source.get('crew', [])
+                        
+                        seen_crew_ids = set()
+                        # 1. 提取主要导演 (最多2个，Order设为负数确保排在最前面)
+                        for c in raw_crew:
+                            c_id = c.get('id')
+                            if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                                c_copy = c.copy()
+                                c_copy['character'] = '导演'
+                                c_copy['order'] = -100 + len(directors_source) 
+                                directors_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
+                                
+                        # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
+                        for c in raw_crew:
+                            c_id = c.get('id')
+                            # 限制最多提取前15个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 15: 
+                                c_copy = c.copy()
+                                # 提取原本的英文职务，后续大一统 AI 引擎会自动把它翻译成中文 (如 Producer -> 制片人)
+                                c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
+                                c_copy['order'] = 1000 + len(other_crew_source) 
+                                other_crew_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
+                                
+                        actors_source = raw_actors
+
+                    elif item_type == "Series":
+                        if aggregated_tmdb_data:
+                            all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
+                            actors_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
+                        else:
+                            credits_source = fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}
+                            actors_source = credits_source.get('cast', [])
+                            
+                        seen_crew_ids = set()
+                        # 1. 提取主要导演/主创 (最多2个)
+                        creators = fresh_data.get('created_by', [])
+                        for c in creators:
+                            c_id = c.get('id')
+                            if len(directors_source) < 2 and c_id not in seen_crew_ids:
+                                c_copy = c.copy()
+                                c_copy['character'] = '导演/主创'
+                                c_copy['order'] = -100 + len(directors_source)
+                                directors_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
+                                
+                        # 2. 提取其他幕后工作人员
+                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
+                        for c in raw_crew:
+                            c_id = c.get('id')
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 15:
+                                c_copy = c.copy()
+                                c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
+                                c_copy['order'] = 1000 + len(other_crew_source)
+                                other_crew_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
+
+                    # 3. 合并队列：导演在前 -> 演员在中 -> 其他幕后在后
+                    authoritative_cast_source = directors_source + actors_source + other_crew_source
+
+                    # ★★★ 全局应用隐藏无头像规则（给 API 减负，没头像的幕后统统在这里被杀掉） ★★★
                     if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
                         authoritative_cast_source = [a for a in authoritative_cast_source if a.get("profile_path")]
 
@@ -1966,6 +2096,14 @@ class MediaProcessor:
                         is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
                         
                         final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
+
+                        # [新增] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀
+                        for actor in final_processed_cast:
+                            # 通过我们之前设定的极端 order 值来判断是否为幕后人员
+                            o = actor.get('order', 0)
+                            if isinstance(o, (int, float)) and (o < 0 or o >= 1000):
+                                char_str = actor.get('character', '')
+                                actor['character'] = re.sub(r'^(饰\s*|配\s*)', '', char_str).strip()
 
                         # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
                         for actor in final_processed_cast:
@@ -2071,11 +2209,11 @@ class MediaProcessor:
         # ======================================================================
         # 预处理: 清洗同名演员
         # ======================================================================
-        logger.debug("  ➜ 预处理：清洗源数据中的同名演员，只保留order最小的一个。")
+        logger.debug("  ➜ 预处理：清洗源数据中的同名演员，合并身兼数职人员。")
         cleaned_tmdb_cast = []
         seen_names = {} 
         
-        tmdb_cast_people.sort(key=lambda x: x.get('order', 999))
+        tmdb_cast_people.sort(key=lambda x: x.get('order') if isinstance(x.get('order'), (int, float)) else 999)
 
         for actor in tmdb_cast_people:
             name = actor.get("name")
@@ -2086,10 +2224,18 @@ class MediaProcessor:
             
             if cleaned_name not in seen_names:
                 cleaned_tmdb_cast.append(actor)
-                seen_names[cleaned_name] = actor.get('order', 999)
+                seen_names[cleaned_name] = actor # 存整个字典对象
             else:
+                existing_actor = seen_names[cleaned_name]
                 role = actor.get("character", "未知角色")
-                logger.info(f"  ➜ 为避免张冠李戴，删除同名异人演员: '{cleaned_name}' (角色: {role}, order: {actor.get('order', 999)})")
+                existing_role = existing_actor.get("character", "")
+                
+                # 【优化】如果这个人既是导演又是演员，智能合并角色名
+                if role and existing_role and role not in existing_role:
+                    existing_actor["character"] = f"{existing_role} / {role}"
+                    logger.info(f"  ➜ 发现身兼多职人员 '{cleaned_name}'，已合并身份: {existing_actor['character']}")
+                else:
+                    logger.info(f"  ➜ 为避免张冠李戴，删除同名异人演员: '{cleaned_name}' (角色: {role})")
 
         tmdb_cast_people = cleaned_tmdb_cast
         original_tmdb_ids = {str(actor.get("id")) for actor in tmdb_cast_people if actor.get("id")}
@@ -2382,15 +2528,18 @@ class MediaProcessor:
         # 步骤 6：智能截断与排序
         # ======================================================================
         limit = int(self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30) or 30)
+        
+        # 解除大于0的限制，允许负数order (保证导演排在首位)
+        sort_key = lambda x: x.get('order') if isinstance(x.get('order'), (int, float)) else 999
+        
         if len(current_cast_list) > limit:
-            sort_key = lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999
             with_profile = [actor for actor in current_cast_list if actor.get("profile_path")]
             without_profile = [actor for actor in current_cast_list if not actor.get("profile_path")]
             with_profile.sort(key=sort_key)
             without_profile.sort(key=sort_key)
             current_cast_list = (with_profile + without_profile)[:limit]
         else:
-            current_cast_list.sort(key=lambda x: x.get('order') if x.get('order') is not None and x.get('order') >= 0 else 999)
+            current_cast_list.sort(key=sort_key)
 
         # ======================================================================
         # 步骤 7: 最终格式化
