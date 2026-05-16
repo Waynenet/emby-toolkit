@@ -1949,13 +1949,30 @@ class MediaProcessor:
 
                         # 将翻译结果同步回 final_processed_cast 并执行强制英文兜底
                         translated_cast_map = {str(a.get('id')): a.get('character') for a in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])) if a.get('id')}
+                        
                         for actor in final_processed_cast:
                             aid = str(actor.get('id'))
                             final_char = translated_cast_map.get(aid) or actor.get('character') or ""
+                            
+                            # 剔除 AI 翻译时可能自作主张加的词汇，剥离出纯净角色名，防止套娃重叠
+                            final_char = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', final_char).strip()
+                            
                             if not utils.contains_chinese(final_char): final_char = "演员"
                             actor['character'] = final_char
+                        
+                        # [完美修复] 重新使用格式化函数过一遍，根据用户的“角色前缀开关”和媒体类型(动画/真人)重新挂载 "饰/配" 前缀
+                        raw_genres = item_details_from_emby.get("Genres", [])
+                        genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
+                        is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
+                        
+                        final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
+
+                        # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
+                        for actor in final_processed_cast:
+                            aid = str(actor.get('id'))
+                            final_char_with_prefix = actor.get('character')
                             for t_actor in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])):
-                                if str(t_actor.get('id')) == aid: t_actor['character'] = final_char
+                                if str(t_actor.get('id')) == aid: t_actor['character'] = final_char_with_prefix
 
                         tmdb_details_for_extra = construct_metadata_payload(item_type, fresh_data, aggregated_tmdb_data, item_details_from_emby)
                         if not item_details_from_emby.get("Genres") and fresh_data.get("genres"): item_details_from_emby["Genres"] = fresh_data.get("genres")
