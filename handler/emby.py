@@ -179,6 +179,8 @@ def wait_for_server_idle(base_url: str, api_key: str, max_wait_seconds: int = 30
         "Refresh Guide",                 # 刷新直播指南 (IPTV相关，通常只占网络)
         "Clean up collections",          # 清理合集 (通常很快)
         "Build Douban Cache",            # 神医-构建豆瓣缓存 (不影响可以忽略)
+        "Update Emby.ApiClient",         # <--- 忽略，因为这个任务通常very fast
+        "Merge Multi Versions",          # 合并多版本 (通常很快，且不占资源)
         # "Scan media library",          # <--- 如果你想一边扫库一边硬跑，可以把这个注释解开
     ]
     
@@ -646,7 +648,7 @@ def get_emby_library_items(
 
     if search_term and search_term.strip():
         # ... (搜索逻辑保持不变) ...
-        logger.info(f"进入搜索模式，关键词: '{search_term}'")
+        logger.info(f"  ➜ 进入搜索模式，关键词: '{search_term}'")
         api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
         params = {
             "api_key": api_key,
@@ -660,10 +662,10 @@ def get_emby_library_items(
             response = emby_client.get(api_url, params=params)
             response.raise_for_status()
             items = response.json().get("Items", [])
-            logger.info(f"搜索到 {len(items)} 个匹配项。")
+            logger.info(f"  ➜ 搜索到 {len(items)} 个匹配项。")
             return items
         except requests.exceptions.RequestException as e:
-            logger.error(f"搜索 Emby 时发生网络错误: {e}")
+            logger.error(f"  ➜ 搜索 Emby 时发生网络错误: {e}")
             return None
 
     if not library_ids:
@@ -730,76 +732,6 @@ def get_emby_library_items(
     
     return all_items_from_selected_libraries
 
-# ✨✨✨ 刷新Emby元数据 ✨✨✨
-def refresh_emby_item_metadata(item_emby_id: str,
-                               emby_server_url: str,
-                               emby_api_key: str,
-                               user_id_for_ops: str,
-                               replace_all_metadata_param: bool = False,
-                               replace_all_images_param: bool = False,
-                               item_name_for_log: Optional[str] = None
-                               ) -> bool:
-    if not all([item_emby_id, emby_server_url, emby_api_key, user_id_for_ops]):
-        logger.error("刷新Emby元数据参数不足：缺少ItemID、服务器URL、API Key或UserID。")
-        return False
-    wait_for_server_idle(emby_server_url, emby_api_key)
-    log_identifier = f"'{item_name_for_log}'" if item_name_for_log else f"ItemID: {item_emby_id}"
-    
-    try:
-        logger.trace(f"  ➜ 正在为 {log_identifier} 获取当前详情...")
-        item_data = get_emby_item_details(item_emby_id, emby_server_url, emby_api_key, user_id_for_ops)
-        if not item_data:
-            logger.error(f"  ➜ 无法获取 {log_identifier} 的详情，所有操作中止。")
-            return False
-
-        item_needs_update = False
-        
-        if replace_all_metadata_param:
-            logger.trace(f"  ➜ 检测到 ReplaceAllMetadata=True，执行解锁...")
-            if item_data.get("LockData") is True:
-                item_data["LockData"] = False
-                item_needs_update = True
-            if item_data.get("LockedFields"):
-                item_data["LockedFields"] = []
-                item_needs_update = True
-        
-        if item_needs_update:
-            logger.trace(f"  ➜ 正在为 {log_identifier} 提交锁状态更新...")
-            update_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}"
-            update_params = {"api_key": emby_api_key}
-            headers = {'Content-Type': 'application/json'}
-            update_response = emby_client.post(update_url, json=item_data, headers=headers, params=update_params)
-            update_response.raise_for_status()
-            logger.trace(f"  ➜ 成功更新 {log_identifier} 的锁状态。")
-        else:
-            logger.trace(f"  ➜ 项目 {log_identifier} 的锁状态无需更新。")
-
-    except Exception as e:
-        logger.warning(f"  ➜ 在刷新前更新锁状态时失败: {e}。刷新将继续，但可能受影响。")
-
-    logger.debug(f"  ➜ 正在为 {log_identifier} 发送最终的刷新请求...")
-    refresh_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}/Refresh"
-    params = {
-        "api_key": emby_api_key,
-        "Recursive": str(item_data.get("Type") == "Series").lower(),
-        "MetadataRefreshMode": "Default",
-        "ImageRefreshMode": "Default",
-        "ReplaceAllMetadata": str(replace_all_metadata_param).lower(),
-        "ReplaceAllImages": str(replace_all_images_param).lower()
-    }
-    
-    try:
-        response = emby_client.post(refresh_url, params=params)
-        if response.status_code == 204:
-            logger.info(f"  ➜ 已成功为 {log_identifier} 刷新元数据。")
-            return True
-        else:
-            logger.error(f"  - 刷新请求失败: HTTP状态码 {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"  - 刷新请求时发生网络错误: {e}")
-        return False
-
 def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
     """
     【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。
@@ -834,7 +766,7 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
                     target_id = items[0].get("Id")
                     target_name = items[0].get("Name", current_path)
                     
-                    #logger.info(f"  ➜ [定点扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
+                    #logger.info(f"  ➜ [精准扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
                     
                     # 对这个特定的父目录触发刷新
                     refresh_url = f"{base_url.rstrip('/')}/Items/{target_id}/Refresh"
@@ -847,7 +779,7 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
                         "ReplaceAllMetadata": "false"
                     }
                     emby_client.post(refresh_url, params=refresh_params)
-                    logger.info(f"  ➜ [定点扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
+                    logger.info(f"  ➜ [精准扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
                     return True
         except Exception as e:
             pass # 忽略查询错误，继续向上找
@@ -879,7 +811,7 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
         # 直接提取所有文件所在的目录，去重 (防止批量入库时重复刷新同一个父目录)
         dirs_to_refresh = set(os.path.dirname(p) for p in file_paths if p)
         
-        #logger.info(f"  ➜ [极速通知] 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
+        # logger.info(f"  ➜ 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
         
         # 直接拿鞭子抽，让 Emby 扫目录
         for d in dirs_to_refresh:
@@ -888,6 +820,99 @@ def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str,
         return True
     except Exception as e:
         logger.error(f"  ➜ [极速通知] 触发扫描失败: {e}")
+        return False
+
+# ✨✨✨ 刷新Emby元数据 ✨✨✨
+def refresh_emby_item_metadata(item_emby_id: str,
+                               emby_server_url: str,
+                               emby_api_key: str,
+                               user_id_for_ops: str,
+                               replace_all_metadata_param: bool = False,
+                               replace_all_images_param: bool = False,
+                               item_name_for_log: Optional[str] = None
+                               ) -> bool:
+    if not all([item_emby_id, emby_server_url, emby_api_key, user_id_for_ops]):
+        logger.error("刷新Emby元数据参数不足：缺少ItemID、服务器URL、API Key或UserID。")
+        return False
+
+    # =====================================================================
+    # ★★★ 核心优化：防御性编程，纠正外部参数传错位置的问题 ★★★
+    # =====================================================================
+    # 如果外部错误地把电影名传给了 ReplaceAllImages 参数
+    if isinstance(replace_all_images_param, str) and replace_all_images_param.lower() not in ['true', 'false']:
+        if not item_name_for_log:
+            item_name_for_log = replace_all_images_param
+        replace_all_images_param = False
+        
+    # 如果外部错误地把电影名传给了 ReplaceAllMetadata 参数
+    if isinstance(replace_all_metadata_param, str) and replace_all_metadata_param.lower() not in ['true', 'false']:
+        if not item_name_for_log:
+            item_name_for_log = replace_all_metadata_param
+        replace_all_metadata_param = False
+
+    # 强制将变量转换为标准的布尔值，防止后续出错
+    is_replace_meta = str(replace_all_metadata_param).lower() == 'true' or replace_all_metadata_param is True
+    is_replace_images = str(replace_all_images_param).lower() == 'true' or replace_all_images_param is True
+    # =====================================================================
+
+    wait_for_server_idle(emby_server_url, emby_api_key)
+    log_identifier = f"'{item_name_for_log}'" if item_name_for_log else f"ItemID: {item_emby_id}"
+    
+    try:
+        logger.trace(f"  ➜ 正在为 {log_identifier} 获取当前详情...")
+        item_data = get_emby_item_details(item_emby_id, emby_server_url, emby_api_key, user_id_for_ops)
+        if not item_data:
+            logger.error(f"  ➜ 无法获取 {log_identifier} 的详情，所有操作中止。")
+            return False
+
+        item_needs_update = False
+        
+        if is_replace_meta:
+            logger.trace(f"  ➜ 检测到 ReplaceAllMetadata=True，执行解锁...")
+            if item_data.get("LockData") is True:
+                item_data["LockData"] = False
+                item_needs_update = True
+            if item_data.get("LockedFields"):
+                item_data["LockedFields"] = []
+                item_needs_update = True
+        
+        if item_needs_update:
+            logger.trace(f"  ➜ 正在为 {log_identifier} 提交锁状态更新...")
+            update_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}"
+            update_params = {"api_key": emby_api_key}
+            headers = {'Content-Type': 'application/json'}
+            update_response = emby_client.post(update_url, json=item_data, headers=headers, params=update_params)
+            update_response.raise_for_status()
+            logger.trace(f"  ➜ 成功更新 {log_identifier} 的锁状态。")
+        else:
+            logger.trace(f"  ➜ 项目 {log_identifier} 的锁状态无需更新。")
+
+    except Exception as e:
+        logger.warning(f"  ➜ 在刷新前更新锁状态时失败: {e}。刷新将继续，但可能受影响。")
+
+    logger.debug(f"  ➜ 正在为 {log_identifier} 发送最终的刷新请求...")
+    refresh_url = f"{emby_server_url.rstrip('/')}/Items/{item_emby_id}/Refresh"
+    
+    # ★★★ 核心优化：不再使用 str().lower()，直接强制输出 "true" 或 "false" ★★★
+    params = {
+        "api_key": emby_api_key,
+        "Recursive": "true" if item_data.get("Type") == "Series" else "false",
+        "MetadataRefreshMode": "Default",
+        "ImageRefreshMode": "Default",
+        "ReplaceAllMetadata": "true" if is_replace_meta else "false",
+        "ReplaceAllImages": "true" if is_replace_images else "false"
+    }
+    
+    try:
+        response = emby_client.post(refresh_url, params=params)
+        if response.status_code == 204:
+            logger.info(f"  ➜ 已成功为 {log_identifier} 刷新元数据。")
+            return True
+        else:
+            logger.error(f"  - 刷新请求失败: HTTP状态码 {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"  - 刷新请求时发生网络错误: {e}")
         return False
 
 # ✨✨✨ 分批次地从 Emby 获取所有 Person 条目 ✨✨✨
@@ -906,10 +931,10 @@ def get_all_persons_from_emby(
         return
 
     library_ids = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS)
-    
+
     if library_ids and not force_full_scan:
         logger.info(f"  ➜ 检测到配置了 {len(library_ids)} 个媒体库，将优先尝试精准扫描...")
-        
+
         media_items = get_emby_library_items(
             base_url=base_url,
             api_key=api_key,
@@ -1679,7 +1704,7 @@ def append_item_to_collection(collection_id: str, item_emby_id: str, base_url: s
     except Exception as e:
         logger.error(f"  ➜ 向合集 {collection_id} 追加项目时发生未知错误: {e}", exc_info=True)
         return False
-  
+
 # --- 获取所有媒体库及其源文件夹路径 (带极速缓存) ---    
 def get_all_libraries_with_paths(base_url: str, api_key: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
     global _library_paths_cache, _library_paths_cache_time
@@ -1725,7 +1750,6 @@ def get_all_libraries_with_paths(base_url: str, api_key: str, force_refresh: boo
         logger.error(f"  ➜ 实时获取媒体库路径时发生错误: {e}", exc_info=True)
         return _library_paths_cache or [] # 失败则回退到旧缓存
 
-# --- 定位媒体库 ---
 # --- 定位媒体库 (极速版) ---
 def get_library_root_for_item(item_id: str, base_url: str, api_key: str, user_id: str, item_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     try:
@@ -1811,7 +1835,7 @@ def update_emby_item_details(item_id: str, new_data: Dict[str, Any], emby_server
         logger.error(f"  ➜ 更新项目详情失败 (ID: {item_id}): {e}")
         return False
 
-# --- 删除媒体项神医接口 (带自动回退) ---    
+# --- 删除媒体项神医接口 (带自动回退) ---
 def delete_item_sy(item_id: str, emby_server_url: str, emby_api_key: str, user_id: str) -> bool:
     """
     删除媒体项神医接口
@@ -2134,10 +2158,6 @@ def set_user_disabled_status(
 
     except Exception as e:
         logger.error(f"{action_text}用户 '{user_name_for_log}' 时发生严重错误: {e}", exc_info=True)
-        return False
-
-    except Exception as e:
-        logger.error(f"{action_text}用户 {user_id} 时发生严重错误: {e}", exc_info=True)
         return False
 
 # --- 获取用户完整详情 (含 Policy 和 Configuration) ---
@@ -2529,7 +2549,6 @@ def get_all_folder_mappings(base_url: str, api_key: str) -> dict:
                         'guid': str(folder.get('Guid') or ""),
                         'type': 'SelectableFolder'
                     }
-        logger.debug(f"  ➜ [权限调试] 已加载 {len(selectable_folders)} 个权限专用文件夹映射。")
     except Exception as e:
         logger.error(f"获取 SelectableMediaFolders 失败: {e}")
 
@@ -2824,7 +2843,7 @@ def clear_item_media_info(item_id: str, base_url: str, api_key: str) -> bool:
         # 这个接口是 POST 请求，不需要 body
         response = emby_client.post(api_url, params=params)
         response.raise_for_status()
-        logger.info(f"  ➜ [神医] 成功清除项目 (ID:{item_id}) 的错误媒体信息缓存。")
+        logger.info(f"  ➜ [神医] 成功清除项目 (ID:{item_id}) 媒体信息缓存。")
         return True
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
