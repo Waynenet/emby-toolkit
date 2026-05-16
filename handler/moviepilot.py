@@ -10,7 +10,7 @@ import handler.tmdb as tmdb
 import constants
 
 logger = logging.getLogger(__name__)
-SERIES_COMPLETE_INCLUDE_REGEX = r"(全|共)\d+(集|期)|完结|合集|Complete"
+
 # ======================================================================
 # 核心基础函数 (Token管理与API请求)
 # ======================================================================
@@ -190,20 +190,6 @@ def check_subscription_exists(tmdb_id: str, item_type: str, config: Dict[str, An
 # 业务封装函数 (保持原有逻辑，底层复用 subscribe_with_custom_payload)
 # ======================================================================
 
-def subscribe_movie_to_moviepilot(movie_info: dict, config: Dict[str, Any], best_version: Optional[int] = None) -> bool:
-    """订阅单部电影"""
-    payload = {
-        "name": movie_info['title'],
-        "tmdbid": int(movie_info['tmdb_id']),
-        "type": "电影"
-    }
-    if best_version is not None:
-        payload["best_version"] = best_version
-        logger.info(f"  ➜ 本次订阅为洗版订阅 (best_version={best_version})")
-        
-    logger.info(f"  ➜ 正在向 MoviePilot 提交电影订阅: '{movie_info['title']}'")
-    return subscribe_with_custom_payload(payload, config)
-
 def subscribe_series_to_moviepilot(series_info: dict, season_number: Optional[int], config: Dict[str, Any], best_version: Optional[int] = None) -> bool:
     """订阅单季或整部剧集"""
     title = series_info.get('title') or series_info.get('item_name')
@@ -221,11 +207,8 @@ def subscribe_series_to_moviepilot(series_info: dict, season_number: Optional[in
     
     if best_version is not None:
         payload["best_version"] = best_version
-        payload["include"] = SERIES_COMPLETE_INCLUDE_REGEX
-        logger.info(
-            f"  ➜ 本次订阅为剧集完结洗版订阅 "
-            f"(best_version={best_version}, include={SERIES_COMPLETE_INCLUDE_REGEX})"
-        )
+        payload["best_version_full"] = 1  # 明确告诉 MP 这是全集洗版
+        logger.info(f"  ➜ 本次订阅为全集洗版订阅")
 
     log_msg = f"  ➜ 正在向 MoviePilot 提交剧集订阅: '{title}'"
     if season_number is not None:
