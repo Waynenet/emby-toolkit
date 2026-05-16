@@ -685,8 +685,8 @@ class MediaProcessor:
                     # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
                     for c in raw_crew:
                         c_id = c.get('id')
-                        # 限制最多提取前15个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 15: 
+                        # 限制最多提取前8个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 8: 
                             c_copy = c.copy()
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source) 
@@ -725,7 +725,7 @@ class MediaProcessor:
                     raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
                     for c in raw_crew:
                         c_id = c.get('id')
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 15:
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                             c_copy = c.copy()
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source)
@@ -2037,8 +2037,8 @@ class MediaProcessor:
                         # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
                         for c in raw_crew:
                             c_id = c.get('id')
-                            # 限制最多提取前15个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 15: 
+                            # 限制最多提取前8个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 8: 
                                 c_copy = c.copy()
                                 # 提取原本的英文职务，后续大一统 AI 引擎会自动把它翻译成中文 (如 Producer -> 制片人)
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
@@ -2074,7 +2074,7 @@ class MediaProcessor:
                         raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
                         for c in raw_crew:
                             c_id = c.get('id')
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 15:
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                                 c_copy = c.copy()
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source)
