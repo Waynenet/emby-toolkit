@@ -2483,7 +2483,7 @@ class MediaProcessor:
                                 final_cast_map[tmdb_id_from_map] = {
                                     "id": tmdb_id_from_map, "name": d_actor.get("Name"),
                                     "original_name": cached_metadata.get("original_name") or d_actor.get("OriginalName"),
-                                    "character": valid_d_role if is_important_crew else (valid_d_role if valid_d_role else "演员"), 
+                                    "character": valid_d_role if valid_d_role else "演员", 
                                     "order": -50 if is_important_crew else 999, # 导演强制给负数排前面
                                     "_is_crew": True if is_important_crew else False, # 打上免死烙印
                                     "imdb_id": entry.get("imdb_id"), "douban_id": d_douban_id, "emby_person_id": None
@@ -2544,7 +2544,7 @@ class MediaProcessor:
                                     if len(final_cast_map) < limit or is_important_crew:
                                         final_cast_map[tmdb_id_from_find] = {
                                             "id": tmdb_id_from_find, "name": d_actor.get("Name"),
-                                            "character": valid_d_role if is_important_crew else (valid_d_role if valid_d_role else "演员"), 
+                                            "character": valid_d_role if valid_d_role else "演员", 
                                             "order": -50 if is_important_crew else 999, 
                                             "_is_crew": True if is_important_crew else False,
                                             "imdb_id": d_imdb_id, "douban_id": d_douban_id, "emby_person_id": None
