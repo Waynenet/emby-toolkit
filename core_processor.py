@@ -2144,7 +2144,7 @@ class MediaProcessor:
                             # # ★★★ 完美判断：扩大词库，只要含有这些幕后词汇，一律杀掉前缀
                             # crew_keywords = ['导演', '编剧', '制片', '出品', '执行', '美术', '剪辑', '原著', '原创', '配乐', '摄影', '策划', '监制', '动作', '视效']
                             # if is_crew_flag or any(k in char_str for k in crew_keywords):
-                            if is_crew_flag
+                            if is_crew_flag:
                                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
 
                         # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
