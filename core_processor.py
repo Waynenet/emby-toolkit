@@ -2358,14 +2358,19 @@ class MediaProcessor:
         logger.info(f"  ➜ 匹配阶段 1: 提取豆瓣ID及具体角色名")
         
         for d_actor in douban_candidates:
-            douban_name_zh = d_actor.get("Name", "").lower().strip()
-            douban_name_en = d_actor.get("OriginalName", "").lower().strip()
+            # 【终极修复】防止数据库缓存(小写键)和API(大写键)的差异导致漏读数据
+            raw_zh = d_actor.get("Name") or d_actor.get("name") or ""
+            raw_en = d_actor.get("OriginalName") or d_actor.get("original_name") or d_actor.get("Original_Name") or ""
+            
+            douban_name_zh = str(raw_zh).lower().strip()
+            douban_name_en = str(raw_en).lower().strip()
+            
             match_found_for_this_douban_actor = False
             for i, l_actor in enumerate(unmatched_local_actors):
                 local_name = str(l_actor.get("name") or "").lower().strip()
                 local_original_name = str(l_actor.get("original_name") or "").lower().strip()
                 
-                # [优化] 更强大的名字匹配逻辑，支持姓名反转 (Zhengye Gong vs Gong Zhengye) 和空格剔除
+                # 【强化版匹配逻辑】支持倒装匹配和无视空格
                 def _is_name_match(n1: str, n2: str) -> bool:
                     if not n1 or not n2: return False
                     if n1 == n2: return True
@@ -2382,11 +2387,12 @@ class MediaProcessor:
                     is_match = True
                 
                 if is_match:
-                    douban_id_to_add = d_actor.get("DoubanCelebrityId")
+                    # 兼容不同格式的 ID 键
+                    douban_id_to_add = d_actor.get("DoubanCelebrityId") or d_actor.get("id")
                     if douban_id_to_add:
                         l_actor["douban_id"] = douban_id_to_add
                     
-                    # ★★★ 使用提取到的有效豆瓣具体角色覆盖TMDB ★★★
+                    # 使用提取到的有效豆瓣具体角色覆盖TMDB
                     valid_d_role = _extract_douban_role(d_actor)
                     if valid_d_role:
                         l_actor["character"] = valid_d_role
@@ -2394,6 +2400,7 @@ class MediaProcessor:
                     merged_actors.append(unmatched_local_actors.pop(i))
                     match_found_for_this_douban_actor = True
                     break
+                    
             if not match_found_for_this_douban_actor:
                 unmatched_douban_actors.append(d_actor)
 
