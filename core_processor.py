@@ -2707,6 +2707,10 @@ class MediaProcessor:
                 char_str = actor.get('character', '')
                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
         
+        # ★★★ [终极排序修复] 重新分配绝对顺序 (解决 Emby 实时入库时忽略负数 order 的 Bug) ★★★
+        for i, actor in enumerate(final_cast_perfect):
+            actor['order'] = i
+            
         for actor in final_cast_perfect:
             tmdb_id_str = str(actor.get("id"))
             if tmdb_id_str in tmdb_to_emby_id_map:
