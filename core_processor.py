@@ -810,6 +810,34 @@ class MediaProcessor:
                         config=self.config,
                         douban_cast_data=douban_cast_raw
                     )
+
+                # [新增修复] 实时监控也需要将 AI 翻译结果同步回 final_processed_cast，并处理前缀
+                translated_cast_map = {str(a.get('id')): a.get('character') for a in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])) if a.get('id')}
+                
+                for actor in final_processed_cast:
+                    aid = str(actor.get('id'))
+                    final_char = translated_cast_map.get(aid) or actor.get('character') or ""
+                    final_char = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', final_char).strip()
+                    if not utils.contains_chinese(final_char): final_char = "演员"
+                    actor['character'] = final_char
+                
+                raw_genres = details.get("genres", [])
+                genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
+                is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
+                
+                final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
+
+                for actor in final_processed_cast:
+                    char_str = actor.get('character', '')
+                    is_crew_flag = actor.get('_is_crew', False)
+                    if is_crew_flag:
+                        actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
+
+                for actor in final_processed_cast:
+                    aid = str(actor.get('id'))
+                    final_char_with_prefix = actor.get('character')
+                    for t_actor in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])):
+                        if str(t_actor.get('id')) == aid: t_actor['character'] = final_char_with_prefix
             
             # =========================================================
             # 步骤 4 & 5: 生成本地 override 元数据文件 & 写入数据库
@@ -2997,6 +3025,13 @@ class MediaProcessor:
             final_formatted_cast = actor_utils.format_and_complete_cast_list(
                 new_cast_built, is_animation, self.config, mode='manual'
             )
+            
+            # [新增修复] 手动编辑保存后，同样需要剔除幕后人员的 "饰" 前缀
+            for actor in final_formatted_cast:
+                if actor.get('_is_crew', False):
+                    char_str = actor.get('character', '')
+                    actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
+                    
             final_cast_for_json = self._build_cast_from_final_data(final_formatted_cast)
 
             # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有 Crew 节点 ★★★
