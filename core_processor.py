@@ -789,14 +789,16 @@ class MediaProcessor:
                 # =================================================================
                 # ★★★ 核心修复：完美分流，演员进 cast，幕后进 crew，彻底杜绝重复！ ★★★
                 # =================================================================
+                target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
+                
                 cast_payload = []
                 crew_payload = []
                 
                 for actor in final_processed_cast:
                     if actor.get('_is_crew'): 
                         # 身份是幕后大佬：还原身份，塞入 crew 队列
-                        job_val = actor.get('_original_job', 'Director')
-                        dept_val = actor.get('_original_department', 'Directing')
+                        job_val = actor.get('_original_job') or ('Director' if '导演' in actor.get('character', '') else 'Crew')
+                        dept_val = actor.get('_original_department') or ('Directing' if '导演' in actor.get('character', '') else 'Production')
                         crew_payload.append({
                             "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path")
                         })
@@ -810,6 +812,11 @@ class MediaProcessor:
                     if 'credits' not in target_tmdb_data: target_tmdb_data['credits'] = {}
                     target_tmdb_data['credits']['cast'] = cast_payload
                     target_tmdb_data['credits']['crew'] = crew_payload # 原生纯净幕后就位
+                elif item_type == "Series":
+                    if 'series_details' in target_tmdb_data:
+                        if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
+                        target_tmdb_data['series_details']['credits']['cast'] = cast_payload
+                        target_tmdb_data['series_details']['credits']['crew'] = crew_payload # 原生纯净幕后就位
                 elif item_type == "Series":
                     if 'series_details' in target_tmdb_data:
                         if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
