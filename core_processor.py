@@ -709,21 +709,22 @@ class MediaProcessor:
                         actors_source = credits_source.get('cast', [])
                         
                     seen_crew_ids = set()
-                    # 1. 提取主要导演/主创 (最多2个)
+                    
+                    # 1. 将原著/编剧等主创人员提取出来，不再作为导演置顶，而是放在队伍末尾
                     creators = details.get('created_by', [])
                     for c in creators:
                         c_id = c.get('id')
-                        if len(directors_source) < 2 and c_id not in seen_crew_ids:
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                             c_copy = c.copy()
-                            c_copy['character'] = '导演/主创'
-                            c_copy['order'] = -100 + len(directors_source)
-                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
-                            directors_source.append(c_copy)
+                            c_copy['character'] = '主创/原著' # 降级为普通幕后
+                            c_copy['order'] = 1000 + len(other_crew_source)
+                            c_copy['_is_crew'] = True # 打上幕后人员的永久烙印
+                            other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
                     raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
 
-                    # 1.5 ★★★ 修复：专门从剧集的 crew 中捞出导演，防止被当成打杂的沉底被切掉 ★★★
+                    # 1.5 ★★★ 捞出真正的导演，放在第一位 ★★★
                     for c in raw_crew:
                         c_id = c.get('id')
                         if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
@@ -2024,7 +2025,6 @@ class MediaProcessor:
                     # =================================================================
                     # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
                     # =================================================================
-                    # 准备演员源数据
                     authoritative_cast_source = []
                     directors_source = []
                     other_crew_source = []
@@ -2035,27 +2035,25 @@ class MediaProcessor:
                         raw_crew = credits_source.get('crew', [])
                         
                         seen_crew_ids = set()
-                        # 1. 提取主要导演 (最多2个，Order设为负数确保排在最前面)
+                        # 1. 提取主要导演
                         for c in raw_crew:
                             c_id = c.get('id')
                             if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
                                 c_copy = c.copy()
                                 c_copy['character'] = '导演'
                                 c_copy['order'] = -100 + len(directors_source) 
-                                c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                                c_copy['_is_crew'] = True 
                                 directors_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
                                 
-                        # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
+                        # 2. 提取其他所有工作人员
                         for c in raw_crew:
                             c_id = c.get('id')
-                            # 限制最多提取前8个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
                             if c_id not in seen_crew_ids and len(other_crew_source) < 8: 
                                 c_copy = c.copy()
-                                # 提取原本的英文职务，后续大一统 AI 引擎会自动把它翻译成中文 (如 Producer -> 制片人)
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source) 
-                                c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                                c_copy['_is_crew'] = True 
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
                                 
@@ -2070,31 +2068,32 @@ class MediaProcessor:
                             actors_source = credits_source.get('cast', [])
                             
                         seen_crew_ids = set()
-                        # 1. 提取主要导演/主创 (最多2个)
+                        
+                        # 1. 将原著/编剧等主创降级为普通幕后，排在演员之后
                         creators = fresh_data.get('created_by', [])
                         for c in creators:
                             c_id = c.get('id')
-                            if len(directors_source) < 2 and c_id not in seen_crew_ids:
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                                 c_copy = c.copy()
-                                c_copy['character'] = '导演/主创'
-                                c_copy['order'] = -100 + len(directors_source)
-                                c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
-                                directors_source.append(c_copy)
+                                c_copy['character'] = '主创/原著' 
+                                c_copy['order'] = 1000 + len(other_crew_source)
+                                c_copy['_is_crew'] = True 
+                                other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
                         raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
 
-                        # 1.5 ★★★ 修复：专门从剧集的 crew 中捞出导演，防止被当成打杂的沉底被切掉 ★★★
+                        # 1.5 ★★★ 捞出真正的导演，放在第一位 ★★★
                         for c in raw_crew:
                             c_id = c.get('id')
                             if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
                                 c_copy = c.copy()
                                 c_copy['character'] = '导演'
                                 c_copy['order'] = -100 + len(directors_source)
-                                c_copy['_is_crew'] = True # ★★★ 核心标记
+                                c_copy['_is_crew'] = True 
                                 directors_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
-                                
+
                         # 2. 提取其他幕后工作人员
                         for c in raw_crew:
                             c_id = c.get('id')
@@ -2102,25 +2101,32 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                                c_copy['_is_crew'] = True 
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
-                    # 3. 合并队列：导演在前 -> 演员在中 -> 其他幕后在后
                     authoritative_cast_source = directors_source + actors_source + other_crew_source
 
-                    # ★★★ 全局应用隐藏无头像规则（给 API 减负，没头像的幕后统统在这里被杀掉） ★★★
                     if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
                         authoritative_cast_source = [a for a in authoritative_cast_source if a.get("profile_path")]
 
-                    # [优化] 这里开始集中使用一个 DB Connection
+                    # 【修正版】正确使用全库重刷连接，保留已有 Emby 演员
                     with get_central_db_connection() as conn:
                         cursor = conn.cursor()
                         current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
                         emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
                         enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
 
-                        final_processed_cast = self._process_cast_list(authoritative_cast_source, enriched_emby_cast, douban_cast_raw, item_details_from_emby, cursor, self.tmdb_api_key, self.get_stop_event())
+                        logger.info(f"  ➜ 启动演员表核心处理 (ID精准匹配/映射)...")
+                        final_processed_cast = self._process_cast_list(
+                            tmdb_cast_people=authoritative_cast_source,
+                            emby_cast_people=enriched_emby_cast, # 恢复读取原版演员
+                            douban_cast_list=douban_cast_raw,
+                            item_details_from_emby=item_details_from_emby,
+                            cursor=cursor,
+                            tmdb_api_key=self.tmdb_api_key,
+                            stop_event=self.get_stop_event()
+                        )
 
                         # ★★★ 智能比对与继承 (满足用户需求：保留已有翻译/手动修改) ★★★
                         if force_full_update and existing_override_data:
@@ -2164,10 +2170,6 @@ class MediaProcessor:
                         for actor in final_processed_cast:
                             char_str = actor.get('character', '')
                             is_crew_flag = actor.get('_is_crew', False)
-                            
-                            # # ★★★ 完美判断：扩大词库，只要含有这些幕后词汇，一律杀掉前缀
-                            # crew_keywords = ['导演', '编剧', '制片', '出品', '执行', '美术', '剪辑', '原著', '原创', '配乐', '摄影', '策划', '监制', '动作', '视效']
-                            # if is_crew_flag or any(k in char_str for k in crew_keywords):
                             if is_crew_flag:
                                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
 
@@ -2282,11 +2284,17 @@ class MediaProcessor:
             if isinstance(raw, list):
                 raw = " / ".join([str(x) for x in raw])
             val = str(raw or "").strip()
+            
+            # [强化] 如果常规字段没抓到职位，看看豆瓣有没有在 jobs 里塞“导演”等特殊身份
+            if not val or val in ["演员", "自己", "配音", "本色出演"]:
+                jobs = d_actor_dict.get("jobs", [])
+                if isinstance(jobs, list) and "导演" in jobs:
+                    val = "导演"
+                    
             # 如果包含中文，且不是泛指词汇，则认为是有效具体角色
             if val and utils.contains_chinese(val) and val not in ["演员", "自己", "配音", "本色出演"]:
                 return val
             return None
-        # ----------------------------------------------------
 
         # ======================================================================
         # 预处理: 清洗同名演员
@@ -2419,7 +2427,12 @@ class MediaProcessor:
                     # 使用提取到的有效豆瓣具体角色覆盖TMDB
                     valid_d_role = _extract_douban_role(d_actor)
                     if valid_d_role:
-                        l_actor["character"] = valid_d_role
+                        current_char = l_actor.get("character", "")
+                        # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣普通角色覆盖而消失
+                        if '导演' in current_char and '导演' not in valid_d_role:
+                            l_actor["character"] = f"导演 / {valid_d_role}"
+                        else:
+                            l_actor["character"] = valid_d_role
                     
                     merged_actors.append(unmatched_local_actors.pop(i))
                     match_found_for_this_douban_actor = True
@@ -2462,11 +2475,17 @@ class MediaProcessor:
                         if tmdb_id_from_map in final_cast_map:
                             existing_actor = final_cast_map[tmdb_id_from_map]
                             if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
-                            if valid_d_role: existing_actor["character"] = valid_d_role
+                            if valid_d_role: 
+                                current_char = existing_actor.get("character", "")
+                                # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
+                                if '导演' in current_char and '导演' not in valid_d_role:
+                                    existing_actor["character"] = f"导演 / {valid_d_role}"
+                                else:
+                                    existing_actor["character"] = valid_d_role
                             match_found = True
                         else:
-                            # ★★★ 修复：判断是否为核心主创 ★★★
-                            is_important_crew = valid_d_role and any(k in valid_d_role for k in ['导演', '编剧', '制片', '出品'])
+                            # ★★★ 修复：仅有导演才算无视限制的核心特权人员 ★★★
+                            is_important_crew = valid_d_role and '导演' in valid_d_role
                             
                             # 【优化】如果还没满 30 人，或者他是核心主创，无视限制强行塞进去置顶！
                             if len(final_cast_map) < limit or is_important_crew:
@@ -2527,11 +2546,17 @@ class MediaProcessor:
                                 if tmdb_id_from_find in final_cast_map:
                                     existing_actor = final_cast_map[tmdb_id_from_find]
                                     if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
-                                    if valid_d_role: existing_actor["character"] = valid_d_role
+                                    if valid_d_role: 
+                                        current_char = existing_actor.get("character", "")
+                                        # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
+                                        if '导演' in current_char and '导演' not in valid_d_role:
+                                            existing_actor["character"] = f"导演 / {valid_d_role}"
+                                        else:
+                                            existing_actor["character"] = valid_d_role
                                     match_found = True
                                 else:
-                                    # ★★★ 修复：判断是否为核心主创 ★★★
-                                    is_important_crew = valid_d_role and any(k in valid_d_role for k in ['导演', '编剧', '制片', '出品'])
+                                    # ★★★ 修复：仅有导演才算无视限制的核心特权人员 ★★★
+                                    is_important_crew = valid_d_role and '导演' in valid_d_role
                                     
                                     if len(final_cast_map) < limit or is_important_crew:
                                         final_cast_map[tmdb_id_from_find] = {
@@ -2559,7 +2584,12 @@ class MediaProcessor:
                                     if new_name and utils.contains_chinese(new_name):
                                         existing_actor["name"] = new_name
                                     if valid_d_role:
-                                        existing_actor["character"] = valid_d_role
+                                        current_char = existing_actor.get("character", "")
+                                        # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
+                                        if '导演' in current_char and '导演' not in valid_d_role:
+                                            existing_actor["character"] = f"导演 / {valid_d_role}"
+                                        else:
+                                            existing_actor["character"] = valid_d_role
                                 else:
                                     new_actor_entry = {
                                         "id": tmdb_id_to_process,
@@ -2633,6 +2663,13 @@ class MediaProcessor:
         is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
         
         final_cast_perfect = actor_utils.format_and_complete_cast_list(current_cast_list, is_animation, self.config, mode='auto')
+        
+        # [统一修正] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀 (全局生效：无论是实时入库还是重新处理)
+        for actor in final_cast_perfect:
+            is_crew_flag = actor.get('_is_crew', False)
+            if is_crew_flag:
+                char_str = actor.get('character', '')
+                actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
         
         for actor in final_cast_perfect:
             tmdb_id_str = str(actor.get("id"))
