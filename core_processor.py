@@ -679,6 +679,8 @@ class MediaProcessor:
                             c_copy['character'] = '导演'
                             c_copy['order'] = -100 + len(directors_source) 
                             c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                            c_copy['_original_job'] = c.get('job', 'Director')
+                            c_copy['_original_department'] = c.get('department', 'Directing')
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
                             
@@ -691,6 +693,8 @@ class MediaProcessor:
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source) 
                             c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                            c_copy['_original_job'] = c.get('job', 'Director')
+                            c_copy['_original_department'] = c.get('department', 'Directing')
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
                             
@@ -719,6 +723,8 @@ class MediaProcessor:
                             c_copy['character'] = '主创/原著' # 降级为普通幕后
                             c_copy['order'] = 1000 + len(other_crew_source)
                             c_copy['_is_crew'] = True # 打上幕后人员的永久烙印
+                            c_copy['_original_job'] = c.get('job', 'Director')
+                            c_copy['_original_department'] = c.get('department', 'Directing')
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
@@ -732,6 +738,8 @@ class MediaProcessor:
                             c_copy['character'] = '导演'
                             c_copy['order'] = -100 + len(directors_source)
                             c_copy['_is_crew'] = True # ★★★ 核心标记
+                            c_copy['_original_job'] = c.get('job', 'Director')
+                            c_copy['_original_department'] = c.get('department', 'Directing')
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
@@ -743,6 +751,8 @@ class MediaProcessor:
                             c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source)
                             c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                            c_copy['_original_job'] = c.get('job', 'Director')
+                            c_copy['_original_department'] = c.get('department', 'Directing')
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
@@ -777,24 +787,34 @@ class MediaProcessor:
                     final_processed_cast = authoritative_cast_source
 
                 # =================================================================
-                # ★★★ 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译 ★★★
+                # ★★★ 核心修复：完美分流，演员进 cast，幕后进 crew，彻底杜绝重复！ ★★★
                 # =================================================================
-                target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
-                
                 cast_payload = []
+                crew_payload = []
+                
                 for actor in final_processed_cast:
-                    cast_payload.append({
-                        "id": actor.get("id"), "name": actor.get("name"), "character": actor.get("character"),
-                        "order": actor.get("order")
-                    })
+                    if actor.get('_is_crew'): 
+                        # 身份是幕后大佬：还原身份，塞入 crew 队列
+                        job_val = actor.get('_original_job', 'Director')
+                        dept_val = actor.get('_original_department', 'Directing')
+                        crew_payload.append({
+                            "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path")
+                        })
+                    else: 
+                        # 身份是纯演员：塞入 cast 队列
+                        cast_payload.append({
+                            "id": actor.get("id"), "name": actor.get("name"), "character": actor.get("character"), "order": actor.get("order"), "profile_path": actor.get("profile_path")
+                        })
                     
                 if item_type == "Movie":
                     if 'credits' not in target_tmdb_data: target_tmdb_data['credits'] = {}
                     target_tmdb_data['credits']['cast'] = cast_payload
+                    target_tmdb_data['credits']['crew'] = crew_payload # 原生纯净幕后就位
                 elif item_type == "Series":
                     if 'series_details' in target_tmdb_data:
                         if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
                         target_tmdb_data['series_details']['credits']['cast'] = cast_payload
+                        target_tmdb_data['series_details']['credits']['crew'] = crew_payload # 原生纯净幕后就位
 
                 # =================================================================
                 # ★★★ 大一统 AI 翻译引擎 (此时演员已经是中文，AI 会直接跳过演员翻译) ★★★
@@ -863,22 +883,22 @@ class MediaProcessor:
                 # 因为我们已经把有价值的幕后人员全部融合进了 Cast(演员表)，
                 # 此时必须把所有原生的 Crew 节点物理销毁，防止任何没头像的杂兵乱入！
                 # =============================================================
-                if 'casts' in formatted_metadata: formatted_metadata['casts']['crew'] = []
-                if 'credits' in formatted_metadata: formatted_metadata['credits']['crew'] = []
-                if 'created_by' in formatted_metadata: formatted_metadata['created_by'] = []
+                # if 'casts' in formatted_metadata: formatted_metadata['casts']['crew'] = []
+                # if 'credits' in formatted_metadata: formatted_metadata['credits']['crew'] = []
+                # if 'created_by' in formatted_metadata: formatted_metadata['created_by'] = []
                 
-                if item_type == "Series":
-                    # 1. 物理清洗所有分季的 Crew
-                    for s in formatted_metadata.get('seasons_details', []):
-                        if 'credits' in s: s['credits']['crew'] = []
-                    # 2. 物理清洗所有分集的 Crew
-                    ep_data = formatted_metadata.get('episodes_details')
-                    if isinstance(ep_data, dict):
-                        for ep in ep_data.values():
-                            if 'credits' in ep: ep['credits']['crew'] = []
-                    elif isinstance(ep_data, list):
-                        for ep in ep_data:
-                            if 'credits' in ep: ep['credits']['crew'] = []
+                # if item_type == "Series":
+                #     # 1. 物理清洗所有分季的 Crew
+                #     for s in formatted_metadata.get('seasons_details', []):
+                #         if 'credits' in s: s['credits']['crew'] = []
+                #     # 2. 物理清洗所有分集的 Crew
+                #     ep_data = formatted_metadata.get('episodes_details')
+                #     if isinstance(ep_data, dict):
+                #         for ep in ep_data.values():
+                #             if 'credits' in ep: ep['credits']['crew'] = []
+                #     elif isinstance(ep_data, list):
+                #         for ep in ep_data:
+                #             if 'credits' in ep: ep['credits']['crew'] = []
                 # =============================================================
 
                 logger.info(f"  ➜ [实时监控] 正在写入本地元数据文件...")
@@ -2070,7 +2090,9 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = '导演'
                                 c_copy['order'] = -100 + len(directors_source) 
-                                c_copy['_is_crew'] = True 
+                                c_copy['_is_crew'] = True
+                                c_copy['_original_job'] = c.get('job', 'Director')
+                                c_copy['_original_department'] = c.get('department', 'Directing')
                                 directors_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
                                 
@@ -2081,7 +2103,9 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source) 
-                                c_copy['_is_crew'] = True 
+                                c_copy['_is_crew'] = True
+                                c_copy['_original_job'] = c.get('job', 'Director')
+                                c_copy['_original_department'] = c.get('department', 'Directing')
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
                                 
@@ -2105,7 +2129,9 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = '主创/原著' 
                                 c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True 
+                                c_copy['_is_crew'] = True
+                                c_copy['_original_job'] = c.get('job', 'Director')
+                                c_copy['_original_department'] = c.get('department', 'Directing')
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
@@ -2118,7 +2144,9 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = '导演'
                                 c_copy['order'] = -100 + len(directors_source)
-                                c_copy['_is_crew'] = True 
+                                c_copy['_is_crew'] = True
+                                c_copy['_original_job'] = c.get('job', 'Director')
+                                c_copy['_original_department'] = c.get('department', 'Directing')
                                 directors_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
@@ -2129,7 +2157,9 @@ class MediaProcessor:
                                 c_copy = c.copy()
                                 c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True 
+                                c_copy['_is_crew'] = True
+                                c_copy['_original_job'] = c.get('job', 'Director')
+                                c_copy['_original_department'] = c.get('department', 'Directing')
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
@@ -2165,10 +2195,30 @@ class MediaProcessor:
                                     if not utils.contains_chinese(actor.get('character')) and utils.contains_chinese(old_actor.get('character')): actor['character'] = old_actor['character']
                                     if not utils.contains_chinese(actor.get('name')) and utils.contains_chinese(old_actor.get('name')): actor['name'] = old_actor['name']
 
-                        # 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译
-                        cast_payload = [{"id": a.get("id"), "name": a.get("name"), "character": a.get("character"), "order": a.get("order")} for a in final_processed_cast]
-                        if item_type == "Movie": target_tmdb_data.setdefault('credits', {})['cast'] = cast_payload
-                        elif item_type == "Series" and 'series_details' in target_tmdb_data: target_tmdb_data['series_details'].setdefault('credits', {})['cast'] = cast_payload
+                        # =================================================================
+                        # ★★★ 核心修复：完美分流，演员进 cast，幕后进 crew，彻底杜绝重复！ ★★★
+                        # =================================================================
+                        cast_payload = []
+                        crew_payload = []
+                        
+                        for actor in final_processed_cast:
+                            if actor.get('_is_crew'): 
+                                job_val = actor.get('_original_job') or ('Director' if '导演' in actor.get('character', '') else 'Crew')
+                                dept_val = actor.get('_original_department') or ('Directing' if '导演' in actor.get('character', '') else 'Production')
+                                crew_payload.append({
+                                    "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path")
+                                })
+                            else: 
+                                cast_payload.append({
+                                    "id": actor.get("id"), "name": actor.get("name"), "character": actor.get("character"), "order": actor.get("order"), "profile_path": actor.get("profile_path")
+                                })
+                            
+                        if item_type == "Movie":
+                            target_tmdb_data.setdefault('credits', {})['cast'] = cast_payload
+                            target_tmdb_data['credits']['crew'] = crew_payload # 原生纯净幕后就位
+                        elif item_type == "Series" and 'series_details' in target_tmdb_data:
+                            target_tmdb_data['series_details'].setdefault('credits', {})['cast'] = cast_payload
+                            target_tmdb_data['series_details']['credits']['crew'] = crew_payload # 原生纯净幕后就位
 
                         # 大一统 AI 翻译引擎
                         if self.ai_translator:
@@ -2708,8 +2758,8 @@ class MediaProcessor:
                 actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
         
         # ★★★ [终极排序修复] 重新分配绝对顺序 (避开 Emby 把 0 视为未排序的底层 Bug) ★★★
-        for i, actor in enumerate(final_cast_perfect):
-            actor['order'] = i + 1  # 从 1 开始排，导演就是 1，绝对会在第一位！
+        # for i, actor in enumerate(final_cast_perfect):
+        #     actor['order'] = i + 1  # 从 1 开始排，导演就是 1，绝对会在第一位！
             
         for actor in final_cast_perfect:
             tmdb_id_str = str(actor.get("id"))
@@ -3040,9 +3090,9 @@ class MediaProcessor:
 
             # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有 Crew 节点 ★★★
             # 这一步是为了防止旧的 JSON 文件里残留无头像的幕后杂鱼
-            if 'casts' in data: data['casts']['crew'] = []
-            if 'credits' in data: data['credits']['crew'] = []
-            if 'created_by' in data: data['created_by'] = []
+            # if 'casts' in data: data['casts']['crew'] = []
+            # if 'credits' in data: data['credits']['crew'] = []
+            # if 'created_by' in data: data['created_by'] = []
             # =============================================================
 
             # 重新赋值修正后的演员表
@@ -3088,20 +3138,20 @@ class MediaProcessor:
                     # =============================================================
                     # ★★★ 核弹级清理：手动编辑入口处的强制抹除 ★★★
                     # =============================================================
-                    if 'casts' in formatted_manual_metadata: formatted_manual_metadata['casts']['crew'] = []
-                    if 'credits' in formatted_manual_metadata: formatted_manual_metadata['credits']['crew'] = []
-                    if 'created_by' in formatted_manual_metadata: formatted_manual_metadata['created_by'] = []
+                    # if 'casts' in formatted_manual_metadata: formatted_manual_metadata['casts']['crew'] = []
+                    # if 'credits' in formatted_manual_metadata: formatted_manual_metadata['credits']['crew'] = []
+                    # if 'created_by' in formatted_manual_metadata: formatted_manual_metadata['created_by'] = []
                     
-                    if item_type == "Series":
-                        for s in formatted_manual_metadata.get('seasons_details', []):
-                            if 'credits' in s: s['credits']['crew'] = []
-                        ep_data = formatted_manual_metadata.get('episodes_details')
-                        if isinstance(ep_data, dict):
-                            for ep in ep_data.values():
-                                if 'credits' in ep: ep['credits']['crew'] = []
-                        elif isinstance(ep_data, list):
-                            for ep in ep_data:
-                                if 'credits' in ep: ep['credits']['crew'] = []
+                    # if item_type == "Series":
+                    #     for s in formatted_manual_metadata.get('seasons_details', []):
+                    #         if 'credits' in s: s['credits']['crew'] = []
+                    #     ep_data = formatted_manual_metadata.get('episodes_details')
+                    #     if isinstance(ep_data, dict):
+                    #         for ep in ep_data.values():
+                    #             if 'credits' in ep: ep['credits']['crew'] = []
+                    #     elif isinstance(ep_data, list):
+                    #         for ep in ep_data:
+                    #             if 'credits' in ep: ep['credits']['crew'] = []
 
                 self._upsert_media_metadata(
                     cursor=cursor,
