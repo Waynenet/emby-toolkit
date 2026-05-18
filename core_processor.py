@@ -817,11 +817,6 @@ class MediaProcessor:
                         if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
                         target_tmdb_data['series_details']['credits']['cast'] = cast_payload
                         target_tmdb_data['series_details']['credits']['crew'] = crew_payload # 原生纯净幕后就位
-                elif item_type == "Series":
-                    if 'series_details' in target_tmdb_data:
-                        if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
-                        target_tmdb_data['series_details']['credits']['cast'] = cast_payload
-                        target_tmdb_data['series_details']['credits']['crew'] = crew_payload # 原生纯净幕后就位
 
                 # =================================================================
                 # ★★★ 大一统 AI 翻译引擎 (此时演员已经是中文，AI 会直接跳过演员翻译) ★★★
