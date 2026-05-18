@@ -709,25 +709,12 @@ class MediaProcessor:
                         actors_source = credits_source.get('cast', [])
                         
                     seen_crew_ids = set()
-                    
-                    # 1. 将原著/编剧等主创人员提取出来，不再作为导演置顶，而是放在队伍末尾
-                    creators = details.get('created_by', [])
-                    for c in creators:
-                        c_id = c.get('id')
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 2:
-                            c_copy = c.copy()
-                            c_copy['character'] = '主创/原著' # 降级为普通幕后
-                            c_copy['order'] = 1000 + len(other_crew_source)
-                            c_copy['_is_crew'] = True # 打上幕后人员的永久烙印
-                            other_crew_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
-
                     raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
-
-                    # 1.5 ★★★ 捞出真正的导演，放在第一位 ★★★
+                    
+                    # 1. ★★★ 最优先：捞出真正的导演，赋予特权放在第一位！★★★
                     for c in raw_crew:
                         c_id = c.get('id')
-                        # 兼容普通 credits(job) 和 aggregate_credits(jobs)
+                        # 兼容电视剧特有的 jobs 列表解析
                         is_director = False
                         if c.get('job') == 'Director':
                             is_director = True
@@ -739,23 +726,34 @@ class MediaProcessor:
                             c_copy = c.copy()
                             c_copy['character'] = '导演'
                             c_copy['order'] = -100 + len(directors_source)
-                            c_copy['_is_crew'] = True # ★★★ 核心标记
+                            c_copy['_is_crew'] = True 
                             directors_source.append(c_copy)
                             seen_crew_ids.add(c_id)
-                    # 2. 提取其他幕后工作人员
+
+                    # 2. 其次处理原著/编剧等主创人员 (如果他是导演，上面已经入库，这里会自动跳过他)
+                    creators = details.get('created_by', [])
+                    for c in creators:
+                        c_id = c.get('id')
+                        if c_id not in seen_crew_ids and len(other_crew_source) < 3:
+                            c_copy = c.copy()
+                            c_copy['character'] = '主创/原著' 
+                            c_copy['order'] = 1000 + len(other_crew_source)
+                            c_copy['_is_crew'] = True 
+                            other_crew_source.append(c_copy)
+                            seen_crew_ids.add(c_id)
+
+                    # 3. 最后提取其他幕后打杂工作人员
                     for c in raw_crew:
                         c_id = c.get('id')
                         if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                             c_copy = c.copy()
-                            
-                            # 同样兼容提取职位名称
+                            # 兼容电视剧提取职务名称
                             job_name = c.get('job')
                             if not job_name and 'jobs' in c and isinstance(c['jobs'], list) and len(c['jobs']) > 0:
                                 job_name = c['jobs'][0].get('job')
-                                
                             c_copy['character'] = job_name or c.get('department') or '工作人员'
                             c_copy['order'] = 1000 + len(other_crew_source)
-                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                            c_copy['_is_crew'] = True 
                             other_crew_source.append(c_copy)
                             seen_crew_ids.add(c_id)
 
@@ -2107,14 +2105,34 @@ class MediaProcessor:
                         else:
                             credits_source = fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}
                             actors_source = credits_source.get('cast', [])
-                            
+
                         seen_crew_ids = set()
-                        
-                        # 1. 将原著/编剧等主创降级为普通幕后，排在演员之后
+                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
+
+                        # 1. ★★★ 最优先：捞出真正的导演，赋予特权放在第一位！★★★
+                        for c in raw_crew:
+                            c_id = c.get('id')
+                            # 兼容电视剧特有的 jobs 列表解析
+                            is_director = False
+                            if c.get('job') == 'Director':
+                                is_director = True
+                            elif 'jobs' in c and isinstance(c['jobs'], list):
+                                if any(j.get('job') == 'Director' for j in c['jobs']):
+                                    is_director = True
+
+                            if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
+                                c_copy = c.copy()
+                                c_copy['character'] = '导演'
+                                c_copy['order'] = -100 + len(directors_source)
+                                c_copy['_is_crew'] = True 
+                                directors_source.append(c_copy)
+                                seen_crew_ids.add(c_id)
+
+                        # 2. 其次处理原著/编剧等主创人员 (如果他是导演，上面已经入库，这里会自动跳过他)
                         creators = fresh_data.get('created_by', [])
                         for c in creators:
                             c_id = c.get('id')
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 2:
+                            if c_id not in seen_crew_ids and len(other_crew_source) < 3:
                                 c_copy = c.copy()
                                 c_copy['character'] = '主创/原著' 
                                 c_copy['order'] = 1000 + len(other_crew_source)
@@ -2122,41 +2140,18 @@ class MediaProcessor:
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
-                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
-
-                        # 1.5 ★★★ 捞出真正的导演，放在第一位 ★★★
-                        for c in raw_crew:
-                            c_id = c.get('id')
-                            # 兼容普通 credits(job) 和 aggregate_credits(jobs)
-                            is_director = False
-                            if c.get('job') == 'Director':
-                                is_director = True
-                            elif 'jobs' in c and isinstance(c['jobs'], list):
-                                if any(j.get('job') == 'Director' for j in c['jobs']):
-                                    is_director = True
-                                    
-                            if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
-                                c_copy = c.copy()
-                                c_copy['character'] = '导演'
-                                c_copy['order'] = -100 + len(directors_source)
-                                c_copy['_is_crew'] = True # ★★★ 核心标记
-                                directors_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-
-                        # 2. 提取其他幕后工作人员
+                        # 3. 最后提取其他幕后打杂工作人员
                         for c in raw_crew:
                             c_id = c.get('id')
                             if c_id not in seen_crew_ids and len(other_crew_source) < 8:
                                 c_copy = c.copy()
-                                
-                                # 同样兼容提取职位名称
+                                # 兼容电视剧提取职务名称
                                 job_name = c.get('job')
                                 if not job_name and 'jobs' in c and isinstance(c['jobs'], list) and len(c['jobs']) > 0:
                                     job_name = c['jobs'][0].get('job')
-                                    
                                 c_copy['character'] = job_name or c.get('department') or '工作人员'
                                 c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
+                                c_copy['_is_crew'] = True 
                                 other_crew_source.append(c_copy)
                                 seen_crew_ids.add(c_id)
 
