@@ -800,7 +800,7 @@ class MediaProcessor:
                         job_val = actor.get('_original_job') or ('Director' if '导演' in actor.get('character', '') else 'Crew')
                         dept_val = actor.get('_original_department') or ('Directing' if '导演' in actor.get('character', '') else 'Production')
                         crew_payload.append({
-                            "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path")
+                            "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path"), "order": actor.get("order")
                         })
                     else: 
                         # 身份是纯演员：塞入 cast 队列
@@ -2215,7 +2215,7 @@ class MediaProcessor:
                                 job_val = actor.get('_original_job') or ('Director' if '导演' in actor.get('character', '') else 'Crew')
                                 dept_val = actor.get('_original_department') or ('Directing' if '导演' in actor.get('character', '') else 'Production')
                                 crew_payload.append({
-                                    "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path")
+                                    "id": actor.get("id"), "name": actor.get("name"), "job": job_val, "department": dept_val, "profile_path": actor.get("profile_path"), "order": actor.get("order")
                                 })
                             else: 
                                 cast_payload.append({
@@ -3950,6 +3950,7 @@ class MediaProcessor:
                 crew_info = base_info.copy()
                 crew_info["job"] = actor_info.get('_original_job', 'Director')
                 crew_info["department"] = actor_info.get('_original_department', 'Directing')
+                crew_info["order"] = actor_info.get("order", i)  # <--- 把排队号还给导演
                 crew_list.append(crew_info)
             else:
                 # 放入 Cast 队列 (普通演员)
