@@ -3088,22 +3088,24 @@ class MediaProcessor:
                     char_str = actor.get('character', '')
                     actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
                     
-            final_cast_for_json = self._build_cast_from_final_data(final_formatted_cast)
+            # 接收双列表
+            final_cast_for_json, final_crew_for_json = self._build_cast_from_final_data(final_formatted_cast)
 
-            # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有 Crew 节点 ★★★
-            # 这一步是为了防止旧的 JSON 文件里残留无头像的幕后杂鱼
-            # if 'casts' in data: data['casts']['crew'] = []
-            # if 'credits' in data: data['credits']['crew'] = []
-            # if 'created_by' in data: data['created_by'] = []
-            # =============================================================
+            # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有旧 Crew 节点 ★★★
+            if 'casts' in data: data['casts']['crew'] = []
+            if 'credits' in data: data['credits']['crew'] = []
+            if 'created_by' in data: data['created_by'] = []
 
-            # 重新赋值修正后的演员表
+            # 重新精准赋值修正后的 演员(cast) 和 导演(crew)
             if 'casts' in data:
                 data['casts']['cast'] = final_cast_for_json
+                data['casts']['crew'] = final_crew_for_json
             elif 'credits' in data:
                 data['credits']['cast'] = final_cast_for_json
+                data['credits']['crew'] = final_crew_for_json
             else:
                 data.setdefault('credits', {})['cast'] = final_cast_for_json
+                data.setdefault('credits', {})['crew'] = final_crew_for_json
             
             # 写入文件...
             with open(main_json_path, 'w', encoding='utf-8') as f:
@@ -3877,7 +3879,8 @@ class MediaProcessor:
                 json.dump(data_to_write, f, ensure_ascii=False, indent=2)
 
         if final_cast_override is not None:
-            new_cast_for_json = self._build_cast_from_final_data(final_cast_override)
+            # 接收分流后的两个列表
+            new_cast_for_json, new_crew_for_json = self._build_cast_from_final_data(final_cast_override)
             perfect_cast_for_injection = new_cast_for_json
 
             if not os.path.exists(main_json_path):
@@ -3887,8 +3890,13 @@ class MediaProcessor:
                 with open(main_json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
 
-            if 'casts' in data: data['casts']['cast'] = perfect_cast_for_injection
-            else: data.setdefault('credits', {})['cast'] = perfect_cast_for_injection
+            # 分别精准注入 演员(cast) 和 幕后(crew)
+            if 'casts' in data: 
+                data['casts']['cast'] = new_cast_for_json
+                data['casts']['crew'] = new_crew_for_json
+            else: 
+                data.setdefault('credits', {})['cast'] = new_cast_for_json
+                data.setdefault('credits', {})['crew'] = new_crew_for_json
             
             with open(main_json_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -3908,19 +3916,35 @@ class MediaProcessor:
                 tmdb_seasons_data=tmdb_seasons_data 
             )
 
-    def _build_cast_from_final_data(self, final_cast_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_cast_from_final_data(self, final_cast_data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         cast_list = []
+        crew_list = []
         for i, actor_info in enumerate(final_cast_data):
             if not actor_info.get("id"): continue
-            cast_list.append({
-                "id": actor_info.get("id"), "name": actor_info.get("name"), "character": actor_info.get("character"),
+            
+            base_info = {
+                "id": actor_info.get("id"), "name": actor_info.get("name"), 
                 "original_name": actor_info.get("original_name"), "profile_path": actor_info.get("profile_path"),
                 "adult": actor_info.get("adult", False), "gender": actor_info.get("gender", 0),
                 "known_for_department": actor_info.get("known_for_department", "Acting"),
-                "popularity": actor_info.get("popularity", 0.0), "cast_id": actor_info.get("cast_id"),
-                "credit_id": actor_info.get("credit_id"), "order": actor_info.get("order", i)
-            })
-        return cast_list
+                "popularity": actor_info.get("popularity", 0.0), "credit_id": actor_info.get("credit_id")
+            }
+
+            if actor_info.get('_is_crew'):
+                # 放入 Crew 队列 (保留高贵职位)
+                crew_info = base_info.copy()
+                crew_info["job"] = actor_info.get('_original_job', 'Director')
+                crew_info["department"] = actor_info.get('_original_department', 'Directing')
+                crew_list.append(crew_info)
+            else:
+                # 放入 Cast 队列 (普通演员)
+                cast_info = base_info.copy()
+                cast_info["character"] = actor_info.get("character")
+                cast_info["order"] = actor_info.get("order", i) # 演员保持排序
+                cast_info["cast_id"] = actor_info.get("cast_id")
+                cast_list.append(cast_info)
+                
+        return cast_list, crew_list
 
     # --- [优化] 使用 ThreadPoolExecutor 并发写入季/集文件，大幅提升几百集长剧的处理速度 ---
     def _inject_cast_to_series_files(self, target_dir: str, cast_list: List[Dict[str, Any]], series_details: Dict[str, Any], episode_ids_to_sync: Optional[List[str]] = None, tmdb_episodes_data: Optional[Dict[str, Any]] = None, tmdb_seasons_data: Optional[List[Dict[str, Any]]] = None):
