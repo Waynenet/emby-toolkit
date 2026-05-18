@@ -3925,6 +3925,14 @@ class MediaProcessor:
                         if master_info.get('original_name'): person['original_name'] = master_info.get('original_name')
                         if master_info.get('profile_path'): person['profile_path'] = master_info.get('profile_path')
                         if master_info.get('character'): person['character'] = master_info.get('character')
+                        
+                        # ★★★ 核心修复：强制同步主剧集的排序，防止 Emby 聚合时发生乱序插队 ★★★
+                        if 'order' in master_info: 
+                            person['order'] = master_info.get('order')
+                    else:
+                        # 对于不在主名单里的客串演员，将其顺位后移，坚决避开 0, 1, 2... 的前排冲突
+                        original_order = person.get('order', 99)
+                        person['order'] = original_order + 1000
                 except ValueError: continue
 
         children_from_emby = []
