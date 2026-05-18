@@ -735,7 +735,7 @@ class MediaProcessor:
                             if any(j.get('job') == 'Director' for j in c['jobs']):
                                 is_director = True
                                 
-                        if is_director and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                        if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
                             c_copy = c.copy()
                             c_copy['character'] = '导演'
                             c_copy['order'] = -100 + len(directors_source)
@@ -2135,7 +2135,7 @@ class MediaProcessor:
                                 if any(j.get('job') == 'Director' for j in c['jobs']):
                                     is_director = True
                                     
-                            if is_director and len(directors_source) < 2 and c_id not in seen_crew_ids:
+                            if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
                                 c_copy = c.copy()
                                 c_copy['character'] = '导演'
                                 c_copy['order'] = -100 + len(directors_source)
@@ -2490,6 +2490,11 @@ class MediaProcessor:
                             l_actor["character"] = f"导演 / {valid_d_role}"
                         else:
                             l_actor["character"] = valid_d_role
+                            
+                        # [新增保险] 如果豆瓣判定是导演，且该人在 TMDb 排序靠后，强制提权置顶！
+                        if '导演' in valid_d_role and l_actor.get('order', 999) > 0:
+                            l_actor['order'] = -50
+                            l_actor['_is_crew'] = True
                         
                     # ★★★ 病根 2 修复：匹配成功后，必须把 TMDb 的英文名替换为豆瓣的中文名！
                     if raw_zh and utils.contains_chinese(raw_zh):
