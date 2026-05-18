@@ -437,6 +437,17 @@
                 <n-collapse-transition :show="watchlistConfig.auto_resub_ended">
                   <div class="setting-sub-panel">
                     <div class="resub-item">
+                      <span class="resub-label">洗版超时取消 (天)</span>
+                      <n-input-number 
+                        v-model:value="watchlistConfig.auto_resub_ended_timeout_days" 
+                        size="small" 
+                        style="width: 120px" 
+                        :min="1"
+                      >
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </div>
+                    <div class="resub-item">
                       <span class="resub-label">删除 Emby 旧文件</span>
                       <n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small"/>
                     </div>
@@ -545,6 +556,7 @@ const watchlistConfig = ref({
   auto_pause: 0,
   douban_count_correction: false,
   auto_resub_ended: false,
+  auto_resub_ended_timeout_days: 7,
   auto_delete_old_files: false,
   auto_delete_mp_history: false,
   auto_delete_download_tasks: false,
@@ -567,6 +579,7 @@ const openConfigModal = async () => {
          auto_pause: data.auto_pause ?? 0,
          douban_count_correction: data.douban_count_correction ?? false,
          auto_resub_ended: data.auto_resub_ended ?? false,
+         auto_resub_ended_timeout_days: data.auto_resub_ended_timeout_days ?? 7,
          auto_delete_old_files: data.auto_delete_old_files ?? false,
          auto_delete_mp_history: data.auto_delete_mp_history ?? false,
          auto_delete_download_tasks: data.auto_delete_download_tasks ?? false,
