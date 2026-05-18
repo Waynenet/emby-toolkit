@@ -847,7 +847,14 @@ class MediaProcessor:
                 genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
                 is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
                 
+                # [完美修复] 防止底层的格式化函数丢失我们打上的幕后烙印
+                _flags_backup = {str(a['id']): {'_is_crew': a.get('_is_crew'), '_original_job': a.get('_original_job'), '_original_department': a.get('_original_department')} for a in final_processed_cast if a.get('id')}
+                
                 final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
+                for actor in final_processed_cast:
+                    aid = str(actor.get('id'))
+                    if aid in _flags_backup:
+                        actor.update({k: v for k, v in _flags_backup[aid].items() if v is not None})
 
                 for actor in final_processed_cast:
                     char_str = actor.get('character', '')
@@ -2244,7 +2251,15 @@ class MediaProcessor:
                         genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
                         is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
                         
+                        # [完美修复] 防止底层的格式化函数丢失我们打上的幕后烙印
+                        _flags_backup = {str(a['id']): {'_is_crew': a.get('_is_crew'), '_original_job': a.get('_original_job'), '_original_department': a.get('_original_department')} for a in final_processed_cast if a.get('id')}
+                        
                         final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
+
+                        for actor in final_processed_cast:
+                            aid = str(actor.get('id'))
+                            if aid in _flags_backup:
+                                actor.update({k: v for k, v in _flags_backup[aid].items() if v is not None})
 
                         # [新增] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀
                         for actor in final_processed_cast:
@@ -2750,7 +2765,15 @@ class MediaProcessor:
         genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
         is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
         
+        # [完美修复] 防止底层的格式化函数丢失我们打上的幕后烙印
+        _flags_backup = {str(a['id']): {'_is_crew': a.get('_is_crew'), '_original_job': a.get('_original_job'), '_original_department': a.get('_original_department')} for a in current_cast_list if a.get('id')}
+        
         final_cast_perfect = actor_utils.format_and_complete_cast_list(current_cast_list, is_animation, self.config, mode='auto')
+        
+        for actor in final_cast_perfect:
+            aid = str(actor.get('id'))
+            if aid in _flags_backup:
+                actor.update({k: v for k, v in _flags_backup[aid].items() if v is not None})
         
         # [统一修正] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀 (全局生效：无论是实时入库还是重新处理)
         for actor in final_cast_perfect:
@@ -3088,24 +3111,16 @@ class MediaProcessor:
                     char_str = actor.get('character', '')
                     actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
                     
-            # 接收双列表
-            final_cast_for_json, final_crew_for_json = self._build_cast_from_final_data(final_formatted_cast)
+            # 手动编辑入口仅处理演员，提取纯 cast 列表即可
+            final_cast_for_json, _ = self._build_cast_from_final_data(final_formatted_cast)
 
-            # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有旧 Crew 节点 ★★★
-            if 'casts' in data: data['casts']['crew'] = []
-            if 'credits' in data: data['credits']['crew'] = []
-            if 'created_by' in data: data['created_by'] = []
-
-            # 重新精准赋值修正后的 演员(cast) 和 导演(crew)
+            # 重新精准赋值修正后的 演员(cast)，注意：千万不要覆盖 crew，保留原始的导演数据！
             if 'casts' in data:
                 data['casts']['cast'] = final_cast_for_json
-                data['casts']['crew'] = final_crew_for_json
             elif 'credits' in data:
                 data['credits']['cast'] = final_cast_for_json
-                data['credits']['crew'] = final_crew_for_json
             else:
                 data.setdefault('credits', {})['cast'] = final_cast_for_json
-                data.setdefault('credits', {})['crew'] = final_crew_for_json
             
             # 写入文件...
             with open(main_json_path, 'w', encoding='utf-8') as f:
