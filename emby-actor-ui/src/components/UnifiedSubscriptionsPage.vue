@@ -110,27 +110,24 @@
             class="grid-item"
           >
             <n-card class="dashboard-card series-card" :bordered="false" @click="toggleSelection(item, $event, i)">
-              
+              <div class="card-type-badge">
+                <n-tooltip trigger="hover">
+                  <template #trigger>
+                    <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
+                  </template>
+                  {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
+                </n-tooltip>
+              </div>
+
               <div class="card-inner-layout">
-                
                 <div class="card-poster-container">
                   <!-- 绝对定位包裹 Checkbox -->
                   <div class="poster-checkbox-wrap" @click.stop>
-                    <!-- 修改点：添加 size="small" -->
                     <n-checkbox
                       size="small"
                       :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
                       @update:checked="(checked, event) => toggleSelection(item, event, i)"
                     />
-                  </div>
-                  <!-- 绝对定位影视类型 Badge -->
-                  <div class="poster-type-badge">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
-                      </template>
-                      {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
-                    </n-tooltip>
                   </div>
 
                   <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover" @click.stop>
@@ -715,15 +712,15 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 /* ★★★ 绝对定位：右上角影视类型角标 ★★★ */
-.poster-type-badge {
+.card-type-badge {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 12px;
+  right: 12px;
   z-index: 10;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(4px);
-  color: #fff;
-  padding: 4px;
+  color: var(--text-primary, #fff);
+  padding: 4px 6px;
   border-radius: 6px;
   display: flex;
   align-items: center;
@@ -736,7 +733,12 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 .card-header {
-  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px;
+  display: flex; 
+  justify-content: space-between; 
+  align-items: flex-start; 
+  gap: 8px; 
+  margin-bottom: 8px;
+  padding-right: 28px;
 }
 
 .card-title {
