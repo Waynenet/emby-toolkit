@@ -393,8 +393,6 @@ body::before {
   border: 1px solid var(--glass-border) !important;
   border-radius: 4px !important;
   color: #ffffff !important;
-  /* ★ 修复紫色闪烁：严禁使用 transition: all，改为只针对背景和边框做动画 */
-  transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease !important;
 }
 
 .n-input:hover, .n-input--focus,
@@ -433,7 +431,6 @@ body::before {
   border: 1px solid var(--glass-border) !important;
   border-left: none !important; 
   box-shadow: none !important;
-  transition: background-color 0.3s ease, color 0.3s ease !important; /* 修复紫色闪烁 */
 }
 .n-radio-button:first-child {
   border-left: 1px solid var(--glass-border) !important;
@@ -767,5 +764,9 @@ body {
 .poster-checkbox-wrap .n-checkbox .n-checkbox-box__border,
 .poster-checkbox-wrap .n-checkbox .n-checkbox-box__state-border {
   display: none !important;
+}
+
+.n-form-item { 
+  background-color: transparent !important; 
 }
 </style>
