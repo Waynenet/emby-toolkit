@@ -766,7 +766,7 @@ body {
   display: none !important;
 }
 
-.n-checkbox-group { 
+.n-space { 
   background-color: transparent !important; 
 }
 </style>
