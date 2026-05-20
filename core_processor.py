@@ -736,7 +736,7 @@ class MediaProcessor:
                         c_id = c.get('id')
                         if c_id not in seen_crew_ids and len(other_crew_source) < 3:
                             c_copy = c.copy()
-                            c_copy['character'] = '主创/原著' 
+                            c_copy['character'] = '主创' 
                             c_copy['order'] = 1000 + len(other_crew_source)
                             c_copy['_is_crew'] = True 
                             other_crew_source.append(c_copy)
@@ -2134,7 +2134,7 @@ class MediaProcessor:
                             c_id = c.get('id')
                             if c_id not in seen_crew_ids and len(other_crew_source) < 3:
                                 c_copy = c.copy()
-                                c_copy['character'] = '主创/原著' 
+                                c_copy['character'] = '主创' 
                                 c_copy['order'] = 1000 + len(other_crew_source)
                                 c_copy['_is_crew'] = True 
                                 other_crew_source.append(c_copy)
