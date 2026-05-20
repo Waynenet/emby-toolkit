@@ -18,12 +18,14 @@ logger = logging.getLogger(__name__)
 def get_subscription_status():
     mp_config = settings_db.get_setting('mp_config') or {}
     mp_url = mp_config.get('moviepilot_url')
-    hdhive_config = settings_db.get_setting("hdhive_config") or {}
-    hdhive_key = hdhive_config.get("api_key")
+    try:
+        hdhive_configured = HDHiveClient().ping()
+    except Exception:
+        hdhive_configured = False
     return jsonify({
         "success": True,
         "mp_configured": bool(mp_url),
-        "hdhive_configured": bool(hdhive_key)
+        "hdhive_configured": bool(hdhive_configured)
     })
 
 # ==========================================
@@ -58,7 +60,13 @@ def save_mp_config():
 # 影巢 (HDHive) 接口
 # ==========================================
 HDHIVE_DEFAULT_CONFIG = {
-    "api_key": "",
+    # 面向用户：不再暴露 API Key / 中转地址 / 中转密钥。
+    # ETK 后端会自动向项目方统一 Relay 注册实例，并保存 relay_instance_id / relay_instance_secret。
+    "relay_base_url": "",
+    "relay_instance_id": "",
+    "relay_instance_secret": "",
+    # 自动签到方式：normal=普通签到，gambler=赌狗签到
+    "checkin_mode": "normal",
     "unlock_limit": {
         "count": 3,
         "window": 60
@@ -73,6 +81,20 @@ HDHIVE_DEFAULT_CONFIG = {
     }
 }
 
+def _has_hdhive_scope(relay_status, scope_name):
+    if not relay_status:
+        return False
+
+    scopes = relay_status.get("scopes")
+
+    if isinstance(scopes, list):
+        return scope_name in scopes
+
+    scope_text = relay_status.get("scope") or ""
+    if isinstance(scope_text, str):
+        return scope_name in scope_text.split()
+
+    return False
 
 def _get_hdhive_config():
     cfg = settings_db.get_setting("hdhive_config") or {}
@@ -83,7 +105,10 @@ def _get_hdhive_config():
     filter_cfg = cfg.get("filter") or {}
 
     return {
-        "api_key": cfg.get("api_key") or "",
+        "relay_base_url": cfg.get("relay_base_url") or "",
+        "relay_instance_id": cfg.get("relay_instance_id") or "",
+        "relay_instance_secret": cfg.get("relay_instance_secret") or "",
+        "checkin_mode": cfg.get("checkin_mode") if cfg.get("checkin_mode") in ["normal", "gambler"] else "normal",
         "unlock_limit": {
             "count": int(unlock_cfg.get("count", 3)),
             "window": int(unlock_cfg.get("window", 60))
@@ -99,26 +124,64 @@ def _get_hdhive_config():
     }
 
 
+def _build_hdhive_config_from_request(data):
+    old_cfg = _get_hdhive_config()
+    return {
+        # 这些字段由后端自动注册维护，不由前端填写。
+        "relay_base_url": old_cfg.get("relay_base_url") or "",
+        "relay_instance_id": old_cfg.get("relay_instance_id") or "",
+        "relay_instance_secret": old_cfg.get("relay_instance_secret") or "",
+        "checkin_mode": data.get("hdhive_checkin_mode") if data.get("hdhive_checkin_mode") in ["normal", "gambler"] else "normal",
+        "unlock_limit": {
+            "count": int(data.get("unlock_limit_count") or 3),
+            "window": int(data.get("unlock_limit_window") or 60)
+        },
+        "filter": {
+            "free_only": bool(data.get("hdhive_free_only", False)),
+            "max_points": int(data.get("hdhive_max_points") or 10),
+            "max_size_gb": float(data.get("hdhive_max_size_gb") or 120),
+            "resolution": data.get("hdhive_resolution") or "All",
+            "zh_sub_only": bool(data.get("hdhive_zh_sub_only", True)),
+            "exclude_iso": bool(data.get("hdhive_exclude_iso", False))
+        }
+    }
+
+
 @subscription_bp.route('/hdhive/config', methods=['GET', 'POST'])
 @admin_required
 def handle_hdhive_config():
     if request.method == 'GET':
         cfg = _get_hdhive_config()
-        api_key = cfg.get("api_key") or ""
         unlock_cfg = cfg.get("unlock_limit") or {}
         filter_cfg = cfg.get("filter") or {}
 
-        user_info = None
-        quota_info = None
+        client = HDHiveClient()
+        authorize_url = client.authorize_url()
+        relay_status = client.get_relay_status()
 
-        if api_key:
-            client = HDHiveClient(api_key)
+        user_info = None
+        usage_today = None
+        vip_info = None 
+
+        if relay_status and relay_status.get("has_access_token"):
             user_info = client.get_user_info()
-            quota_info = client.get_quota()
+
+            if _has_hdhive_scope(relay_status, "meta"):
+                usage_today = client.get_usage_today() 
+
+            if _has_hdhive_scope(relay_status, "vip"):
+                user_level = user_info.get("level") if user_info else "normal"
+                # 包含影巢可能返回的各种 VIP 标识
+                if user_level in ["vip", "forever_vip", "lifetime_vip", "premium"]:
+                    vip_info = client.get_vip_entitlements()
 
         return jsonify({
             "success": True,
-            "api_key": api_key,
+            "authorize_url": authorize_url,
+            "relay_status": relay_status,
+            "authorized": bool(relay_status and relay_status.get("has_access_token")),
+
+            "hdhive_checkin_mode": cfg.get("checkin_mode", "normal"),
             "unlock_limit_count": unlock_cfg.get("count", 3),
             "unlock_limit_window": unlock_cfg.get("window", 60),
 
@@ -130,67 +193,115 @@ def handle_hdhive_config():
             "hdhive_exclude_iso": filter_cfg.get("exclude_iso", False),
 
             "user_info": user_info,
-            "quota_info": quota_info
+            "usage_today": usage_today,
+            "vip_info": vip_info
         })
 
-    elif request.method == 'POST':
-        data = request.json or {}
+    data = request.json or {}
+    cfg = _build_hdhive_config_from_request(data)
+    settings_db.save_setting("hdhive_config", cfg)
 
-        cfg = {
-            "api_key": (data.get("api_key") or "").strip(),
-            "unlock_limit": {
-                "count": int(data.get("unlock_limit_count") or 3),
-                "window": int(data.get("unlock_limit_window") or 60)
-            },
-            "filter": {
-                "free_only": bool(data.get("hdhive_free_only", False)),
-                "max_points": int(data.get("hdhive_max_points") or 10),
-                "max_size_gb": float(data.get("hdhive_max_size_gb") or 120),
-                "resolution": data.get("hdhive_resolution") or "All",
-                "zh_sub_only": bool(data.get("hdhive_zh_sub_only", True)),
-                "exclude_iso": bool(data.get("hdhive_exclude_iso", False))
-            }
-        }
+    client = HDHiveClient()
+    authorize_url = client.authorize_url()
+    relay_status = client.get_relay_status()
 
-        settings_db.save_setting("hdhive_config", cfg)
+    user_info = None
+    usage_today = None
+    vip_info = None 
+    
+    if relay_status and relay_status.get("has_access_token"):
+        user_info = client.get_user_info()
 
-        user_info = None
-        quota_info = None
+        if _has_hdhive_scope(relay_status, "meta"):
+            usage_today = client.get_usage_today() 
 
-        api_key = cfg.get("api_key") or ""
-        if api_key:
-            client = HDHiveClient(api_key)
+        if _has_hdhive_scope(relay_status, "vip"):
+            user_level = user_info.get("level") if user_info else "normal"
+            # 包含影巢可能返回的各种 VIP 标识
+            if user_level in ["vip", "forever_vip", "lifetime_vip", "premium"]:
+                vip_info = client.get_vip_entitlements()
 
-            if not client.ping():
-                return jsonify({
-                    "success": False,
-                    "message": "API Key 无效或网络异常，配置已保存，请检查后重试。"
-                })
+    return jsonify({
+        "success": True,
+        "message": "影巢配置保存成功！" if user_info else "筛选配置已保存。若未授权，请点击“前往影巢授权”。",
+        "authorize_url": authorize_url,
+        "relay_status": relay_status,
+        "authorized": bool(relay_status and relay_status.get("has_access_token")),
+        "hdhive_checkin_mode": cfg.get("checkin_mode", "normal"),
+        "user_info": user_info,
+        "usage_today": usage_today,
+        "vip_info": vip_info
+    })
 
-            user_info = client.get_user_info()
-            quota_info = client.get_quota()
 
+@subscription_bp.route('/hdhive/authorize_url', methods=['GET'])
+@admin_required
+def get_hdhive_authorize_url():
+    client = HDHiveClient()
+    url = client.authorize_url()
+    if not url:
+        return jsonify({"success": False, "message": "生成影巢授权链接失败，请查看后端日志。"}), 500
+    return jsonify({"success": True, "authorize_url": url})
+
+
+@subscription_bp.route('/hdhive/clear_authorization', methods=['POST'])
+@admin_required
+def clear_hdhive_authorization():
+    """清除当前 ETK 实例在影巢中转服务上的用户授权，保留本地筛选/签到配置。"""
+    client = HDHiveClient()
+    res = client.clear_authorization()
+
+    if not res.get("success"):
         return jsonify({
-            "success": True,
-            "message": "影巢配置保存成功！",
-            "user_info": user_info,
-            "quota_info": quota_info
-        })
+            "success": False,
+            "message": res.get("message") or "清除影巢授权失败"
+        }), 500
+
+    authorize_url = client.authorize_url()
+    relay_status = client.get_relay_status()
+
+    return jsonify({
+        "success": True,
+        "message": "影巢授权已清除，需要使用时请重新授权。",
+        "authorize_url": authorize_url,
+        "relay_status": relay_status,
+        "authorized": bool(relay_status and relay_status.get("has_access_token"))
+    })
+
+
+
+def _normalize_hdhive_media_type(media_type, item_type=None):
+    """影巢 OpenAPI 只接受 movie / tv。
+    前端/内部对象可能传 Movie、Series、Season、Episode、tvshow 等，统一归一化。
+    """
+    raw = str(media_type or item_type or "").strip().lower()
+    if raw in {"movie", "movies", "film", "films"}:
+        return "movie"
+    if raw in {"tv", "series", "season", "episode", "show", "shows", "tvshow", "tvshows", "电视剧", "剧集", "季", "集"}:
+        return "tv"
+    return "movie" if not raw else "tv"
 
 @subscription_bp.route('/hdhive/resources', methods=['GET'])
 @admin_required
 def get_hdhive_resources():
     tmdb_id = request.args.get('tmdb_id')
-    media_type = request.args.get('media_type')
+    raw_media_type = request.args.get('media_type')
     season = request.args.get('season')
+    media_type = _normalize_hdhive_media_type(raw_media_type)
 
-    hdhive_config = settings_db.get_setting("hdhive_config") or {}
-    api_key = hdhive_config.get("api_key")
-    if not api_key:
-        return jsonify({"success": False, "message": "请先配置影巢 API Key"}), 400
+    if not tmdb_id:
+        return jsonify({"success": False, "message": "缺少 TMDB ID"}), 400
 
-    client = HDHiveClient(api_key)
-    resources = client.get_resources(tmdb_id, media_type)
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    logger.debug(
+        "  ➜ 影巢资源查询: raw_media_type=%s, normalized_media_type=%s, tmdb_id=%s, season=%s",
+        raw_media_type, media_type, tmdb_id, season
+    )
+
+    resources = client.get_resources(tmdb_id, media_type, target_season=season)
     filtered_resources = filter_hdhive_resources(
         resources,
         target_season=season,
@@ -204,47 +315,57 @@ def get_hdhive_resources():
         "filtered": len(filtered_resources)
     })
 
+
 @subscription_bp.route('/hdhive/download', methods=['POST'])
 @admin_required
 def trigger_hdhive_download():
-    data = request.json
+    data = request.json or {}
     slug = data.get('slug')
     tmdb_id = data.get('tmdb_id')
-    media_type = data.get('media_type')
+    raw_media_type = data.get('media_type')
+    media_type = _normalize_hdhive_media_type(raw_media_type)
     title = data.get('title', '未知影视')
-    
-    hdhive_config = settings_db.get_setting("hdhive_config") or {}
-    api_key = hdhive_config.get("api_key")
+
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    # task_download_from_hdhive 的第一个参数保留兼容旧函数签名，新版 HDHiveClient 会忽略该参数。
     threading.Thread(
-        target=task_download_from_hdhive, 
-        args=(api_key, slug, tmdb_id, media_type, title)
+        target=task_download_from_hdhive,
+        args=(None, slug, tmdb_id, media_type, title)
     ).start()
-    return jsonify({"success": True, "message": f"已向 115 发送转存指令，后台正在处理！"})
+    return jsonify({"success": True, "message": "已向 115 发送转存指令，后台正在处理！"})
+
 
 @subscription_bp.route('/hdhive/checkin', methods=['POST'])
 @admin_required
 def trigger_hdhive_checkin():
-    data = request.json
-    is_gambler = data.get('is_gambler', False)
-    
-    hdhive_config = settings_db.get_setting("hdhive_config") or {}
-    api_key = hdhive_config.get("api_key")
-    if not api_key:
-        return jsonify({"success": False, "message": "请先配置影巢 API Key"}), 400
-        
-    client = HDHiveClient(api_key)
+    data = request.json or {}
+
+    # 手动签到接口：如果前端显式传了 is_gambler，就按前端按钮执行；
+    # 如果没传，则按配置里的自动签到方式执行。
+    if 'is_gambler' in data:
+        is_gambler = bool(data.get('is_gambler'))
+    else:
+        cfg = _get_hdhive_config()
+        is_gambler = cfg.get("checkin_mode", "normal") == "gambler"
+
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
     res = client.checkin(is_gambler)
-    
+
     if res.get("success"):
         res_data = res.get("data", {})
         real_message = res_data.get("message") or res.get("message", "签到请求成功")
         if res_data.get("checked_in") is False:
             return jsonify({"success": False, "message": real_message})
-        else:
-            return jsonify({"success": True, "message": real_message})
-    else:
-        return jsonify({"success": False, "message": res.get("message", "签到失败")})
-    
+        return jsonify({"success": True, "message": real_message})
+
+    return jsonify({"success": False, "message": res.get("message", "签到失败")})
+
 # ==========================================
 # TG频道 (Telegram) 接口
 # ==========================================

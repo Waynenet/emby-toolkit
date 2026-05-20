@@ -18,6 +18,7 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
     """
     logger.info(f"=== ➜ 开始从影巢获取资源: {title} (TMDB: {tmdb_id}) ===")
     
+    # api_key 参数保留兼容旧调用签名；新版影巢授权通过统一 Relay 完成。
     hdhive = HDHiveClient(api_key)
     unlock_data = hdhive.unlock_resource(slug)
     
@@ -217,19 +218,22 @@ def task_hdhive_auto_checkin(processor):
     logger.info("--- 开始执行影巢自动签到任务 ---")
     task_manager.update_status_from_thread(0, "正在读取影巢配置...")
 
-    hdhive_config = settings_db.get_setting("hdhive_config") or {}
-    api_key = hdhive_config.get("api_key")
-    if not api_key:
-        logger.info("  ➜ 未配置影巢 API Key，跳过自动签到。")
-        task_manager.update_status_from_thread(100, "未配置 API Key，跳过")
+    # 新版影巢使用统一 Relay OAuth 授权，不再依赖个人 API Key。
+    client = HDHiveClient()
+    if not client.ping():
+        logger.info("  ➜ 影巢尚未完成授权，跳过自动签到。")
+        task_manager.update_status_from_thread(100, "影巢未授权，跳过")
         return
-
-    client = HDHiveClient(api_key)
     task_manager.update_status_from_thread(50, "正在发送签到请求...")
 
     try:
-        # 1. 发送签到请求
-        res = client.checkin(is_gambler=False)
+        # 1. 根据配置选择签到方式
+        hdhive_config = settings_db.get_setting("hdhive_config") or {}
+        checkin_mode = hdhive_config.get("checkin_mode") if isinstance(hdhive_config, dict) else "normal"
+        is_gambler = checkin_mode == "gambler"
+        logger.info(f"  ➜ 影巢自动签到方式: {'赌狗签到' if is_gambler else '普通签到'}")
+
+        res = client.checkin(is_gambler=is_gambler)
         
         # 2. 签到完顺便拉取一下最新的用户信息，为了在通知里展示最新积分
         user_info = client.get_user_info() or {}
@@ -253,7 +257,7 @@ def task_hdhive_auto_checkin(processor):
         notify_types = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, [])
         if 'hdhive_checkin' in notify_types:
             try:
-                send_hdhive_checkin_notification(res, user_info)
+                send_hdhive_checkin_notification(res, is_gambler, user_info)
             except Exception as e:
                 logger.error(f"  ➜ 发送影巢签到通知失败: {e}")
         else:
