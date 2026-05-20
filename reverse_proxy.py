@@ -1,4 +1,4 @@
-# reverse_proxy.py (终极融合版：HTTPStrm缓存流媒体 + 虚拟库完美去重/灰块修复/iOS兼容)
+# reverse_proxy.py (终极融合版：HTTPStrm缓存流媒体 + Yamby全面兼容 + 灰块修复)
 
 import logging
 import requests
@@ -64,6 +64,10 @@ def from_mimicked_id(mimicked_id): return -(int(mimicked_id)) - MIMICKED_ID_BASE
 def is_mimicked_id(item_id):
     try: return isinstance(item_id, str) and item_id.startswith('-')
     except: return False
+
+# ---------------------------------------------------------
+# 【核心恢复】将原版的两个正则表达式重新放回全局
+# ---------------------------------------------------------
 MIMICKED_ITEMS_RE = re.compile(r'/emby/Users/([^/]+)/Items/(-(\d+))')
 MIMICKED_ITEM_DETAILS_RE = re.compile(r'emby/Users/([^/]+)/Items/(-(\d+))$')
 
@@ -185,8 +189,12 @@ def handle_get_views(user_id):
                 try: definition = json.loads(definition)
                 except Exception: definition = {}
 
-            # 强制伪装 mixed 防止 Emby Web UI 渲染错误
+            # 【Yamby修复点1】恢复动态类型计算，拒绝强制伪装 mixed
+            item_type_from_db = definition.get('item_type', 'Movie')
             collection_type = "mixed"
+            if not (isinstance(item_type_from_db, list) and len(item_type_from_db) > 1):
+                 authoritative_type = item_type_from_db[0] if isinstance(item_type_from_db, list) and item_type_from_db else item_type_from_db if isinstance(item_type_from_db, str) else 'Movie'
+                 collection_type = "tvshows" if authoritative_type == 'Series' else "movies"
 
             fake_view = {
                 "Name": coll['name'], "ServerId": real_server_id, "Id": mimicked_id,
@@ -194,14 +202,13 @@ def handle_get_views(user_id):
                 "DateCreated": "2025-01-01T00:00:00.0000000Z", "CanDelete": False, "CanDownload": False,
                 "SortName": coll['name'], "ExternalUrls": [], "ProviderIds": {}, "IsFolder": True,
                 "ParentId": "2", "Type": "CollectionFolder", "PresentationUniqueKey": str(uuid.uuid4()),
-                "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{db_id}", 
-                "ForcedSortName": coll['name'],
+                "DisplayPreferencesId": f"custom-{db_id}", "ForcedSortName": coll['name'],
                 "Taglines": [], "RemoteTrailers": [],
                 "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
                 "ChildCount": coll.get('in_library_count', 1),
                 "PrimaryImageAspectRatio": 1.7777777777777777, 
                 "CollectionType": collection_type, "ImageTags": image_tags, "BackdropImageTags": [], 
-                "LockedFields": [], "LockData": False, "Tags": []
+                "LockedFields": [], "LockData": False
             }
             fake_views_items.append(fake_view)
         
@@ -249,22 +256,17 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
             try: definition = json.loads(definition)
             except Exception: definition = {}
 
+        # 【Yamby修复点2】恢复动态类型计算
+        item_type_from_db = definition.get('item_type', 'Movie')
         collection_type = "mixed"
+        if not (isinstance(item_type_from_db, list) and len(item_type_from_db) > 1):
+             authoritative_type = item_type_from_db[0] if isinstance(item_type_from_db, list) and item_type_from_db else item_type_from_db if isinstance(item_type_from_db, str) else 'Movie'
+             collection_type = "tvshows" if authoritative_type == 'Series' else "movies"
 
+        # 【Yamby修复点3】恢复精简字典，去除 Yamby 可能解析失败的额外冗余字段
         fake_library_details = {
             "Name": coll['name'], "ServerId": real_server_id, "Id": mimicked_id,
-            "Guid": str(uuid.uuid4()), "Etag": f"{real_db_id}{int(time.time())}",
-            "DateCreated": "2025-01-01T00:00:00.0000000Z", "CanDelete": False, "CanDownload": False,
-            "SortName": coll['name'], "ExternalUrls": [], "ProviderIds": {}, "IsFolder": True,
-            "ParentId": "2", "Type": "CollectionFolder", "PresentationUniqueKey": str(uuid.uuid4()),
-            "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{real_db_id}", 
-            "ForcedSortName": coll['name'],
-            "Taglines": [], "RemoteTrailers": [],
-            "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
-            "ChildCount": coll.get('in_library_count', 1),
-            "PrimaryImageAspectRatio": 1.7777777777777777, 
-            "CollectionType": collection_type, "ImageTags": image_tags, "BackdropImageTags": [], 
-            "LockedFields": [], "LockData": False, "Tags": []
+            "Type": "CollectionFolder", "CollectionType": collection_type, "IsFolder": True, "ImageTags": image_tags,
         }
         return Response(json.dumps(fake_library_details), mimetype='application/json')
     except Exception as e:
@@ -371,7 +373,7 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
         item_types = definition.get('item_type', ['Movie'])
         target_library_ids = definition.get('target_library_ids', [])
 
-        # --- 场景 A: 榜单类 (占位符 + 严格去重聚合) ---
+        # --- 场景 A: 榜单类 ---
         if collection_type == 'list':
             show_placeholders = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS, False)
             raw_list_json = collection_info.get('generated_media_info_json')
@@ -691,7 +693,7 @@ def handle_get_latest_items(user_id, params):
         return Response(json.dumps([]), mimetype='application/json')
 
 # ==========================================
-# 核心反代入口 (HTTPStrm + 虚拟库拦截整合)
+# 核心反代入口
 # ==========================================
 
 proxy_app = Flask(__name__)
@@ -761,7 +763,6 @@ def proxy_all(path):
                         play_session_id = request.args.get('PlaySessionId', '')
 
                         pb_url = f"{base_url}/Items/{item_id}/PlaybackInfo"
-                        # 【优化点1】请求 PlaybackInfo 时锁定最高码率，确保拿到直链源码
                         pb_params = {
                             'api_key': api_key, 
                             'UserId': request.args.get('UserId') or request.args.get('userId', ''),
@@ -786,14 +787,12 @@ def proxy_all(path):
                                     global _strm_cdn_cache
                                     current_time = time.time()
                                     
-                                    # 清理过期缓存
                                     keys_to_delete = [k for k, v in _strm_cdn_cache.items() if current_time > v[1]]
                                     for k in keys_to_delete: del _strm_cdn_cache[k]
                                     
-                                    # 命中缓存
                                     if file_path in _strm_cdn_cache and current_time <= _strm_cdn_cache[file_path][1]:
                                         cached_cdn_url = _strm_cdn_cache[file_path][0]
-                                        logger.info(f"[HTTPStrm 缓存命中] 拦截到重复请求，直接返回已知 CDN 直链: {cached_cdn_url}")
+                                        logger.info(f"[HTTPStrm 缓存命中] 拦截到重复请求: {cached_cdn_url}")
                                         return redirect(cached_cdn_url, code=302)
                                         
                                     logger.info(f"[HTTPStrm] 捕获 STRM 链接，首次执行后台链路穿透: {file_path}")
@@ -815,23 +814,20 @@ def proxy_all(path):
                                         
                                         ttl_seconds = get_strm_cache_ttl()
                                         if final_cdn_url and final_cdn_url != file_path:
-                                            logger.info(f"[HTTPStrm 网络优化] 成功穿透中间跳转链，单次直达底层 CDN: {final_cdn_url}")
+                                            logger.info(f"[HTTPStrm 网络优化] 成功穿透中间跳转链，直达底层 CDN: {final_cdn_url}")
                                             if ttl_seconds > 0:
                                                 _strm_cdn_cache[file_path] = (final_cdn_url, current_time + ttl_seconds)
                                             return redirect(final_cdn_url, code=302)
                                         else:
-                                            logger.info(f"[HTTPStrm] 链接已是直链，无中间跳转: {file_path}")
                                             if ttl_seconds > 0:
                                                 _strm_cdn_cache[file_path] = (file_path, current_time + ttl_seconds)
                                             return redirect(file_path, code=302)
                                             
                                     except Exception as fetch_e:
-                                        logger.warning(f"[HTTPStrm] 链路穿透失败，将直接 302 原始链接交给客户端处理。原因: {fetch_e}")
+                                        logger.warning(f"[HTTPStrm] 链路穿透失败，将 302 原始链接交给客户端。原因: {fetch_e}")
                                         return redirect(file_path, code=302)
-                                else:
-                                    logger.debug(f"[HTTPStrm] 媒体源不是 http(s) 链接 ({file_path})，跳过拦截，进入普通代理。")
                 except Exception as e:
-                    logger.error(f"[HTTPStrm] 拦截流过程出错: {e}，将无缝回退到透明代理。", exc_info=True)
+                    logger.error(f"[HTTPStrm] 拦截流过程出错: {e}，回退到透明代理。", exc_info=True)
 
             # --- 流回退/本地文件代理透传逻辑 ---
             base_url, api_key = _get_real_emby_url_and_key()
@@ -864,11 +860,10 @@ def proxy_all(path):
 
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-            # 【优化点3】chunk_size 缩小为 8192，大幅降低代理转发时的内存开销
             return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         
         # ====================================================================
-        # ★★★ 拦截：虚拟库业务及各接口路由 (完美恢复第三方客户端兼容性) ★★★
+        # ★★★ 拦截：虚拟库业务及各接口路由 (双重兼容版) ★★★
         # ====================================================================
 
         # 1. 缺失占位符海报
@@ -904,12 +899,22 @@ def proxy_all(path):
             if user_id_match:
                 return handle_get_latest_items(user_id_match.group(1), request.args)
 
-        # 4. Details 拦截 (完全恢复文件1的精确正则，防止误伤 Yamby 其它接口)
+        # 4. Details 拦截
+        # 【核心恢复】优先使用精确正则，保证 Yamby 原汁原味的兼容性
         details_match = MIMICKED_ITEM_DETAILS_RE.search(full_path)
         if details_match:
             user_id = details_match.group(1)
             mimicked_id = details_match.group(2)
             return handle_get_mimicked_library_details(user_id, mimicked_id)
+        else:
+            # 兼容 iOS / Infuse 不带 Users 路径的客户端
+            details_match_ios = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path, re.IGNORECASE)
+            if details_match_ios and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
+                mimicked_id = details_match_ios.group(1)
+                user_id_match = re.search(r'/Users/([^/]+)/', full_path, re.IGNORECASE)
+                user_id = user_id_match.group(1) if user_id_match else request.args.get('UserId')
+                if user_id:
+                    return handle_get_mimicked_library_details(user_id, mimicked_id)
 
         # 5. 虚拟库图片 拦截
         if path.startswith('emby/Items/') and '/Images/' in path:
@@ -917,23 +922,20 @@ def proxy_all(path):
             if is_mimicked_id(item_id):
                 return handle_get_mimicked_library_image(path)
         
-        # 6. Items / Metadata 拦截 (恢复黑名单与放行机制，彻底修复 Yamby)
+        # 6. Items / Metadata 拦截 (核心恢复)
         parent_id = request.args.get("ParentId") or request.args.get("parentId")
         if parent_id and is_mimicked_id(parent_id):
-            # 黑名单机制：遇到这些明确不支持的元数据，才返回空数据
+            # 遇到不支持的明确返回空，没命中的放给底层服务端
             if any(path.endswith(endpoint) for endpoint in UNSUPPORTED_METADATA_ENDPOINTS + ['/Items/Prefixes', '/Genres', '/Studios', '/Tags', '/OfficialRatings', '/Years']):
                 return handle_mimicked_library_metadata_endpoint(path, parent_id, request.args)
             
-            # 精确匹配内容列表请求
-            user_id_match = re.search(r'emby/Users/([^/]+)/Items', path)
+            user_id_match = re.search(r'emby/Users/([^/]+)/Items', path, re.IGNORECASE)
             if user_id_match:
                 user_id = user_id_match.group(1)
                 return handle_get_mimicked_library_items(user_id, parent_id, request.args)
-            
-            # 【关键】如果不是上面两项（比如 Yamby 特殊的 API），它会顺理成章走到下面的“兜底透传”交给 Emby 处理！
 
         # ====================================================================
-        # ★★★ 兜底透传 (普通图片/接口等非拦截请求走这里) ★★★
+        # ★★★ 兜底透传 (非拦截请求走这里) ★★★
         # ====================================================================
         base_url, api_key = _get_real_emby_url_and_key()
         target_url = f"{base_url}/{path.lstrip('/')}"
