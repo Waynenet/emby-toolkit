@@ -766,7 +766,8 @@ body {
   display: none !important;
 }
 
-.n-space { 
+.n-space,
+.n-descriptions-table-header { 
   background-color: transparent !important; 
 }
 </style>
