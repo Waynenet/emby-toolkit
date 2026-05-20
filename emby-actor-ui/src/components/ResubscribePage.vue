@@ -1,6 +1,6 @@
 <!-- src/components/ResubscribePage.vue -->
 <template>
-  <div content-style="padding: 24px;">
+  <div content-style="padding: 24px;" class="page-container">
     <div class="resubscribe-page">
       <n-page-header>
         <template #title>
@@ -17,7 +17,8 @@
           <li>按住 Shift 键可以进行多选。</li>
         </n-alert>
         <template #extra>
-          <n-space align="center">
+          <!-- ★ 优化：加上 wrap 允许小屏幕换行 -->
+          <n-space align="center" wrap class="header-actions">
             <n-dropdown
               trigger="click"
               :options="batchActions"
@@ -28,7 +29,7 @@
               </n-button>
             </n-dropdown>
           
-            <n-radio-group v-model:value="filter" size="small">
+            <n-radio-group v-model:value="filter" size="small" class="status-radio-group">
               <n-radio-button value="all">全部</n-radio-button>
               <n-radio-button value="needed">需处理</n-radio-button>
               <n-radio-button value="subscribed">处理中</n-radio-button>
@@ -53,33 +54,33 @@
         </template>
       </n-page-header>
 
-      <!-- 筛选栏 -->
-      <n-space justify="space-between" align="center" style="margin-top: 24px; margin-bottom: -12px;">
+      <!-- ★ 优化：筛选栏加上自定义类 filter-bar -->
+      <div class="filter-bar">
         <n-input
           v-model:value="searchQuery"
           placeholder="按名称搜索..."
           clearable
-          style="width: 240px;"
+          class="filter-input-search"
         />
-        <n-space align="center">
+        <div class="filter-options">
           <n-select
             v-model:value="mediaTypeFilter"
             :options="mediaTypeOptions"
             placeholder="按类型筛选"
-            style="width: 120px;"
+            class="filter-select-type"
           />
           <n-select
             v-model:value="ruleFilter"
             :options="ruleOptions"
             placeholder="按规则筛选"
-            style="width: 200px;"
+            class="filter-select-rule"
           />
           <n-select
             v-model:value="sortBy"
             :options="sortOptions"
-            style="width: 150px;"
+            class="filter-select-sort"
           />
-          <n-button-group>
+          <n-button-group class="filter-sort-btns">
             <n-button @click="sortOrder = 'asc'" :type="sortOrder === 'asc' ? 'primary' : 'default'">
               <template #icon><n-icon :component="ArrowUpIcon" /></template>
               升序
@@ -89,8 +90,8 @@
               降序
             </n-button>
           </n-button-group>
-        </n-space>
-      </n-space>
+        </div>
+      </div>
 
       <n-divider />
 
@@ -206,7 +207,7 @@
 
                 <!-- 底部按钮 -->
                 <div class="card-actions-bottom">
-                  <n-space align="center" justify="center" size="small" :wrap="false">
+                  <n-space align="center" justify="start" size="small" wrap>
                       <n-button 
                         v-if="item.status === 'needed'" 
                         size="tiny" 
@@ -443,11 +444,9 @@ const batchActions = computed(() => {
   if (filter.value === 'ignored') {
     actions.push({ label: '批量取消忽略', key: 'unignore', disabled: noSelection });
   } else {
-    // 核心修改：重命名为批量整理
     actions.push({ label: '批量整理', key: 'subscribe', disabled: noSelection });
     actions.push({ label: '批量忽略', key: 'ignore', disabled: noSelection });
   }
-  // 移除批量删除
   actions.push({ type: 'divider', key: 'd1' });
 
   if (filter.value === 'needed') {
@@ -456,8 +455,6 @@ const batchActions = computed(() => {
   if (filter.value === 'ignored') {
     actions.push({ label: '一键取消忽略当前页所有项', key: 'oneclick-unignore' });
   }
-  
-  // 移除一键删除
   
   return actions;
 });
@@ -469,10 +466,8 @@ const handleBatchAction = (key) => {
 
   if (key.startsWith('oneclick-')) {
     isOneClick = true;
-    actionKey = key.split('-')[1]; // 提取 'ignore' 或 'unignore'
+    actionKey = key.split('-')[1]; 
     
-    // ★★★ 核心修改：这里不再留空，而是直接获取当前筛选后的所有 ID ★★★
-    // filteredItems 就是你当前页面看到的所有数据（包含搜索、筛选后的结果）
     ids = filteredItems.value.map(item => item.item_id);
     
     if (ids.length === 0) {
@@ -480,7 +475,6 @@ const handleBatchAction = (key) => {
         return;
     }
     
-    // 增加一个确认弹窗，防止误操作（因为数量可能很大）
     dialog.warning({
         title: '批量操作确认',
         content: `确定要对当前视图下的 ${ids.length} 个项目执行“${actionKey === 'ignore' ? '忽略' : '取消忽略'}”操作吗？`,
@@ -490,9 +484,8 @@ const handleBatchAction = (key) => {
             executeBatchAction(actionKey, ids, isOneClick);
         }
     });
-    return; // 这里的 return 是为了等待 Dialog 回调，不直接执行下面的代码
+    return; 
   } else {
-    // 普通的多选操作
     ids = Array.from(selectedItems.value);
   }
   
@@ -531,7 +524,6 @@ const sendBatchActionRequest = async (actionKey, ids, isOneClick) => {
 };
 
 const executeBatchAction = async (actionKey, ids, isOneClick) => {
-  // 移除删除确认逻辑，直接发送请求（因为现在是“整理”，具体行为由后端规则决定）
   sendBatchActionRequest(actionKey, ids, isOneClick);
 };
 
@@ -558,8 +550,6 @@ const unignoreItem = async (item) => {
   }
 };
 
-// 移除 deleteItem 函数
-
 const triggerRefreshStatus = async () => {
   try {
     await axios.post('/api/resubscribe/refresh_status');
@@ -581,8 +571,6 @@ const resubscribeItem = async (item) => {
 
     const itemInList = allItems.value.find(i => i.item_id === item.item_id);
     if (itemInList) {
-      // 暂时设为 'subscribed'，前端会显示为“处理中”
-      // 等后台任务跑完，如果是删除操作，刷新后该条目会自动消失
       itemInList.status = 'subscribed'; 
     }
   } catch (err) {
@@ -625,22 +613,17 @@ const openInEmby = (item) => {
   window.open(finalUrl, '_blank');
 };
 const getActionInfo = (item) => {
-  // 如果后端返回的字段名不是 'action'，请在此处修改 (例如 item.rule_mode)
   if (item.action === 'delete') {
     return { text: '删除', type: 'error' };
   }
   return { text: '洗版', type: 'primary' };
 };
 const handleSettingsSaved = async (payload = {}) => {
-  showSettingsModal.value = false; // 关闭弹窗
-  
-  // 如果是删除规则（或者调整顺序），后端数据已经变了
+  showSettingsModal.value = false; 
   if (payload.needsRefresh) {
-    // 直接重新拉取列表（这是一个极快的读库操作，瞬间完成）
     await fetchData(); 
     message.success('规则已更新，列表已刷新。');
   } else {
-    // 如果只是修改了规则内容（但没删），可能需要提示用户手动扫描
     message.success('规则已保存。如需应用新规则，请点击“扫描媒体库”按钮。');
   }
 };
@@ -662,7 +645,70 @@ watch(() => props.taskStatus, (newStatus, oldStatus) => {
 </script>
 
 <style scoped>
+.page-container {
+  /* 防止小屏幕下出现横向滚动条 */
+  max-width: 100vw;
+  overflow-x: hidden;
+}
 .center-container { display: flex; justify-content: center; align-items: center; height: calc(100vh - 200px); }
+
+/* ★★★ 筛选栏响应式布局 ★★★ */
+.filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 24px;
+  margin-bottom: -12px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.filter-input-search {
+  width: 240px;
+}
+.filter-options {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.filter-select-type { width: 120px; }
+.filter-select-rule { width: 200px; }
+.filter-select-sort { width: 150px; }
+
+/* 移动端覆盖样式 */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px !important;
+  }
+  .header-actions {
+    margin-top: 12px;
+    justify-content: flex-start;
+  }
+  .status-radio-group {
+    /* 如果按钮字太多，允许其折行 */
+    flex-wrap: wrap;
+  }
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-input-search,
+  .filter-select-type,
+  .filter-select-rule,
+  .filter-select-sort {
+    width: 100% !important;
+  }
+  .filter-options {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-sort-btns {
+    display: flex;
+  }
+  .filter-sort-btns .n-button {
+    flex: 1;
+  }
+}
 
 /* ★★★ 响应式 Grid 布局 ★★★ */
 .responsive-grid {
@@ -733,6 +779,12 @@ watch(() => props.taskStatus, (newStatus, oldStatus) => {
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
+@media (max-width: 768px) {
+  .card-poster-container {
+    width: 90px; /* 移动端微调海报宽度，给文字留更多空间 */
+  }
+}
+
 .card-poster { width: 100%; height: 100%; display: block; }
 .card-poster :deep(img) { width: 100%; height: 100%; object-fit: cover !important; display: block; }
 
@@ -763,33 +815,4 @@ watch(() => props.taskStatus, (newStatus, oldStatus) => {
   margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.05);
   display: flex; justify-content: flex-start; align-items: center; gap: 8px;
 }
-
-/* 悬浮操作栏 (Watchlist/Unified) */
-.floating-action-bar {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 1000;
-  width: auto; min-width: 400px; max-width: 90%;
-}
-.fab-content {
-  background: rgba(30, 35, 45, 0.85); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50px; padding: 12px 24px;
-  display: flex; justify-content: space-between; align-items: center; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); gap: 24px;
-}
-.fab-text { color: #fff; font-size: 14px; }
-.fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
-
-/* 模态框内的海报墙 (TmdbCollectionsPage 等) */
-.movie-card {
-  border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 2 / 3; 
-  background-color: rgba(20, 25, 35, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: transform 0.2s, box-shadow 0.2s; cursor: default; 
-}
-.movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 2; }
-.movie-poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.3s; }
-.movie-card:hover .movie-poster { transform: scale(1.05); }
-.movie-info-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 60px 10px 10px 10px; background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 60%, transparent 100%); color: #fff; pointer-events: none; z-index: 10; }
-.movie-title { font-size: 13px; font-weight: bold; line-height: 1.3; text-shadow: 0 1px 2px rgba(0,0,0,0.8); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
-.movie-year { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 2px; }
-.movie-actions-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; opacity: 0; transition: opacity 0.2s ease-in-out; z-index: 20; }
-.movie-card:hover .movie-actions-overlay { opacity: 1; }
-.status-badge { position: absolute; top: 10px; left: -30px; width: 100px; height: 24px; background-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px); color: #fff; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 15; pointer-events: none; }
 </style>

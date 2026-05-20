@@ -1,5 +1,6 @@
+<!-- src/components/MediaCleanupPage.vue -->
 <template>
-  <div content-style="padding: 24px;">
+  <div content-style="padding: 24px;" class="page-container">
     <div class="cleanup-page">
       <n-page-header>
         <template #title>
@@ -15,14 +16,16 @@
           <li>首先按需配置清理规则，扫描的时候会自动标记出保留的唯一版本，其他所有版本会标记为待清理。</li>
           <li>扫描结束后，刷新本页即可展示待清理媒体项。可多选批量清理，也可以一键清理所有。</li>
         </n-alert>
+        
         <template #extra>
-          <n-space>
+          <!-- ★ 优化：加上 wrap 和自定义类支持手机端折行 -->
+          <n-space wrap class="top-action-bar">
             <n-dropdown 
               trigger="click"
               :options="batchActions"
               @select="handleBatchAction"
             >
-              <n-button type="error" :disabled="selectedSeriesNames.length === 0">
+              <n-button type="error" :disabled="selectedSeriesNames.length === 0" class="action-btn">
                 批量操作 ({{ selectedSeriesNames.length }})
               </n-button>
             </n-dropdown>
@@ -31,12 +34,13 @@
               type="warning" 
               @click="handleClearAllTasks" 
               :disabled="allTasks.length === 0"
+              class="action-btn"
             >
               <template #icon><n-icon :component="DeleteIcon" /></template>
               一键清理
             </n-button>
             
-            <n-button @click="showSettingsModal = true">
+            <n-button @click="showSettingsModal = true" class="action-btn">
               <template #icon><n-icon :component="SettingsIcon" /></template>
               清理规则
             </n-button>
@@ -45,6 +49,7 @@
               type="primary" 
               @click="triggerScan" 
               :loading="isTaskRunning('扫描媒体库重复项')"
+              class="action-btn"
             >
               <template #icon><n-icon :component="ScanIcon" /></template>
               扫描重复项
@@ -57,6 +62,7 @@
       <div v-if="isLoading" class="center-container"><n-spin size="large" /></div>
       <div v-else-if="error" class="center-container"><n-alert title="加载错误" type="error">{{ error }}</n-alert></div>
       <div v-else-if="groupedTasks.length > 0">
+        <!-- ★ 优化：主表格开启 scroll-x 允许横向滑动 -->
         <n-data-table
           :columns="seriesColumns"
           :data="groupedTasks"
@@ -64,6 +70,7 @@
           :row-key="row => row.key"
           v-model:checked-row-keys="selectedSeriesNames"
           v-model:expanded-row-keys="expandedRowKeys"
+          :scroll-x="800"
         />
       </div>
       <div v-else class="center-container">
@@ -120,7 +127,6 @@ const expandedRowKeys = ref([]);
 
 // --- 3. 计算属性 ---
 
-// 根据勾选的行，计算出所有需要操作的任务ID
 const selectedTaskIds = computed(() => {
   const ids = [];
   const selectedKeysSet = new Set(selectedSeriesNames.value);
@@ -135,13 +141,9 @@ const selectedTaskIds = computed(() => {
   return ids;
 });
 
-// 判断特定名称的任务是否正在运行
 const isTaskRunning = (taskName) => props.taskStatus.is_running && props.taskStatus.current_action.includes(taskName);
-
-// 跟踪扫描任务的状态
 const isScanTaskActive = computed(() => isTaskRunning('扫描媒体库重复项'));
 
-// 将从后端获取的扁平任务列表，按剧集/电影进行分组
 const groupedTasks = computed(() => {
   const seriesMap = new Map();
 
@@ -178,7 +180,6 @@ const groupedTasks = computed(() => {
   return Array.from(seriesMap.values());
 });
 
-// 主表格的列定义
 const seriesColumns = computed(() => [
   { type: 'selection', width: 40 },
   { 
@@ -194,7 +195,9 @@ const seriesColumns = computed(() => [
         bottomBordered: false,
         showHeader: false,
         rowKey: row => row.id,
-        style: { padding: '4px 24px 4px 48px', backgroundColor: 'rgba(255, 255, 255, 0.02)' } 
+        // ★ 优化：开启内层表格的横向滚动，并缩小 padding 留出空间
+        scrollX: 1000,
+        style: { padding: '4px 8px 4px 24px', backgroundColor: 'rgba(255, 255, 255, 0.02)' } 
       });
     }
   },
@@ -225,14 +228,12 @@ const seriesColumns = computed(() => [
   }
 ]);
 
-// 批量操作下拉菜单的选项
 const batchActions = computed(() => [
   { label: `执行清理 (${selectedSeriesNames.value.length}项)`, key: 'execute', props: { type: 'error' } },
   { label: `忽略 (${selectedSeriesNames.value.length}项)`, key: 'ignore' },
   { label: `从列表移除 (${selectedSeriesNames.value.length}项)`, key: 'delete' }
 ]);
 
-// 分页配置
 const pagination = computed(() => {
   const totalItems = groupedTasks.value.length;
   if (totalItems === 0) return false;
@@ -273,7 +274,6 @@ const parseBestIds = (val) => {
   return ids.map(id => String(id));
 };
 
-// ★★★ 手动删除单一版本的处理函数 ★★★
 const handleDeleteVersion = (row) => {
   dialog.warning({
     title: '手动删除确认',
@@ -286,7 +286,7 @@ const handleDeleteVersion = (row) => {
           emby_id: String(row.id)
         });
         message.success('版本删除成功');
-        fetchData(); // 删除成功后刷新列表
+        fetchData(); 
       } catch (err) {
         message.error(err.response?.data?.error || '删除失败');
       }
@@ -294,7 +294,6 @@ const handleDeleteVersion = (row) => {
   });
 };
 
-// 定义版本详情表格的列结构
 const createVersionColumns = (bestVersionJson) => {
   const bestIds = parseBestIds(bestVersionJson);
 
@@ -304,6 +303,7 @@ const createVersionColumns = (bestVersionJson) => {
       key: 'actions',
       width: 60,
       align: 'center',
+      fixed: 'left', // 移动端滑动时固定操作列
       render: (row) => {
         return h(NButton, {
           size: 'small',
@@ -332,7 +332,6 @@ const createVersionColumns = (bestVersionJson) => {
       title: 'ID',
       key: 'id',
       width: 90,
-      // ★★★ 恢复为普通的 Tag 显示，移除跳转逻辑 ★★★
       render: (row) => h(NTag, { size: 'small', bordered: false, type: 'default' }, { default: () => row.id })
     },
     {
@@ -452,6 +451,8 @@ const renderVersions = (row) => {
     size: 'small',
     bordered: false,
     bottomBordered: false,
+    // ★ 优化：这部分列非常多，必须开启非常宽的 scroll-x
+    scrollX: 1300,
     rowKey: r => r.id
   });
 };
@@ -461,6 +462,7 @@ const episodeColumns = [
     key: 'item_name',
     width: 100,
     align: 'center',
+    fixed: 'left', // 移动端滑动时固定集数信息
     render(row) {
       let displayName = row.item_name;
       if (row.item_type === 'Episode' && row.season_number !== undefined && row.episode_number !== undefined) {
@@ -490,7 +492,6 @@ const fetchData = async () => {
     const response = await axios.get('/api/cleanup/tasks');
     allTasks.value = response.data;
     
-    // 刷新后只保留仍然存在的展开分组，避免删光后残留无效 key
     const validKeys = new Set(groupedTasks.value.map(group => group.key));
     expandedRowKeys.value = previousExpandedKeys.filter(key => validKeys.has(key));
   } catch (err) {
@@ -615,10 +616,36 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.page-container {
+  /* 防止横向溢出导致页面整体能左右晃动 */
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
 .center-container {
   display: flex;
   justify-content: center;
   align-items: center;
   height: calc(100vh - 300px);
+}
+
+/* ★ 移动端自适应 CSS */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px !important;
+  }
+  
+  .top-action-bar {
+    /* 在小屏幕下，所有按钮垂直堆叠，填满屏幕 */
+    display: flex;
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 12px;
+    margin-top: 12px;
+  }
+
+  .action-btn {
+    width: 100% !important;
+  }
 }
 </style>

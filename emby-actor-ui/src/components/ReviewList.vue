@@ -1,6 +1,6 @@
 <!-- src/components/ReviewList.vue -->
 <template>
-  <div content-style="padding: 24px;">
+  <div content-style="padding: 24px;" class="page-container">
   <n-card class="dashboard-card no-hover" :bordered="false" size="small">
     
     <n-alert title="手动处理操作提示" type="info" style="margin-top: 24px;">
@@ -18,15 +18,15 @@
     </n-alert>
     
     <div>
-      <!-- ★ 新增：搜索框和筛选框放在同一行 -->
-      <n-space style="margin-bottom: 20px;" align="center">
+      <!-- ★ 优化：添加 class="top-action-bar" 并在手机端自动换行 -->
+      <n-space style="margin-bottom: 20px;" align="center" wrap class="top-action-bar">
         <n-input
           v-model:value="searchQuery"
           placeholder="输入媒体名称搜索整个 Emby 库..."
           clearable
           @keyup.enter="handleSearch"
           @clear="handleSearch"
-          style="width: 300px;"
+          class="search-input"
         >
           <template #suffix>
             <n-icon :component="SearchIcon" @click="handleSearch" style="cursor: pointer;" />
@@ -38,7 +38,7 @@
           :options="reasonOptions"
           placeholder="按失败原因筛选"
           clearable
-          style="width: 200px;"
+          class="reason-select"
           @update:value="handleReasonChange"
           :disabled="isShowingSearchResults"
         />
@@ -48,7 +48,7 @@
             :positive-button-props="{ type: 'error' }"
           >
             <template #trigger>
-              <n-button type="error" ghost :disabled="tableData.length === 0 || loading || isShowingSearchResults">
+              <n-button type="error" ghost :disabled="tableData.length === 0 || loading || isShowingSearchResults" class="action-btn">
                 <template #icon><n-icon :component="TrashIcon" /></template>
                 清空所有待复核项
               </n-button>
@@ -60,9 +60,8 @@
             @positive-click="reprocessAllReviewItems"
         >
             <template #trigger>
-                <n-button type="warning" ghost :disabled="tableData.length === 0 || loading || props.taskStatus?.is_running || isShowingSearchResults">
+                <n-button type="warning" ghost :disabled="tableData.length === 0 || loading || props.taskStatus?.is_running || isShowingSearchResults" class="action-btn">
                     <template #icon><n-icon :component="ReprocessIcon" /></template>
-                    <!-- ★ 动态按钮文字 -->
                     {{ selectedReason ? `重新处理筛选出的 ${totalItems} 项` : '重新处理所有' }}
                 </n-button>
             </template>
@@ -75,6 +74,7 @@
           <n-alert title="加载错误" type="error">{{ error }}</n-alert>
         </div>
         <div v-else>
+          <!-- ★ 优化：添加 :scroll-x="1000" 支持在手机端横滑表格 -->
           <n-data-table
             v-if="tableData.length > 0"
             :columns="columns"
@@ -87,6 +87,7 @@
             :row-key="row => row.item_id"
             :loading="loadingAction[currentRowId]"
             remote 
+            :scroll-x="1000"
           />
           <n-empty 
             v-else-if="!loading && tableData.length === 0" 
@@ -101,6 +102,7 @@
 </template>
 
 <script setup>
+// [原样保留了 Script 内的逻辑代码...]
 import { useRouter } from 'vue-router';
 import { ref, onMounted, computed, h } from 'vue';
 import axios from 'axios';
@@ -109,7 +111,6 @@ import {
     useMessage
 } from 'naive-ui';
 import { HeartOutline as AddToWatchlistIcon } from '@vicons/ionicons5';
-// ★ [新增] 引入了 VideocamOutline 用于"补全流信息"按钮图标
 import { SearchOutline as SearchIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, TrashOutline as TrashIcon, VideocamOutline } from '@vicons/ionicons5';
 
 const props = defineProps({
@@ -134,7 +135,6 @@ const loadingAction = ref({});
 const currentRowId = ref(null);
 const isShowingSearchResults = ref(false);
 
-// ★ 新增：原因筛选相关状态
 const selectedReason = ref(null);
 const reasonOptions = ref([]);
 
@@ -202,7 +202,7 @@ const clearAllReviewItems = async () => {
     const response = await axios.post('/api/actions/clear_review_items');
     message.success(response.data.message);
     await fetchReviewItems(); 
-    await fetchReasons(); // 清空后刷新下拉框
+    await fetchReasons(); 
   } catch (err) {
     console.error("清空待复核列表失败:", err);
     message.error(`操作失败: ${err.response?.data?.error || err.message}`);
@@ -236,7 +236,6 @@ const handleMarkAsProcessed = async (row) => {
   }
 };
 
-// ★ [新增] 处理补全流信息的点击事件
 const handleSyncMediaInfo = async (row) => {
   currentRowId.value = row.item_id;
   loadingAction.value[row.item_id] = true;
@@ -244,7 +243,6 @@ const handleSyncMediaInfo = async (row) => {
     const response = await axios.post(`/api/actions/sync_media_info/${row.item_id}`);
     message.success(response.data.message || `项目 "${row.item_name}" 流信息补全成功。`);
     
-    // 如果补全后成功移出了待复核列表，刷新列表
     if (!isShowingSearchResults.value) {
         await fetchReviewItems();
         await fetchReasons();
@@ -303,7 +301,7 @@ const columns = computed(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 360, // 稍微调宽一点，容纳新按钮
+    width: 360, 
     align: 'center',
     fixed: 'right',
     render(row) {
@@ -325,7 +323,6 @@ const columns = computed(() => [
         })
       );
 
-      // ★ [新增] 只有在失败原因包含“缺失”两字时，才展示“补全流信息”按钮
       if (row.reason && row.reason.includes('缺失')) {
           actionButtons.push(
             h(NButton, {
@@ -412,7 +409,7 @@ const fetchReviewItems = async () => {
         params: {
             page: currentPage.value,
             per_page: itemsPerPage.value,
-            reason: selectedReason.value || '' // ★ 传递筛选原因
+            reason: selectedReason.value || '' 
         }
     });
     tableData.value = response.data.items;
@@ -428,7 +425,7 @@ const searchEmbyLibrary = async () => {
   loading.value = true;
   error.value = null;
   isShowingSearchResults.value = true;
-  selectedReason.value = null; // 搜索时清空筛选
+  selectedReason.value = null; 
   try {
     const response = await axios.get(`/api/search_emby_library`, {
         params: { query: searchQuery.value }
@@ -468,7 +465,6 @@ const handleReprocessItem = async (row) => {
 
 const reprocessAllReviewItems = async () => {
   try {
-    // ★ 提交时带上当前选中的原因
     const response = await axios.post('/api/actions/reprocess_all_review_items', {
       reason: selectedReason.value || ''
     });
@@ -496,7 +492,38 @@ const handleSearch = () => {
 };
 
 onMounted(() => {
-  fetchReasons(); // ★ 初始化时获取原因列表
+  fetchReasons(); 
   fetchReviewItems();
 });
 </script>
+
+<style scoped>
+.page-container {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+.search-input {
+  width: 300px;
+}
+.reason-select {
+  width: 200px;
+}
+
+/* ★ 移动端自适应 CSS */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px !important;
+  }
+  .top-action-bar {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 12px;
+  }
+  .search-input,
+  .reason-select,
+  .action-btn {
+    width: 100% !important;
+  }
+}
+</style>
