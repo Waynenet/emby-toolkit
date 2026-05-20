@@ -866,66 +866,73 @@ def proxy_all(path):
             return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         
         # ====================================================================
-        # ★★★ 拦截：虚拟库业务及各接口路由 ★★★
+        # ★★★ 拦截：虚拟库业务及各接口路由 (修复 Yamby/Infuse/iOS 全面兼容) ★★★
         # ====================================================================
 
         # 1. 缺失占位符海报
-        if path.startswith('emby/Items/') and '/Images/Primary' in path:
-            item_id = path.split('/')[2]
-            if is_missing_item_id(item_id):
-                combined_id = parse_missing_item_id(item_id)
-                real_tmdb_id = combined_id.split('_S_')[0] if '_S_' in combined_id else combined_id
-                meta = queries_db.get_best_metadata_by_tmdb_id(real_tmdb_id)
-                db_status = meta.get('subscription_status', 'WANTED')
-                current_status = db_status if db_status in ['WANTED', 'SUBSCRIBED', 'PENDING_RELEASE', 'PAUSED', 'IGNORED'] else 'WANTED'
-                
-                img_file_path = get_missing_poster(
-                    tmdb_id=real_tmdb_id, 
-                    status=current_status,
-                    poster_path=meta.get('poster_path')
-                )
-                
-                if img_file_path and os.path.exists(img_file_path):
-                    resp = send_file(img_file_path, mimetype='image/jpeg')
-                    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-                    return resp
+        if '/images/primary' in full_path_lower:
+            img_match = re.search(r'/items/([^/]+)/images/primary', full_path_lower)
+            if img_match:
+                item_id = img_match.group(1)
+                if is_missing_item_id(item_id):
+                    combined_id = parse_missing_item_id(item_id)
+                    real_tmdb_id = combined_id.split('_S_')[0] if '_S_' in combined_id else combined_id
+                    meta = queries_db.get_best_metadata_by_tmdb_id(real_tmdb_id)
+                    db_status = meta.get('subscription_status', 'WANTED')
+                    current_status = db_status if db_status in ['WANTED', 'SUBSCRIBED', 'PENDING_RELEASE', 'PAUSED', 'IGNORED'] else 'WANTED'
+                    
+                    img_file_path = get_missing_poster(
+                        tmdb_id=real_tmdb_id, 
+                        status=current_status,
+                        poster_path=meta.get('poster_path')
+                    )
+                    
+                    if img_file_path and os.path.exists(img_file_path):
+                        resp = send_file(img_file_path, mimetype='image/jpeg')
+                        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                        return resp
 
-        # 2. Views 拦截
-        if path.endswith('/Views') and path.startswith('emby/Users/'):
-            # 使用更安全的 path 变量进行提取
-            user_id_match = re.search(r'emby/Users/([^/]+)/', path)
-            if user_id_match:
-                return handle_get_views(user_id_match.group(1))
-            else:
-                return "Could not determine user from path", 400
+        # 2. Views 拦截 (兼容末尾有无斜杠，以及 UserId 存在于路径或参数中)
+        if path.lower().endswith('/views') or path.lower().endswith('/views/'):
+            user_id_match = re.search(r'/users/([^/]+)/', full_path_lower)
+            user_id = user_id_match.group(1) if user_id_match else (request.args.get('UserId') or request.args.get('userId'))
+            if user_id:
+                return handle_get_views(user_id)
 
         # 3. Latest 拦截
-        if path.endswith('/Items/Latest'):
-            user_id_match = re.search(r'/emby/Users/([^/]+)/', full_path)
-            if user_id_match:
-                return handle_get_latest_items(user_id_match.group(1), request.args)
+        if path.lower().endswith('/items/latest') or path.lower().endswith('/items/latest/'):
+            user_id_match = re.search(r'/users/([^/]+)/', full_path_lower)
+            user_id = user_id_match.group(1) if user_id_match else (request.args.get('UserId') or request.args.get('userId'))
+            if user_id:
+                return handle_get_latest_items(user_id, request.args)
 
-        # 4. Details 拦截 (iOS兼容)
-        details_match = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path)
-        if details_match and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
-            mimicked_id = details_match.group(1)
-            user_id_match = re.search(r'/Users/([^/]+)/', full_path)
-            user_id = user_id_match.group(1) if user_id_match else request.args.get('UserId')
-            return handle_get_mimicked_library_details(user_id, mimicked_id)
+        # 4. Details 拦截 (防误伤：必须排除图片和播放信息的请求)
+        if '/images/' not in full_path_lower and '/playbackinfo' not in full_path_lower:
+            details_match = re.search(r'/items/(-(\d+))(?:$|/)', full_path_lower)
+            if details_match:
+                mimicked_id = details_match.group(1)
+                user_id_match = re.search(r'/users/([^/]+)/', full_path_lower)
+                user_id = user_id_match.group(1) if user_id_match else (request.args.get('UserId') or request.args.get('userId'))
+                if user_id:
+                    return handle_get_mimicked_library_details(user_id, mimicked_id)
 
         # 5. 虚拟库图片 拦截
-        if path.startswith('emby/Items/') and '/Images/' in path:
-            item_id = path.split('/')[2]
-            if is_mimicked_id(item_id):
+        if '/images/' in full_path_lower:
+            img_match = re.search(r'/items/(-(\d+))/images/', full_path_lower)
+            if img_match:
                 return handle_get_mimicked_library_image(path)
         
-        # 6. Items / Metadata 拦截 (ParentId兼容)
+        # 6. Items / Metadata 拦截 (ParentId 核心逻辑兼容)
         parent_id = request.args.get("ParentId") or request.args.get("parentId")
         if parent_id and is_mimicked_id(parent_id):
-            user_id_match = re.search(r'emby/Users/([^/]+)/Items$', path)
-            if user_id_match:
-                user_id = user_id_match.group(1)
-                return handle_get_mimicked_library_items(user_id, parent_id, request.args)
+            # 精准判断是列表浏览，兼容有无末尾斜杠 (排除了 /Filters 等元数据请求)
+            if path.lower().endswith('/items') or path.lower().endswith('/items/'):
+                user_id_match = re.search(r'/users/([^/]+)/', full_path_lower)
+                user_id = user_id_match.group(1) if user_id_match else (request.args.get('UserId') or request.args.get('userId'))
+                if user_id:
+                    return handle_get_mimicked_library_items(user_id, parent_id, request.args)
+            
+            # 其他附加查询（Filters, Genres 等）按元数据兜底处理返回空
             return handle_mimicked_library_metadata_endpoint(path, parent_id, request.args)
 
         # ====================================================================
