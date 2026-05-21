@@ -240,7 +240,14 @@
                 <div v-if="currentRecommendation.cast && currentRecommendation.cast.length > 0">
                     <n-divider style="margin-top: 24px; margin-bottom: 16px;" />
                     <n-h4 style="margin: 0 0 16px 0;">主要演员</n-h4>
-                    <div class="actor-list-container">
+                    <div 
+                      class="actor-list-container" 
+                      ref="actorListRef"
+                      @mousedown="onMouseDown"
+                      @mouseleave="onMouseLeave"
+                      @mouseup="onMouseUp"
+                      @mousemove="onMouseMove"
+                    >
                         <div v-for="actor in currentRecommendation.cast" :key="actor.id" class="actor-card">
                             <img 
                             :src="actor.profile_path ? `https://image.tmdb.org/t/p/w185${actor.profile_path}` : '/default-avatar.png'" 
@@ -481,6 +488,41 @@ const seasonList = ref([]);
 const currentSeriesForSearch = ref(null);
 const subscribingSeasonId = ref(null);
 const subscribingAllSeasons = ref(false);
+
+// --- 新增：演员列表横向拖拽逻辑 ---
+const actorListRef = ref(null);
+let isDown = false;
+let startX = 0;
+let scrollLeft = 0;
+
+const onMouseDown = (e) => {
+  if (!actorListRef.value) return;
+  isDown = true;
+  // 拖拽时取消平滑滚动，保证鼠标跟手度
+  actorListRef.value.style.scrollBehavior = 'auto';
+  startX = e.pageX - actorListRef.value.offsetLeft;
+  scrollLeft = actorListRef.value.scrollLeft;
+};
+
+const onMouseLeave = () => {
+  isDown = false;
+};
+
+const onMouseUp = () => {
+  isDown = false;
+  if (actorListRef.value) {
+    // 松开后恢复平滑滚动
+    actorListRef.value.style.scrollBehavior = 'smooth';
+  }
+};
+
+const onMouseMove = (e) => {
+  if (!isDown || !actorListRef.value) return;
+  e.preventDefault(); // 阻止默认的文本/图片拖拽行为
+  const x = e.pageX - actorListRef.value.offsetLeft;
+  const walk = (x - startX) * 1.5; // 1.5 是滑动灵敏度乘数
+  actorListRef.value.scrollLeft = scrollLeft - walk;
+};
 
 const studioLabel = computed(() => {
   return mediaType.value === 'movie' ? '出品公司' : '播出平台';
@@ -1074,13 +1116,22 @@ onUnmounted(() => {
   display: flex;
   gap: 16px;
   padding-bottom: 10px;
+  overflow-x: auto;           /* 允许横向滚动 */
+  scroll-behavior: smooth;    /* 默认平滑滚动 */
+  cursor: grab;               /* 提示用户可拖拽 */
+}
+
+.actor-list-container:active {
+  cursor: grabbing;           /* 拖拽时的鼠标样式 */
 }
 
 .actor-card {
   flex-shrink: 0;
   width: 90px;
   text-align: center;
+  user-select: none;          /* 防止拖拽时选中文字 */
 }
+
 .actor-avatar {
   width: 90px;
   height: 135px;
@@ -1088,7 +1139,10 @@ onUnmounted(() => {
   object-fit: cover;
   margin-bottom: 8px;
   background-color: var(--n-action-color);
+  -webkit-user-drag: none;    /* 禁止图片的原生拖拽，防止干扰滑动 */
+  pointer-events: none;       /* 让鼠标事件穿透图片直接作用于父容器 */
 }
+
 .actor-name {
   font-weight: bold;
   font-size: 0.9em;
@@ -1096,12 +1150,14 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .actor-character {
   font-size: 0.8em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .action-icon.is-disabled {
   cursor: not-allowed;
   pointer-events: none;
