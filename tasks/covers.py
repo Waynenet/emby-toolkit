@@ -46,14 +46,15 @@ def task_generate_all_covers(processor):
             return
         
         # 3. 筛选媒体库
-        # ★★★ 核心修复：直接使用原始ID进行比较 ★★★
-        exclude_ids = set(cover_config.get("exclude_libraries", []))
+        # ★★★ 核心修复：修改为白名单模式，只有勾选的媒体库才会生成封面 ★★★
+        include_ids = set(cover_config.get("include_libraries", []))
         # 允许处理的媒体库类型列表，增加了 'audiobooks'
         ALLOWED_COLLECTION_TYPES = ['movies', 'tvshows', 'boxsets', 'mixed', 'music', 'audiobooks']
 
         libraries_to_process = [
             lib for lib in all_libraries 
-            if lib.get('Id') not in exclude_ids
+            # 【核心修改点】：从 not in 变成了 in，且使用的是 include_libraries
+            if lib.get('Id') in include_ids
             and (
                 # 条件1：满足常规的 CollectionType
                 lib.get('CollectionType') in ALLOWED_COLLECTION_TYPES

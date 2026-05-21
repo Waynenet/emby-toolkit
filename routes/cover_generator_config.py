@@ -23,7 +23,7 @@ def get_default_config():
         # 基础设置
         "enabled": False,
         "transfer_monitor": True,
-        "exclude_libraries": [], # 现在是勾选框
+        "include_libraries": [], # 现在是勾选框
         "sort_by": "Latest", # 默认改为最新添加
 
         # ★★★ 新增：默认安全分级上限 (默认为 8，即 PG-13) ★★★

@@ -133,7 +133,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
                     if library_info.get('CollectionType') in ['movies', 'tvshows', 'boxsets', 'mixed', 'music']:
                         server_id = 'main_emby'
                         library_unique_id = f"{server_id}-{library_id}"
-                        if library_unique_id not in cover_config.get("exclude_libraries", []):
+                        if library_unique_id in cover_config.get("include_libraries", []):
                             # ... (获取 item_count) ...
                             TYPE_MAP = {'movies': 'Movie', 'tvshows': 'Series', 'music': 'MusicAlbum', 'boxsets': 'BoxSet', 'mixed': 'Movie,Series'}
                             collection_type = library_info.get('CollectionType')

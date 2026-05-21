@@ -39,8 +39,8 @@
             <n-gi :span="5"><n-divider style="margin-top: 8px; margin-bottom: 8px;" /></n-gi>
 
             <n-gi :span="5"> 
-              <n-form-item label="选择要【忽略】的媒体库">
-                <n-checkbox-group v-model:value="configData.exclude_libraries" style="display: flex; flex-wrap: wrap; gap: 8px 16px;">
+              <n-form-item label="选择要【生成】封面的媒体库">
+                <n-checkbox-group v-model:value="configData.include_libraries" style="display: flex; flex-wrap: wrap; gap: 8px 16px;">
                   <n-checkbox v-for="lib in libraryOptions" :key="lib.value" :value="lib.value" :label="lib.label" />
                 </n-checkbox-group>
               </n-form-item>
