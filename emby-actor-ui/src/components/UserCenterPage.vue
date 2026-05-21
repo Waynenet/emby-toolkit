@@ -4,7 +4,7 @@
     
     <!-- 头部问候语模块 -->
     <div class="page-header-module">
-      <h1 class="greeting-title">早安，👋 <br class="mobile-break"/>欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
+      <h1 class="greeting-title">👋 <br class="mobile-break"/>欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
       <p class="greeting-subtitle">我帮您整理了最重要的账户状态与下一步建议。</p>
     </div>
     
