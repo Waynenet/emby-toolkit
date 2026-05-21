@@ -4,7 +4,7 @@
     
     <!-- 头部问候语模块 -->
     <div class="page-header-module">
-      <h1 class="greeting-title">👋 <br class="mobile-break"/>欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
+      <h1 class="greeting-title">👋 欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
       <p class="greeting-subtitle">我帮您整理了最重要的账户状态与下一步建议。</p>
     </div>
     
@@ -402,7 +402,6 @@ onMounted(async () => {
 .page-header-module { margin-bottom: 24px; }
 .greeting-title { font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: #fff; line-height: 1.3; }
 .greeting-subtitle { font-size: 14px; color: rgba(255,255,255,0.6); margin: 0; }
-.mobile-break { display: none; }
 
 .stat-module :deep(.n-statistic__label) { color: rgba(255, 255, 255, 0.7) !important; }
 .stat-module :deep(.n-statistic-value__content) { color: var(--n-value-text-color, #ffffff) !important; font-size: 28px; font-weight: bold; }
@@ -481,7 +480,6 @@ onMounted(async () => {
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
-  .mobile-break { display: block; }
   
   .account-info-vertical { gap: 16px; }
   .profile-header-vertical { gap: 8px; }
