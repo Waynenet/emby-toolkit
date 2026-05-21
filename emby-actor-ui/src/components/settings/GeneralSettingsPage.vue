@@ -112,7 +112,7 @@
                         <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="浏览器开发者工具中获取，状态同步需填写"/>
                       </n-form-item-grid-item>
 
-                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">在看/看过记录同步</n-divider></n-gi>
+                      <n-gi span="1 s:2"><n-divider title-placement="left" style="margin: 4px 0; font-size: 0.8em;">观看记录同步</n-divider></n-gi>
                       
                       <n-form-item-grid-item label="启用状态同步" path="douban_sync_enabled">
                         <n-switch v-model:value="configModel.douban_sync_enabled" />
