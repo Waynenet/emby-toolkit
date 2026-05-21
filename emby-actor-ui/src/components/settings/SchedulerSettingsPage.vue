@@ -26,11 +26,13 @@
                 <n-text strong>启用高频任务链</n-text>
                 <n-switch v-model:value="configModel.task_chain_enabled" />
               </n-space>
-              <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3" :show-feedback="false">
-                <n-form-item label="定时执行 (CRON)" label-style="padding-right: 24px;">
+              
+              <!-- ★ 修改点：使用固定宽度 160px，并让 label 左对齐，完美拉开距离并垂直对齐右侧控件 -->
+              <n-form :model="configModel" label-placement="left" :label-width="160" label-align="left" class="mt-3" :show-feedback="false">
+                <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_cron" :disabled="!configModel.task_chain_enabled" placeholder="例如: 0 7-23/2 * * *" />
                 </n-form-item>
-                <n-form-item label="最大运行时长 (分钟)" label-style="padding-right: 24px;">
+                <n-form-item label="最大运行时长 (分钟)">
                   <n-input-number 
                     v-model:value="configModel.task_chain_max_runtime_minutes" 
                     :min="0" 
@@ -40,15 +42,15 @@
                     style="width: 100%;"
                   />
                 </n-form-item>
-                <n-form-item label="任务序列" label-style="padding-right: 24px;">
-                  <n-button-group>
-                    <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
-                      <template #icon><n-icon :component="Settings24Regular" /></template>
-                      配置
-                    </n-button>
-                  </n-button-group>
+                <n-form-item label="任务序列">
+                  <!-- 去除了会导致变胖的 button-group -->
+                  <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
+                    <template #icon><n-icon :component="Settings24Regular" /></template>
+                    配置
+                  </n-button>
                 </n-form-item>
               </n-form>
+
               <n-button 
                 type="primary" 
                 ghost 
@@ -97,11 +99,13 @@
                 <n-text strong>启用低频任务链</n-text>
                 <n-switch v-model:value="configModel.task_chain_low_freq_enabled" />
               </n-space>
-              <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3" :show-feedback="false">
-                <n-form-item label="定时执行 (CRON)" label-style="padding-right: 24px;">
+              
+              <!-- ★ 修改点：同上 -->
+              <n-form :model="configModel" label-placement="left" :label-width="160" label-align="left" class="mt-3" :show-feedback="false">
+                <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_low_freq_cron" :disabled="!configModel.task_chain_low_freq_enabled" placeholder="例如: 0 1 * * *" />
                 </n-form-item>
-                <n-form-item label="最大运行时长 (分钟)" label-style="padding-right: 24px;">
+                <n-form-item label="最大运行时长 (分钟)">
                   <n-input-number 
                     v-model:value="configModel.task_chain_low_freq_max_runtime_minutes" 
                     :min="0" 
@@ -111,13 +115,14 @@
                     style="width: 100%;"
                   />
                 </n-form-item>
-                <n-form-item label="任务序列" label-style="padding-right: 24px;">
+                <n-form-item label="任务序列">
                    <n-button type="default" @click="showLowFreqChainConfigModal = true" :disabled="!configModel.task_chain_low_freq_enabled">
                       <template #icon><n-icon :component="Settings24Regular" /></template>
                       配置
                     </n-button>
                 </n-form-item>
               </n-form>
+              
               <n-button 
                 type="primary" 
                 ghost 
@@ -289,7 +294,7 @@ import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import {
   NForm, NFormItem, NInput, NCheckbox, NGrid, NGi, NAlert,
   NButton, NCard, NSpace, NSwitch, NIcon, NText, NInputNumber,
-  useMessage, NSpin, NModal, NButtonGroup
+  useMessage, NSpin, NModal
 } from 'naive-ui';
 import { Play24Regular, Settings24Regular, Drag24Regular, Save24Regular } from '@vicons/fluent';
 import { useConfig } from '../../composables/useConfig.js';
