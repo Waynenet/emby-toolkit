@@ -213,6 +213,11 @@ def task_process_all_custom_collections(processor):
                 for item in raw_tmdb_items:
                     tmdb_id = str(item.get('id')) if item.get('id') else None
                     media_type = item.get('type')
+
+                    # 全局 AI 推荐的剧集默认按第一季处理
+                    if collection_type == 'ai_recommendation_global' and media_type == 'Series' and item.get('season') is None:
+                        item['season'] = 1
+                        logger.debug(f"  ➜ [全局推荐] 剧集《{item.get('title')}》未指定季，默认按第 1 季处理。")
                     
                     # ★★★ 新增：如果是 Series 且没有指定季，尝试拆解 ★★★
                     if media_type == 'Series' and 'season' not in item:
@@ -471,6 +476,12 @@ def process_single_custom_collection(processor, custom_collection_id: int):
             for item in raw_tmdb_items:
                 tmdb_id = str(item.get('id'))
                 media_type = item.get('type')
+
+                # 全局 AI 推荐的剧集默认按第一季处理
+                if collection_type == 'ai_recommendation_global' and media_type == 'Series' and item.get('season') is None:
+                    item['season'] = 1
+                    logger.debug(f"  ➜ [全局推荐] 剧集《{item.get('title')}》未指定季，默认按第 1 季处理。")
+
                 if media_type == 'Series' and 'season' not in item and collection_type == 'list':
                     try:
                         series_details = tmdb.get_tv_details(tmdb_id, processor.tmdb_api_key)
@@ -531,21 +542,33 @@ def process_single_custom_collection(processor, custom_collection_id: int):
             items_for_db = tmdb_items
             total_count = len(global_ordered_emby_ids)
 
-            if collection_type == 'list':
-                # 构造一个临时的 map 传给健康检查
-                tmdb_to_emby_map_full = tmdb_to_emby_item_map # 复用
-                
-                # ★★★ 修复：构造 subscription_source 并适配新签名 ★★★
+            if collection_type in ['list', 'ai_recommendation_global']:
+                tmdb_to_emby_map_full = tmdb_to_emby_item_map
+
+                missing_count = sum(1 for x in tmdb_items if not x.get('emby_id'))
+                in_library_count = sum(1 for x in tmdb_items if x.get('emby_id'))
+
+                logger.info(
+                    f"  ➜ [订阅检查] 合集《{collection_name}》类型={collection_type}，"
+                    f"候选 {len(tmdb_items)} 部，在库 {in_library_count} 部，缺失 {missing_count} 部，开始处理订阅..."
+                )
+
                 subscription_source = {
                     "type": "custom_collection",
                     "id": custom_collection_id,
                     "name": collection_name
                 }
-                process_subscription_items_and_update_db(
+
+                processed_active_ids = process_subscription_items_and_update_db(
                     tmdb_items=tmdb_items,
                     tmdb_to_emby_item_map=tmdb_to_emby_map_full,
                     subscription_source=subscription_source,
                     tmdb_api_key=processor.tmdb_api_key
+                )
+
+                logger.info(
+                    f"  ➜ [订阅检查] 合集《{collection_name}》订阅处理完成，"
+                    f"活跃候选 {len(processed_active_ids)} 个。"
                 )
 
         # ==================================================================
