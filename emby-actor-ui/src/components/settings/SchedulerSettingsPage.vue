@@ -19,7 +19,7 @@
           <n-text depth="3">建议白天两小时执行一次，保证实时数据更新，及时订阅资源</n-text>
         </template>
         
-        <n-grid cols="1 l:3" :x-gap="24" :y-gap="16" responsive="screen">
+        <n-grid cols="1 l:4" :x-gap="24" :y-gap="16" responsive="screen">
           <n-gi span="1">
             <n-space vertical>
               <n-space align="center" justify="space-between">
@@ -27,10 +27,10 @@
                 <n-switch v-model:value="configModel.task_chain_enabled" />
               </n-space>
               <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3" :show-feedback="false">
-                <n-form-item label="定时执行 (CRON)">
+                <n-form-item label="定时执行 (CRON)" label-style="padding-right: 24px;">
                   <n-input v-model:value="configModel.task_chain_cron" :disabled="!configModel.task_chain_enabled" placeholder="例如: 0 7-23/2 * * *" />
                 </n-form-item>
-                <n-form-item label="最大运行时长 (分钟)">
+                <n-form-item label="最大运行时长 (分钟)" label-style="padding-right: 24px;">
                   <n-input-number 
                     v-model:value="configModel.task_chain_max_runtime_minutes" 
                     :min="0" 
@@ -40,7 +40,7 @@
                     style="width: 100%;"
                   />
                 </n-form-item>
-                <n-form-item label="任务序列">
+                <n-form-item label="任务序列" label-style="padding-right: 24px;">
                   <n-button-group>
                     <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
                       <template #icon><n-icon :component="Settings24Regular" /></template>
@@ -63,11 +63,11 @@
             </n-space>
           </n-gi>
 
-          <n-gi span="2">
+          <n-gi span="3">
             <n-text strong>当前执行流程</n-text>
             <div class="flowchart-wrapper">
               <div v-if="enabledHighFreqTaskChain.length > 0" class="flowchart-container">
-                <div v-for="task in enabledHighFreqTaskChain" :key="task.key" class="flowchart-node">
+                <div v-for="task in enabledHighFreqTaskChain" :key="task.key" class="flowchart-node highlight-high-freq">
                   {{ task.name }}
                 </div>
               </div>
@@ -90,7 +90,7 @@
           <n-text depth="3">建议夜里空闲时间段执行并限制任务时长，处理资源密集型任务</n-text>
         </template>
         
-        <n-grid cols="1 l:3" :x-gap="24" :y-gap="16" responsive="screen">
+        <n-grid cols="1 l:4" :x-gap="24" :y-gap="16" responsive="screen">
           <n-gi span="1">
             <n-space vertical>
               <n-space align="center" justify="space-between">
@@ -98,10 +98,10 @@
                 <n-switch v-model:value="configModel.task_chain_low_freq_enabled" />
               </n-space>
               <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3" :show-feedback="false">
-                <n-form-item label="定时执行 (CRON)">
+                <n-form-item label="定时执行 (CRON)" label-style="padding-right: 24px;">
                   <n-input v-model:value="configModel.task_chain_low_freq_cron" :disabled="!configModel.task_chain_low_freq_enabled" placeholder="例如: 0 1 * * *" />
                 </n-form-item>
-                <n-form-item label="最大运行时长 (分钟)">
+                <n-form-item label="最大运行时长 (分钟)" label-style="padding-right: 24px;">
                   <n-input-number 
                     v-model:value="configModel.task_chain_low_freq_max_runtime_minutes" 
                     :min="0" 
@@ -111,7 +111,7 @@
                     style="width: 100%;"
                   />
                 </n-form-item>
-                <n-form-item label="任务序列">
+                <n-form-item label="任务序列" label-style="padding-right: 24px;">
                    <n-button type="default" @click="showLowFreqChainConfigModal = true" :disabled="!configModel.task_chain_low_freq_enabled">
                       <template #icon><n-icon :component="Settings24Regular" /></template>
                       配置
@@ -132,11 +132,11 @@
             </n-space>
           </n-gi>
 
-          <n-gi span="2">
+          <n-gi span="3">
             <n-text strong>当前执行流程</n-text>
             <div class="flowchart-wrapper">
               <div v-if="enabledLowFreqTaskChain.length > 0" class="flowchart-container">
-                <div v-for="task in enabledLowFreqTaskChain" :key="task.key" class="flowchart-node">
+                <div v-for="task in enabledLowFreqTaskChain" :key="task.key" class="flowchart-node highlight-low-freq">
                   {{ task.name }}
                 </div>
               </div>
@@ -159,7 +159,7 @@
           <n-text depth="3">配置显示在 TG 机器人输入框左侧 Menu 按钮中的快捷任务 (保存后需重启应用生效)</n-text>
         </template>
         
-        <n-grid cols="1 l:3" :x-gap="24" :y-gap="16" responsive="screen">
+        <n-grid cols="1 l:4" :x-gap="24" :y-gap="16" responsive="screen">
           <n-gi span="1">
             <n-space vertical>
               <n-button type="default" @click="showTgMenuConfigModal = true" style="width: 100%;">
@@ -169,12 +169,11 @@
             </n-space>
           </n-gi>
 
-          <n-gi span="2">
+          <n-gi span="3">
             <n-text strong>当前 TG 菜单列表</n-text>
             <div class="flowchart-wrapper">
               <div v-if="enabledTgMenuTasks.length > 0" class="flowchart-container">
-                <!-- 移除导致白色的 style="background-color: var(--n-action-color);" 改用类名 highlight-node -->
-                <div v-for="task in enabledTgMenuTasks" :key="task.key" class="flowchart-node highlight-node">
+                <div v-for="task in enabledTgMenuTasks" :key="task.key" class="flowchart-node highlight-tg">
                   {{ task.name }}
                 </div>
               </div>
@@ -216,7 +215,7 @@
     </n-space>
 
     <!-- ======================================================================= -->
-    <!-- 模态框 (统一使用 modal-card-lite) -->
+    <!-- 模态框 -->
     <!-- ======================================================================= -->
 
     <!-- 高频任务链配置模态框 -->
@@ -273,7 +272,7 @@
       </template>
     </n-modal>
 
-    <!-- 通用模式选择模态框 (加上 modal-card-lite 确保毛玻璃) -->
+    <!-- 通用模式选择模态框 -->
     <n-modal v-model:show="showSyncModeModal" class="modal-card-lite" preset="dialog" title="选择处理模式" :mask-closable="false">
       <n-text>您希望如何执行此任务？</n-text>
       <template #action>
@@ -520,7 +519,6 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   margin-top: 12px;
 }
 
-/* ★ 修复：临时任务使用毛玻璃背景与边框，去白底 */
 .temp-task-item {
   display: flex;
   justify-content: space-between;
@@ -541,7 +539,6 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   gap: 8px;
 }
 
-/* ★ 修复：模态框内的拖拽项去白底，融入主题 */
 .task-chain-item {
   display: flex;
   align-items: center;
@@ -591,7 +588,6 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   min-height: 80px;
 }
 
-/* ★ 修复：流程图节点使用毛玻璃代替 Naive 原生色 */
 .flowchart-node {
   background-color: var(--glass-bg);
   border: 1px solid var(--glass-border);
@@ -604,8 +600,20 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 
-/* 新增：专门给 TG 菜单高亮使用的样式 */
-.flowchart-node.highlight-node {
+/* ★ 高频任务链高亮 (翠绿色/活力) */
+.flowchart-node.highlight-high-freq {
+  background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(16, 185, 129, 0.25) 100%);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+/* ★ 低频任务链高亮 (紫罗兰色/夜间静默) */
+.flowchart-node.highlight-low-freq {
+  background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(139, 92, 246, 0.25) 100%);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+/* ★ TG 菜单高亮 (经典蓝色) */
+.flowchart-node.highlight-tg {
   background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(54, 162, 235, 0.25) 100%);
   border-color: rgba(54, 162, 235, 0.4);
 }
