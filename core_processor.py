@@ -3319,7 +3319,31 @@ class MediaProcessor:
 
                 # === 流信息补全完毕，重新算分并洗白 ===
                 raw_actors = db_record.get('actors_json', '[]')
-                final_cast = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
+                actors_link = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
+                
+                final_cast = []
+                # ★ 修复 Bug：从 person_metadata 表中查询真实姓名并重组列表 ★
+                if actors_link:
+                    actor_tmdb_ids = [a.get('tmdb_id') for a in actors_link if a.get('tmdb_id')]
+                    if actor_tmdb_ids:
+                        placeholders = ','.join(['%s'] * len(actor_tmdb_ids))
+                        sql = f"""
+                            SELECT tmdb_person_id, primary_name 
+                            FROM person_metadata 
+                            WHERE tmdb_person_id IN ({placeholders})
+                        """
+                        cursor.execute(sql, tuple(actor_tmdb_ids))
+                        actor_name_map = {r['tmdb_person_id']: r['primary_name'] for r in cursor.fetchall()}
+                        
+                        for link in actors_link:
+                            tid = link.get('tmdb_id')
+                            final_cast.append({
+                                "id": tid,
+                                "name": actor_name_map.get(tid), # 恢复名字
+                                "character": link.get('character'),
+                                "order": link.get('order', 999)
+                            })
+
                 original_cast_count = len([p for p in item_details.get("People", []) if p.get("Type") == "Actor"])
                 
                 raw_genres = item_details.get("Genres", [])
