@@ -150,7 +150,7 @@ const emit = defineEmits(['update:is-dark']);
 const router = useRouter(); 
 const route = useRoute(); 
 const authStore = useAuthStore();
-const collapsed = ref(false); 
+const collapsed = ref(true); 
 const activeMenuKey = computed(() => route.name);
 const appVersion = ref(__APP_VERSION__);
 const isRealtimeLogVisible = ref(false);
