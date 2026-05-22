@@ -18,6 +18,12 @@ from database import settings_db, request_db, user_db, media_db, watchlist_db
 from .helpers import is_movie_subscribable, check_series_completion, parse_series_title_and_season, should_mark_as_pending
 from handler.hdhive_client import HDHiveClient
 from tasks.hdhive import task_download_from_hdhive, filter_hdhive_resources
+try:
+    from handler.tg_userbot import TGUserBotManager, tg_task_queue
+except Exception:
+    TGUserBotManager = None
+    tg_task_queue = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +191,430 @@ def _try_download_from_hdhive_first(tmdb_id, media_type, title, item_label="媒�
     except Exception as e:
         logger.error(f"  ➜ 影巢优先处理异常，准备降级到 MoviePilot: {e}", exc_info=True)
         return False
+
+
+def _cloud_size_to_gb(value):
+    """把频道资源里提取到的 3.5GB / 940MB / 1.2TB 等文本转成 GB，便于排序。"""
+    if value is None:
+        return 0.0
+    try:
+        if isinstance(value, (int, float)):
+            return float(value) / 1024 / 1024 / 1024 if float(value) > 10000 else float(value)
+        text = str(value).strip().upper().replace(',', '')
+        match = re.search(r'(\d+(?:\.\d+)?)\s*(TB|GB|G|MB|M|KB|K|B)?', text)
+        if not match:
+            return 0.0
+        number = float(match.group(1))
+        unit = match.group(2) or 'GB'
+        if unit == 'TB':
+            return number * 1024
+        if unit in ('GB', 'G'):
+            return number
+        if unit in ('MB', 'M'):
+            return number / 1024
+        if unit in ('KB', 'K'):
+            return number / 1024 / 1024
+        if unit == 'B':
+            return number / 1024 / 1024 / 1024
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _channel_resource_text(resource: Dict) -> str:
+    parts = []
+    for key in ('title', 'name', 'quality', 'remark', 'text', 'source_channel'):
+        value = resource.get(key)
+        if isinstance(value, (list, tuple, set)):
+            value = ' '.join(str(v) for v in value if v)
+        if value:
+            parts.append(str(value))
+    return '\n'.join(parts)
+
+
+def _normalize_title_for_channel_match(value: str) -> str:
+    text = str(value or '').lower()
+    text = re.sub(r'[\s\-_·.．・:：,，;；!！?？()\[\]【】{}<>《》"“”\'’‘`~～/\\|]+', '', text)
+    return text
+
+
+def _channel_resource_matches_title(resource: Dict, title: str) -> bool:
+    title = str(title or '').strip()
+    if not title:
+        return True
+
+    text = _channel_resource_text(resource)
+    normalized_title = _normalize_title_for_channel_match(title)
+    normalized_text = _normalize_title_for_channel_match(text)
+
+    if normalized_title and len(normalized_title) >= 3 and normalized_title in normalized_text:
+        return True
+
+    words = [
+        w.lower()
+        for w in re.findall(r'[A-Za-z0-9]+|[\u4e00-\u9fa5]{2,}', title)
+        if len(w.strip()) >= 2
+    ]
+    if not words:
+        return False
+
+    hit = 0
+    raw_text_lower = text.lower()
+    for word in words:
+        if _normalize_title_for_channel_match(word) in normalized_text or word in raw_text_lower:
+            hit += 1
+
+    required = len(words) if len(words) <= 2 else max(2, int(len(words) * 0.7))
+    return hit >= required
+
+
+def _fallback_channel_rule_matches(target_channel, chat_username, chat_id):
+    target_channel = str(target_channel or '').strip().lower()
+    if not target_channel:
+        return True
+
+    chat_username = str(chat_username or '').strip().lower().lstrip('@')
+    chat_id = str(chat_id or '').strip()
+    target_clean = target_channel.lstrip('@')
+    target_id_clean = target_clean.replace('-100', '') if target_clean.startswith('-100') else target_clean
+    curr_id_clean = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
+
+    return (
+        chat_username == target_clean
+        or chat_id == target_channel
+        or curr_id_clean == target_id_clean
+    )
+
+
+def _channel_resource_block_rule(resource: Dict):
+    """统一订阅自动流程专用：复用 TG 频道监听的拦截规则做资源初检。
+
+    手动 TG 搜索和云下载模态框不调用本函数，因此不会被拦截规则影响；
+    自动订阅无人值守选择频道资源时必须调用，避免初筛阶段转入明显不想要的资源。
+    """
+    resource = resource or {}
+
+    if TGUserBotManager is not None:
+        try:
+            manager = TGUserBotManager.get_instance()
+            if hasattr(manager, 'is_resource_blocked_by_rules'):
+                return manager.is_resource_blocked_by_rules(resource)
+        except Exception as e:
+            logger.warning(f"  ➜ [频道搜索] 调用 UserBot 拦截规则检查失败，将使用本地兜底检查: {e}")
+
+    cfg = settings_db.get_setting('tg_userbot_config') or {}
+    rules = cfg.get('block_keywords') or []
+    if not rules:
+        return None
+
+    text = resource.get('text') or _channel_resource_text(resource)
+    chat_username = resource.get('source_username') or ''
+    chat_id = resource.get('source_chat_id') or resource.get('chat_id') or ''
+
+    for rule_obj in rules:
+        if isinstance(rule_obj, str):
+            pattern = rule_obj.strip()
+            target_channel = ''
+        else:
+            pattern = str((rule_obj or {}).get('pattern', '')).strip()
+            target_channel = str((rule_obj or {}).get('channel', '')).strip().lower()
+
+        if not pattern:
+            continue
+        if not _fallback_channel_rule_matches(target_channel, chat_username, chat_id):
+            continue
+
+        try:
+            if re.search(pattern, text or '', re.IGNORECASE):
+                return pattern
+        except Exception as e:
+            logger.error(f"  ➜ [频道搜索] 拦截规则正则解析错误 '{pattern}': {e}")
+
+    return None
+
+
+def _extract_explicit_seasons(text: str) -> set[int]:
+    """从频道消息中提取明确季号；自动订阅用，避免把 S02 当 S01 转存。"""
+    text = str(text or '')
+    seasons = set()
+
+    for pattern in [
+        r'\bS\s*(\d{1,2})\b',
+        r'\bSeason\s*(\d{1,2})\b',
+        r'第\s*(\d{1,2})\s*季',
+        r'\{tmdb-\d+\}\s*(\d{1,2})\s*-\s*\d+\s*集',
+    ]:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                seasons.add(int(match.group(1)))
+            except Exception:
+                pass
+    return seasons
+
+
+def _is_channel_resource_complete(resource: Dict) -> bool:
+    text = _channel_resource_text(resource)
+    if resource.get('is_completed_pack'):
+        return True
+    return bool(re.search(r'(完结|全集|全\s*\d+\s*[集话]|\d+\s*[集话]\s*全|Complete|Completed|Finale)', text, re.IGNORECASE))
+
+
+def _channel_resource_season_level(resource: Dict, target_season=None) -> int:
+    """
+    返回频道资源的季匹配等级：
+    2 = 明确命中目标季；1 = 未写季号但目标季为 S01，可视作单季/第一季候选；0 = 不适用；-1 = 明确错季。
+    """
+    if target_season is None:
+        return 0
+
+    try:
+        target = int(target_season)
+    except Exception:
+        return 0
+
+    explicit = set()
+    try:
+        if resource.get('season_number') is not None:
+            explicit.add(int(resource.get('season_number')))
+    except Exception:
+        pass
+
+    explicit.update(_extract_explicit_seasons(_channel_resource_text(resource)))
+
+    if explicit:
+        return 2 if target in explicit else -1
+
+    # 自动流程保守过滤：没有明确季号时，只允许 S01 候选，避免 S02/S03 误转。
+    return 1 if target == 1 else -1
+
+
+def _filter_channel_resources_for_auto(resources: List[Dict], media_type: str, target_season=None, require_complete: bool = False, title: str = '') -> List[Dict]:
+    filtered = []
+    for resource in resources or []:
+        block_rule = _channel_resource_block_rule(resource)
+        if block_rule:
+            logger.info(
+                "  ➜ [频道搜索] 自动流程初检拦截频道资源：命中规则 '%s'，标题=%s，频道=%s",
+                block_rule,
+                resource.get('title') or resource.get('name') or title or '未知',
+                resource.get('source_channel') or resource.get('source_username') or '未知'
+            )
+            continue
+
+        if title and not _channel_resource_matches_title(resource, title):
+            continue
+        if media_type == 'tv':
+            season_level = _channel_resource_season_level(resource, target_season)
+            if target_season is not None and season_level < 0:
+                continue
+            resource['_season_match_level'] = season_level
+            if require_complete and not _is_channel_resource_complete(resource):
+                continue
+            resource['_completion_level'] = 2 if _is_channel_resource_complete(resource) else 0
+        filtered.append(resource)
+    return filtered
+
+
+def _channel_resource_score(resource: Dict, media_type: str, target_season=None, require_complete: bool = False):
+    text = _channel_resource_text(resource).upper()
+    size_gb = _cloud_size_to_gb(resource.get('share_size') or resource.get('size'))
+    pan_type = str(resource.get('pan_type') or '').lower()
+
+    resolution_score = 0
+    if '8K' in text:
+        resolution_score = 4
+    elif '4K' in text or '2160P' in text:
+        resolution_score = 3
+    elif '1080P' in text:
+        resolution_score = 2
+    elif '720P' in text:
+        resolution_score = 1
+
+    quality_score = 0
+    for keyword, weight in [('REMUX', 5), ('BLURAY', 4), ('WEB-DL', 3), ('WEBRIP', 2), ('HDR', 1), ('DV', 1), ('DOVI', 1)]:
+        if keyword in text:
+            quality_score += weight
+
+    season_level = int(resource.get('_season_match_level') or 0)
+    completion_level = int(resource.get('_completion_level') or 0)
+
+    # sort 默认升序：负值越小越靠前。
+    base = (
+        0 if pan_type in ('115', '115网盘') or resource.get('target_link') else 1,
+        -resolution_score,
+        -quality_score,
+        -size_gb,
+    )
+    if media_type == 'tv':
+        if require_complete:
+            return (-completion_level, -season_level, *base)
+        return (-season_level, *base)
+    return base
+
+
+def _build_channel_extra_queries(title: str, year=None, target_season=None) -> List[str]:
+    title = str(title or '').strip()
+    year = str(year or '').strip()
+    queries = []
+    if title and year:
+        queries.append(f'{title} {year}')
+    if title and target_season is not None:
+        try:
+            s_num = int(target_season)
+            queries.extend([f'{title} S{s_num:02d}', f'{title} 第{s_num}季'])
+        except Exception:
+            pass
+    return queries
+
+
+def _enqueue_channel_resource_download(resource: Dict, tmdb_id, media_type: str, title: str, target_season=None) -> bool:
+    if tg_task_queue is None:
+        logger.warning('  ➜ [频道搜索] tg_task_queue 不可用，无法推送转存任务。')
+        return False
+
+    target_link = resource.get('target_link')
+    magnet_url = resource.get('magnet_url')
+    if not target_link and not magnet_url:
+        logger.warning('  ➜ [频道搜索] 候选资源缺少 target_link / magnet_url，无法转存。')
+        return False
+
+    season_number = resource.get('season_number')
+    if season_number is None and target_season is not None:
+        try:
+            season_number = int(target_season)
+        except Exception:
+            season_number = target_season
+
+    tg_task_queue.put({
+        'type': 'channel_resource_complex',
+        'tmdb_id': str(tmdb_id) if tmdb_id is not None else resource.get('tmdb_id'),
+        'title': title or resource.get('title') or resource.get('name'),
+        'year': resource.get('year'),
+        'item_type': media_type,
+        'target_link': target_link,
+        'magnet_url': magnet_url,
+        'receive_code': resource.get('receive_code') or '',
+        'season_number': season_number,
+        'episode_number': resource.get('episode_number'),
+        'is_pack': bool(resource.get('is_pack')),
+        'is_completed_pack': bool(resource.get('is_completed_pack')),
+        # 统一订阅自动选中的频道资源已经由本函数做过过滤，交给队列时直接放行。
+        'is_brainless': True,
+        'is_keyword_matched': True,
+        'is_subscribe': False,
+    })
+    return True
+
+
+def _try_download_from_channel_first(tmdb_id, media_type, title, item_label='媒体', target_season=None, require_complete=False):
+    """统一订阅自动流程的频道历史搜索兜底；剧集/季必须启用季过滤。"""
+    if TGUserBotManager is None:
+        logger.info('  ➜ [频道搜索] 当前环境未加载 TGUserBotManager，跳过频道搜索。')
+        return False
+
+    if not title:
+        logger.info('  ➜ [频道搜索] 缺少标题，跳过频道搜索。')
+        return False
+
+    season_suffix = ''
+    if media_type == 'tv' and target_season is not None:
+        try:
+            season_suffix = f' S{int(target_season):02d}'
+        except Exception:
+            season_suffix = f' S{target_season}'
+
+    try:
+        manager = TGUserBotManager.get_instance()
+        if not hasattr(manager, 'search_channel_resources'):
+            logger.info('  ➜ [频道搜索] tg_userbot.py 尚未支持频道历史搜索，跳过。')
+            return False
+
+        logger.info(
+            f'  ➜ [策略] {item_label}《{title}》{season_suffix} 启用频道历史搜索兜底；'
+            f'{"已启用季过滤，" if media_type == "tv" and target_season is not None else ""}'
+            f'{"只收完结包" if require_complete else "不强制完结包"}。'
+        )
+
+        search_result = manager.search_channel_resources(
+            query=title,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            limit=50,
+            extra_queries=_build_channel_extra_queries(title, target_season=target_season),
+            timeout=35,
+            include_tmdb_query=False,
+            strict_title_match=True,
+        )
+
+        if not search_result.get('ok'):
+            logger.info(f"  ➜ [频道搜索] 未能执行频道搜索：{search_result.get('error') or '未知原因'}")
+            return False
+
+        candidates = search_result.get('results') or []
+        if not candidates:
+            logger.info(f'  ➜ [频道搜索] 未找到《{title}》{season_suffix} 的频道资源。')
+            return False
+
+        before_count = len(candidates)
+        candidates = _filter_channel_resources_for_auto(
+            candidates,
+            media_type=media_type,
+            target_season=target_season,
+            require_complete=require_complete,
+            title=title,
+        )
+
+        if not candidates:
+            logger.info(
+                f'  ➜ [频道搜索] 返回 {before_count} 条频道资源，但经季号/完结包规则过滤后无可用候选，准备 MP 兜底。'
+            )
+            return False
+
+        candidates.sort(key=lambda r: _channel_resource_score(r, media_type, target_season, require_complete))
+        target_resource = candidates[0]
+
+        logger.info(
+            f"  ➜ 最终选定频道资源: {target_resource.get('title') or target_resource.get('name') or title} "
+            f"(频道: {target_resource.get('source_channel') or '未知'}, "
+            f"体积: {target_resource.get('share_size') or '未知'}, "
+            f"清晰度: {target_resource.get('resolution') or '未知'}, "
+            f"季匹配等级: {target_resource.get('_season_match_level', 0)})"
+        )
+
+        if _enqueue_channel_resource_download(target_resource, tmdb_id, media_type, title, target_season=target_season):
+            logger.info('  ➜ 频道资源已推入转存队列，跳过 MoviePilot 订阅。')
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f'  ➜ 频道搜索处理异常，准备降级到 MoviePilot: {e}', exc_info=True)
+        return False
+
+
+def _try_download_from_cloud_first(tmdb_id, media_type, title, item_label='媒体', target_season=None, require_complete=False):
+    """云资源优先：先影巢，失败后频道历史搜索；自动流程对剧集启用季过滤。"""
+    if _try_download_from_hdhive_first(
+        tmdb_id,
+        media_type,
+        title,
+        item_label=item_label,
+        target_season=target_season,
+        require_complete=require_complete,
+    ):
+        return '影巢'
+
+    if _try_download_from_channel_first(
+        tmdb_id,
+        media_type,
+        title,
+        item_label=item_label,
+        target_season=target_season,
+        require_complete=require_complete,
+    ):
+        return '频道'
+
+    return None
 
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
@@ -1003,12 +1433,12 @@ def task_auto_subscribe(processor):
             subscription_priority = strategy_config.get('subscription_priority', 'mp')
 
             # ==========================================
-            # 影巢优先：电影 / 剧集 / 季统一走影巢，失败再 MP 兜底
+            # 云资源优先：电影 / 剧集 / 季统一先查影巢，失败再查已监听 TG 频道，最后 MP 兜底
             # - Movie: 使用电影 TMDb ID + movie
             # - Series: 使用剧集 TMDb ID + tv
-            # - Season: 使用父剧集 TMDb ID + tv；影巢请求不带季号，本地按季号识别/排序
+            # - Season: 使用父剧集 TMDb ID + tv；自动流程必须按目标季过滤，避免错季误转
             # ==========================================
-            if subscription_priority == 'hdhive' and item_type in ['Movie', 'Series', 'Season']:
+            if subscription_priority in ['hdhive', 'cloud'] and item_type in ['Movie', 'Series', 'Season']:
                 hdhive_tmdb_id = tmdb_id
                 hdhive_media_type = 'movie'
                 hdhive_item_label = '电影'
@@ -1023,7 +1453,7 @@ def task_auto_subscribe(processor):
                     if item_type == 'Season' and season_number is not None:
                         hdhive_target_season = int(season_number)
                         logger.info(
-                            f"  ➜ [策略] 季《{title}》S{int(season_number):02d} 走影巢时请求不带季号，"
+                            f"  ➜ [策略] 季《{title}》S{int(season_number):02d} 走云资源时请求不带季号，"
                             f"仅使用父剧集 TMDb ID {hdhive_tmdb_id} 检索；返回后本地按季号排序。"
                         )
 
@@ -1057,7 +1487,7 @@ def task_auto_subscribe(processor):
                         )
 
                 if hdhive_tmdb_id:
-                    success = _try_download_from_hdhive_first(
+                    cloud_source = _try_download_from_cloud_first(
                         int(hdhive_tmdb_id),
                         hdhive_media_type,
                         title,
@@ -1065,10 +1495,11 @@ def task_auto_subscribe(processor):
                         target_season=hdhive_target_season,
                         require_complete=hdhive_require_complete
                     )
-                    if success:
-                        action_type = "影巢"
+                    if cloud_source:
+                        success = True
+                        action_type = cloud_source
 
-            # 如果影巢没开、没找到资源、或者转存失败，统一交由 MP 兜底
+            # 如果云资源没开、没找到资源、或者转存失败，统一交由 MP 兜底
             if not success:
                 if item_type == 'Movie':
                     logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
@@ -1103,8 +1534,8 @@ def task_auto_subscribe(processor):
                 
                 # 将状态从 WANTED 更新为 SUBSCRIBED
                 # Series 走 MP 整剧逻辑时仍由 _subscribe_full_series_with_logic 内部逐季处理；
-                # Series 走影巢时没有逐季订阅流程，需要直接更新当前 Series，避免下次任务重复处理。
-                if item_type != 'Series' or action_type == "影巢":
+                # Series 走云资源时没有逐季订阅流程，需要直接更新当前 Series，避免下次任务重复处理。
+                if item_type != 'Series' or action_type in ["影巢", "频道", "云资源"]:
                     request_db.set_media_status_subscribed(
                         tmdb_ids=item['tmdb_id'], 
                         item_type=item_type,
