@@ -71,8 +71,8 @@
 
               <div class="filter-item">
                 <label class="filter-label">风格:</label>
-                <div class="filter-control" style="display: flex; flex-direction: column; gap: 8px;">
-                  <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode">
+                <div class="filter-control" style="display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px;">
+                  <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode" style="flex-shrink: 0;">
                     <n-radio-button value="include" label="包含" />
                     <n-radio-button value="exclude" label="排除" />
                   </n-radio-group>
@@ -83,6 +83,7 @@
                     filterable
                     :placeholder="genreFilterMode === 'include' ? '选择要包含的风格' : '选择要排除的风格'"
                     :options="genreOptions"
+                    style="flex: 1; min-width: 200px;"
                   />
                 </div>
               </div>
@@ -173,25 +174,31 @@
                 />
               </div>
 
-              <div class="filter-item">
-                <label class="filter-label">评分最低:</label>
-                <n-input-number
-                  v-model:value="filters.vote_average_gte"
-                  :disabled="isSearchMode"
-                  :step="0.5"
-                  :min="0"
-                  :max="10"
-                  placeholder="最低评分"
-                  style="width: 120px;"
-                />
-              </div>
+              <div style="display: flex; flex-wrap: wrap; gap: 16px; width: 100%;">
+                
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">评分最低:</label>
+                  <n-input-number
+                    class="filter-control"
+                    v-model:value="filters.vote_average_gte"
+                    :disabled="isSearchMode"
+                    :step="0.5"
+                    :min="0"
+                    :max="10"
+                    placeholder="最低评分"
+                  />
+                </div>
 
-              <div class="filter-item">
-                <label class="filter-label">隐藏已入库:</label>
-                <n-switch v-model:value="hideInLibrary" :disabled="loading || isLoadingMore">
-                  <template #checked>开启</template>
-                  <template #unchecked>关闭</template>
-                </n-switch>
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">隐藏已入库:</label>
+                  <div class="filter-control" style="display: flex; align-items: center; min-height: 34px;">
+                    <n-switch v-model:value="hideInLibrary" :disabled="loading || isLoadingMore">
+                      <template #checked>开启</template>
+                      <template #unchecked>关闭</template>
+                    </n-switch>
+                  </div>
+                </div>
+
               </div>
 
             </n-space>
