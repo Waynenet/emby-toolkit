@@ -186,6 +186,14 @@
                 />
               </div>
 
+              <div class="filter-item">
+                <label class="filter-label">隐藏已入库:</label>
+                <n-switch v-model:value="hideInLibrary" :disabled="loading || isLoadingMore">
+                  <template #checked>开启</template>
+                  <template #unchecked>关闭</template>
+                </n-switch>
+              </div>
+
             </n-space>
           </n-card>
         </n-gi>
@@ -269,7 +277,7 @@
     <n-spin :show="loading && results.length === 0">
       <div class="responsive-grid">
         <div 
-          v-for="media in results" 
+          v-for="media in displayResults" 
           :key="media.id" 
           class="grid-item"
         >
@@ -322,6 +330,12 @@
         </div>
       </div>
     </n-spin>
+
+    <n-empty
+      v-if="!loading && hideInLibrary && results.length > 0 && displayResults.length === 0"
+      description="当前页结果均已入库，已按开关隐藏。继续下滑可加载更多结果。"
+      style="margin-top: 24px;"
+    />
 
     <div v-if="isLoadingMore" style="text-align: center; padding: 20px;">
       <n-spin size="medium" />
@@ -377,7 +391,7 @@ import { useAuthStore } from '../stores/auth';
 import { 
   NPageHeader, NCard, NSpace, NRadioGroup, NRadioButton, NSelect,
   NInputNumber, NSpin, NGrid, NGi, NButton, NThing, useMessage, NIcon, 
-  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag
+  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag, NSwitch
 } from 'naive-ui';
 import { 
   Heart, HeartOutline, HourglassOutline, Star as StarIcon, 
@@ -474,8 +488,13 @@ const recommendationThemeName = ref('每日推荐');
 const results = ref([]);
 const totalPages = ref(0);
 const isLoadingMore = ref(false);
+const hideInLibrary = ref(false);
 const searchQuery = ref('');
 const isSearchMode = computed(() => searchQuery.value.trim() !== '');
+const displayResults = computed(() => {
+  if (!hideInLibrary.value) return results.value;
+  return results.value.filter(media => !media.in_library);
+});
 const sentinel = ref(null);
 const isMobile = ref(false);
 const checkMobile = () => {
@@ -591,7 +610,10 @@ const fetchDiscoverData = async () => {
     let response;
     if (isSearchMode.value) {
       response = await axios.post('/api/discover/search', {
-        query: searchQuery.value, media_type: mediaType.value, page: filters.page,
+        query: searchQuery.value,
+        media_type: mediaType.value,
+        page: filters.page,
+        hide_in_library: hideInLibrary.value,
       });
     } else {
       const apiParams = {
@@ -602,7 +624,8 @@ const fetchDiscoverData = async () => {
         'with_original_language': selectedLanguage.value,
         'with_keywords': selectedKeywords.value,
         'with_companies': selectedStudios.value,
-        'with_rating_label': selectedRating.value
+        'with_rating_label': selectedRating.value,
+        'hide_in_library': hideInLibrary.value
       };
       if (selectedGenres.value.length > 0) {
         if (genreFilterMode.value === 'include') { apiParams.with_genres = selectedGenres.value.join(','); } 
@@ -816,7 +839,7 @@ watch(mediaType, () => {
   fetchGenres(); resetAndFetch();
 });
 watch(searchQuery, () => { resetAndFetch(); });
-watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, genreFilterMode, yearFrom, yearTo, selectedRating], () => { resetAndFetch(); }, { deep: true });
+watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, genreFilterMode, yearFrom, yearTo, selectedRating, hideInLibrary], () => { resetAndFetch(); }, { deep: true });
 let observer = null;
 onMounted(() => {
   checkMobile();
