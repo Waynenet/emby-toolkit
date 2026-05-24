@@ -709,13 +709,22 @@ const filteredWatchlist = computed(() => {
       groups[pid].total_count += (season.total_count || 0);
       
       const isInLibrary = (season.collected_count > 0);
+      const sNum = season.season_number;
+      
       if (isInLibrary) {
-        groups[pid].seasons_contains.push(season.season_number);
+        // ★ 修复：只有当数组中不存在该季号时才推入，防止新老数据ID交替导致重复
+        if (!groups[pid].seasons_contains.includes(sNum)) {
+            groups[pid].seasons_contains.push(sNum);
+        }
         if (season.status === 'Watching' || season.status === 'Paused') {
-           groups[pid].seasons_airing.push(season.season_number);
+           if (!groups[pid].seasons_airing.includes(sNum)) {
+               groups[pid].seasons_airing.push(sNum);
+           }
         }
       } else {
-        groups[pid].seasons_missing.push(season.season_number);
+        if (!groups[pid].seasons_missing.includes(sNum)) {
+            groups[pid].seasons_missing.push(sNum);
+        }
       }
       if (new Date(season.last_checked_at) > new Date(groups[pid].last_checked_at)) {
         groups[pid].last_checked_at = season.last_checked_at;
@@ -743,7 +752,10 @@ const filteredWatchlist = computed(() => {
 
 const formatSeasonRange = (numbers) => {
   if (!numbers || numbers.length === 0) return '';
-  const sorted = [...numbers].sort((a, b) => a - b);
+  // ★ 核心修复：使用 Set 强行去重
+  const uniqueNumbers = [...new Set(numbers)];
+  const sorted = uniqueNumbers.sort((a, b) => a - b);
+  
   const ranges = [];
   let start = sorted[0], prev = sorted[0];
   for (let i = 1; i < sorted.length; i++) {
