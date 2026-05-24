@@ -1165,3 +1165,32 @@ def transfer_dummy_episode_assets(parent_tmdb_id: str, unified_episodes_dict: di
                 conn.commit()
     except Exception as e:
         logger.error(f"  ➜ 转移临时 ID 资产时出错: {e}", exc_info=True)
+
+def get_episode_group_id(tmdb_id: str) -> Optional[str]:
+    """获取剧集配置的 TMDb 剧集组 ID"""
+    if not tmdb_id: return None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT tmdb_episode_group_id FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Series'", (str(tmdb_id),))
+                row = cursor.fetchone()
+                return row['tmdb_episode_group_id'] if row else None
+    except Exception as e:
+        logger.error(f"获取剧集组ID失败: {e}")
+        return None
+
+def set_episode_group_id(tmdb_id: str, group_id: Optional[str]) -> bool:
+    """设置剧集的 TMDb 剧集组 ID"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE media_metadata 
+                    SET tmdb_episode_group_id = %s 
+                    WHERE tmdb_id = %s AND item_type = 'Series'
+                """, (group_id, str(tmdb_id)))
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"设置剧集组ID失败: {e}")
+        return False

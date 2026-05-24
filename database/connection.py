@@ -254,6 +254,7 @@ def init_db():
                         parent_series_tmdb_id TEXT,
                         season_number INTEGER,
                         episode_number INTEGER,
+                        tmdb_episode_group_id TEXT,
                                
                         -- 追剧专属字段
                         watching_status TEXT DEFAULT 'NONE', -- 'NONE', 'Watching', 'Paused', 'Completed', 'Pending'
@@ -510,7 +511,8 @@ def init_db():
                             "homepage": "TEXT", 
                             "production_companies_json": "JSONB",
                             "networks_json": "JSONB",
-                            "tagline": "TEXT"
+                            "tagline": "TEXT",
+                            "tmdb_episode_group_id": "TEXT"
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",

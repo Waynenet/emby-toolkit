@@ -150,29 +150,52 @@
                           </span>
                         </template>
                         
-                        <!-- 修正总集数 -->
-                        <div style="display: flex; flex-direction: column; gap: 8px; width: 180px;">
-                          <n-text strong depth="1">修正总集数</n-text>
-                          <n-input-number 
-                            v-model:value="tempTotalEpisodes" 
-                            size="small" 
-                            :min="item.collected_count || 0"
-                            placeholder="输入实际集数"
-                          />
-                          <n-space justify="end" size="small">
-                            <!-- 取消按钮 (可选，点击关闭) -->
-                            <n-button size="tiny" @click="item.show_edit_popover = false">取消</n-button>
-                            
-                            <n-button size="tiny" @click="tempTotalEpisodes = item.collected_count">
-                              填入当前
+                        <div style="display: flex; flex-direction: column; gap: 12px; width: 220px;">
+  
+                          <!-- 1. 原有的总集数修正 -->
+                          <div style="display: flex; flex-direction: column; gap: 4px;">
+                            <n-text strong depth="1">修正总集数 (单季有效)</n-text>
+                            <n-input-number 
+                              v-model:value="tempTotalEpisodes" 
+                              size="small" 
+                              :min="item.collected_count || 0"
+                              placeholder="输入实际集数"
+                            />
+                            <n-space justify="end" size="small" style="margin-top: 4px;">
+                              <n-button size="tiny" @click="tempTotalEpisodes = item.collected_count">填入当前</n-button>
+                              <n-button type="primary" size="tiny" @click="saveTotalEpisodes(item)">保存集数</n-button>
+                            </n-space>
+                          </div>
+                        
+                          <n-divider style="margin: 0" />
+                        
+                          <!-- 2. ★★★ 新增：TMDb 剧集组绑定 ★★★ -->
+                          <div style="display: flex; flex-direction: column; gap: 4px;">
+                            <n-text strong depth="1">TMDb 剧集组 (全剧洗牌)</n-text>
+                            <n-text depth="3" style="font-size: 12px;">长篇动漫解决分季混乱的神器！</n-text>
+
+                            <n-select
+                              v-model:value="item.temp_group_id"
+                              :options="item.available_groups || []"
+                              :loading="item.loading_groups"
+                              placeholder="加载中..."
+                              size="small"
+                              clearable
+                              @click="fetchEpisodeGroups(item)"
+                            />
+
+                            <n-button 
+                              type="warning" 
+                              size="tiny" 
+                              block 
+                              style="margin-top: 4px;"
+                              :disabled="item.temp_group_id === item.saved_group_id"
+                              @click="saveEpisodeGroup(item)"
+                            >
+                              保存并重铸全剧
                             </n-button>
-                            <n-button type="primary" size="tiny" @click="saveTotalEpisodes(item)">
-                              保存
-                            </n-button>
-                          </n-space>
-                          <n-text depth="3" style="font-size: 12px;">
-                            * 保存后将锁定该数字。
-                          </n-text>
+                          </div>
+
                         </div>
                       </n-popover>
                     </div>
@@ -1004,6 +1027,55 @@ const saveTotalEpisodes = async (item) => {
 
 const isMobile = ref(false);
 const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
+
+// 获取可用的剧集组
+const fetchEpisodeGroups = async (item) => {
+  // 防止重复拉取
+  if (item.available_groups && item.available_groups.length > 0) return;
+  
+  item.loading_groups = true;
+  try {
+    const parentId = item.parent_tmdb_id || item.tmdb_id; // 聚合卡片和分季卡片的ID取法兜底
+    const { data } = await axios.get(`/api/watchlist/episode_groups/${parentId}`);
+    
+    // 组装下拉框选项
+    item.available_groups = data.groups.map(g => ({
+      label: `${g.name} (${g.network ? g.network.name : 'Unknown'})`,
+      value: g.id
+    }));
+    
+    // 如果没有可选的
+    if (item.available_groups.length === 0) {
+      item.available_groups = [{ label: '暂无可用剧集组', value: 'none', disabled: true }];
+    }
+    
+    item.saved_group_id = data.current_group_id;
+    item.temp_group_id = data.current_group_id;
+    
+  } catch (err) {
+    message.error('拉取剧集组失败');
+  } finally {
+    item.loading_groups = false;
+  }
+};
+
+// 保存剧集组
+const saveEpisodeGroup = async (item) => {
+  try {
+    const parentId = item.parent_tmdb_id || item.tmdb_id;
+    await axios.post('/api/watchlist/set_episode_group', { 
+      tmdb_id: parentId, 
+      group_id: item.temp_group_id || '' 
+    });
+    
+    message.success('已应用剧集组！后台正在执行洗牌，请稍等几十秒后刷新页面查看效果。');
+    item.saved_group_id = item.temp_group_id;
+    item.show_edit_popover = false; // 关闭气泡
+    
+  } catch (err) {
+    message.error('应用剧集组失败');
+  }
+};
 
 onMounted(() => {
   checkMobile(); window.addEventListener('resize', checkMobile); fetchWatchlist();

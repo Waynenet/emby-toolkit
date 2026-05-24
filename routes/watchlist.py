@@ -3,8 +3,9 @@
 from flask import Blueprint, request, jsonify
 import logging
 from datetime import datetime, date
-# 导入需要的模块
-
+import handler.tmdb as tmdb
+import config_manager
+import constants
 import task_manager
 import extensions
 from extensions import admin_required, task_lock_required
@@ -315,3 +316,56 @@ def api_watchlist_settings():
         except Exception as e:
             logger.error(f"保存追剧配置失败: {e}", exc_info=True)
             return jsonify({"error": "保存配置失败"}), 500
+
+@watchlist_bp.route('/episode_groups/<tmdb_id>', methods=['GET'])
+@admin_required
+def api_get_episode_groups(tmdb_id):
+    """获取该剧集在 TMDb 上所有可用的剧集组 (Episode Groups)"""
+    try:
+        api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+        
+        # 获取现已绑定的 ID
+        current_group_id = watchlist_db.get_episode_group_id(tmdb_id)
+        
+        # 请求 TMDb
+        res = tmdb._tmdb_request(f"/tv/{tmdb_id}/episode_groups", api_key)
+        groups = res.get('results', []) if res else []
+        
+        return jsonify({
+            "current_group_id": current_group_id,
+            "groups": groups
+        }), 200
+    except Exception as e:
+        logger.error(f"获取剧集组失败: {e}", exc_info=True)
+        return jsonify({"error": "获取剧集组失败"}), 500
+
+@watchlist_bp.route('/set_episode_group', methods=['POST'])
+@admin_required
+def api_set_episode_group():
+    """保存剧集组ID，并自动触发一次刷新"""
+    data = request.json
+    tmdb_id = data.get('tmdb_id')
+    group_id = data.get('group_id') # 允许传空字符串以取消绑定
+
+    if not tmdb_id:
+        return jsonify({"error": "参数无效"}), 400
+
+    try:
+        # 保存到数据库
+        target_val = group_id if group_id else None
+        watchlist_db.set_episode_group_id(tmdb_id, target_val)
+        
+        # 立即触发一次全量刷新，让剧集组重映射生效！
+        from tasks.watchlist import task_process_watchlist 
+        item_name = watchlist_db.get_watchlist_item_name(tmdb_id) or "未知剧集"
+        
+        task_manager.submit_task(
+            lambda processor: task_process_watchlist(processor, tmdb_id=tmdb_id),
+            f"应用剧集组重洗: {item_name}",
+            processor_type='watchlist'
+        )
+        
+        return jsonify({"message": f"剧集组绑定成功，正在后台重新清洗《{item_name}》的数据结构！"}), 200
+    except Exception as e:
+        logger.error(f"保存剧集组失败: {e}", exc_info=True)
+        return jsonify({"error": "保存失败"}), 500

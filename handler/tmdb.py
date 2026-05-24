@@ -13,6 +13,8 @@ import logging
 import config_manager
 import constants
 import threading
+import copy
+from database import watchlist_db
 logger = logging.getLogger(__name__)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 # ★★★ 自定义的重试类，用于输出更友好的日志并强制控制等待时间 ★★★
@@ -519,6 +521,87 @@ def aggregate_full_series_data_from_tmdb(
                     logger.warning(f"  ➜ 补全英文分集源文本失败: {e}")
 
         return data_zh
+
+# =====================================================================
+    # ★★★ 步骤 2.5: 核心劫持：检查是否配置了剧集组 ID ★★★
+    # =====================================================================
+    group_id = None
+    try:
+        group_id = watchlist_db.get_episode_group_id(str(tv_id))
+    except Exception as e:
+        logger.warning(f"无法读取剧集组配置: {e}")
+
+    if group_id:
+        logger.info(f"  ➜ 🌟 触发重映射！检测到剧集 {tv_id} 绑定了剧集组 ID: {group_id}，正在进行底层重组...")
+        
+        # A. 获取剧集组详细结构
+        group_details = _tmdb_request(f"/tv/episode_group/{group_id}", api_key, {"language": DEFAULT_LANGUAGE})
+        if group_details and 'groups' in group_details:
+            
+            # B. 分析该剧集组囊括了哪些原生标准季
+            needed_seasons = set()
+            for g in group_details['groups']:
+                for ep in g.get('episodes', []):
+                    if 'season_number' in ep:
+                        needed_seasons.add(ep['season_number'])
+            
+            # C. 并发获取这些标准季的完整数据 (含AI翻译兜底和演员表)
+            ep_lookup = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_snum = {executor.submit(_fetch_season_smart, tv_id, s_num): s_num for s_num in needed_seasons}
+                for future in concurrent.futures.as_completed(future_to_snum):
+                    try:
+                        s_data = future.result()
+                        if s_data and 'episodes' in s_data:
+                            for ep in s_data['episodes']:
+                                ep_key = f"S{ep.get('season_number')}E{ep.get('episode_number')}"
+                                ep_lookup[ep_key] = ep
+                    except Exception as e:
+                        logger.error(f"  ➜ 剧集组获取标准季失败: {e}")
+
+            # D. 开始偷天换日，组装假数据！
+            rebuilt_seasons = []
+            rebuilt_episodes = {}
+            
+            for s_idx, g in enumerate(group_details['groups'], start=1):
+                # 伪造一个 Season 对象，不在其中注入任何剧集组ID，保持神医构建文件的纯净
+                season_obj = {
+                    "id": g.get('id', f"group_{s_idx}"), 
+                    "season_number": s_idx,
+                    "name": g.get('name', f"第 {s_idx} 季"),
+                    "overview": g.get('description', ''), 
+                    "poster_path": series_details.get('poster_path'), 
+                    "episode_count": len(g.get('episodes', []))
+                }
+                rebuilt_seasons.append(season_obj)
+                
+                # 提取并重写 Episode 对象
+                for e_idx, base_ep in enumerate(g.get('episodes', []), start=1):
+                    orig_key = f"S{base_ep.get('season_number')}E{base_ep.get('episode_number')}"
+                    full_ep_data = ep_lookup.get(orig_key)
+                    if full_ep_data:
+                        cloned_ep = copy.deepcopy(full_ep_data)
+                        # ★★★ 魔法发生的地方：改写季号和集号 ★★★
+                        cloned_ep['season_number'] = s_idx
+                        cloned_ep['episode_number'] = e_idx
+                        # 兜底：保留原始名字
+                        if not cloned_ep.get('name'):
+                            cloned_ep['name'] = base_ep.get('name') or f"第 {e_idx} 集"
+                        
+                        rebuilt_episodes[f"S{s_idx}E{e_idx}"] = cloned_ep
+
+            # E. 篡改顶级剧集信息，完美欺骗下游
+            series_details['seasons'] = rebuilt_seasons
+            series_details['number_of_seasons'] = len(rebuilt_seasons)
+            series_details['number_of_episodes'] = sum(len(g.get('episodes', [])) for g in group_details['groups'])
+
+            logger.info(f"  ➜ 🌟 重映射完成！将原生 {len(needed_seasons)} 季重组为了 {len(rebuilt_seasons)} 季，共包含 {len(rebuilt_episodes)} 集。")
+            
+            return {
+                "series_details": series_details,
+                "seasons_details": rebuilt_seasons,
+                "episodes_details": rebuilt_episodes
+            }
 
     # --- 步骤 3: 构建任务 ---
     tasks = []
