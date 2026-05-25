@@ -1719,18 +1719,20 @@ class MediaProcessor:
         # ★ 尝试从 TMDb 数据中提取季名称，用于智能拼接搜索
         target_season_name = None
         if item_type == "Series" and tmdb_data and tmdb_data.get("seasons"):
-            # 找到最新的、且季号大于0的季
             valid_seasons = sorted([s for s in tmdb_data['seasons'] if s.get('season_number', 0) > 0], 
                                    key=lambda x: x['season_number'], reverse=True)
             if valid_seasons:
                 target_season_name = valid_seasons[0].get('name')
+                # ★★★ 物理斩断年份：入库的如果最新是第2季以上，直接清空主剧年份 ★★★
+                if valid_seasons[0].get('season_number', 0) > 1:
+                    item_year = None
 
         match_info_result = self.douban_api.match_info(
             name=item_name, 
             imdbid=imdb_id, 
             mtype=item_type, 
-            year=item_year,
-            season_name=target_season_name # 传入季名
+            year=item_year,        # 已经被物理清空
+            season_name=target_season_name 
         )
 
         if match_info_result.get("error") or not match_info_result.get("id"):

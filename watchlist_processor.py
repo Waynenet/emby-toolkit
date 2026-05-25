@@ -1106,9 +1106,13 @@ class WatchlistProcessor:
         try:
             search_candidates = []
             
+            # ★★★ 物理斩断年份 ★★★
+            # 只要是第2季及以上，直接把年份干掉，绝对不传给豆瓣！
+            if season_number > 1:
+                year = None
+            
             # 1. 优先处理非标准季名 (例如 "重返天南")
             if season_name and season_number > 1:
-                # 排除掉 "第X季" 或 "Season X" 这种没营养的泛指季名
                 is_generic = bool(re.search(r'(第\s*[\d一二三四五六七八九十]+\s*季|Season\s*\d+)', season_name, re.IGNORECASE))
                 if not is_generic:
                     search_candidates.append(f"{series_name} {season_name}")
@@ -1130,7 +1134,9 @@ class WatchlistProcessor:
                     name=search_string, 
                     imdbid=imdb_id, 
                     mtype='tv', 
-                    year=year
+                    year=year,           # 这里如果是后续季，绝对是 None
+                    season=season_number,
+                    season_name=season_name
                 )
                 
                 if match_result and match_result.get('id'):
@@ -1147,10 +1153,7 @@ class WatchlistProcessor:
             details = self.douban_api._get_subject_details(douban_id, "tv")
             
             if details and not details.get("error"):
-                # 优先读取 episodes_count (int)
                 ep_count = details.get('episodes_count')
-                
-                # 兜底：有时候豆瓣返回的是字符串
                 if not ep_count and details.get('episodes_count_str'):
                      try: ep_count = int(details.get('episodes_count_str'))
                      except: pass

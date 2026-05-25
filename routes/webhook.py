@@ -462,7 +462,9 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
                 search_name = f"{target_name} {season_idx}"
                 logger.debug(f"  ➜ [豆瓣同步] 识别为多季剧集，将豆瓣基础搜索名称修正为: '{search_name}'")
                 
-                # ★ 尝试从数据库反查该季的具体名称（如 "重返天南"）
+                # ★★★ 物理斩断年份：第二季以上同步状态，绝对不带年份 ★★★
+                target_year = None 
+                
                 if tmdb_id:
                     try:
                         with get_db_connection() as conn:
@@ -478,9 +480,9 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
 
             match_res = api.match_info(
                 name=search_name, 
-                year=str(target_year) if target_year else None, 
+                year=str(target_year) if target_year else None, # 已经被物理清空
                 mtype=mtype,
-                season_name=target_season_name # 传入从数据库里捞出来的季名
+                season_name=target_season_name 
             )
             if match_res and match_res.get('id'):
                 douban_id = match_res['id']
