@@ -564,14 +564,15 @@ def aggregate_full_series_data_from_tmdb(
             rebuilt_episodes = {}
             
             for s_idx, g in enumerate(group_details['groups'], start=1):
-                # 伪造一个 Season 对象，不在其中注入任何剧集组ID，保持神医构建文件的纯净
+                # 伪造一个 Season 对象
                 season_obj = {
                     "id": g.get('id', f"group_{s_idx}"), 
                     "season_number": s_idx,
                     "name": g.get('name', f"第 {s_idx} 季"),
                     "overview": g.get('description', ''), 
                     "poster_path": series_details.get('poster_path'), 
-                    "episode_count": len(g.get('episodes', []))
+                    "episode_count": len(g.get('episodes', [])),
+                    "episodes": []  # ★★★ 修复 1：必须初始化一个空的 episodes 列表！
                 }
                 rebuilt_seasons.append(season_obj)
                 
@@ -581,7 +582,7 @@ def aggregate_full_series_data_from_tmdb(
                     full_ep_data = ep_lookup.get(orig_key)
                     if full_ep_data:
                         cloned_ep = copy.deepcopy(full_ep_data)
-                        # ★★★ 魔法发生的地方：改写季号和集号 ★★★
+                        # 魔法发生的地方：改写季号和集号
                         cloned_ep['season_number'] = s_idx
                         cloned_ep['episode_number'] = e_idx
                         # 兜底：保留原始名字
@@ -589,6 +590,9 @@ def aggregate_full_series_data_from_tmdb(
                             cloned_ep['name'] = base_ep.get('name') or f"第 {e_idx} 集"
                         
                         rebuilt_episodes[f"S{s_idx}E{e_idx}"] = cloned_ep
+                        
+                        # ★★★ 修复 2：必须把改好的分集，塞进上面那个季的列表里！
+                        season_obj["episodes"].append(cloned_ep)
 
             # E. 篡改顶级剧集信息，完美欺骗下游
             series_details['seasons'] = rebuilt_seasons
