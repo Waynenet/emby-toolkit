@@ -455,12 +455,33 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
         # 如果是第二季及以上，或者本地查不到，则去豆瓣精确搜索
         if not douban_id:
             search_name = target_name
+            target_season_name = None
+            
             if is_multi_season:
-                # 拼接上季号去豆瓣搜，例如："剑来 2"
+                # 默认拼接季号："剧名 2"
                 search_name = f"{target_name} {season_idx}"
-                logger.debug(f"  ➜ [豆瓣同步] 识别为多季剧集，将豆瓣搜索名称修正为: '{search_name}'")
+                logger.debug(f"  ➜ [豆瓣同步] 识别为多季剧集，将豆瓣基础搜索名称修正为: '{search_name}'")
+                
+                # ★ 尝试从数据库反查该季的具体名称（如 "重返天南"）
+                if tmdb_id:
+                    try:
+                        with get_db_connection() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT title FROM media_metadata WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Season'", 
+                                    (str(tmdb_id), season_idx)
+                                )
+                                row = cursor.fetchone()
+                                if row and row['title']:
+                                    target_season_name = row['title']
+                    except Exception: pass
 
-            match_res = api.match_info(name=search_name, year=str(target_year) if target_year else None, mtype=mtype)
+            match_res = api.match_info(
+                name=search_name, 
+                year=str(target_year) if target_year else None, 
+                mtype=mtype,
+                season_name=target_season_name # 传入从数据库里捞出来的季名
+            )
             if match_res and match_res.get('id'):
                 douban_id = match_res['id']
 

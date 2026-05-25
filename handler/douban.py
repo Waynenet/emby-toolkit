@@ -217,7 +217,7 @@ class DoubanApi:
         return details 
 
     def match_info(self, name: str, imdbid: Optional[str] = None, mtype: Optional[str] = None,
-               year: Optional[str] = None, season: Optional[int] = None) -> Dict[str, Any]:
+               year: Optional[str] = None, season: Optional[int] = None, season_name: Optional[str] = None) -> Dict[str, Any]:
         if imdbid and imdbid.strip().startswith("tt"):
             actual_imdbid = imdbid.strip()
             logger.trace(f"  ➜ 尝试通过IMDBID {actual_imdbid} (使用统一接口) 查询豆瓣信息...")
@@ -251,109 +251,120 @@ class DoubanApi:
 
         # 如果IMDb查询失败或无IMDbID，则进行名称搜索
         logger.info(f"  ➜ IMDb查询失败或未提供ID，回退到名称搜索: '{name}'")
-        return self._search_by_name_for_match_info(name, mtype, year, season)
+        return self._search_by_name_for_match_info(name, mtype, year, season, season_name)
 
     def _search_by_name_for_match_info(self, name: str, mtype: Optional[str],
-                                       year: Optional[str] = None, season: Optional[int] = None) -> Dict[str, Any]:
+                                       year: Optional[str] = None, season: Optional[int] = None, season_name: Optional[str] = None) -> Dict[str, Any]:
         logger.info(f"  ➜ 开始使用名称 '{name}'{(', 年份: '+year) if year else ''}{(', 类型: '+mtype) if mtype else ''} 匹配豆瓣信息 ...")
         
         # 规范化 mtype，将 'Series' 视为 'tv'
         normalized_mtype = mtype
         if mtype and mtype.lower() == 'series':
             normalized_mtype = 'tv'
-            logger.trace(f"  ➜ 将传入的媒体类型 'Series' 规范化为 'tv'。")
 
         # 改进 search_query 的构建，避免重复年份
         effective_year_in_query = year
         if year:
-            # 检查 name 中是否已经包含年份
             year_pattern = re.compile(r'\((\d{4})\)')
             match = year_pattern.search(name)
             if match and match.group(1) == year:
                 effective_year_in_query = '' 
-                logger.debug(f"  ➜ 名称 '{name}' 中已包含年份 '{year}'，搜索查询中将不重复年份。")
 
-        search_query = f"{name} {effective_year_in_query or ''}".strip()
+        # =======================================================
+        # ★★★ 核心优化：构建智能搜索候选词队列 ★★★
+        # =======================================================
+        search_candidates = []
+        if season_name and normalized_mtype == 'tv':
+            is_generic = bool(re.search(r'(第\s*[\d一二三四五六七八九十]+\s*季|Season\s*\d+)', season_name, re.IGNORECASE))
+            if not is_generic:
+                search_candidates.append(f"{name} {season_name}")
         
-        if not search_query: return self._make_error_dict("invalid_param", "搜索关键词为空")
+        # 始终把传入的原始 name 作为兜底搜索词
+        search_candidates.append(name)
 
-        logger.trace(f"  ➜ 最终豆瓣搜索查询: '{search_query}'")
-        search_result = self.search(search_query)
+        last_error_result = None
 
-        if search_result.get("error"):
-            logger.warning(f"  ➜ 豆瓣名称搜索 '{search_query}' 返回错误: {search_result.get('message')}")
-            return search_result 
+        for base_query in search_candidates:
+            search_query = f"{base_query} {effective_year_in_query or ''}".strip()
+            if not search_query: continue
 
-        items = search_result.get("items")
-        if not items or not isinstance(items, list):
-            logger.warning(f"  ➜ 豆瓣名称搜索 '{search_query}' 未找到条目或格式错误。")
-            return self._make_error_dict("no_items_found", f"豆瓣名称搜索 '{search_query}' 未找到条目或格式错误。")
+            logger.trace(f"  ➜ 尝试豆瓣搜索查询: '{search_query}'")
+            search_result = self.search(search_query)
 
-        candidates = []
-        exact_match = None
-        for item_obj in items:
-            if not isinstance(item_obj, dict): continue
-            target = item_obj.get("target", {})
-            if not isinstance(target, dict): continue
-
-            api_item_type = item_obj.get("target_type") 
-            if api_item_type not in ["movie", "tv"]: continue
-
-            # 使用规范化后的类型进行比较
-            if normalized_mtype and normalized_mtype != api_item_type: continue
-
-            title_from_api = target.get("title")
-            douban_id = str(target.get("id", "")).strip()
-
-            if not isinstance(title_from_api, str) or not title_from_api.strip() or not douban_id.isdigit():
+            if search_result.get("error"):
+                logger.warning(f"  ➜ 豆瓣名称搜索 '{search_query}' 返回错误: {search_result.get('message')}")
+                last_error_result = search_result
                 continue
 
-            title_str = title_from_api
-            api_item_year = str(target.get("year", "")).strip()
-            
-            year_match_status = "N/A"
-            if not year:
-                year_match = True
-            elif api_item_year and api_item_year.isdigit():
-                try:
-                    year_diff = abs(int(api_item_year) - int(year))
-                    year_match = year_diff <= 1
-                except ValueError:
-                    year_match = False
-            else:
-                year_match = False
+            items = search_result.get("items")
+            if not items or not isinstance(items, list):
+                logger.warning(f"  ➜ 豆瓣名称搜索 '{search_query}' 未找到条目或格式错误。")
+                last_error_result = self._make_error_dict("no_items_found", f"豆瓣名称搜索 '{search_query}' 未找到条目或格式错误。")
+                continue
 
-            if year_match:
-                candidate_info = {"id": douban_id, "title": title_str, "original_title": target.get("original_title"),
-                                  "year": api_item_year, "type": api_item_type, "source": "name_search_candidate"}
+            candidates = []
+            exact_match = None
+            for item_obj in items:
+                if not isinstance(item_obj, dict): continue
+                target = item_obj.get("target", {})
+                if not isinstance(target, dict): continue
+
+                api_item_type = item_obj.get("target_type") 
+                if api_item_type not in ["movie", "tv"]: continue
+
+                # 使用规范化后的类型进行比较
+                if normalized_mtype and normalized_mtype != api_item_type: continue
+
+                title_from_api = target.get("title")
+                douban_id = str(target.get("id", "")).strip()
+
+                if not isinstance(title_from_api, str) or not title_from_api.strip() or not douban_id.isdigit():
+                    continue
+
+                title_str = title_from_api
+                api_item_year = str(target.get("year", "")).strip()
                 
-                name_to_compare = str(name).strip()
+                year_match_status = "N/A"
+                if not year:
+                    year_match = True
+                elif api_item_year and api_item_year.isdigit():
+                    try:
+                        year_diff = abs(int(api_item_year) - int(year))
+                        year_match = year_diff <= 1
+                    except ValueError:
+                        year_match = False
+                else:
+                    year_match = False
 
-                if title_str.lower().strip() == name_to_compare.lower() and (not year or api_item_year == year):
-                    exact_match = candidate_info
-                    exact_match["source"] = "name_search_exact"
-                    logger.debug(f"  ➜ 找到精确匹配: {exact_match}")
-                    break
-                candidates.append(candidate_info)
+                if year_match:
+                    candidate_info = {"id": douban_id, "title": title_str, "original_title": target.get("original_title"),
+                                      "year": api_item_year, "type": api_item_type, "source": "name_search_candidate"}
+                    
+                    name_to_compare = str(base_query).strip()
 
-        if exact_match: return exact_match
-        if candidates:
-            if len(candidates) == 1:
+                    if title_str.lower().strip() == name_to_compare.lower() and (not year or api_item_year == year):
+                        exact_match = candidate_info
+                        exact_match["source"] = "name_search_exact"
+                        logger.debug(f"  ➜ 找到精确匹配: {exact_match}")
+                        break
+                    candidates.append(candidate_info)
+
+            if exact_match: return exact_match
+            if candidates:
+                if len(candidates) == 1:
+                    return candidates[0]
+                if year:
+                    year_exact_candidates = [c for c in candidates if c.get("year") == year]
+                    if year_exact_candidates:
+                        return year_exact_candidates[0]
                 return candidates[0]
-            
-            if year:
-                year_exact_candidates = [c for c in candidates if c.get("year") == year]
-                if year_exact_candidates:
-                    return year_exact_candidates[0]
-            
-            return candidates[0]
 
         logger.warning(f"  ➜ 豆瓣名称搜索未能为 '{name}' 找到合适的匹配项。")
-        return self._make_error_dict("no_suitable_match", f"豆瓣名称搜索未能为 '{name}' 找到合适的匹配项。")
+        return last_error_result or self._make_error_dict("no_suitable_match", f"豆瓣名称搜索未能为 '{name}' 找到合适的匹配项。")
 
     def get_acting(self, name: str, imdbid: Optional[str] = None, mtype: Optional[str] = None,
                    year: Optional[str] = None, season: Optional[int] = None,
-                   douban_id_override: Optional[str] = None) -> Dict[str, Any]:
+                   douban_id_override: Optional[str] = None, season_name: Optional[str] = None) -> Dict[str, Any]:
         douban_subject_id = None
         final_mtype = mtype
 
@@ -368,7 +379,7 @@ class DoubanApi:
                     if details_tv and not details_tv.get("error") and details_tv.get("type"): final_mtype = details_tv.get("type")
                 if not final_mtype: return self._make_error_dict("type_inference_failed", f"无法为豆瓣ID '{douban_subject_id}' 推断媒体类型", {"cast": []})
         else:
-            match_info_result = self.match_info(name=name, imdbid=imdbid, mtype=mtype, year=year, season=season)
+            match_info_result = self.match_info(name=name, imdbid=imdbid, mtype=mtype, year=year, season=season, season_name=season_name)
             if match_info_result.get("error"):
                 return {**match_info_result, "cast": []} 
             if match_info_result.get("id") and str(match_info_result.get("id")).isdigit():

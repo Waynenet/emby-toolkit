@@ -1716,8 +1716,21 @@ class MediaProcessor:
         
         logger.info(f"  ➜ 缓存未命中，准备通过豆瓣在线 API 获取演员信息 (IMDb: {imdb_id or '无'}, 年份: {item_year})...")
 
+        # ★ 尝试从 TMDb 数据中提取季名称，用于智能拼接搜索
+        target_season_name = None
+        if item_type == "Series" and tmdb_data and tmdb_data.get("seasons"):
+            # 找到最新的、且季号大于0的季
+            valid_seasons = sorted([s for s in tmdb_data['seasons'] if s.get('season_number', 0) > 0], 
+                                   key=lambda x: x['season_number'], reverse=True)
+            if valid_seasons:
+                target_season_name = valid_seasons[0].get('name')
+
         match_info_result = self.douban_api.match_info(
-            name=item_name, imdbid=imdb_id, mtype=item_type, year=item_year
+            name=item_name, 
+            imdbid=imdb_id, 
+            mtype=item_type, 
+            year=item_year,
+            season_name=target_season_name # 传入季名
         )
 
         if match_info_result.get("error") or not match_info_result.get("id"):
