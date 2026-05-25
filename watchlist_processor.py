@@ -1199,10 +1199,19 @@ class WatchlistProcessor:
                 emby_tmdb_eg = emby_details.get("ProviderIds", {}).get("TmdbEg")
                 current_db_eg = watchlist_db.get_episode_group_id(str(tmdb_id))
                 
-                # 如果 Emby 端有值，且和数据库不同 (支持从无到有，或更改)
-                if emby_tmdb_eg and emby_tmdb_eg != current_db_eg:
-                    logger.info(f"  ➜ 💡 [神医联动] 追剧检查时，发现 Emby 中配置了新的剧集组 ID ({emby_tmdb_eg})，正在同步到本地...")
-                    watchlist_db.set_episode_group_id(str(tmdb_id), emby_tmdb_eg)
+                # 如果剧集组结构发生了任何改变 (包括新增、修改、取消)
+                if emby_tmdb_eg != current_db_eg:
+                    logger.info(f"  ➜ 💡 [神医联动] 追剧检查时，发现剧集组 ID 发生变更 ({current_db_eg} -> {emby_tmdb_eg})，正在同步到本地...")
+                    watchlist_db.set_episode_group_id(str(tmdb_id), emby_tmdb_eg if emby_tmdb_eg else None)
+                    
+                    # ★★★ 呼叫核心处理器，强行重构底层物理数据库 ★★★
+                    import extensions
+                    if extensions.media_processor_instance:
+                        logger.info(f"  ➜ 🔄 [结构坍塌重建] 正在召唤核心处理器，对《{item_name}》执行深度物理扫库重组...")
+                        # force_full_update=True 会强制核心处理器去拉取新结构、查 Emby 硬盘并完美匹配在库状态
+                        extensions.media_processor_instance.process_single_item(item_id, force_full_update=True)
+                        logger.info(f"  ➜ 🔄 [结构坍塌重建] 物理数据库重组完毕，继续追剧判定逻辑。")
+                        
         except Exception as e:
             logger.warning(f"  ➜ 追剧检查时，同步 Emby 剧集组信息失败: {e}")
         
