@@ -829,38 +829,25 @@ def proxy_all(path):
                 except Exception as e:
                     logger.error(f"[HTTPStrm] 拦截流过程出错: {e}，回退到透明代理。", exc_info=True)
 
-            # --- 流回退/本地文件代理透传逻辑 ---
+            # --- 流回退：交给 Nginx 处理，彻底解放 Python ---
             base_url, api_key = _get_real_emby_url_and_key()
-            target_url = f"{base_url}/{path.lstrip('/')}"
-            forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-            forward_headers['Host'] = urlparse(base_url).netloc
-            forward_params = request.args.copy()
-            forward_params['api_key'] = api_key
+            
+            # 重新拼装 Query 参数（合并原有的和 api_key）
+            query_string = request.query_string.decode('utf-8')
+            forward_uri = f"/internal_emby_forward/{path.lstrip('/')}"
+            if query_string:
+                forward_uri += f"?{query_string}&api_key={api_key}"
+            else:
+                forward_uri += f"?api_key={api_key}"
 
-            resp = requests.request(
-                method=request.method, 
-                url=target_url, 
-                headers=forward_headers,
-                params=forward_params, 
-                data=request.get_data(), 
-                stream=True, 
-                timeout=(10.0, 1800.0),
-                allow_redirects=False # 【优化点2】禁止自动追跳转，防止代理服务器偷偷去下载网盘文件
-            )
-
-            # 【优化点2配套】如果 Emby 自己给了 302(比如使用了 Alist 等网盘挂载件)，直接透传 302
-            if resp.status_code in [301, 302, 303, 307, 308]:
-                redirect_url = resp.headers.get('Location', '')
-                logger.debug(f"[原生重定向透传] Emby 服务器返回了重定向: {redirect_url}")
-                response = redirect(redirect_url, code=resp.status_code)
-                for name, value in resp.headers.items():
-                    if name.lower() not in ['content-length', 'connection']:
-                        response.headers[name] = value
-                return response
-
-            excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+            # 构造空响应，仅携带 X-Accel-Redirect 头
+            nginx_response = Response(status=200)
+            nginx_response.headers['X-Accel-Redirect'] = forward_uri
+            
+            # 如果之前有拦截到的 Emby 302 重定向，可以直接抛给客户端
+            # 但这里作为原生流回退，直接让 Nginx 代理即可
+            logger.debug(f"[X-Accel-Redirect] 释放视频流压力给 Nginx: {forward_uri}")
+            return nginx_response
         
         # ====================================================================
         # ★★★ 拦截：虚拟库业务及各接口路由 (双重兼容版) ★★★
@@ -938,20 +925,44 @@ def proxy_all(path):
         # ★★★ 兜底透传 (非拦截请求走这里) ★★★
         # ====================================================================
         base_url, api_key = _get_real_emby_url_and_key()
-        target_url = f"{base_url}/{path.lstrip('/')}"
-        forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-        forward_headers['Host'] = urlparse(base_url).netloc
-        forward_params = request.args.copy()
-        forward_params['api_key'] = api_key
         
-        resp = requests.request(
-            method=request.method, url=target_url, headers=forward_headers,
-            params=forward_params, data=request.get_data(), stream=True, timeout=(10.0, 1800.0)
-        )
-        
-        excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-        return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+        # 【分支 1】：GET / HEAD 请求（获取数据/图片/流），交给 Nginx 内部重定向，0 性能消耗
+        if request.method in ['GET', 'HEAD']:
+            query_string = request.query_string.decode('utf-8')
+            forward_uri = f"/internal_emby_forward/{path.lstrip('/')}"
+            
+            if query_string:
+                forward_uri += f"?{query_string}&api_key={api_key}"
+            else:
+                forward_uri += f"?api_key={api_key}"
+
+            nginx_response = Response(status=200)
+            nginx_response.headers['X-Accel-Redirect'] = forward_uri
+            return nginx_response
+
+        # 【分支 2】：POST / PUT / DELETE 请求（上报播放记录、修改数据等），保留 Python 代理透传！
+        else:
+            target_url = f"{base_url}/{path.lstrip('/')}"
+            forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+            forward_headers['Host'] = urlparse(base_url).netloc
+            forward_params = request.args.copy()
+            forward_params['api_key'] = api_key
+            
+            resp = requests.request(
+                method=request.method, 
+                url=target_url, 
+                headers=forward_headers,
+                params=forward_params, 
+                data=request.get_data(), 
+                stream=True, 
+                timeout=(10.0, 60.0) # 交互类请求不需要太长的超时
+            )
+            
+            excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+            
+            # 【核心优化】：把缓冲调到 1MB，极大降低 Python GIL 锁争抢
+            return Response(resp.iter_content(chunk_size=1048576), resp.status_code, response_headers)
         
     except Exception as e:
         logger.error(f"[PROXY] HTTP 代理时发生未知错误: {e}", exc_info=True)

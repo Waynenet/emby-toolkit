@@ -111,6 +111,19 @@ server {
         proxy_pass http://emby_server;
     }
 
+    # 【新增】Nginx 内部重定向专用通道，用于接管 Python 甩回来的原生视频流
+    location /internal_emby_forward/ {
+        internal; # 必须有，防止外部恶意调用
+        rewrite ^/internal_emby_forward/(.*) /$1 break;
+        proxy_pass http://emby_server;
+        
+        # 视频流必须的头
+        proxy_buffering off;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_set_header Host $host;
+    }
+
     # 兜底规则：转发所有其他请求到真实 Emby
     location / {
         proxy_pass http://emby_server;
