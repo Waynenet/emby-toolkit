@@ -1091,43 +1091,59 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 执行完结自动洗版逻辑时出错: {e}", exc_info=True)
 
     # --- 尝试从豆瓣获取总集数 ---
-    def _try_fetch_douban_episode_count(self, series_name: str, season_number: int, year: str, imdb_id: Optional[str] = None) -> Optional[int]:
+    def _try_fetch_douban_episode_count(self, series_name: str, season_number: int, year: str, imdb_id: Optional[str] = None, season_name: Optional[str] = None) -> Optional[int]:
         """
         尝试从豆瓣获取剧集的总集数。
         策略：
         1. 优先使用 IMDb ID (如果提供)。
-        2. 否则使用名称搜索：
-           - 第1季: 剧名 + 年份
-           - 第N季: 剧名 + 季号 + 年份 (如 "乡村爱情18 2026")
+        2. 特殊季名优先：如果 TMDb 返回了特殊的季名（如“重返天南”），则优先尝试 "剧名 季名"。
+        3. 默认搜索兜底：剧名+季号 / 剧名+第X季 (如 "乡村爱情18", "凡人修仙传 第8季")。
         """
         if not self.douban_api or not self.config.get(constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API, True):
             return None
 
+        import re
         try:
-            # --- 构造搜索条件 ---
-            search_name = series_name
+            search_candidates = []
             
-            # 如果是第2季及以上，修改搜索名称为 "剧名+季号"
+            # 1. 优先处理非标准季名 (例如 "重返天南")
+            if season_name and season_number > 1:
+                # 排除掉 "第X季" 或 "Season X" 这种没营养的泛指季名
+                is_generic = bool(re.search(r'(第\s*[\d一二三四五六七八九十]+\s*季|Season\s*\d+)', season_name, re.IGNORECASE))
+                if not is_generic:
+                    search_candidates.append(f"{series_name} {season_name}")
+            
+            # 2. 补充标准搜索名称作为兜底
             if season_number > 1:
-                search_name = f"{series_name}{season_number}"
-            
-            logger.debug(f"  ➜ [豆瓣辅助] 准备查询 《{series_name}》第 {season_number} 季 集数。IMDb: {imdb_id}, 搜索名: {search_name}, 年份: {year}")
+                search_candidates.append(f"{series_name}{season_number}")
+                search_candidates.append(f"{series_name} 第{season_number}季")
+            else:
+                search_candidates.append(series_name)
 
-            # 1. 搜索/匹配豆瓣条目 (match_info 内部优先处理 IMDb ID)
-            match_result = self.douban_api.match_info(
-                name=search_name, 
-                imdbid=imdb_id, 
-                mtype='tv', 
-                year=year
-            )
+            logger.debug(f"  ➜ [豆瓣辅助] 准备查询 《{series_name}》第 {season_number} 季。IMDb: {imdb_id}, 候选搜索: {search_candidates}, 年份: {year}")
+
+            douban_id = None
             
-            if not match_result or not match_result.get('id'):
-                logger.debug(f"  ➜ [豆瓣辅助] 未匹配到豆瓣条目: {search_name}")
+            # 3. 依次使用候选词尝试匹配豆瓣条目
+            for search_string in search_candidates:
+                match_result = self.douban_api.match_info(
+                    name=search_string, 
+                    imdbid=imdb_id, 
+                    mtype='tv', 
+                    year=year
+                )
+                
+                if match_result and match_result.get('id'):
+                    douban_id = match_result['id']
+                    logger.debug(f"  ➜ [豆瓣辅助] 匹配成功: '{search_string}' -> 豆瓣 ID: {douban_id}")
+                    break
+                else:
+                    logger.debug(f"  ➜ [豆瓣辅助] 候选词 '{search_string}' 未匹配到条目，尝试下一个...")
+            
+            if not douban_id:
                 return None
             
-            douban_id = match_result['id']
-            
-            # 2. 获取详情 (使用 protected 方法 _get_subject_details)
+            # 4. 获取详情提取集数
             details = self.douban_api._get_subject_details(douban_id, "tv")
             
             if details and not details.get("error"):
@@ -1140,7 +1156,7 @@ class WatchlistProcessor:
                      except: pass
                 
                 if ep_count:
-                    logger.debug(f"  ➜ [豆瓣辅助] 获取成功: ID {douban_id} ({details.get('title')}) -> {ep_count} 集")
+                    logger.debug(f"  ➜ [豆瓣辅助] 集数获取成功: ID {douban_id} ({details.get('title')}) -> {ep_count} 集")
                     return int(ep_count)
             
             return None
@@ -1237,11 +1253,15 @@ class WatchlistProcessor:
                         external_ids = latest_series_data.get('external_ids', {})
                         target_imdb_id = external_ids.get('imdb_id')
                         
+                    # 提取 TMDb 最新的季名称
+                    latest_season_name = latest_season_info.get('name')
+                    
                     douban_count = self._try_fetch_douban_episode_count(
                         series_name=item_name, 
                         season_number=latest_s_num, 
                         year=year,
-                        imdb_id=target_imdb_id
+                        imdb_id=target_imdb_id,
+                        season_name=latest_season_name
                     )
                     
                     # 信任豆瓣权威数据，查到即锁定
