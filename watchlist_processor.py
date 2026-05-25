@@ -1189,6 +1189,22 @@ class WatchlistProcessor:
         if not item_id:
             logger.warning(f"  ➜ 剧集 '{item_name}' 在数据库中没有关联的 Emby ID，跳过。")
             return
+
+        # =====================================================================
+        # ★★★ 神医联动兜底：追剧刷新前，反查 Emby 确认剧集组 ID 是否被外部修改 ★★★
+        # =====================================================================
+        try:
+            emby_details = emby.get_emby_item_details(item_id, self.emby_url, self.emby_api_key, self.emby_user_id, fields="ProviderIds")
+            if emby_details:
+                emby_tmdb_eg = emby_details.get("ProviderIds", {}).get("TmdbEg")
+                current_db_eg = watchlist_db.get_episode_group_id(str(tmdb_id))
+                
+                # 如果 Emby 端有值，且和数据库不同 (支持从无到有，或更改)
+                if emby_tmdb_eg and emby_tmdb_eg != current_db_eg:
+                    logger.info(f"  ➜ 💡 [神医联动] 追剧检查时，发现 Emby 中配置了新的剧集组 ID ({emby_tmdb_eg})，正在同步到本地...")
+                    watchlist_db.set_episode_group_id(str(tmdb_id), emby_tmdb_eg)
+        except Exception as e:
+            logger.warning(f"  ➜ 追剧检查时，同步 Emby 剧集组信息失败: {e}")
         
         # --- 获取配置 ---
         watchlist_cfg = settings_db.get_setting('watchlist_config') or {}

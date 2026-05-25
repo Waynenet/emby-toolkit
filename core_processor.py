@@ -1996,6 +1996,22 @@ class MediaProcessor:
 
         logger.trace(f"--- 开始处理 '{item_name_for_log}' (TMDb ID: {tmdb_id}) ---")
 
+        # =====================================================================
+        # ★★★ 神医联动兜底：顺手牵羊获取 Emby 端的剧集组 ID ★★★
+        # =====================================================================
+        if item_type == "Series" and tmdb_id:
+            emby_tmdb_eg = item_details_from_emby.get("ProviderIds", {}).get("TmdbEg")
+            if emby_tmdb_eg:
+                try:
+                    from database import watchlist_db
+                    current_db_eg = watchlist_db.get_episode_group_id(str(tmdb_id))
+                    if emby_tmdb_eg != current_db_eg:
+                        logger.info(f"  ➜ 💡 [神医联动] 在处理媒体时，发现 Emby 存在不同的剧集组 ID ({emby_tmdb_eg})，正在同步到本地并触发全量重构...")
+                        watchlist_db.set_episode_group_id(str(tmdb_id), emby_tmdb_eg)
+                        force_full_update = True  # 强制全量重拉，重构底层数据！
+                except Exception as e:
+                    logger.warning(f"  ➜ 同步 Emby 剧集组信息失败: {e}")
+
         all_emby_people = item_details_from_emby.get("People", [])
         original_emby_actor_count = len([p for p in all_emby_people if p.get("Type") == "Actor"])
 

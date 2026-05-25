@@ -1168,37 +1168,6 @@ def emby_webhook():
 
     # --- 分离 metadata.update 和 image.update 的处理逻辑 ---
     if event_type == "metadata.update":
-        
-        # =====================================================================
-        # ★★★ 神医联动：拦截剧集组 ID (TmdbEg) 变更并触发深度重洗 ★★★
-        # =====================================================================
-        if original_item_type == "Series":
-            tmdb_id = item_from_webhook.get("ProviderIds", {}).get("Tmdb")
-            new_group_id = item_from_webhook.get("ProviderIds", {}).get("TmdbEg")
-            
-            if tmdb_id:
-                current_group_id = watchlist_db.get_episode_group_id(str(tmdb_id))
-                
-                # 如果剧集组ID发生了变化（不管是新增、修改还是删除）
-                if new_group_id != current_group_id:
-                    logger.info(f"  ➜ 💡 [神医联动] 探测到剧集组 ID 发生变更 ({current_group_id} -> {new_group_id})，升级为全量重构任务！")
-                    
-                    # 1. 同步保存到本地数据库
-                    watchlist_db.set_episode_group_id(str(tmdb_id), new_group_id if new_group_id else None)
-                    
-                    # 2. 绕过原本的 15 秒轻量防抖，直接强行提交深度 TMDb 重构任务！
-                    task_manager.submit_task(
-                        _handle_full_processing_flow,
-                        task_name=f"应用剧集组重洗: {name_for_task}",
-                        processor_type='media',
-                        item_id=id_to_process,
-                        force_full_update=True,
-                        new_episode_ids=None,
-                        is_new_item=False
-                    )
-                    # 拦截成功，直接返回，不再往下执行普通的轻量更新
-                    return jsonify({"status": "episode_group_update_triggered", "item_id": id_to_process}), 202
-
         with UPDATE_DEBOUNCE_LOCK:
             if id_to_process in UPDATE_DEBOUNCE_TIMERS:
                 old_timer = UPDATE_DEBOUNCE_TIMERS[id_to_process]
