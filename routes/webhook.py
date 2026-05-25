@@ -70,6 +70,34 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
     item_type = item_details.get("Type")
     tmdb_id = item_details.get("ProviderIds", {}).get("Tmdb")
 
+    # =====================================================================
+    # ★★★ 联动神医：提取剧集组 ID (TmdbEg) 并同步至本地数据库 ★★★
+    # =====================================================================
+    if item_type == "Series" and tmdb_id:
+        # 提取神医注入的剧集组 ID
+        new_group_id = item_details.get("ProviderIds", {}).get("TmdbEg")
+        
+        try:
+            # 读取本地数据库中当前的记录
+            current_group_id = watchlist_db.get_episode_group_id(str(tmdb_id))
+            
+            # 如果神医推送了 ID，并且和我们本地存的不一样 (包含我们本地为空，或者发生了修改)
+            if new_group_id and new_group_id != current_group_id:
+                logger.info(f"  ➜ 💡 [神医联动] 检测到 Emby 推送了新的剧集组 ID ({new_group_id})，正在同步到本地...")
+                watchlist_db.set_episode_group_id(str(tmdb_id), new_group_id)
+                
+                # 因为底层架构发生了改变，标记需要强制全量更新，让 processor 重新覆盖文件！
+                force_full_update = True
+                
+            # 反之，如果神医把 TmdbEg 删了，我们也同步清空 (允许用户取消绑定)
+            elif current_group_id and not new_group_id:
+                logger.info(f"  ➜ 💡 [神医联动] 检测到 Emby 移除了剧集组 ID，正在同步解除绑定...")
+                watchlist_db.set_episode_group_id(str(tmdb_id), None)
+                force_full_update = True
+
+        except Exception as e:
+            logger.error(f"  ➜ [神医联动] 同步剧集组 ID 时发生错误: {e}")
+
     # 1. 核心调用：优先执行元数据处理 (process_single_item)
     processed_successfully = processor.process_single_item(
         item_id, 
