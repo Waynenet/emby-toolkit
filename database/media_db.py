@@ -461,6 +461,27 @@ def sync_series_children_metadata(parent_tmdb_id: str, seasons: List[Dict], epis
                 conn.commit()
                 logger.info(f"  ➜ [追剧联动] 成功为剧集 {series_title} 智能同步了 {len(data_for_batch)} 个子项目的元数据(含集数)和在库状态。")
 
+                # =========================================================
+                # ★★★ 新增：清理由于剧集组切换产生的幽灵脏数据 ★★★
+                # =========================================================
+                valid_tmdb_ids = [str(rec["tmdb_id"]) for rec in records_to_upsert]
+                if valid_tmdb_ids:
+                    # 构造参数占位符，支持几百上千集的超长列表
+                    format_strings = ','.join(['%s'] * len(valid_tmdb_ids))
+                    clean_sql = f"""
+                        DELETE FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type IN ('Season', 'Episode')
+                          AND tmdb_id NOT IN ({format_strings})
+                    """
+                    # 执行删除：只保留本次同步中存在的合法 ID，其余全部物理抹除
+                    cursor.execute(clean_sql, [parent_tmdb_id] + valid_tmdb_ids)
+                    deleted_ghosts = cursor.rowcount
+                    conn.commit()
+                    
+                    if deleted_ghosts > 0:
+                        logger.info(f"  ➜ [数据大扫除] 成功清除了 {deleted_ghosts} 个由于结构切换产生的幽灵季/集数据！")
+
     except Exception as e:
         logger.error(f"  ➜ [追剧联动] 在同步剧集 {series_title} 的子项目时发生错误: {e}", exc_info=True)
 
