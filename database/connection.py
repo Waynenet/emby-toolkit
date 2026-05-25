@@ -478,6 +478,164 @@ def init_db():
                     pass
                 # ▲▲▲ 临时结束 ▲▲▲
 
+
+                logger.trace("  ➜ 正在创建 'shared_virtual_items' 表 (共享资源虚拟入库管理)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_virtual_items (
+                        virtual_id TEXT PRIMARY KEY,
+                        source_id TEXT,
+                        source_key TEXT,
+                        source_provider TEXT DEFAULT 'shared_center',
+                        tmdb_id TEXT NOT NULL,
+                        item_type TEXT NOT NULL,
+                        parent_series_tmdb_id TEXT,
+                        season_number INTEGER,
+                        episode_number INTEGER,
+                        title TEXT,
+                        release_year INTEGER,
+                        poster_path TEXT,
+                        sha1 TEXT NOT NULL,
+                        size BIGINT,
+                        file_name TEXT NOT NULL,
+                        quality TEXT,
+                        strm_path TEXT,
+                        mediainfo_path TEXT,
+                        nfo_path TEXT,
+                        share_code TEXT,
+                        receive_code TEXT,
+                        contributor_id TEXT,
+                        cache_parent_id TEXT,
+                        cache_parent_name TEXT,
+                        real_fid TEXT,
+                        real_pick_code TEXT,
+                        real_parent_id TEXT,
+                        real_local_path TEXT,
+                        target_parent_id TEXT,
+                        target_parent_name TEXT,
+                        promoted_fid TEXT,
+                        promoted_pick_code TEXT,
+                        status TEXT NOT NULL DEFAULT 'virtual_ready',
+                        play_count INTEGER NOT NULL DEFAULT 0,
+                        last_played_at TIMESTAMP WITH TIME ZONE,
+                        first_transferred_at TIMESTAMP WITH TIME ZONE,
+                        last_transferred_at TIMESTAMP WITH TIME ZONE,
+                        expires_at TIMESTAMP WITH TIME ZONE,
+                        promoted_at TIMESTAMP WITH TIME ZONE,
+                        deleted_at TIMESTAMP WITH TIME ZONE,
+                        last_error TEXT,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'shared_share_records' 表 (我的共享资源记录)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_share_records (
+                        id SERIAL PRIMARY KEY,
+                        share_code TEXT UNIQUE,
+                        receive_code TEXT,
+                        share_url TEXT,
+                        share_type TEXT NOT NULL DEFAULT 'season_pack',
+                        root_fid TEXT NOT NULL,
+                        root_name TEXT,
+                        root_is_dir BOOLEAN NOT NULL DEFAULT TRUE,
+                        tmdb_id TEXT,
+                        item_type TEXT,
+                        parent_series_tmdb_id TEXT,
+                        season_number INTEGER,
+                        title TEXT,
+                        release_year INTEGER,
+                        status TEXT NOT NULL DEFAULT 'pending_review',
+                        review_status TEXT NOT NULL DEFAULT 'pending_review',
+                        center_status TEXT NOT NULL DEFAULT 'not_reported',
+                        center_source_id TEXT,
+                        item_count INTEGER NOT NULL DEFAULT 0,
+                        reported_count INTEGER NOT NULL DEFAULT 0,
+                        last_checked_at TIMESTAMP WITH TIME ZONE,
+                        reported_at TIMESTAMP WITH TIME ZONE,
+                        cancelled_at TIMESTAMP WITH TIME ZONE,
+                        last_error TEXT,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'shared_share_items' 表 (我的共享资源文件明细)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_share_items (
+                        id SERIAL PRIMARY KEY,
+                        share_record_id INTEGER NOT NULL REFERENCES shared_share_records(id) ON DELETE CASCADE,
+                        fid TEXT,
+                        sha1 TEXT,
+                        size BIGINT DEFAULT 0,
+                        file_name TEXT NOT NULL,
+                        relative_path TEXT,
+                        tmdb_id TEXT,
+                        item_type TEXT,
+                        season_number INTEGER,
+                        episode_number INTEGER,
+                        center_source_id TEXT,
+                        center_reported BOOLEAN NOT NULL DEFAULT FALSE,
+                        raw_ffprobe_uploaded BOOLEAN NOT NULL DEFAULT FALSE,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT uniq_shared_share_item UNIQUE (share_record_id, fid)
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'shared_credit_snapshot' 表 (共享资源贡献值快照)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_credit_snapshot (
+                        id INTEGER PRIMARY KEY DEFAULT 1,
+                        device_id TEXT,
+                        credit INTEGER NOT NULL DEFAULT 0,
+                        contributed_sources INTEGER NOT NULL DEFAULT 0,
+                        consumed_sources INTEGER NOT NULL DEFAULT 0,
+                        transfer_success INTEGER NOT NULL DEFAULT 0,
+                        transfer_failed INTEGER NOT NULL DEFAULT 0,
+                        wanted_gaps INTEGER NOT NULL DEFAULT 0,
+                        shared_sources INTEGER NOT NULL DEFAULT 0,
+                        raw_ffprobe INTEGER NOT NULL DEFAULT 0,
+                        remote_devices INTEGER NOT NULL DEFAULT 0,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT shared_credit_snapshot_singleton CHECK (id = 1)
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'shared_credit_ledger_local' 表 (共享资源贡献值流水)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_credit_ledger_local (
+                        id SERIAL PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        delta INTEGER NOT NULL DEFAULT 0,
+                        reason TEXT,
+                        ref_id TEXT,
+                        source_id TEXT,
+                        virtual_id TEXT,
+                        tmdb_id TEXT,
+                        item_type TEXT,
+                        title TEXT,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'shared_maintenance_state' 表 (共享资源维护任务状态)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_maintenance_state (
+                        task_name TEXT PRIMARY KEY,
+                        last_run_at TIMESTAMP WITH TIME ZONE,
+                        last_success_at TIMESTAMP WITH TIME ZONE,
+                        last_error TEXT,
+                        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
                 logger.trace("  ➜ 正在创建 'p115_organize_records' 表 (115整理记录)...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS p115_organize_records (
@@ -686,6 +844,18 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_parent_id ON p115_filesystem_cache (parent_id);")
                     # 加速 "全局搜索某个文件"
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_name ON p115_filesystem_cache (name);")
+
+                    # 12.5 【共享资源】加速虚拟入库、我的共享和贡献值页面
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_status_updated ON shared_virtual_items (status, updated_at DESC);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_media ON shared_virtual_items (tmdb_id, item_type, season_number, episode_number);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_sha1 ON shared_virtual_items (sha1);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_expires_at ON shared_virtual_items (expires_at) WHERE status IN ('cached', 'watched');")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ssr_status_updated ON shared_share_records (status, updated_at DESC);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ssr_media ON shared_share_records (tmdb_id, item_type, season_number);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ssi_record ON shared_share_items (share_record_id);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ssi_sha1 ON shared_share_items (sha1) WHERE sha1 IS NOT NULL;")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_credit_ledger_created ON shared_credit_ledger_local (created_at DESC);")
+
 
                     # 13. 【海量数据优化】加速追剧列表的聚合查询
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, parent_series_tmdb_id);")
