@@ -13,7 +13,7 @@ import task_manager
 from .actors import (task_enrich_aliases, task_persons_translation, 
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_local_cache_from_db
+from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_local_cache_from_db, task_fill_studio_images
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -209,6 +209,7 @@ def get_task_registry(context: str = 'all'):
         'manual_subscribe_batch': (task_manual_subscribe_batch, "手动订阅处理", 'media', False),
         'scan_old_seasons_backfill': (task_scan_old_seasons_backfill, "扫描缺季的剧", 'watchlist', False),
         'generate_embeddings': (task_generate_embeddings, "生成媒体向量", 'media', False),
+        'fill-studio-images': (task_fill_studio_images, "补全工作室图标", 'media', False),
     }
 
     if context == 'chain':
