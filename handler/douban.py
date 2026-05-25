@@ -218,6 +218,28 @@ class DoubanApi:
 
     def match_info(self, name: str, imdbid: Optional[str] = None, mtype: Optional[str] = None,
                year: Optional[str] = None, season: Optional[int] = None, season_name: Optional[str] = None) -> Dict[str, Any]:
+        
+        # ==============================================================
+        # ★★★ 核心优化：智能年份丢弃机制 ★★★
+        # 豆瓣是按每季独立建词条（年份为该季首播年份），而 TMDb/Emby 传来的往往是整剧首播年份。
+        # 如果携带首播年份去搜后续季，必定会导致验证失败被误杀。
+        # 因此：只要发现是在搜索剧集的后续季或特定篇章，强行丢弃年份验证！
+        # ==============================================================
+        normalized_mtype = 'tv' if mtype and mtype.lower() in ['series', 'tv'] else 'movie'
+        if normalized_mtype == 'tv' and year:
+            is_subsequent = False
+            if season and season > 1:
+                is_subsequent = True
+            elif season_name: # 只要传了季名，大概率是分季篇章，丢弃年份保平安
+                is_subsequent = True
+            elif re.search(r'(\d+|第\s*[\d一二三四五六七八九十]+\s*季)$', name.strip(), re.IGNORECASE):
+                # 剧名自带季号尾巴 (如 "剑来 2", "权力的游戏 第8季")
+                is_subsequent = True
+                
+            if is_subsequent:
+                logger.debug(f"  ➜ [豆瓣智能匹配] 检测到正在搜索剧集分季 ('{name}' / '{season_name}'), 为防误杀，已强制丢弃主剧年份 ({year})。")
+                year = None
+
         if imdbid and imdbid.strip().startswith("tt"):
             actual_imdbid = imdbid.strip()
             logger.trace(f"  ➜ 尝试通过IMDBID {actual_imdbid} (使用统一接口) 查询豆瓣信息...")
@@ -234,7 +256,7 @@ class DoubanApi:
                     # 2. 从API结果中提取ID，但忽略它返回的类型
                     _, actual_douban_id = match.groups()
                     
-                    # 3. ✨✨✨ 核心修正：直接使用从 Emby 传入的 mtype 作为最终类型 ✨✨✨
+                    # 3. 使用传入的类型作为最终类型
                     final_mtype = 'tv' if mtype and mtype.lower() in ['series', 'tv'] else 'movie'
                     logger.trace(f"  ➜ IMDBID '{actual_imdbid}' -> 豆瓣ID: {actual_douban_id}。将使用传入的类型: '{final_mtype}'")
                     
