@@ -471,14 +471,6 @@ def init_db():
                     )
                 """)
 
-                # ▼▼▼ 临时代码，强行解除存量数据库的 NOT NULL 约束 ▼▼▼
-                try:
-                    cursor.execute("ALTER TABLE p115_mediainfo_cache ALTER COLUMN mediainfo_json DROP NOT NULL;")
-                except Exception:
-                    pass
-                # ▲▲▲ 临时结束 ▲▲▲
-
-
                 logger.trace("  ➜ 正在创建 'shared_virtual_items' 表 (共享资源虚拟入库管理)...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS shared_virtual_items (
@@ -544,6 +536,7 @@ def init_db():
                         item_type TEXT,
                         parent_series_tmdb_id TEXT,
                         season_number INTEGER,
+                        episode_number INTEGER,
                         title TEXT,
                         release_year INTEGER,
                         status TEXT NOT NULL DEFAULT 'pending_review',
@@ -721,6 +714,9 @@ def init_db():
                             "config_main_role_only": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "config_min_vote_count": "INTEGER NOT NULL DEFAULT 10",
                             "last_scanned_tmdb_ids_json": "JSONB"
+                        },
+                        'shared_share_records': {
+                            "episode_number": "INTEGER"
                         }
                     }
 
@@ -740,44 +736,6 @@ def init_db():
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)
 
-                # ======================================================================
-                # ★★★ 更改合集主键 ★★★
-                # ======================================================================
-                # 检查当前主键是不是 tmdb_collection_id
-                cursor.execute("""
-                    SELECT a.attname
-                    FROM pg_index i
-                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                    WHERE i.indrelid = 'collections_info'::regclass AND i.indisprimary;
-                """)
-                current_pk = cursor.fetchone()
-
-                if not current_pk or current_pk['attname'] != 'tmdb_collection_id':
-                    logger.info("  ➜ [数据库升级] 正在更改 collections_info 表的主键为 tmdb_collection_id...")
-                    try:
-                        # 1. 先清理数据：删除那些没有 TMDb ID 的脏数据（因为它们没法当主键）
-                        cursor.execute("DELETE FROM collections_info WHERE tmdb_collection_id IS NULL OR tmdb_collection_id = '';")
-
-                        # 2. 强制把该列设为不可为空（这是主键的先决条件）
-                        cursor.execute("ALTER TABLE collections_info ALTER COLUMN tmdb_collection_id SET NOT NULL;")
-
-                        # 3. 删掉旧的主键约束 (使用 IF EXISTS 防止报错)
-                        cursor.execute("ALTER TABLE collections_info DROP CONSTRAINT IF EXISTS collections_info_pkey;")
-
-                        # 4. 添加新的主键
-                        cursor.execute("ALTER TABLE collections_info ADD PRIMARY KEY (tmdb_collection_id);")
-
-                        # 5.允许 Emby ID 为空 (核心修复) ★★★
-                        cursor.execute("ALTER TABLE collections_info ALTER COLUMN emby_collection_id DROP NOT NULL;")
-
-                        # 6. 为原来的 Emby ID 添加唯一约束（允许为 NULL，但有值时必须唯一）
-                        cursor.execute("ALTER TABLE collections_info DROP CONSTRAINT IF EXISTS collections_info_emby_collection_id_key;")
-                        cursor.execute("ALTER TABLE collections_info ADD CONSTRAINT collections_info_emby_id_unique UNIQUE (emby_collection_id);")
-                        
-                        logger.info("  ➜ [数据库升级] collections_info 表主键迁移完成。")
-                    except Exception as e:
-                        logger.error(f"  ➜ [数据库升级] 迁移 collections_info 主键时出错: {e}")
-                
                 # ======================================================================
                 # ★★★ 统一创建验证所有索引 ★★★
                 # 此处代码用于集中创建所有表需要的索引。

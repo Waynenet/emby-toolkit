@@ -24,6 +24,15 @@ def _cfg(name: str, fallback: str, default=None):
 def _enabled() -> bool:
     return shared_center_enabled()
 
+def _is_network_error(e: Any) -> bool:
+    """判断异常是否属于网络超时或连接失败"""
+    text = str(e).lower()
+    return any(k in text for k in (
+        'timeout', 'connection', 'read timed out', 
+        'max retries exceeded', 'name or service not known', 
+        'host is unreachable', 'socket'
+    ))
+
 
 def _safe_int(v, default=0):
     try:
@@ -236,31 +245,16 @@ def _share_low_watermark(max_active_shares: int) -> int:
 
 def _active_share_statuses() -> List[str]:
     """本地仍应视为占用 115 分享名额的状态。"""
-    return [
-        'pending_review', 'alive', 'reported', 'partial', 'not_reported', 'review_failed',
-        'blocked', 'violation', 'cancel_failed',
-    ]
+    return shared_share_db.active_share_statuses()
 
 
 def _invalid_share_statuses() -> List[str]:
     """115 已判定违规/风控或上次删除失败的分享，维护任务应直接删除/重试。"""
-    return ['blocked', 'violation', 'cancel_failed']
+    return shared_share_db.invalid_share_statuses()
 
 
 def _count_active_local_shares() -> int:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM shared_share_records
-                WHERE COALESCE(share_code, '') <> ''
-                  AND status = ANY(%s)
-                """,
-                (_active_share_statuses(),),
-            )
-            row = cur.fetchone()
-            return int((dict(row) if row else {}).get('n') or 0)
+    return shared_share_db.count_active_share_records(_active_share_statuses())
 
 
 def _share_cancel_success(resp: Any) -> bool:
@@ -351,26 +345,14 @@ def _cleanup_invalid_local_shares(client: SharedCenterClient, max_rows: int = 10
     if not p115:
         return {'share_invalid_deleted': 0, 'share_invalid_failed': 0}
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM shared_share_records
-                WHERE COALESCE(share_code, '') <> ''
-                  AND (
-                        status = ANY(%s)
-                     OR review_status = ANY(%s)
-                     OR center_status = 'cancel_failed'
-                  )
-                ORDER BY created_at ASC NULLS FIRST, id ASC
-                LIMIT %s
-                """,
-                (_invalid_share_statuses(), ['blocked', 'violation'], int(max_rows)),
-            )
-            rows = [dict(r) for r in cur.fetchall()]
+    rows = shared_share_db.list_invalid_share_records(
+        limit=max_rows,
+        invalid_statuses=_invalid_share_statuses(),
+        review_statuses=['blocked', 'violation'],
+    )
 
     deleted = failed = 0
+    consecutive_errors = 0
     for record in rows:
         record_id = record.get('id')
         share_code = str(record.get('share_code') or '').strip()
@@ -386,6 +368,13 @@ def _cleanup_invalid_local_shares(client: SharedCenterClient, max_rows: int = 10
             continue
 
         center_ok, center_resp = _cancel_center_sources_for_record(client, record_id, share_code, 'share_invalid_or_blocked')
+        if not center_ok and _is_network_error(center_resp):
+            consecutive_errors += 1
+            if consecutive_errors >= 3:
+                logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束违规清理。")
+                break
+        else:
+            consecutive_errors = 0
         _mark_share_deleted(
             record,
             p115_resp=p115_resp,
@@ -411,65 +400,100 @@ def _cleanup_invalid_local_shares(client: SharedCenterClient, max_rows: int = 10
     return {'share_invalid_deleted': deleted, 'share_invalid_failed': failed}
 
 
+
+def _cleanup_missing_raw_local_shares(client: SharedCenterClient, max_rows: int = 100) -> Dict[str, int]:
+    """自清洁：本地分享项缺少 raw_ffprobe_json 的分享直接删除。
+
+    缺 raw 的源无法在中心展示清晰度、编码、音轨、字幕，也不能被可靠消费；
+    因此不参与水位评分，发现后直接撤销 115 分享和中心登记。
+    """
+    p115 = P115Service.get_client()
+    if not p115:
+        return {'share_raw_missing_deleted': 0, 'share_raw_missing_failed': 0}
+
+    try:
+        from routes import shared_resource as sr
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源维护] 无法加载 raw_ffprobe 检查辅助函数，跳过缺 raw 自清洁: {e}")
+        return {'share_raw_missing_deleted': 0, 'share_raw_missing_failed': 0}
+
+    rows = shared_share_db.list_active_share_records(
+        limit=max_rows,
+        statuses=_active_share_statuses(),
+        order_by='created_asc',
+    )
+
+    deleted = failed = 0
+    consecutive_errors = 0
+    for record in rows:
+        record_id = record.get('id')
+        share_code = str(record.get('share_code') or '').strip()
+        title = record.get('title') or record.get('root_name') or share_code or str(record_id)
+        try:
+            items = shared_share_db.list_share_items(record_id) or []
+            if not items:
+                continue
+            missing = sr._files_missing_raw_ffprobe(items)
+            if not missing:
+                continue
+
+            p115_ok, p115_resp = _delete_115_share(p115, share_code)
+            if not p115_ok:
+                shared_share_db.update_share_record(
+                    record_id,
+                    status='cancel_failed',
+                    last_error=f'缺少 raw_ffprobe_json 自动清理失败，115 删除/取消分享失败：{p115_resp}',
+                    raw_json={**(record.get('raw_json') if isinstance(record.get('raw_json'), dict) else {}), 'missing_raw_ffprobe': missing},
+                )
+                failed += 1
+                continue
+
+            center_ok, center_resp = _cancel_center_sources_for_record(client, record_id, share_code, 'raw_ffprobe_missing')
+            if not center_ok and _is_network_error(center_resp):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束缺 raw 清理。")
+                    break
+            else:
+                consecutive_errors = 0
+
+            _mark_share_deleted(
+                record,
+                p115_resp=p115_resp,
+                center_resp=center_resp,
+                center_ok=center_ok,
+                reason='raw_ffprobe_missing',
+                last_error=f'分享文件缺少 raw_ffprobe_json，维护任务已直接删除分享：{sr._raw_missing_message(missing)}',
+                status='cancelled',
+                review_status='raw_missing',
+            )
+            shared_virtual_db.add_credit_ledger(
+                'share_raw_missing_deleted', 0,
+                f'删除缺少 raw_ffprobe_json 的分享：{title}',
+                ref_id=str(record_id),
+                title=title,
+                raw_json={'share_code': share_code, 'missing_raw': missing, 'center_ok': center_ok},
+            )
+            deleted += 1
+            time.sleep(0.25)
+        except Exception as e:
+            logger.warning(f"  ➜ [共享资源维护] 缺 raw 分享清理异常: record={record_id}, share={share_code}, err={e}", exc_info=True)
+            failed += 1
+            if _is_network_error(e):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束缺 raw 清理。")
+                    break
+
+    if deleted or failed:
+        logger.info(f"  ➜ [共享资源维护] 缺 raw_ffprobe_json 分享清理完成：删除 {deleted}，失败 {failed}。")
+    return {'share_raw_missing_deleted': deleted, 'share_raw_missing_failed': failed}
+
+
+
 def _load_share_waterline_candidates(target_active: int) -> tuple[int, List[Dict[str, Any]]]:
     """按“转存热度 + 创建时间保护”综合评分，取出应清理的超额分享。"""
-    target_active = max(0, int(target_active or 0))
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                WITH active_records AS (
-                    SELECT r.*
-                    FROM shared_share_records r
-                    WHERE COALESCE(r.share_code, '') <> ''
-                      AND r.status = ANY(%s)
-                ), stats AS (
-                    SELECT
-                        r.id AS record_id,
-                        COUNT(DISTINCT l.id) FILTER (WHERE l.id IS NOT NULL) AS served_count,
-                        MAX(l.created_at) FILTER (WHERE l.id IS NOT NULL) AS last_served_at
-                    FROM active_records r
-                    LEFT JOIN shared_share_items i ON i.share_record_id = r.id
-                    LEFT JOIN shared_credit_ledger_local l
-                      ON l.event_type = 'center_shared_source_served'
-                     AND COALESCE(l.source_id, '') <> ''
-                     AND l.source_id IN (COALESCE(i.center_source_id, ''), COALESCE(r.center_source_id, ''))
-                    GROUP BY r.id
-                ), scored AS (
-                    SELECT
-                        r.*,
-                        COALESCE(s.served_count, 0) AS served_count,
-                        s.last_served_at,
-                        EXTRACT(EPOCH FROM (NOW() - COALESCE(r.created_at, NOW()))) / 86400.0 AS age_days,
-                        COUNT(*) OVER() AS total_active,
-                        (
-                            COALESCE(s.served_count, 0) * 100.0
-                            + CASE
-                                WHEN EXTRACT(EPOCH FROM (NOW() - COALESCE(r.created_at, NOW()))) / 86400.0 < 3
-                                  THEN (3 - EXTRACT(EPOCH FROM (NOW() - COALESCE(r.created_at, NOW()))) / 86400.0) * 50.0
-                                ELSE 0
-                              END
-                            - LEAST(EXTRACT(EPOCH FROM (NOW() - COALESCE(r.created_at, NOW()))) / 86400.0, 365.0)
-                            - CASE
-                                WHEN r.status IN ('blocked','violation','cancel_failed') THEN 1000.0
-                                ELSE 0
-                              END
-                        ) AS retention_score
-                    FROM active_records r
-                    LEFT JOIN stats s ON s.record_id = r.id
-                )
-                SELECT *
-                FROM scored
-                WHERE total_active > %s
-                ORDER BY retention_score ASC, served_count ASC, created_at ASC NULLS FIRST, id ASC
-                LIMIT GREATEST((SELECT MAX(total_active) FROM scored) - %s, 0)
-                """,
-                (_active_share_statuses(), target_active, target_active),
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-            total = int(rows[0].get('total_active') or 0) if rows else _count_active_local_shares()
-            return total, rows
+    return shared_share_db.load_share_waterline_candidates(target_active, _active_share_statuses())
 
 
 def _cleanup_excess_local_shares(client: SharedCenterClient, max_active_shares: int = 0) -> Dict[str, int]:
@@ -490,6 +514,7 @@ def _cleanup_excess_local_shares(client: SharedCenterClient, max_active_shares: 
 
     p115 = P115Service.get_client()
     pruned = failed = 0
+    consecutive_errors = 0
     for record in candidates:
         record_id = record.get('id')
         share_code = str(record.get('share_code') or '').strip()
@@ -509,6 +534,13 @@ def _cleanup_excess_local_shares(client: SharedCenterClient, max_active_shares: 
                 continue
 
             center_ok, center_resp = _cancel_center_sources_for_record(client, record_id, share_code, 'max_active_shares_waterline')
+            if not center_ok and _is_network_error(center_resp):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束水位清理。")
+                    break
+            else:
+                consecutive_errors = 0
             raw_json = record.get('raw_json') if isinstance(record.get('raw_json'), dict) else {}
             raw_json = dict(raw_json or {})
             raw_json['share_waterline_prune'] = {
@@ -553,6 +585,11 @@ def _cleanup_excess_local_shares(client: SharedCenterClient, max_active_shares: 
         except Exception as e:
             logger.warning(f"  ➜ [共享资源维护] 分享水位清理异常: record={record_id}, share={share_code}, err={e}", exc_info=True)
             failed += 1
+            if _is_network_error(e):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束水位清理。")
+                    break
         time.sleep(0.25)
 
     if pruned or failed:
@@ -571,6 +608,8 @@ def _enforce_local_share_waterline(client: SharedCenterClient) -> Dict[str, int]
     result = {
         'share_invalid_deleted': 0,
         'share_invalid_failed': 0,
+        'share_raw_missing_deleted': 0,
+        'share_raw_missing_failed': 0,
         'share_pruned': 0,
         'share_prune_failed': 0,
         'share_limit': _max_active_shares_limit(),
@@ -579,6 +618,8 @@ def _enforce_local_share_waterline(client: SharedCenterClient) -> Dict[str, int]
     }
     invalid = _cleanup_invalid_local_shares(client)
     result.update(invalid)
+    raw_missing = _cleanup_missing_raw_local_shares(client)
+    result.update(raw_missing)
     excess = _cleanup_excess_local_shares(client)
     result.update(excess)
     return result
@@ -602,6 +643,7 @@ def _auto_check_and_report_local_shares(client: SharedCenterClient, max_records:
 
     records, _ = shared_share_db.list_share_records(status='all', keyword='', page=1, page_size=max_records)
     checked = reported = cancelled = 0
+    consecutive_errors = 0
 
     # 延迟导入 routes.shared_resource，复用现有检查/上传/登记逻辑，避免两套实现分叉。
     try:
@@ -629,25 +671,55 @@ def _auto_check_and_report_local_shares(client: SharedCenterClient, max_records:
                     # 自动补 raw + 登记中心。
                     try:
                         cfg, headers = sr._center_headers()
-                        sr._upload_share_raw_ffprobe_to_center(record['id'], cfg, headers, force=False)
+                        sr._upload_share_raw_ffprobe_to_center(record['id'], cfg, headers, force=True)
                     except Exception as e:
                         logger.debug(f"  ➜ [共享资源维护] 自动上传 raw 失败，继续尝试登记中心: {e}")
                     try:
                         # 直接复用 route 的核心注册逻辑不方便调用带 Flask request 的视图，这里手动按 shared_share_items 注册。
                         items = shared_share_db.list_share_items(record['id'])
+                        missing_raw = sr._files_missing_raw_ffprobe(items) if sr is not None and hasattr(sr, '_files_missing_raw_ffprobe') else []
+                        not_uploaded = [i for i in items if str(i.get('sha1') or '').strip() and not i.get('raw_ffprobe_uploaded')]
+                        if missing_raw or not_uploaded:
+                            shared_share_db.update_share_record(
+                                record['id'],
+                                center_status='failed',
+                                last_error=(sr._raw_missing_message(missing_raw) if missing_raw and hasattr(sr, '_raw_missing_message') else '存在 raw_ffprobe_json 未上传的分享项，禁止自动登记中心'),
+                            )
+                            continue
+                        record_share_type_for_check = str(record.get('share_type') or '').strip().lower()
+                        if record_share_type_for_check in ('season_pack', 'series_pack', 'season', 'tv_pack') and hasattr(sr, '_validate_season_pack_consistency'):
+                            consistency = sr._validate_season_pack_consistency(items)
+                            if not consistency.get('ok'):
+                                shared_share_db.update_share_record(
+                                    record['id'],
+                                    center_status='failed',
+                                    last_error=consistency.get('message') or '季包媒体参数不一致，禁止自动登记中心',
+                                )
+                                shared_virtual_db.add_credit_ledger(
+                                    'share_season_pack_inconsistent_blocked', 0,
+                                    '季包分辨率或 HDR/杜比不一致，已阻止自动登记中心',
+                                    ref_id=str(record['id']), title=record.get('title') or '',
+                                    raw_json={'season_pack_consistency': consistency},
+                                )
+                                continue
                         ok = 0
                         for item in items:
                             sha1 = str(item.get('sha1') or '').strip().upper()
                             if not sha1:
                                 continue
-                            is_season_pack = str(record.get('share_type') or '').lower() in ('season_pack', 'season', 'tv_pack') or (record.get('root_is_dir') and str(record.get('item_type') or '').lower() in ('season', 'series', 'tv'))
+                            record_share_type = str(record.get('share_type') or '').strip().lower()
+                            is_season_pack = record_share_type in ('season_pack', 'series_pack', 'season', 'tv_pack')
+                            center_item_type = 'Season' if is_season_pack else (item.get('item_type') or record.get('item_type') or 'Movie')
+                            if record_share_type == 'episode_file':
+                                center_item_type = 'Episode'
+                            standard_identity = sr._standard_share_identity(record, item, center_item_type=center_item_type) if sr is not None else {}
                             resp = client.register_source(
-                                tmdb_id=item.get('tmdb_id') or record.get('tmdb_id'),
-                                item_type='Season' if is_season_pack else (item.get('item_type') or record.get('item_type') or 'Movie'),
+                                tmdb_id=standard_identity.get('tmdb_id') or item.get('tmdb_id') or record.get('tmdb_id'),
+                                item_type=center_item_type,
                                 season_number=item.get('season_number') or record.get('season_number'),
                                 episode_number=None if is_season_pack else item.get('episode_number'),
-                                title=record.get('title') or item.get('file_name'),
-                                release_year=record.get('release_year'),
+                                title=standard_identity.get('title') or record.get('title') or '',
+                                release_year=standard_identity.get('release_year') or record.get('release_year'),
                                 sha1=sha1,
                                 size=_safe_int(item.get('size'), 0),
                                 file_name=item.get('file_name') or '',
@@ -713,6 +785,11 @@ def _auto_check_and_report_local_shares(client: SharedCenterClient, max_records:
                     cancelled += 1
         except Exception as e:
             logger.warning(f"  ➜ [共享资源维护] 同步分享状态异常: share={share_code}, err={e}")
+            if _is_network_error(e):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束分享状态同步。")
+                    break
         time.sleep(0.2)
 
     return {'checked': checked, 'reported': reported, 'cancelled': cancelled}
@@ -779,115 +856,24 @@ def _dedupe_values(*vals) -> List[str]:
 
 
 def _has_existing_share_for_gap(gap: Dict[str, Any], candidate: Dict[str, Any] | None = None, files: List[Dict[str, Any]] | None = None) -> bool:
-    """判断中心缺口是否已经有本机分享在处理。返回 True 就绝对不再自动 share_create。
-
-    旧逻辑只按 tmdb_id + item_type + season_number 粗略判断，遇到单集缺口时容易因为
-    gap tmdb / candidate tmdb / parent_series_tmdb_id 口径不一致而漏判，维护任务就会每轮
-    都创建一个新 115 分享。这里改为三层去重：root_fid、sha1、媒体口径。
-    """
-    candidate = candidate or {}
-    files = files or []
-    item_type = str(gap.get('item_type') or candidate.get('share_item_type') or candidate.get('item_type') or '').strip()
-    season = _safe_int(gap.get('season_number', candidate.get('season_number')), -1)
-    episode = _safe_int(gap.get('episode_number', candidate.get('episode_number')), -1)
-    root_fid = str(candidate.get('root_fid') or '').strip()
-    tmdb_ids = _dedupe_values(
-        gap.get('tmdb_id'),
-        candidate.get('share_tmdb_id'),
-        candidate.get('tmdb_id'),
-        candidate.get('parent_series_tmdb_id'),
+    """判断中心缺口是否已经有本机分享在处理（包含已取消的记录，作为黑名单防止死循环）。"""
+    return shared_share_db.has_existing_share_for_gap(
+        gap or {},
+        candidate or {},
+        files or [],
+        # 👇 【修改】加上 cancelled，只要曾经分享过并被淘汰了，就不再自动分享
+        statuses=_active_share_statuses() + ['cancelled', 'cancel_failed', 'deleted'],
     )
-    sha1s = _dedupe_values([str(x.get('sha1') or '').strip().upper() for x in files or [] if x.get('sha1')])
-
-    # blocked/violation 也必须算“已有处理记录”，这样违规资源不会被下一轮自动重建。
-    active_statuses = (
-        'pending_review', 'alive', 'reported', 'partial', 'not_reported',
-        'blocked', 'violation', 'review_failed'
-    )
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            if root_fid:
-                cur.execute(
-                    """
-                    SELECT 1 FROM shared_share_records
-                    WHERE root_fid=%s
-                      AND status = ANY(%s)
-                    LIMIT 1
-                    """,
-                    (root_fid, list(active_statuses)),
-                )
-                if cur.fetchone() is not None:
-                    return True
-
-            if sha1s:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM shared_share_records r
-                    JOIN shared_share_items i ON i.share_record_id = r.id
-                    WHERE UPPER(COALESCE(i.sha1, '')) = ANY(%s)
-                      AND r.status = ANY(%s)
-                    LIMIT 1
-                    """,
-                    (sha1s, list(active_statuses)),
-                )
-                if cur.fetchone() is not None:
-                    return True
-
-            if not tmdb_ids:
-                return False
-
-            if item_type == 'Movie':
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM shared_share_records r
-                    LEFT JOIN shared_share_items i ON i.share_record_id = r.id
-                    WHERE (r.tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
-                      AND (r.item_type IN ('Movie','movie','movie_file','movie_folder') OR i.item_type IN ('Movie','movie','movie_file'))
-                      AND r.status = ANY(%s)
-                    LIMIT 1
-                    """,
-                    (tmdb_ids, tmdb_ids, list(active_statuses)),
-                )
-                return cur.fetchone() is not None
-
-            if item_type == 'Episode':
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM shared_share_records r
-                    LEFT JOIN shared_share_items i ON i.share_record_id = r.id
-                    WHERE (r.tmdb_id = ANY(%s) OR r.parent_series_tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
-                      AND COALESCE(i.season_number, r.season_number, -1)=COALESCE(%s, -1)
-                      AND COALESCE(i.episode_number, -1)=COALESCE(%s, -1)
-                      AND r.status = ANY(%s)
-                    LIMIT 1
-                    """,
-                    (tmdb_ids, tmdb_ids, tmdb_ids, season, episode, list(active_statuses)),
-                )
-                return cur.fetchone() is not None
-
-            # Season / Series 都按“剧集包”处理，精确到季。
-            cur.execute(
-                """
-                SELECT 1
-                FROM shared_share_records r
-                LEFT JOIN shared_share_items i ON i.share_record_id = r.id
-                WHERE (r.tmdb_id = ANY(%s) OR r.parent_series_tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
-                  AND COALESCE(i.season_number, r.season_number, -1)=COALESCE(%s, -1)
-                  AND r.status = ANY(%s)
-                LIMIT 1
-                """,
-                (tmdb_ids, tmdb_ids, tmdb_ids, season, list(active_statuses)),
-            )
-            return cur.fetchone() is not None
 
 
 
 def _auto_share_center_open_gaps(client: SharedCenterClient, limit: int = 80) -> int:
-    """中心有缺口而本机已入库时，自动创建 115 分享。可用后由下一轮维护自动登记中心。"""
+    """中心有缺口而本机已入库时，自动创建 115 分享。可用后由下一轮维护自动登记中心。
+
+    注意：Season 缺口不能直接 _build_media_candidate 后放弃。
+    _expand_share_candidates 会复用手动分享的策略：Completed 且齐集才给 season_pack；
+    未完结/未齐集季会展开为已有 Episode，逐集自动分享。
+    """
     try:
         gaps = (client.list_open_gaps(limit=limit).get('items') or [])
     except Exception as e:
@@ -909,82 +895,140 @@ def _auto_share_center_open_gaps(client: SharedCenterClient, limit: int = 80) ->
     created = 0
     for gap in gaps:
         try:
-            if _has_existing_share_for_gap(gap):
+            gap_item_type = str(gap.get('item_type') or '').strip()
+            # Movie/Episode 可以先用缺口口径粗略去重；Season 要等展开成候选后逐个去重，
+            # 否则同季已有 1 个单集分享就会误判整季无需继续分享。
+            if gap_item_type in ('Movie', 'Episode') and _has_existing_share_for_gap(gap):
                 continue
+
             row = _find_local_media_for_gap(gap)
             if not row:
                 continue
-            candidate = sr._build_media_candidate(row)
-            if not candidate.get('resolvable') or not candidate.get('root_fid'):
-                continue
-            if _has_existing_share_for_gap(gap, candidate=candidate):
-                continue
 
-            # 遵守已有季包分享策略，避免未完结季整包分享。
-            if candidate.get('share_type') == 'season_pack':
-                policy = sr._share_policy_for_media({
-                    'item_type': 'Season',
-                    'tmdb_id': candidate.get('parent_series_tmdb_id') or candidate.get('tmdb_id'),
-                    'parent_series_tmdb_id': candidate.get('parent_series_tmdb_id') or candidate.get('tmdb_id'),
-                    'season_number': candidate.get('season_number'),
-                })
-                if not policy.get('allowed'):
+            if hasattr(sr, '_expand_share_candidates'):
+                candidates = sr._expand_share_candidates(row)
+            else:
+                candidates = [sr._build_media_candidate(row)]
+
+            for candidate in candidates:
+                if not candidate.get('resolvable') or not candidate.get('root_fid'):
                     continue
 
-            share_resp = p115.share_create([str(candidate.get('root_fid'))], share_duration=-1, receive_code=None)
-            if not share_resp or not share_resp.get('state'):
-                logger.warning(f"  ➜ [共享资源维护] 自动创建分享失败: {candidate.get('display_title')} -> {share_resp}")
-                continue
-            data = share_resp.get('data') or {}
-            share_code = data.get('share_code') or share_resp.get('share_code')
-            receive_code = data.get('receive_code') or ''
-            share_url = data.get('share_url') or (f"https://115.com/s/{share_code}" if share_code else '')
-            root_fid = str(candidate.get('root_fid'))
-            root_name = candidate.get('root_name') or candidate.get('title') or root_fid
-            root_is_dir = candidate.get('root_is_dir') is not False
+                candidate_gap = {
+                    **gap,
+                    'tmdb_id': candidate.get('share_tmdb_id') or candidate.get('tmdb_id') or gap.get('tmdb_id'),
+                    'item_type': candidate.get('share_item_type') or candidate.get('item_type') or gap.get('item_type'),
+                    'season_number': candidate.get('season_number', gap.get('season_number')),
+                    'episode_number': candidate.get('episode_number', gap.get('episode_number')),
+                }
+                if _has_existing_share_for_gap(candidate_gap, candidate=candidate):
+                    continue
 
-            files = sr._collect_files_from_115(p115, root_fid, root_name=root_name, max_depth=6, assume_dir=root_is_dir)
-            if not files:
-                payload = {
+                # 二次遵守季包策略，避免未完结季整包分享。
+                if candidate.get('share_type') == 'season_pack':
+                    policy = sr._share_policy_for_media({
+                        'item_type': 'Season',
+                        'tmdb_id': candidate.get('parent_series_tmdb_id') or candidate.get('tmdb_id'),
+                        'parent_series_tmdb_id': candidate.get('parent_series_tmdb_id') or candidate.get('tmdb_id'),
+                        'season_number': candidate.get('season_number'),
+                    })
+                    if not policy.get('allowed'):
+                        continue
+
+                root_fid = str(candidate.get('root_fid'))
+                standard_identity = sr._standard_media_identity_for_share({
                     'tmdb_id': candidate.get('share_tmdb_id') or candidate.get('tmdb_id'),
                     'item_type': candidate.get('share_item_type') or candidate.get('item_type'),
                     'parent_series_tmdb_id': candidate.get('parent_series_tmdb_id'),
                     'season_number': candidate.get('season_number'),
                     'episode_number': candidate.get('episode_number'),
-                    'title': candidate.get('display_title') or candidate.get('title'),
+                    'title': candidate.get('standard_title') or candidate.get('title'),
+                    'release_year': candidate.get('release_year'),
+                    'share_type': candidate.get('share_type'),
+                })
+                root_name = candidate.get('root_name') or standard_identity.get('title') or root_fid
+                root_is_dir = candidate.get('root_is_dir') is not False
+
+                # 先收集文件并做 sha1 级去重，避免重复创建 115 分享。
+                files = sr._collect_files_from_115(p115, root_fid, root_name=root_name, max_depth=6, assume_dir=root_is_dir)
+                if not files:
+                    payload = {
+                        'tmdb_id': candidate.get('share_tmdb_id') or candidate.get('tmdb_id'),
+                        'item_type': candidate.get('share_item_type') or candidate.get('item_type'),
+                        'parent_series_tmdb_id': candidate.get('parent_series_tmdb_id'),
+                        'season_number': candidate.get('season_number'),
+                        'episode_number': candidate.get('episode_number'),
+                        'title': candidate.get('display_title') or candidate.get('title'),
+                        'root_name': root_name,
+                    }
+                    files = sr._collect_files_from_media_payload(payload)
+                for item in files:
+                    item.setdefault('tmdb_id', str(candidate.get('share_tmdb_id') or candidate.get('tmdb_id') or ''))
+                    share_type_now = str(candidate.get('share_type') or '').strip().lower()
+                    if share_type_now == 'episode_file':
+                        # 自动补缺展开出来的单集必须强制写 Episode，不能沿用 Season 缺口行。
+                        item['item_type'] = 'Episode'
+                        if not item.get('episode_number'):
+                            item['episode_number'] = candidate.get('episode_number')
+                    else:
+                        item.setdefault('item_type', 'Episode' if share_type_now in ('season_pack','series_pack') and item.get('episode_number') else candidate.get('share_item_type') or candidate.get('item_type'))
+                    item.setdefault('season_number', candidate.get('season_number'))
+                    item.setdefault('episode_number', candidate.get('episode_number'))
+
+                if not files:
+                    continue
+                if hasattr(sr, '_files_missing_raw_ffprobe'):
+                    missing_raw = sr._files_missing_raw_ffprobe(files)
+                    if missing_raw:
+                        logger.info(f"  ➜ [共享资源维护] 自动分享跳过缺 raw_ffprobe_json 的资源：{candidate.get('display_title')} -> {sr._raw_missing_message(missing_raw) if hasattr(sr, '_raw_missing_message') else missing_raw}")
+                        continue
+
+                if str(candidate.get('share_type') or '').strip().lower() == 'season_pack' and hasattr(sr, '_validate_season_pack_consistency'):
+                    consistency = sr._validate_season_pack_consistency(files)
+                    if not consistency.get('ok'):
+                        logger.info(f"  ➜ [共享资源维护] 自动分享跳过媒体参数不一致的季包：{candidate.get('display_title')} -> {consistency.get('message')}")
+                        continue
+
+                if _has_existing_share_for_gap(candidate_gap, candidate=candidate, files=files):
+                    continue
+
+                share_resp = p115.share_create([root_fid], share_duration=-1, receive_code=None)
+                if not share_resp or not share_resp.get('state'):
+                    logger.warning(f"  ➜ [共享资源维护] 自动创建分享失败: {candidate.get('display_title')} -> {share_resp}")
+                    continue
+
+                data = share_resp.get('data') or {}
+                share_code = data.get('share_code') or share_resp.get('share_code')
+                receive_code = data.get('receive_code') or ''
+                share_url = data.get('share_url') or (f"https://115.com/s/{share_code}" if share_code else '')
+
+                record = shared_share_db.create_share_record({
+                    'share_code': share_code,
+                    'receive_code': receive_code,
+                    'share_url': share_url,
+                    'share_type': candidate.get('share_type') or 'movie_folder',
+                    'root_fid': root_fid,
                     'root_name': root_name,
-                }
-                files = sr._collect_files_from_media_payload(payload)
-            for item in files:
-                item.setdefault('tmdb_id', str(candidate.get('share_tmdb_id') or candidate.get('tmdb_id') or ''))
-                item.setdefault('item_type', 'Episode' if candidate.get('share_type') in ('season_pack','series_pack') and item.get('episode_number') else candidate.get('share_item_type') or candidate.get('item_type'))
-                item.setdefault('season_number', candidate.get('season_number'))
-                item.setdefault('episode_number', candidate.get('episode_number'))
-            record = shared_share_db.create_share_record({
-                'share_code': share_code,
-                'receive_code': receive_code,
-                'share_url': share_url,
-                'share_type': candidate.get('share_type') or 'movie_folder',
-                'root_fid': root_fid,
-                'root_name': root_name,
-                'root_is_dir': root_is_dir,
-                'tmdb_id': str(candidate.get('share_tmdb_id') or candidate.get('tmdb_id') or ''),
-                'item_type': candidate.get('share_item_type') or candidate.get('item_type') or 'Movie',
-                'parent_series_tmdb_id': candidate.get('parent_series_tmdb_id'),
-                'season_number': candidate.get('season_number'),
-                'title': candidate.get('display_title') or candidate.get('title') or root_name,
-                'release_year': candidate.get('release_year'),
-                'status': 'pending_review',
-                'review_status': 'pending_review',
-                'center_status': 'not_reported',
-                'raw_json': {'auto_gap': gap, 'share_response': share_resp, 'candidate': candidate},
-            })
-            shared_share_db.replace_share_items(record['id'], files)
-            shared_virtual_db.add_credit_ledger('share_auto_created_for_gap', 0, '命中中心缺口并自动创建115分享，等待审核', ref_id=str(record['id']), title=record.get('title') or '', raw_json={'gap': gap, 'share_code': share_code})
-            created += 1
+                    'root_is_dir': root_is_dir,
+                    'tmdb_id': str(standard_identity.get('tmdb_id') or candidate.get('share_tmdb_id') or candidate.get('tmdb_id') or ''),
+                    'item_type': candidate.get('share_item_type') or candidate.get('item_type') or 'Movie',
+                    'parent_series_tmdb_id': standard_identity.get('parent_series_tmdb_id') or candidate.get('parent_series_tmdb_id'),
+                    'season_number': candidate.get('season_number'),
+                    'episode_number': candidate.get('episode_number'),
+                    'title': standard_identity.get('title') or candidate.get('standard_title') or candidate.get('title') or root_name,
+                    'release_year': standard_identity.get('release_year') or candidate.get('release_year'),
+                    'status': 'pending_review',
+                    'review_status': 'pending_review',
+                    'center_status': 'not_reported',
+                    'raw_json': {'auto_gap': gap, 'share_response': share_resp, 'candidate': candidate, 'standard_identity': standard_identity},
+                })
+                shared_share_db.replace_share_items(record['id'], files)
+                shared_virtual_db.add_credit_ledger('share_auto_created_for_gap', 0, '命中中心缺口并自动创建115分享，等待审核', ref_id=str(record['id']), title=record.get('title') or '', raw_json={'gap': gap, 'share_code': share_code})
+                created += 1
+                time.sleep(0.3)
         except Exception as e:
             logger.warning(f"  ➜ [共享资源维护] 自动分享中心缺口失败: {gap} -> {e}", exc_info=True)
-        time.sleep(0.3)
+        time.sleep(0.1)
     return created
 
 
@@ -1174,6 +1218,7 @@ def _auto_follow_watching_series_from_center(max_items: int = 80) -> Dict[str, i
     rows = _watching_missing_episodes(limit=max_items)
     consumed = gaps = skipped = 0
     mode = shared_resource_mode()
+    consecutive_errors = 0 
 
     for row in rows:
         try:
@@ -1205,6 +1250,11 @@ def _auto_follow_watching_series_from_center(max_items: int = 80) -> Dict[str, i
                 gaps += 1
         except Exception as e:
             logger.warning(f"  ➜ [共享资源维护] 剧集追更共享消费失败: {row} -> {e}", exc_info=True)
+            if _is_network_error(e):
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    logger.error("  ➜ [共享资源维护] 连续 3 次网络请求失败，触发熔断，提前结束剧集追更。")
+                    break
         time.sleep(0.2)
 
     return {'missing': len(rows), 'consumed': consumed, 'gaps': gaps, 'skipped': skipped}
@@ -1223,7 +1273,8 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         logger.setLevel(logging.ERROR)
 
     def _status(progress: int, message: str):
-        # 静默调度时仍允许后台状态更新，但不依赖实时日志展示。
+        if maintenance_silent:
+            return
         task_manager.update_status_from_thread(progress, message)
 
     try:
@@ -1234,6 +1285,23 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         client = SharedCenterClient()
         if not client.ready:
             _status(100, '共享中心地址或 device_token 未配置，跳过。')
+            return
+
+        _status(5, '正在测试中心服务器连通性...')
+        try:
+            from routes.shared_resource import _fetch_center_credit
+            credit_test = _fetch_center_credit()
+            if not credit_test.get('ok'):
+                msg = f"中心服务器连接失败 ({credit_test.get('message')})，为避免任务卡死，本次维护取消。"
+                if not maintenance_silent:
+                    logger.warning(f"  ➜ [共享资源维护] {msg}")
+                _status(100, msg)
+                return
+        except Exception as e:
+            msg = f"中心服务器连接超时或异常，为避免任务卡死，本次维护取消。"
+            if not maintenance_silent:
+                logger.warning(f"  ➜ [共享资源维护] {msg} ({e})")
+            _status(100, msg)
             return
 
         total = {}
@@ -1276,6 +1344,7 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
             f"清理临时转存 {total.get('expired_virtual_cache_cleaned', 0)}，"
             f"自动创建分享 {total.get('auto_created_shares', 0)}，"
             f"违规分享清理 {total.get('share_invalid_deleted', 0)}/{total.get('share_invalid_failed', 0)}，"
+            f"缺raw清理 {total.get('share_raw_missing_deleted', 0)}/{total.get('share_raw_missing_failed', 0)}，"
             f"水位清理 {total.get('share_pruned', 0)}/{total.get('share_prune_failed', 0)}，"
             f"追更命中 {total.get('follow_consumed', 0)}/{total.get('follow_missing', 0)}，"
             f"登记追更缺口 {total.get('follow_gaps', 0)}，"

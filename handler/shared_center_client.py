@@ -10,6 +10,20 @@ import constants
 
 logger = logging.getLogger(__name__)
 
+def _request_kwargs(timeout: int) -> Dict[str, Any]:
+    """共享中心 HTTP 请求参数。
+
+    复用全局 Network 代理配置，只影响共享中心相关 requests。
+    未开启代理时不传 proxies，保持原行为。
+    """
+    kwargs = {'timeout': timeout}
+    getter = getattr(config_manager, 'get_proxies_for_requests', None)
+    if callable(getter):
+        proxies = getter()
+        if proxies:
+            kwargs['proxies'] = proxies
+    return kwargs
+
 
 def _cfg_const(name: str, fallback: str, default=None):
     key = getattr(constants, name, fallback)
@@ -47,7 +61,7 @@ class SharedCenterClient:
         if not self.ready:
             raise RuntimeError('共享中心地址或 device_token 未配置')
         url = f"{self.base_url}{path}"
-        resp = requests.post(url, headers=self._headers(), json=payload, timeout=timeout)
+        resp = requests.post(url, headers=self._headers(), json=payload, **_request_kwargs(timeout))
         if not resp.ok:
             raise RuntimeError(f"共享中心请求失败: {resp.status_code} {resp.text[:200]}")
         return resp.json() if resp.text else {}
@@ -56,7 +70,7 @@ class SharedCenterClient:
         if not self.ready:
             raise RuntimeError('共享中心地址或 device_token 未配置')
         url = f"{self.base_url}{path}"
-        resp = requests.get(url, headers=self._headers(), timeout=timeout)
+        resp = requests.get(url, headers=self._headers(), **_request_kwargs(timeout))
         if not resp.ok:
             raise RuntimeError(f"共享中心请求失败: {resp.status_code} {resp.text[:200]}")
         return resp.json() if resp.text else {}
@@ -76,7 +90,7 @@ class SharedCenterClient:
             'install_id': str(install_id or '').strip(),
         }
         url = f"{self.base_url}/api/v1/devices/register"
-        resp = requests.post(url, json=payload, timeout=20)
+        resp = requests.post(url, json=payload, **_request_kwargs(20))
         if resp.status_code == 404 and admin_token:
             # 兼容未升级的私有中心：使用管理员接口注册，但这种方式无法按 install_id 幂等。
             admin_url = f"{self.base_url}/api/v1/admin/devices/register"
@@ -84,7 +98,7 @@ class SharedCenterClient:
                 admin_url,
                 headers={'X-Admin-Token': str(admin_token)},
                 json={'name': payload['name']},
-                timeout=20,
+                **_request_kwargs(20),
             )
         if not resp.ok:
             raise RuntimeError(f"共享中心设备注册失败: {resp.status_code} {resp.text[:300]}")
@@ -107,7 +121,7 @@ class SharedCenterClient:
         return self._get(f'/api/v1/gaps/open?limit={limit}', timeout=20)
 
     def list_sources(self, *, q: str = '', tmdb_id: str = '', item_type: str = '', status: str = 'alive,pending',
-                     source_ids: List[str] = None, limit: int = 100, offset: int = 0, include_raw: bool = True) -> Dict[str, Any]:
+                     source_ids: List[str] = None, order_by: str = 'latest', limit: int = 100, offset: int = 0, include_raw: bool = True) -> Dict[str, Any]:
         """列出中心已有共享源。用于前端展示版本列表，也用于按 source_id 手动入库。"""
         import urllib.parse
         source_ids = [str(x).strip() for x in (source_ids or []) if str(x or '').strip()]
@@ -116,6 +130,7 @@ class SharedCenterClient:
             'tmdb_id': tmdb_id or '',
             'item_type': item_type or '',
             'status': status or '',
+            'order_by': order_by or 'latest',
             'limit': max(1, min(int(limit or 100), 500)),
             'offset': max(0, int(offset or 0)),
             'include_raw': '1' if include_raw else '0',

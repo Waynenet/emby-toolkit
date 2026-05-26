@@ -8,6 +8,7 @@ import time
 import threading
 import uuid
 import socket
+from datetime import datetime
 from typing import Dict, Any, List
 
 import requests
@@ -27,6 +28,20 @@ _SCAN_KICK_LOCK = threading.Lock()
 _LAST_SCAN_KICK_AT = 0
 
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.ts', '.mov', '.m2ts', '.iso', '.wmv', '.flv'}
+
+def _center_request_kwargs(timeout: int) -> Dict[str, Any]:
+    """共享中心 HTTP 请求参数。
+
+    复用全局 Network 代理配置，只影响共享中心接口请求；
+    未开启代理时不传 proxies，保持原来的直连行为。
+    """
+    kwargs = {'timeout': timeout}
+    getter = getattr(config_manager, 'get_proxies_for_requests', None)
+    if callable(getter):
+        proxies = getter()
+        if proxies:
+            kwargs['proxies'] = proxies
+    return kwargs
 
 
 def _request_json() -> Dict[str, Any]:
@@ -71,13 +86,13 @@ def _fetch_center_credit() -> Dict[str, Any]:
         return {"ok": False, "message": "未配置共享中心 device_token"}
 
     headers = {"X-Device-Token": cfg["device_token"]}
-    me_resp = requests.get(f"{cfg['center_url']}/api/v1/me", headers=headers, timeout=12)
+    me_resp = requests.get(f"{cfg['center_url']}/api/v1/me", headers=headers, **_center_request_kwargs(12))
     me_resp.raise_for_status()
     me = me_resp.json() or {}
 
     stats = {}
     try:
-        stats_resp = requests.get(f"{cfg['center_url']}/api/v1/stats", headers=headers, timeout=12)
+        stats_resp = requests.get(f"{cfg['center_url']}/api/v1/stats", headers=headers, **_center_request_kwargs(12))
         if stats_resp.ok:
             stats = stats_resp.json() or {}
     except Exception as e:
@@ -89,7 +104,7 @@ def _fetch_center_credit() -> Dict[str, Any]:
             f"{cfg['center_url']}/api/v1/credit/ledger",
             headers=headers,
             params={"limit": 300},
-            timeout=12,
+            **_center_request_kwargs(12),
         )
         if ledger_resp.ok:
             center_ledger_items = (ledger_resp.json() or {}).get("items") or []
@@ -435,7 +450,7 @@ def _cancel_center_sources_for_share(record_id: int, record: Dict[str, Any]) -> 
         'local_record_id': record_id,
     }
     try:
-        resp = requests.post(f"{cfg['center_url']}/api/v1/sources/cancel", headers=headers, json=payload, timeout=25)
+        resp = requests.post(f"{cfg['center_url']}/api/v1/sources/cancel", headers=headers, json=payload, **_center_request_kwargs(25))
         if not resp.ok:
             return {'ok': False, 'status_code': resp.status_code, 'message': resp.text[:300], 'payload': payload}
         data = resp.json() if resp.text else {}
@@ -524,7 +539,7 @@ def _upload_item_raw_ffprobe_to_center(item: Dict[str, Any], cfg: Dict[str, Any]
         'raw_ffprobe_json': raw,
     }
     try:
-        resp = requests.post(f"{cfg['center_url']}/api/v1/rawffprobe/upload", headers=headers, json=payload, timeout=45)
+        resp = requests.post(f"{cfg['center_url']}/api/v1/rawffprobe/upload", headers=headers, json=payload, **_center_request_kwargs(45))
         if not resp.ok:
             return {'ok': False, 'status': 'http_error', 'message': f'HTTP {resp.status_code} {resp.text[:160]}'}
         shared_share_db.mark_item_raw_uploaded(item['id'], True)
@@ -564,6 +579,231 @@ def _upload_share_raw_ffprobe_to_center(record_id: int, cfg: Dict[str, Any], hea
         'missing': missing,
         'size_fixed': size_fixed,
         'errors': errors,
+    }
+
+
+
+def _files_missing_raw_ffprobe(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """返回缺失 raw_ffprobe_json 的分享文件列表。
+
+    共享资源展示和中心入库都依赖 raw_ffprobe_json 解析清晰度、编码、音轨、字幕等信息。
+    没有 raw 的文件禁止创建/登记分享，避免中心出现全是 "-" 的垃圾版本。
+    """
+    missing = []
+    seen = set()
+    for item in files or []:
+        sha1 = str((item or {}).get('sha1') or '').strip().upper()
+        name = str((item or {}).get('file_name') or (item or {}).get('name') or sha1 or '未知文件')
+        key = sha1 or f"no-sha1:{name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if not re.fullmatch(r'[A-Fa-f0-9]{40}', sha1 or ''):
+            missing.append({'sha1': sha1, 'file_name': name, 'reason': '缺少 SHA1，无法匹配 raw_ffprobe_json'})
+            continue
+        if not _load_local_raw_ffprobe(sha1):
+            missing.append({'sha1': sha1, 'file_name': name, 'reason': '本地 p115_mediainfo_cache 缺少 raw_ffprobe_json'})
+    return missing
+
+
+def _raw_missing_message(missing: List[Dict[str, Any]], limit: int = 6) -> str:
+    shown = []
+    for item in (missing or [])[:max(1, int(limit or 6))]:
+        name = str(item.get('file_name') or item.get('sha1') or '未知文件')
+        reason = str(item.get('reason') or '缺少 raw_ffprobe_json')
+        shown.append(f"{name}（{reason}）")
+    suffix = ''
+    if len(missing or []) > len(shown):
+        suffix = f" 等 {len(missing)} 个文件"
+    return "缺少 raw_ffprobe_json，禁止分享/登记中心：" + "；".join(shown) + suffix
+
+
+
+def _guess_season_episode_numbers(text: str):
+    """从文件名/标题里尽量解析 SxxEyy，用于老数据和外来分享兜底。"""
+    text = str(text or '')
+    patterns = [
+        r'[Ss](\d{1,3})[.\s_-]*[Ee](\d{1,4})',
+        r'第\s*(\d{1,3})\s*季\s*第?\s*(\d{1,4})\s*[集话]',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            return int(m.group(1)), int(m.group(2))
+        except Exception:
+            return None, None
+    return None, None
+
+
+def _iter_text_values(obj, max_depth: int = 5):
+    """递归抽取短文本，给杜比/HDR 识别做兜底。"""
+    if max_depth < 0:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_text_values(v, max_depth - 1)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            yield from _iter_text_values(item, max_depth - 1)
+    elif obj is not None:
+        text = str(obj)
+        if text and len(text) <= 400:
+            yield text
+
+
+def _normalize_dovi_profile(raw_profile: str) -> str:
+    raw_profile = str(raw_profile or '').strip().upper().replace('PROFILE', '').replace('P', '').strip()
+    if not raw_profile:
+        return ''
+    raw_profile = raw_profile.replace('_', '.')
+    if raw_profile in ('81', '8.1'):
+        return 'P8.1'
+    if raw_profile in ('82', '8.2'):
+        return 'P8.2'
+    if raw_profile in ('84', '8.4'):
+        return 'P8.4'
+    m = re.search(r'(\d+(?:\.\d+)?)', raw_profile)
+    return f"P{m.group(1)}" if m else ''
+
+
+def _extract_dovi_profile_from_text(text: str) -> str:
+    text = str(text or '')
+    patterns = [
+        r'DoviProfile\s*([0-9.]+)',
+        r'Dolby\s*Vision[^,\n\r;]*?Profile\s*([0-9.]+)',
+        r'\bDV(?:P|[\s._-]*Profile)?\s*([0-9.]+)',
+        r'\bDOVI[^,\n\r;]*?\bP(?:rofile)?\s*([0-9.]+)',
+        r'\bP(5|7|8(?:\.\d+)?)\b',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return _normalize_dovi_profile(m.group(1))
+    m = re.search(r'dv_profile["\']?\s*[:=]\s*["\']?(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    if m:
+        return _normalize_dovi_profile(m.group(1))
+    return ''
+
+
+def _raw_video_stream(raw: Dict[str, Any]) -> Dict[str, Any]:
+    raw = raw or {}
+    if raw.get('MediaSourceInfo'):
+        streams = (raw.get('MediaSourceInfo') or {}).get('MediaStreams') or []
+        return next((s for s in streams if str(s.get('Type') or '').lower() == 'video'), {}) or {}
+    if raw.get('MediaStreams'):
+        streams = raw.get('MediaStreams') or []
+        return next((s for s in streams if str(s.get('Type') or '').lower() == 'video'), {}) or {}
+    streams = raw.get('streams') or []
+    return next((s for s in streams if str(s.get('codec_type') or s.get('type') or '').lower() == 'video'), {}) or {}
+
+
+def _video_effect_key(raw: Dict[str, Any], summary: Dict[str, Any] = None) -> str:
+    """生成 HDR/杜比一致性 key：SDR/HDR10/HDR10+/HLG/DV-P5/DV-P8.1 等。"""
+    summary = summary or {}
+    effect = str(summary.get('effect') or '')
+    video = _raw_video_stream(raw)
+    text = ' | '.join([effect] + list(_iter_text_values(video, max_depth=4)))
+    upper = text.upper()
+
+    dovi_profile = _extract_dovi_profile_from_text(text)
+    if 'DOLBY' in upper or 'DOVI' in upper or dovi_profile:
+        return f"DV-{dovi_profile or 'UNKNOWN'}"
+
+    if 'HDR10+' in upper or 'SMPTE2094' in upper:
+        return 'HDR10+'
+    if 'HLG' in upper or 'ARIB-STD-B67' in upper:
+        return 'HLG'
+    if 'HDR10' in upper or 'SMPTE2084' in upper or 'BT2020' in upper:
+        return 'HDR10'
+    if 'HDR' in upper:
+        return 'HDR'
+    return 'SDR'
+
+
+def _season_pack_file_signature(item: Dict[str, Any]) -> Dict[str, Any]:
+    """从 raw_ffprobe_json 提取季包一致性校验所需的视频签名。"""
+    item = item or {}
+    sha1 = str(item.get('sha1') or '').strip().upper()
+    raw = _load_local_raw_ffprobe(sha1)
+    if not raw:
+        return {
+            'ok': False,
+            'sha1': sha1,
+            'file_name': item.get('file_name') or item.get('name') or sha1,
+            'reason': '缺少 raw_ffprobe_json',
+        }
+    summary = _summarize_raw_ffprobe(raw, item)
+    width = int(summary.get('width') or 0)
+    height = int(summary.get('height') or 0)
+    resolution = f"{width}x{height}" if width and height else (summary.get('resolution') or '')
+    if not resolution:
+        return {
+            'ok': False,
+            'sha1': sha1,
+            'file_name': item.get('file_name') or item.get('name') or sha1,
+            'reason': '无法从 raw_ffprobe_json 解析视频分辨率',
+        }
+    effect_key = _video_effect_key(raw, summary)
+    return {
+        'ok': True,
+        'sha1': sha1,
+        'file_name': item.get('file_name') or item.get('name') or sha1,
+        'resolution': resolution,
+        'resolution_label': summary.get('resolution') or resolution,
+        'effect_key': effect_key,
+        'effect': summary.get('effect') or ('SDR' if effect_key == 'SDR' else effect_key),
+    }
+
+
+def _validate_season_pack_consistency(files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """季包一致性校验：分辨率、HDR/杜比必须全季一致。
+
+    特别是 Dolby Vision P5/P8/P8.1 不能混用，否则同一个季包在客户端侧体验不可控。
+    """
+    signatures = []
+    invalid = []
+    for item in files or []:
+        sig = _season_pack_file_signature(item)
+        if not sig.get('ok'):
+            invalid.append(sig)
+        else:
+            signatures.append(sig)
+
+    if invalid:
+        return {
+            'ok': False,
+            'message': '季包一致性校验失败：存在无法解析媒体信息的文件',
+            'invalid': invalid,
+            'signatures': signatures,
+        }
+
+    if len(signatures) <= 1:
+        return {'ok': True, 'signatures': signatures, 'groups': {}}
+
+    groups = {}
+    for sig in signatures:
+        key = f"{sig.get('resolution')}|{sig.get('effect_key')}"
+        groups.setdefault(key, []).append(sig)
+
+    if len(groups) == 1:
+        return {'ok': True, 'signatures': signatures, 'groups': groups}
+
+    samples = []
+    for key, rows in groups.items():
+        first = rows[0]
+        samples.append(
+            f"{first.get('resolution_label') or first.get('resolution')} / {first.get('effect') or first.get('effect_key')}: "
+            f"{len(rows)} 个，示例 {first.get('file_name')}"
+        )
+    return {
+        'ok': False,
+        'message': '季包一致性校验失败：同一季包内分辨率或 HDR/杜比类型不一致；' + '；'.join(samples),
+        'signatures': signatures,
+        'groups': groups,
     }
 
 
@@ -666,7 +906,7 @@ def _get_media_row(tmdb_id: str, item_type: str):
                 SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
                        season_number, episode_number, release_year, release_date, last_air_date,
                        file_sha1_json, file_pickcode_json, in_library, subscription_status,
-                       total_episodes, watchlist_tmdb_status
+                       total_episodes, watching_status, watchlist_tmdb_status
                 FROM media_metadata
                 WHERE tmdb_id=%s AND item_type=%s
                 LIMIT 1
@@ -675,18 +915,224 @@ def _get_media_row(tmdb_id: str, item_type: str):
             return dict(row) if row else None
 
 
-def _get_series_title(series_tmdb_id: str):
+def _media_title_value(row: Dict[str, Any]) -> str:
+    """只取 media_metadata.title 作为标准片名；没有时才兜底 original_title。"""
+    row = row or {}
+    return str(row.get('title') or row.get('original_title') or '').strip()
+
+
+def _media_release_year_value(row: Dict[str, Any]):
+    row = row or {}
+    return _parse_release_year(row)
+
+
+def _get_series_identity(series_tmdb_id: str) -> Dict[str, Any]:
     if not series_tmdb_id:
-        return ''
+        return {}
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT title FROM media_metadata
+                SELECT tmdb_id, item_type, title, original_title, release_year, release_date, last_air_date
+                FROM media_metadata
                 WHERE tmdb_id=%s AND item_type='Series'
                 LIMIT 1
             """, (str(series_tmdb_id),))
             row = cur.fetchone()
-            return (dict(row).get('title') if row else '') or ''
+            if not row:
+                return {}
+            row = dict(row)
+            return {
+                'tmdb_id': str(row.get('tmdb_id') or series_tmdb_id),
+                'item_type': 'Series',
+                'title': _media_title_value(row),
+                'release_year': _media_release_year_value(row),
+                'raw_row': row,
+            }
+
+
+def _get_series_title(series_tmdb_id: str):
+    return (_get_series_identity(series_tmdb_id) or {}).get('title') or ''
+
+
+def _get_media_row_loose(tmdb_id: str, item_type: str = ''):
+    """按 TMDb ID 尽量找 media_metadata 行。item_type 为空时按层级优先。"""
+    tmdb_id = str(tmdb_id or '').strip()
+    item_type = str(item_type or '').strip()
+    if not tmdb_id:
+        return None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if item_type:
+                cur.execute("""
+                    SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
+                           season_number, episode_number, release_year, release_date, last_air_date,
+                           watching_status
+                    FROM media_metadata
+                    WHERE tmdb_id=%s AND item_type=%s
+                    LIMIT 1
+                """, (tmdb_id, item_type))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+            cur.execute("""
+                SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
+                       season_number, episode_number, release_year, release_date, last_air_date,
+                       watching_status
+                FROM media_metadata
+                WHERE tmdb_id=%s
+                ORDER BY CASE item_type WHEN 'Series' THEN 0 WHEN 'Movie' THEN 1 WHEN 'Season' THEN 2 WHEN 'Episode' THEN 3 ELSE 9 END
+                LIMIT 1
+            """, (tmdb_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def _standard_media_identity_for_share(data: Dict[str, Any], item: Dict[str, Any] = None) -> Dict[str, Any]:
+    """返回共享展示/登记使用的标准媒体身份。
+
+    规则：
+    - Movie 用电影自身 media_metadata.title；
+    - Series/Season/Episode 统一用父剧 Series 行的 media_metadata.title；
+    - release_year 同步取对应标准条目的年份；
+    - 查不到数据库时才兜底调用方传入标题，绝不从 115 文件名反推片名。
+    """
+    data = dict(data or {})
+    item = dict(item or {})
+
+    item_type = str(
+        data.get('item_type') or item.get('item_type') or data.get('share_item_type') or item.get('share_item_type') or ''
+    ).strip()
+    share_type = str(data.get('share_type') or item.get('share_type') or '').strip().lower()
+    if share_type in ('season_pack', 'series_pack', 'tv_pack'):
+        item_type = 'Season'
+    elif share_type in ('movie_file', 'movie_folder') and not item_type:
+        item_type = 'Movie'
+
+    tmdb_id = str(data.get('tmdb_id') or item.get('tmdb_id') or data.get('share_tmdb_id') or item.get('share_tmdb_id') or '').strip()
+    parent_series_id = str(
+        data.get('parent_series_tmdb_id') or item.get('parent_series_tmdb_id') or
+        data.get('series_tmdb_id') or item.get('series_tmdb_id') or ''
+    ).strip()
+    season_number = data.get('season_number', item.get('season_number'))
+    episode_number = data.get('episode_number', item.get('episode_number'))
+
+    row = _get_media_row_loose(tmdb_id, item_type) if tmdb_id else None
+
+    # 季/集分享登记使用父剧 TMDb ID 和父剧标准片名。
+    if item_type in ('Series', 'Season', 'Episode') or share_type in ('season_pack', 'series_pack', 'episode_file', 'tv_pack'):
+        if not parent_series_id and row:
+            parent_series_id = str(row.get('parent_series_tmdb_id') or '').strip()
+            if not parent_series_id and row.get('item_type') == 'Series':
+                parent_series_id = str(row.get('tmdb_id') or '').strip()
+
+        # 中心缺口/分享记录对 Season/Episode 常直接传父剧 tmdb_id。
+        if not parent_series_id and tmdb_id:
+            series_identity = _get_series_identity(tmdb_id)
+            if series_identity:
+                parent_series_id = str(series_identity.get('tmdb_id') or tmdb_id)
+
+        # 仍未拿到父剧时，用 season/episode 条件从 media_metadata 反查。
+        if not parent_series_id and tmdb_id:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if item_type == 'Season' and season_number not in (None, ''):
+                        cur.execute("""
+                            SELECT parent_series_tmdb_id
+                            FROM media_metadata
+                            WHERE item_type='Season' AND (tmdb_id=%s OR parent_series_tmdb_id=%s) AND season_number=%s
+                            LIMIT 1
+                        """, (tmdb_id, tmdb_id, int(season_number)))
+                    elif item_type == 'Episode' and season_number not in (None, '') and episode_number not in (None, ''):
+                        cur.execute("""
+                            SELECT parent_series_tmdb_id
+                            FROM media_metadata
+                            WHERE item_type='Episode' AND (tmdb_id=%s OR parent_series_tmdb_id=%s)
+                              AND season_number=%s AND episode_number=%s
+                            LIMIT 1
+                        """, (tmdb_id, tmdb_id, int(season_number), int(episode_number)))
+                    else:
+                        cur.execute("""
+                            SELECT parent_series_tmdb_id
+                            FROM media_metadata
+                            WHERE tmdb_id=%s AND parent_series_tmdb_id IS NOT NULL
+                            LIMIT 1
+                        """, (tmdb_id,))
+                    parent_row = cur.fetchone()
+                    if parent_row:
+                        parent_series_id = str(dict(parent_row).get('parent_series_tmdb_id') or '').strip()
+
+        series_identity = _get_series_identity(parent_series_id or tmdb_id)
+        if series_identity:
+            return {
+                'tmdb_id': str(series_identity.get('tmdb_id') or parent_series_id or tmdb_id),
+                'item_type': item_type or 'Series',
+                'parent_series_tmdb_id': str(series_identity.get('tmdb_id') or parent_series_id or tmdb_id),
+                'title': series_identity.get('title') or '',
+                'release_year': series_identity.get('release_year'),
+                'season_number': season_number,
+                'episode_number': episode_number,
+                'source': 'media_metadata.series',
+            }
+
+        # 找不到父剧行时，最多兜底当前 media_metadata 行 title。
+        if row:
+            return {
+                'tmdb_id': parent_series_id or tmdb_id,
+                'item_type': item_type or row.get('item_type'),
+                'parent_series_tmdb_id': parent_series_id or row.get('parent_series_tmdb_id') or '',
+                'title': _media_title_value(row),
+                'release_year': _media_release_year_value(row),
+                'season_number': season_number or row.get('season_number'),
+                'episode_number': episode_number or row.get('episode_number'),
+                'source': 'media_metadata.fallback_row',
+            }
+
+    if item_type == 'Movie' and tmdb_id:
+        movie_row = row if row and row.get('item_type') == 'Movie' else _get_media_row_loose(tmdb_id, 'Movie')
+        if movie_row:
+            return {
+                'tmdb_id': str(movie_row.get('tmdb_id') or tmdb_id),
+                'item_type': 'Movie',
+                'parent_series_tmdb_id': '',
+                'title': _media_title_value(movie_row),
+                'release_year': _media_release_year_value(movie_row),
+                'season_number': None,
+                'episode_number': None,
+                'source': 'media_metadata.movie',
+            }
+
+    return {
+        'tmdb_id': tmdb_id,
+        'item_type': item_type,
+        'parent_series_tmdb_id': parent_series_id,
+        'title': str(data.get('title') or item.get('title') or '').strip(),
+        'release_year': data.get('release_year') or item.get('release_year'),
+        'season_number': season_number,
+        'episode_number': episode_number,
+        'source': 'payload_fallback',
+    }
+
+
+def _standard_share_identity(record: Dict[str, Any], item: Dict[str, Any] = None, center_item_type: str = '') -> Dict[str, Any]:
+    """按本地分享记录 + 文件明细解析中心登记用标准标题。"""
+    record = dict(record or {})
+    item = dict(item or {})
+    payload = dict(record)
+    if item:
+        # item 的 season/episode/sha1 可补充，但 title 仍以 record/media_metadata 为准。
+        for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'parent_series_tmdb_id'):
+            if item.get(key) not in (None, ''):
+                payload[key] = item.get(key)
+    if center_item_type:
+        payload['item_type'] = center_item_type
+    if str(record.get('share_type') or '').lower() in ('season_pack', 'series_pack', 'tv_pack'):
+        payload['item_type'] = 'Season'
+    identity = _standard_media_identity_for_share(payload)
+    if not identity.get('title'):
+        identity['title'] = str(record.get('title') or '').strip()
+    if not identity.get('release_year'):
+        identity['release_year'] = record.get('release_year')
+    return identity
 
 
 def _collect_media_identifiers(row: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -836,7 +1282,7 @@ def _get_episode_rows_for_media(row: Dict[str, Any], only_with_files: bool = Fal
                     SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
                            season_number, episode_number, release_year, release_date, last_air_date,
                            file_sha1_json, file_pickcode_json, in_library, subscription_status,
-                           total_episodes, watchlist_tmdb_status
+                           total_episodes, watching_status, watchlist_tmdb_status
                     FROM media_metadata
                     WHERE {where}
                     ORDER BY season_number NULLS LAST, episode_number NULLS LAST, tmdb_id
@@ -846,6 +1292,8 @@ def _get_episode_rows_for_media(row: Dict[str, Any], only_with_files: bool = Fal
         return rows
     out = []
     for r in rows:
+        if not r.get('in_library'):
+            continue
         if _norm_pc_list(_json_array_values(r.get('file_pickcode_json'))) or _norm_sha1_list(_json_array_values(r.get('file_sha1_json'))):
             out.append(r)
     return out
@@ -854,8 +1302,11 @@ def _get_episode_rows_for_media(row: Dict[str, Any], only_with_files: bool = Fal
 def _season_completion_info(row: Dict[str, Any]) -> Dict[str, Any]:
     """判断某季是否适合按季包分享。
 
-    安全策略：只有“本地已有集数 >= 期望集数”且期望集数明确时，才允许 season_pack。
-    否则视为未完结/信息不明，只允许按单集分享。
+    唯一完结真理：media_metadata 中 Season 行的 watching_status。
+    - Season.watching_status == 'Completed'：该季可按完整季方向处理；
+    - 其他状态：一律视为未完结，只允许单集分享；
+    - total_episodes 缺失时，用该季已知 Episode 行数量兜底；
+    - 季包仍要求本地已有文件集数 >= 应有集数，避免半季被误当季包。
     """
     row = row or {}
     parent_series_id = row.get('parent_series_tmdb_id') or row.get('tmdb_id')
@@ -867,14 +1318,19 @@ def _season_completion_info(row: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         season_number = None
 
-    expected = 0
+    expected = _safe_int(row.get('total_episodes'), 0)
     season_title = ''
-    parent_status = ''
+    watching_status = ''
+
+    # 关键：不信 Series 状态、不信 TMDb status、不信 force_ended；只信 Season.watching_status。
     if parent_series_id and season_number is not None:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT total_episodes, title, watchlist_tmdb_status
+                    SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
+                           season_number, episode_number, release_year, release_date, last_air_date,
+                           file_sha1_json, file_pickcode_json, in_library, subscription_status,
+                           total_episodes, watching_status, watchlist_tmdb_status
                     FROM media_metadata
                     WHERE item_type='Season'
                       AND parent_series_tmdb_id=%s
@@ -885,22 +1341,19 @@ def _season_completion_info(row: Dict[str, Any]) -> Dict[str, Any]:
                 season_row = cur.fetchone()
                 if season_row:
                     season_row = dict(season_row)
-                    expected = _safe_int(season_row.get('total_episodes'), 0)
+                    expected = _safe_int(season_row.get('total_episodes'), expected)
                     season_title = season_row.get('title') or ''
-                cur.execute("""
-                    SELECT watchlist_tmdb_status, total_episodes
-                    FROM media_metadata
-                    WHERE item_type='Series' AND tmdb_id=%s
-                    LIMIT 1
-                """, (str(parent_series_id),))
-                series_row = cur.fetchone()
-                if series_row:
-                    series_row = dict(series_row)
-                    parent_status = series_row.get('watchlist_tmdb_status') or ''
-    if not expected:
-        expected = _safe_int(row.get('total_episodes'), 0)
+                    watching_status = str(season_row.get('watching_status') or '').strip()
+                else:
+                    # 没有 Season 行时，不要用父剧状态猜测完结；最多保留调用方传入值用于提示。
+                    watching_status = str(row.get('watching_status') or '').strip()
+    else:
+        watching_status = str(row.get('watching_status') or '').strip()
 
-    episode_rows = _get_episode_rows_for_media({**row, 'parent_series_tmdb_id': parent_series_id, 'season_number': season_number, 'item_type': 'Season'}, only_with_files=False)
+    episode_rows = _get_episode_rows_for_media(
+        {**row, 'parent_series_tmdb_id': parent_series_id, 'season_number': season_number, 'item_type': 'Season'},
+        only_with_files=False,
+    )
     local_rows = []
     for ep in episode_rows:
         if ep.get('in_library') and (
@@ -911,26 +1364,33 @@ def _season_completion_info(row: Dict[str, Any]) -> Dict[str, Any]:
 
     known_count = len(episode_rows)
     local_count = len(local_rows)
-    complete = bool(expected and local_count >= expected)
-    reason = ''
-    if complete:
-        reason = f'本季已齐 {local_count}/{expected} 集，允许按季包分享'
-    elif expected:
-        reason = f'本季尚未齐集 {local_count}/{expected}，禁止季包，改按单集分享'
-    elif parent_status and parent_status.lower() in ('ended', 'canceled', 'cancelled') and known_count and local_count >= known_count:
-        # 没有明确 total_episodes 时仍不自动开放季包，只给出原因，避免 TMDb 集数变动导致快照不完整。
-        reason = f'本季期望集数不明确；虽然本地已有 {local_count}/{known_count} 集，仍按单集分享更安全'
+    season_completed = watching_status.lower() == 'completed'
+
+    expected_source = 'season.total_episodes'
+    if not expected and season_completed and known_count > 0:
+        expected = known_count
+        expected_source = 'known_episode_rows'
+
+    complete = bool(season_completed and expected and local_count >= expected)
+
+    if not season_completed:
+        reason = f"Season.watching_status={watching_status or 'NONE'}，不是 Completed，禁止季包，改按单集分享"
+    elif not expected:
+        reason = f'本季 Season.watching_status=Completed，但 total_episodes 不明确且没有可兜底的 Episode 行；本地已有 {local_count} 集，仍按单集分享更安全'
+    elif complete:
+        reason = f'本季 Season.watching_status=Completed，且已齐 {local_count}/{expected} 集，允许按季包分享'
     else:
-        reason = f'本季完结状态/总集数不明确，本地已有 {local_count} 集，禁止季包，改按单集分享'
+        reason = f'本季 Season.watching_status=Completed，但尚未齐集 {local_count}/{expected}，禁止季包，改按单集分享'
 
     return {
         'complete': complete,
         'expected': expected,
+        'expected_source': expected_source,
         'known_count': known_count,
         'local_count': local_count,
         'reason': reason,
         'season_title': season_title,
-        'parent_status': parent_status,
+        'watching_status': watching_status,
     }
 
 
@@ -1060,12 +1520,18 @@ def _resolve_share_root(media_row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_media_candidate(row: Dict[str, Any]) -> Dict[str, Any]:
     row = dict(row)
-    year = _parse_release_year(row)
     parent_series_id = row.get('parent_series_tmdb_id')
     if row.get('item_type') in {'Season', 'Episode'} and not parent_series_id:
         parent_series_id = str(row.get('tmdb_id') or '').split('_')[0] if '_' in str(row.get('tmdb_id') or '') else ''
-    series_title = _get_series_title(parent_series_id) if parent_series_id else ''
+
+    series_identity = _get_series_identity(parent_series_id) if parent_series_id else {}
+    series_title = series_identity.get('title') or ''
+    series_year = series_identity.get('release_year')
+
     title = row.get('title') or row.get('original_title') or row.get('tmdb_id')
+    year = series_year if row.get('item_type') in {'Season', 'Episode'} and series_year else _parse_release_year(row)
+    standard_title = series_title if row.get('item_type') in {'Season', 'Episode'} and series_title else title
+
     display_title = title
     if row.get('item_type') == 'Season':
         display_title = f"{series_title or title} S{int(row.get('season_number') or 0):02d}" if row.get('season_number') else (series_title or title)
@@ -1082,6 +1548,7 @@ def _build_media_candidate(row: Dict[str, Any]) -> Dict[str, Any]:
         **row,
         'display_title': display_title,
         'series_title': series_title,
+        'standard_title': standard_title,
         'release_year': year,
         'parent_series_tmdb_id': parent_series_id,
         'share_tmdb_id': str(share_tmdb_id or ''),
@@ -1090,19 +1557,59 @@ def _build_media_candidate(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
+def _load_completed_season_row_for_episode(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Episode 搜索命中时，如果所属 Season 已 Completed，返回 Season 行用于提升为季包候选。"""
+    row = row or {}
+    parent_series_id = str(row.get('parent_series_tmdb_id') or '').strip()
+    season_number = row.get('season_number')
+    if not parent_series_id or season_number in (None, ''):
+        return {}
+    try:
+        season_number = int(season_number)
+    except Exception:
+        return {}
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
+                           season_number, episode_number, release_year, release_date, last_air_date,
+                           file_sha1_json, file_pickcode_json, in_library, subscription_status,
+                           total_episodes, watching_status, watchlist_tmdb_status
+                    FROM media_metadata
+                    WHERE item_type='Season'
+                      AND parent_series_tmdb_id=%s
+                      AND season_number=%s
+                      AND LOWER(COALESCE(watching_status, ''))='completed'
+                    ORDER BY tmdb_id
+                    LIMIT 1
+                """, (parent_series_id, season_number))
+                season_row = cur.fetchone()
+                return dict(season_row) if season_row else {}
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源] 查询单集所属 Completed 季失败: series={parent_series_id}, season={season_number}, err={e}")
+        return {}
+
+
 def _expand_share_candidates(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     """搜索结果展开策略：
     - Movie：一个候选；
     - Series：不直接分享整剧，展开为各季/单集；
-    - Season 完整：季包候选；
-    - Season 未完整：展开已有文件的 Episode 候选；
-    - Episode：单集候选。
+    - Season.watching_status=Completed 且齐集：只显示季包候选；
+    - Season 未 Completed 或未齐集：展开已有文件的 Episode 候选；
+    - Episode 命中时，如果所属季已 Completed 且齐集，提升为对应季包，避免完整季被拆成单集。
     """
     row = dict(row or {})
     item_type = row.get('item_type')
     if item_type == 'Movie':
         return [_build_media_candidate(row)]
     if item_type == 'Episode':
+        season_row = _load_completed_season_row_for_episode(row)
+        if season_row:
+            policy = _share_policy_for_media(season_row)
+            if policy.get('allowed'):
+                return [_build_media_candidate(season_row)]
         return [_build_media_candidate(row)]
     if item_type == 'Season':
         policy = _share_policy_for_media(row)
@@ -1118,27 +1625,30 @@ def _expand_share_candidates(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     if item_type == 'Series':
         out = []
         series_id = str(row.get('tmdb_id') or '')
-        # 优先展开 Season 行；没有 Season 行时直接展开已有文件的 Episode。
+        # 优先展开 Season 行。Completed 的季只出季包；未 Completed 的季才展开单集。
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
-                           season_number, episode_number, release_year, release_date, last_air_date,
-                           file_sha1_json, file_pickcode_json, in_library, subscription_status,
-                           total_episodes, watchlist_tmdb_status
+                        season_number, episode_number, release_year, release_date, last_air_date,
+                        file_sha1_json, file_pickcode_json, in_library, subscription_status,
+                        total_episodes, watching_status, watchlist_tmdb_status
                     FROM media_metadata
-                    WHERE item_type='Season' AND parent_series_tmdb_id=%s
+                    WHERE item_type='Season'
+                    AND parent_series_tmdb_id=%s
+                    AND in_library=TRUE
                     ORDER BY season_number NULLS LAST, tmdb_id
                 """, (series_id,))
                 seasons = [dict(r) for r in cur.fetchall()]
         if seasons:
             for season in seasons:
                 out.extend(_expand_share_candidates(season))
-                if len(out) >= 80:
+                if len(out) >= 100:
                     break
         else:
             episodes = _get_episode_rows_for_media(row, only_with_files=True)
-            out.extend(_build_media_candidate(ep) for ep in episodes[:80])
+            for ep in episodes[:100]:
+                out.extend(_expand_share_candidates(ep))
         if not out:
             disabled = _build_media_candidate(row)
             disabled['resolvable'] = False
@@ -1155,26 +1665,62 @@ def api_search_shareable_media():
     if len(keyword) < 1:
         return jsonify({"success": True, "items": []})
     limit = max(1, min(int(request.args.get('limit', 20) or 20), 50))
+    # 搜索命中 Episode 时，也要把同一父剧的 Season 行带出来；否则“季标题不含剧名”的库会只返回 SxxEyy。
+    search_limit = min(300, max(limit * 5, 100))
+    result_limit = min(500, max(limit * 10, 150))
     kw = f'%{keyword}%'
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
-                       season_number, episode_number, release_year, release_date, last_air_date,
-                       file_sha1_json, file_pickcode_json, in_library, subscription_status,
-                       total_episodes, watchlist_tmdb_status
-                FROM media_metadata
-                WHERE item_type IN ('Movie','Series','Season','Episode')
-                  AND (
-                    title ILIKE %s OR original_title ILIKE %s OR tmdb_id ILIKE %s
-                  )
+                WITH matched AS (
+                    SELECT tmdb_id, item_type, title, original_title, parent_series_tmdb_id,
+                           season_number, episode_number, release_year, release_date, last_air_date,
+                           file_sha1_json, file_pickcode_json, in_library, subscription_status,
+                           total_episodes, watching_status, watchlist_tmdb_status
+                    FROM media_metadata
+                    WHERE item_type IN ('Movie','Series','Season','Episode')
+                      AND in_library = TRUE
+                      AND (
+                        title ILIKE %s OR original_title ILIKE %s OR tmdb_id ILIKE %s
+                      )
+                    ORDER BY
+                      CASE item_type WHEN 'Movie' THEN 0 WHEN 'Series' THEN 1 WHEN 'Season' THEN 2 ELSE 3 END,
+                      in_library DESC,
+                      COALESCE(release_year, 0) DESC,
+                      title NULLS LAST
+                    LIMIT %s
+                ), related_series AS (
+                    SELECT DISTINCT
+                        CASE
+                            WHEN item_type='Series' THEN tmdb_id
+                            WHEN item_type IN ('Season','Episode') THEN parent_series_tmdb_id
+                            ELSE NULL
+                        END AS series_id
+                    FROM matched
+                ), expanded AS (
+                    SELECT * FROM matched
+                    UNION ALL
+                    SELECT s.tmdb_id, s.item_type, s.title, s.original_title, s.parent_series_tmdb_id,
+                           s.season_number, s.episode_number, s.release_year, s.release_date, s.last_air_date,
+                           s.file_sha1_json, s.file_pickcode_json, s.in_library, s.subscription_status,
+                           s.total_episodes, s.watching_status, s.watchlist_tmdb_status
+                    FROM media_metadata s
+                    JOIN related_series rs ON rs.series_id IS NOT NULL
+                                          AND s.item_type='Season'
+                                          AND s.parent_series_tmdb_id=rs.series_id
+                    WHERE s.in_library = TRUE
+                )
+                SELECT *
+                FROM expanded
                 ORDER BY
                   CASE item_type WHEN 'Movie' THEN 0 WHEN 'Season' THEN 1 WHEN 'Series' THEN 2 ELSE 3 END,
+                  season_number NULLS LAST,
+                  episode_number NULLS LAST,
                   in_library DESC,
                   COALESCE(release_year, 0) DESC,
                   title NULLS LAST
                 LIMIT %s
-            """, (kw, kw, kw, limit))
+            """, (kw, kw, kw, search_limit, result_limit))
             rows = [dict(r) for r in cur.fetchall()]
 
     items = []
@@ -2118,6 +2664,36 @@ def api_list_my_shares():
         page=int(request.args.get('page', 1) or 1),
         page_size=int(request.args.get('page_size', 30) or 30),
     )
+    for item in items:
+        try:
+            identity = _standard_share_identity(item)
+            if identity.get('title'):
+                item['title'] = identity.get('title')
+            if identity.get('release_year'):
+                item['release_year'] = identity.get('release_year')
+            if identity.get('tmdb_id'):
+                item['tmdb_id'] = str(identity.get('tmdb_id'))
+            if identity.get('parent_series_tmdb_id'):
+                item['parent_series_tmdb_id'] = identity.get('parent_series_tmdb_id')
+                
+            # 👇 【修改】增强版老数据兼容：JSON提取不到就用正则从文件名提取
+            if item.get('episode_number') is None:
+                ep = None
+                if item.get('raw_json'):
+                    raw = item['raw_json']
+                    ep = (raw.get('standard_identity') or {}).get('episode_number') or \
+                         (raw.get('manual_payload') or {}).get('episode_number') or \
+                         (raw.get('auto_gap') or {}).get('episode_number')
+                
+                # 终极兜底：如果 JSON 里没有，直接从 root_name 或 title 里正则提取 (例如 S01E27 -> 27)
+                if ep is None:
+                    ep = _guess_episode_number(item.get('root_name') or item.get('title'))
+                    
+                if ep is not None:
+                    item['episode_number'] = ep
+                    
+        except Exception:
+            pass
     return jsonify({"success": True, "items": items, "total": total})
 
 
@@ -2156,6 +2732,60 @@ def api_manual_create_share():
     if not client:
         return jsonify({"success": False, "message": "未配置可用的 115 Cookie 客户端，无法创建分享"}), 400
 
+    # 先定位分享文件并校验 raw_ffprobe_json；缺 raw 时不创建 115 分享，避免生成垃圾 share_code。
+    info_resp = client.fs_get_info(root_fid)
+    node = (info_resp or {}).get('data') or {}
+    root_name = data.get('root_name') or _node_name(node) or root_fid
+    # 前端搜索阶段已经根据 PC/SHA1 和 p115_filesystem_cache 判断过 root_is_dir，
+    # 这里应优先信任前端传入值；fs_get_info 对目录偶尔返回字段不完整，会误判成文件。
+    if 'root_is_dir' in data:
+        root_is_dir = _boolish(data.get('root_is_dir'), default=True)
+    else:
+        root_is_dir = _is_folder(node) if node else True
+
+    max_depth = int(data.get('max_depth') or 6)
+    files = _collect_files_from_115(client, root_fid, root_name=root_name, max_depth=max_depth, assume_dir=root_is_dir)
+    if not files:
+        files = _collect_files_from_media_payload(data)
+    if not files:
+        return jsonify({"success": False, "message": "未能定位到可分享的视频文件，禁止创建空分享"}), 400
+
+    for item in files:
+        if not item.get('tmdb_id'):
+            item['tmdb_id'] = str(data.get('tmdb_id') or '')
+
+        # 单集分享必须强制登记为 Episode。之前只在 item_type 为空时才填充，
+        # 如果上游兜底 payload 把 item_type 带成 Season，就会把每一集错误登记成“剧集包”。
+        share_type_now = str(data.get('share_type') or '').strip().lower()
+        if share_type_now == 'episode_file':
+            item['item_type'] = 'Episode'
+            if not item.get('episode_number') and data.get('episode_number'):
+                item['episode_number'] = data.get('episode_number')
+        elif not item.get('item_type'):
+            item['item_type'] = 'Episode' if share_type_now in ('season_pack', 'series_pack') and item.get('episode_number') else data.get('item_type')
+
+        if not item.get('season_number'):
+            item['season_number'] = data.get('season_number')
+        if not item.get('episode_number') and data.get('episode_number'):
+            item['episode_number'] = data.get('episode_number')
+
+    missing_raw = _files_missing_raw_ffprobe(files)
+    if missing_raw:
+        return jsonify({
+            "success": False,
+            "message": _raw_missing_message(missing_raw),
+            "missing_raw": missing_raw,
+        }), 400
+
+    if str(data.get('share_type') or '').strip().lower() == 'season_pack':
+        consistency = _validate_season_pack_consistency(files)
+        if not consistency.get('ok'):
+            return jsonify({
+                "success": False,
+                "message": consistency.get('message') or "季包媒体参数不一致，禁止创建分享",
+                "season_pack_consistency": consistency,
+            }), 400
+
     receive_code = str(data.get('receive_code') or '').strip() or None
     share_resp = client.share_create([root_fid], share_duration=-1, receive_code=receive_code)
     if not share_resp or not share_resp.get('state'):
@@ -2166,31 +2796,13 @@ def api_manual_create_share():
     share_url = share_data.get('share_url') or (f"https://115.com/s/{share_code}" if share_code else '')
     receive_code = receive_code or share_data.get('receive_code') or ''
 
-    info_resp = client.fs_get_info(root_fid)
-    node = (info_resp or {}).get('data') or {}
-    root_name = data.get('root_name') or _node_name(node) or root_fid
-    # 前端搜索阶段已经根据 PC/SHA1 和 p115_filesystem_cache 判断过 root_is_dir，
-    # 这里应优先信任前端传入值；fs_get_info 对目录偶尔返回字段不完整，会误判成文件，
-    # 导致季包创建成功但 item_count=0，后续登记中心报“分享包内没有可登记的视频文件”。
-    if 'root_is_dir' in data:
-        root_is_dir = _boolish(data.get('root_is_dir'), default=True)
-    else:
-        root_is_dir = _is_folder(node) if node else True
-
-    max_depth = int(data.get('max_depth') or 6)
-    files = _collect_files_from_115(client, root_fid, root_name=root_name, max_depth=max_depth, assume_dir=root_is_dir)
-    if not files:
-        files = _collect_files_from_media_payload(data)
-
-    for item in files:
-        if not item.get('tmdb_id'):
-            item['tmdb_id'] = str(data.get('tmdb_id') or '')
-        if not item.get('item_type'):
-            item['item_type'] = 'Episode' if data.get('share_type') in ('season_pack', 'series_pack') and item.get('episode_number') else data.get('item_type')
-        if not item.get('season_number'):
-            item['season_number'] = data.get('season_number')
-        if not item.get('episode_number') and data.get('episode_number'):
-            item['episode_number'] = data.get('episode_number')
+    standard_identity = _standard_media_identity_for_share({
+        **data,
+        'item_type': data.get('item_type') or 'Season',
+        'share_type': data.get('share_type') or ('season_pack' if data.get('season_number') else 'movie_folder'),
+    })
+    standard_title = standard_identity.get('title') or str(data.get('title') or '').strip() or root_name
+    standard_year = standard_identity.get('release_year') or data.get('release_year')
 
     record = shared_share_db.create_share_record({
         'share_code': share_code,
@@ -2200,16 +2812,17 @@ def api_manual_create_share():
         'root_fid': root_fid,
         'root_name': root_name,
         'root_is_dir': root_is_dir,
-        'tmdb_id': str(data.get('tmdb_id') or ''),
+        'tmdb_id': str(standard_identity.get('tmdb_id') or data.get('tmdb_id') or ''),
         'item_type': data.get('item_type') or 'Season',
-        'parent_series_tmdb_id': data.get('parent_series_tmdb_id'),
+        'parent_series_tmdb_id': standard_identity.get('parent_series_tmdb_id') or data.get('parent_series_tmdb_id'),
         'season_number': data.get('season_number'),
-        'title': data.get('title') or root_name,
-        'release_year': data.get('release_year'),
+        'episode_number': data.get('episode_number'),
+        'title': standard_title,
+        'release_year': standard_year,
         'status': 'pending_review',
         'review_status': 'pending_review',
         'center_status': 'not_reported',
-        'raw_json': {'share_response': share_resp, 'root_info': info_resp, 'manual_payload': data},
+        'raw_json': {'share_response': share_resp, 'root_info': info_resp, 'manual_payload': data, 'standard_identity': standard_identity},
     })
     count = shared_share_db.replace_share_items(record['id'], files)
     record = shared_share_db.update_share_record(record['id'], item_count=count)
@@ -2256,8 +2869,15 @@ def api_check_share(record_id):
             for item in files:
                 if not item.get('tmdb_id'):
                     item['tmdb_id'] = str(record.get('tmdb_id') or '')
-                if not item.get('item_type'):
-                    item['item_type'] = 'Episode' if record.get('share_type') in ('season_pack', 'series_pack', 'episode_file') and (item.get('episode_number') or raw_payload.get('episode_number')) else record.get('item_type')
+
+                share_type_now = str(record.get('share_type') or '').strip().lower()
+                if share_type_now == 'episode_file':
+                    item['item_type'] = 'Episode'
+                    if not item.get('episode_number') and raw_payload.get('episode_number'):
+                        item['episode_number'] = raw_payload.get('episode_number')
+                elif not item.get('item_type'):
+                    item['item_type'] = 'Episode' if share_type_now in ('season_pack', 'series_pack') and (item.get('episode_number') or raw_payload.get('episode_number')) else record.get('item_type')
+
                 if not item.get('season_number'):
                     item['season_number'] = record.get('season_number')
                 if not item.get('episode_number') and raw_payload.get('episode_number'):
@@ -2321,8 +2941,15 @@ def api_report_share_to_center(record_id):
             for item in files:
                 if not item.get('tmdb_id'):
                     item['tmdb_id'] = str(record.get('tmdb_id') or '')
-                if not item.get('item_type'):
-                    item['item_type'] = 'Episode' if record.get('share_type') in ('season_pack', 'series_pack', 'episode_file') and (item.get('episode_number') or raw_payload.get('episode_number')) else record.get('item_type')
+
+                share_type_now = str(record.get('share_type') or '').strip().lower()
+                if share_type_now == 'episode_file':
+                    item['item_type'] = 'Episode'
+                    if not item.get('episode_number') and raw_payload.get('episode_number'):
+                        item['episode_number'] = raw_payload.get('episode_number')
+                elif not item.get('item_type'):
+                    item['item_type'] = 'Episode' if share_type_now in ('season_pack', 'series_pack') and (item.get('episode_number') or raw_payload.get('episode_number')) else record.get('item_type')
+
                 if not item.get('season_number'):
                     item['season_number'] = record.get('season_number')
                 if not item.get('episode_number') and raw_payload.get('episode_number'):
@@ -2338,9 +2965,65 @@ def api_report_share_to_center(record_id):
         return jsonify({"success": False, "message": "分享包内没有可登记的视频文件；已尝试从115目录和本地缓存补扫但仍未命中，请确认 root_fid 是季目录且 p115_filesystem_cache 已同步该目录"}), 400
 
     # 登记中心前先上传 raw_ffprobe_json；同时用 raw.format.size 回填本地 size=0 的条目。
-    raw_summary = _upload_share_raw_ffprobe_to_center(record_id, cfg, headers, force=False)
+    raw_summary = _upload_share_raw_ffprobe_to_center(record_id, cfg, headers, force=True)
     # 重新读取 items，确保 size/raw_ffprobe_uploaded 是最新状态。
     items = shared_share_db.list_share_items(record_id)
+
+    missing_raw = _files_missing_raw_ffprobe(items)
+    not_uploaded = [
+        i for i in items
+        if str(i.get('sha1') or '').strip()
+        and not i.get('raw_ffprobe_uploaded')
+        and not any(str(m.get('sha1') or '').upper() == str(i.get('sha1') or '').upper() for m in missing_raw)
+    ]
+    if missing_raw or not_uploaded or raw_summary.get('errors'):
+        errors = []
+        if missing_raw:
+            errors.append(_raw_missing_message(missing_raw))
+        if not_uploaded:
+            errors.append('存在 raw_ffprobe_json 尚未成功上传中心的分享项，禁止登记中心')
+        if raw_summary.get('errors'):
+            errors.extend(raw_summary.get('errors')[:5])
+        row = shared_share_db.update_share_record(
+            record_id,
+            center_status='failed',
+            last_error='；'.join(errors[:8]),
+        )
+        shared_virtual_db.add_credit_ledger(
+            'share_raw_missing_blocked', 0,
+            f"分享缺少 raw_ffprobe_json，已阻止登记中心：{len(missing_raw)} 个缺失，{len(not_uploaded)} 个未上传",
+            ref_id=str(record_id), title=record.get('title') or '',
+            raw_json={'missing_raw': missing_raw, 'not_uploaded': not_uploaded, 'raw_summary': raw_summary}
+        )
+        return jsonify({
+            "success": False,
+            "message": '；'.join(errors[:5]) or "缺少 raw_ffprobe_json，禁止登记中心",
+            "data": row,
+            "missing_raw": missing_raw,
+            "raw_summary": raw_summary,
+        }), 400
+
+    record_share_type_for_check = str(record.get('share_type') or '').strip().lower()
+    if record_share_type_for_check in ('season_pack', 'series_pack', 'season', 'tv_pack'):
+        consistency = _validate_season_pack_consistency(items)
+        if not consistency.get('ok'):
+            row = shared_share_db.update_share_record(
+                record_id,
+                center_status='failed',
+                last_error=consistency.get('message') or '季包媒体参数不一致，禁止登记中心',
+            )
+            shared_virtual_db.add_credit_ledger(
+                'share_season_pack_inconsistent_blocked', 0,
+                '季包分辨率或 HDR/杜比不一致，已阻止登记中心',
+                ref_id=str(record_id), title=record.get('title') or '',
+                raw_json={'season_pack_consistency': consistency},
+            )
+            return jsonify({
+                "success": False,
+                "message": consistency.get('message') or "季包媒体参数不一致，禁止登记中心",
+                "data": row,
+                "season_pack_consistency": consistency,
+            }), 400
 
     reported = 0
     errors = []
@@ -2350,16 +3033,22 @@ def api_report_share_to_center(record_id):
         if not sha1:
             errors.append(f"{item.get('file_name')} 缺少 SHA1，跳过")
             continue
-        is_season_pack = str(record.get('share_type') or '').lower() in ('season_pack', 'season', 'tv_pack') or (record.get('root_is_dir') and str(record.get('item_type') or '').lower() in ('season', 'series', 'tv'))
+        # 只有显式 season_pack / series_pack 才按“季包”登记中心。
+        # 不能再用 root_is_dir + item_type=Season 兜底，否则历史/兜底数据会把单集文件批量登记成剧集包。
+        record_share_type = str(record.get('share_type') or '').strip().lower()
+        is_season_pack = record_share_type in ('season_pack', 'series_pack', 'season', 'tv_pack')
         center_item_type = 'Season' if is_season_pack else (item.get('item_type') or record.get('item_type') or 'Movie')
+        if record_share_type == 'episode_file':
+            center_item_type = 'Episode'
         center_episode_number = None if is_season_pack else item.get('episode_number')
+        standard_identity = _standard_share_identity(record, item, center_item_type=center_item_type)
         payload = {
-            'tmdb_id': str(item.get('tmdb_id') or record.get('tmdb_id') or ''),
+            'tmdb_id': str(standard_identity.get('tmdb_id') or item.get('tmdb_id') or record.get('tmdb_id') or ''),
             'item_type': center_item_type,
             'season_number': item.get('season_number') or record.get('season_number'),
             'episode_number': center_episode_number,
-            'title': record.get('title') or item.get('file_name'),
-            'release_year': record.get('release_year'),
+            'title': standard_identity.get('title') or record.get('title') or '',
+            'release_year': standard_identity.get('release_year') or record.get('release_year'),
             'sha1': sha1,
             'size': int(item.get('size') or 0),
             'file_name': item.get('file_name') or '',
@@ -2370,7 +3059,28 @@ def api_report_share_to_center(record_id):
             'has_raw_ffprobe': bool(item.get('raw_ffprobe_uploaded')),
         }
         try:
-            resp = requests.post(f"{cfg['center_url']}/api/v1/sources/register", headers=headers, json=payload, timeout=20)
+            resp = requests.post(
+                f"{cfg['center_url']}/api/v1/sources/register",
+                headers=headers,
+                json=payload,
+                **_center_request_kwargs(20)
+            )
+
+            # 中心提示 raw 缺失时，强制重传 raw 后再登记一次
+            if resp.status_code == 400 and 'raw_ffprobe_json required before source register' in (resp.text or ''):
+                raw_retry = _upload_item_raw_ffprobe_to_center(item, cfg, headers, force=True)
+                if raw_retry.get('ok'):
+                    payload['has_raw_ffprobe'] = True
+                    resp = requests.post(
+                        f"{cfg['center_url']}/api/v1/sources/register",
+                        headers=headers,
+                        json=payload,
+                        **_center_request_kwargs(20)
+                    )
+                else:
+                    errors.append(f"{item.get('file_name')}: raw重传失败 {raw_retry.get('message')}")
+                    continue
+
             if not resp.ok:
                 errors.append(f"{item.get('file_name')}: HTTP {resp.status_code} {resp.text[:120]}")
                 continue
@@ -2925,6 +3635,66 @@ def _center_is_pack_like_row(item: Dict[str, Any]) -> bool:
     return False
 
 
+
+def _center_created_ts(item: Dict[str, Any]) -> float:
+    value = (item or {}).get('created_at')
+    if not value:
+        return 0.0
+    if hasattr(value, 'timestamp'):
+        try:
+            return float(value.timestamp())
+        except Exception:
+            return 0.0
+    text = str(value).strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        return float(datetime.fromisoformat(text).timestamp())
+    except Exception:
+        return 0.0
+
+
+
+def _center_infer_episode_number(item: Dict[str, Any]):
+    """从中心源记录里尽量推断单集集号，用于修复历史误登记的“假剧集包”。"""
+    item = item or {}
+    value = item.get('episode_number')
+    if value not in (None, ''):
+        try:
+            return int(value)
+        except Exception:
+            return value
+    for key in ('file_name', 'relative_path', 'title', 'root_name'):
+        ep = _guess_episode_number(str(item.get(key) or ''))
+        if ep is not None:
+            return ep
+    raw = item.get('raw_ffprobe_json')
+    if isinstance(raw, dict):
+        etk = raw.get('_etk') if isinstance(raw.get('_etk'), dict) else {}
+        for key in ('episode_number', 'episode'):
+            if etk.get(key) not in (None, ''):
+                try:
+                    return int(etk.get(key))
+                except Exception:
+                    return etk.get(key)
+    return None
+
+
+def _center_mark_as_episode_row(item: Dict[str, Any], episode_number=None) -> Dict[str, Any]:
+    row = dict(item or {})
+    ep = episode_number if episode_number not in (None, '') else _center_infer_episode_number(row)
+    if ep not in (None, ''):
+        row['episode_number'] = ep
+    row['item_type'] = 'Episode'
+    row['share_type'] = 'episode_file'
+    row['display_type'] = 'Episode'
+    row['is_collapsed_pack'] = False
+    row.pop('pack_item_count', None)
+    row.pop('pack_source_ids', None)
+    row.pop('pack_episode_numbers', None)
+    row.pop('pack_tmdb_ids', None)
+    return row
+
 def _center_display_type(item: Dict[str, Any]) -> str:
     """中心资源库只暴露三类：Movie / Pack / Episode。"""
     if not item:
@@ -2963,8 +3733,8 @@ def _collapse_center_season_pack_rows(items: List[Dict[str, Any]]) -> List[Dict[
     展示模型统一成三类：电影、剧集包、单集。
     - Movie/movie_file/movie_folder 永远按电影展示；
     - 同一个 contributor + share_code + season 下存在多条剧集/分集记录时折叠为剧集包；
-    - Season/Series/tv/season_pack 即使只有一条，也按剧集包展示；
-    - 真正只有一条的 episode/episode_file 按单集展示，不误折叠。
+    - Season/Series/tv/season_pack 只有在同分享码下确实包含多集，或无法推断为单集时，才按剧集包展示；
+    - 历史误登记的“每个 share_code 只有一个文件、file_name 可推断集号”的 Season 行，按 Episode 单集展示。
     """
     groups: Dict[str, List[Dict[str, Any]]] = {}
     passthrough: List[Dict[str, Any]] = []
@@ -3002,17 +3772,25 @@ def _collapse_center_season_pack_rows(items: List[Dict[str, Any]]) -> List[Dict[
 
     collapsed: List[Dict[str, Any]] = []
     for rows in groups.values():
-        # Season/Series/tv/season_pack 本身就是剧集包；多条 episode 同分享码同季也折叠为剧集包。
-        must_pack = any(_center_is_pack_like_row(r) for r in rows)
-        if len(rows) <= 1 and not must_pack:
+        # 多条同 share_code + season 的源才是“包”。单条源如果能从文件名/raw 推断集号，
+        # 多半是旧版本把 episode_file 错登记成 Season，展示层先按单集兜底，避免“每集都是剧集包”。
+        if len(rows) <= 1:
             row = dict(rows[0])
-            row['display_type'] = 'Episode'
-            passthrough.append(row)
+            inferred_ep = _center_infer_episode_number(row)
+            if inferred_ep not in (None, '') and _center_norm_item_type(row.get('source_provider')) != 'season_pack':
+                passthrough.append(_center_mark_as_episode_row(row, inferred_ep))
+            else:
+                row['display_type'] = 'Pack' if _center_is_pack_like_row(row) else 'Episode'
+                passthrough.append(row)
             continue
 
         rows_sorted = sorted(rows, key=lambda r: (1 if r.get('raw_ffprobe_json') else 0, int(r.get('size') or 0)), reverse=True)
         rep = dict(rows_sorted[0])
+        newest_row = max(rows, key=_center_created_ts)
+        if newest_row.get('created_at'):
+            rep['created_at'] = newest_row.get('created_at')
         total_size = 0
+        total_success = 0
         episode_numbers = []
         source_ids = []
         tmdb_ids = []
@@ -3023,6 +3801,7 @@ def _collapse_center_season_pack_rows(items: List[Dict[str, Any]]) -> List[Dict[
                 total_size += int(r.get('size') or 0)
             except Exception:
                 pass
+            total_success += int(r.get('success_count') or 0)
             sid = r.get('source_id')
             if sid:
                 source_ids.append(sid)
@@ -3049,6 +3828,7 @@ def _collapse_center_season_pack_rows(items: List[Dict[str, Any]]) -> List[Dict[
         rep['pack_tmdb_ids'] = unique_tmdb_ids
         rep['share_type'] = 'season_pack'
         rep['is_collapsed_pack'] = True
+        rep['success_count'] = total_success
         if not has_any_episode and not unique_eps:
             rep['pack_note'] = f"同一分享码下 {len(rows)} 个文件"
 
@@ -3171,7 +3951,7 @@ def _merge_rows_by_source_id(base_rows: List[Dict[str, Any]], raw_rows: List[Dic
     return merged
 
 
-def _load_center_sources_for_display(client, *, keyword: str = '', tmdb_id: str = '', display_type: str = '', status: str = 'alive,pending', limit: int = 30, offset: int = 0) -> Dict[str, Any]:
+def _load_center_sources_for_display(client, *, keyword: str = '', tmdb_id: str = '', display_type: str = '', status: str = 'alive,pending', order_by: str = 'latest', limit: int = 30, offset: int = 0) -> Dict[str, Any]:
     """按展示口径加载中心资源库。
 
     中心接口是按 shared_sources 原始文件分页，前端需要按“电影 / 剧集包 / 单集”展示。
@@ -3195,6 +3975,7 @@ def _load_center_sources_for_display(client, *, keyword: str = '', tmdb_id: str 
             tmdb_id=tmdb_id or '',
             item_type='',
             status=status or 'alive,pending',
+            order_by=order_by,
             limit=raw_page_size,
             offset=raw_offset,
             include_raw=False,
@@ -3212,6 +3993,15 @@ def _load_center_sources_for_display(client, *, keyword: str = '', tmdb_id: str 
         expanded = _expand_center_pack_page_items(client, raw_rows, status=status)
         collapsed = _collapse_center_season_pack_rows(expanded)
         display_rows = [r for r in collapsed if _center_match_display_type(r, display_type)]
+        if order_by == 'popular':
+            display_rows.sort(key=lambda r: (int(r.get('success_count') or 0), _center_created_ts(r)), reverse=True)
+        elif order_by == 'name':
+            display_rows.sort(key=lambda r: (str(r.get('title') or ''), -_center_created_ts(r)))
+        elif order_by == 'size':
+            display_rows.sort(key=lambda r: (int(r.get('size') or 0), _center_created_ts(r)), reverse=True)
+        else:
+            display_rows.sort(key=lambda r: (_center_created_ts(r), str(r.get('source_id') or '')), reverse=True)
+            
         if len(display_rows) >= target_count:
             break
         raw_offset += len(page_items)
@@ -3265,14 +4055,8 @@ _CENTER_SOURCE_PROVIDER_LABELS = {
 
 
 def _load_local_share_code_set(items: List[Dict[str, Any]]) -> set:
-    codes = sorted({str(x.get('share_code') or '').strip() for x in (items or []) if str(x.get('share_code') or '').strip()})
-    if not codes:
-        return set()
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT share_code FROM shared_share_records WHERE share_code = ANY(%s)", (codes,))
-                return {str(r.get('share_code') or '').strip() for r in cur.fetchall()}
+        return shared_share_db.get_existing_share_code_set(items)
     except Exception as e:
         logger.debug(f"  ➜ [共享资源] 查询本地分享来源失败: {e}")
         return set()
@@ -3281,6 +4065,17 @@ def _load_local_share_code_set(items: List[Dict[str, Any]]) -> set:
 def _decorate_center_source_row(item: Dict[str, Any]) -> Dict[str, Any]:
     """给中心资源库行补充面向前端的可读来源/状态。"""
     item = item or {}
+    # 本机能命中 media_metadata 时，用标准片名/年份修正中心历史标题；远端未知来源则保持中心返回值。
+    try:
+        identity = _standard_media_identity_for_share(item)
+        if identity.get('title'):
+            item['title'] = identity.get('title')
+        if identity.get('release_year') and not item.get('release_year'):
+            item['release_year'] = identity.get('release_year')
+        if identity.get('parent_series_tmdb_id'):
+            item['parent_series_tmdb_id'] = identity.get('parent_series_tmdb_id')
+    except Exception:
+        pass
     status = str(item.get('status') or '').strip()
     status_text, status_type = _CENTER_STATUS_LABELS.get(status, (status or '未知', 'default'))
     provider = str(item.get('source_provider') or '').strip() or 'user_share'
@@ -3328,6 +4123,7 @@ def api_center_sources():
             tmdb_id=request.args.get('tmdb_id', ''),
             display_type=request.args.get('item_type', ''),
             status=request.args.get('status', 'alive,pending'),
+            order_by=request.args.get('order_by', 'latest'),
             limit=int(request.args.get('limit', 30) or 30),
             offset=int(request.args.get('offset', 0) or 0),
         )

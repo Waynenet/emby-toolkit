@@ -1,3 +1,4 @@
+<!-- src/components/SharedResourceManagerPage.vue -->
 <template>
   <div class="shared-page">
     <n-space vertical :size="18">
@@ -44,7 +45,7 @@
         <n-tabs v-model:value="activeTab" animated type="line" @update:value="handleTabChange">
           <n-tab-pane name="virtual" tab="虚拟入库">
             <n-alert type="warning" :bordered="false" style="margin-bottom: 12px;">
-              虚拟入库仅生成 STRM，播放时临时转存到临时缓存目录。值得收藏的资源请及时“转正”，以免临时缓存过期被删除后，无法再次转存。
+              虚拟入库仅生成 STRM，播放时转存到临时缓存目录。值得收藏的资源请及时“转正”，以免临时缓存过期被删除后，无法再次转存。
             </n-alert>
             <n-space class="toolbar" :vertical="isMobile" :size="12">
               <n-input v-model:value="virtualFilters.keyword" placeholder="搜索标题 / 文件名 / TMDb ID / SHA1" clearable @keyup.enter="loadVirtualItems">
@@ -108,6 +109,7 @@
               </n-input>
               <n-select v-model:value="centerFilters.item_type" :options="centerTypeOptions" style="width: 140px" />
               <n-select v-model:value="centerFilters.status" :options="centerStatusOptions" style="width: 150px" />
+              <n-select v-model:value="centerFilters.order_by" :options="centerOrderOptions" style="width: 130px" />
               <n-button type="primary" :loading="centerLoading" @click="loadCenterSources">查询中心</n-button>
               <n-button secondary :loading="maintenanceSubmitting" @click="triggerSharedMaintenance">执行维护任务</n-button>
             </n-space>
@@ -138,7 +140,7 @@
       </n-card>
     </n-space>
 
-    <n-modal v-model:show="showManualShareModal" preset="card" title="手动创建共享资源" style="width: 920px; max-width: 96vw;" class="modal-card-lite">
+    <n-modal v-model:show="showManualShareModal" preset="card" title="手动创建共享资源" style="width: 920px; max-width: 96vw;" class="custom-modal glass-modal">
       <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
         直接输入片名搜索本地 media_metadata，系统会用已记录的 PC/SHA1 反查 p115_filesystem_cache，自动定位可分享的 115 目录或文件。剧集会优先按季目录分享，不创建单集分享。
       </n-alert>
@@ -194,7 +196,7 @@ import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue';
 import axios from 'axios';
 import {
   NAlert, NButton, NCard, NDataTable, NForm, NFormItem, NGi, NGrid, NIcon, NInput,
-  NInputNumber, NModal, NSelect, NSpace, NTabPane, NTabs, NTag, NText, useDialog, useMessage
+  NInputNumber, NModal, NSelect, NSpace, NTabPane, NTabs, NTag, NText, useDialog, useMessage, useThemeVars
 } from 'naive-ui';
 import {
   RefreshOutline as RefreshIcon,
@@ -212,6 +214,7 @@ import {
 
 const message = useMessage();
 const dialog = useDialog();
+const themeVars = useThemeVars();
 
 const isMobile = ref(false);
 const checkMobile = () => { isMobile.value = window.innerWidth <= 768; };
@@ -230,21 +233,29 @@ const mediaSearchKeyword = ref('');
 const mediaSearchLoading = ref(false);
 const mediaCandidates = ref([]);
 const selectedMedia = ref(null);
+const importingMap = reactive({});
 
 const summary = ref({ local: {}, shares: {}, credit: {} });
 const virtualItems = ref([]);
 const shareItems = ref([]);
 const ledgerItems = ref([]);
 const centerSources = ref([]);
-const groupedCenterSources = computed(() => groupCenterSources(centerSources.value || []));
+const groupedCenterSources = computed(() => groupCenterSources(centerSources.value || [], centerFilters.order_by));
 const ledgerCollapsedGroups = reactive({});
 
 const virtualFilters = reactive({ keyword: '', status: 'all', item_type: 'all' });
-const shareFilters = reactive({ keyword: '', status: 'all' });
-const centerFilters = reactive({ keyword: '', status: 'alive,pending', item_type: 'all' });
+const shareFilters = reactive({ keyword: '', status: 'active' });
+const centerFilters = reactive({ keyword: '', status: 'alive,pending', item_type: 'all', order_by: 'latest' });
 const virtualPagination = reactive({ page: 1, pageSize: 30, itemCount: 0, showSizePicker: true, pageSizes: [20, 30, 50, 100] });
 const sharePagination = reactive({ page: 1, pageSize: 30, itemCount: 0, showSizePicker: true, pageSizes: [20, 30, 50, 100] });
 const centerPagination = reactive({ page: 1, pageSize: 30, itemCount: 0, showSizePicker: true, pageSizes: [20, 30, 50, 100] });
+
+const centerOrderOptions = [
+  { label: '最新分享', value: 'latest' },
+  { label: '热门分享', value: 'popular' },
+  { label: '文件大小', value: 'size' },
+  { label: '名称排序', value: 'name' },
+];
 
 const manualShareForm = reactive({
   root_fid: '', root_name: '', root_is_dir: true, title: '', tmdb_id: '', parent_series_tmdb_id: '',
@@ -257,17 +268,20 @@ const virtualStatusOptions = [
   { label: '已转正', value: 'promoted' }, { label: '已删除', value: 'deleted' }, { label: '异常', value: 'error' },
 ];
 const shareStatusOptions = [
-  { label: '全部状态', value: 'all' }, { label: '审核中', value: 'pending_review' },
-  { label: '已通过', value: 'alive' }, { label: '已登记', value: 'reported' },
-  { label: '部分登记', value: 'partial' }, { label: '失败/异常', value: 'failed' },
+  { label: '有效分享', value: 'active' }, 
+  { label: '全部状态', value: 'all' }, 
+  { label: '审核中', value: 'pending_review' },
+  { label: '已通过', value: 'alive' }, 
+  { label: '已登记', value: 'reported' },
+  { label: '部分登记', value: 'partial' }, 
+  { label: '失败/异常', value: 'failed' },
   { label: '已取消', value: 'cancelled' },
 ];
 
 const centerStatusOptions = [
-  { label: '可用/待验证', value: 'alive,pending' },
+  { label: '全部', value: '' },
   { label: '仅可用', value: 'alive' },
   { label: '仅待验证', value: 'pending' },
-  { label: '全部', value: '' },
 ];
 const typeOptions = [
   { label: '全部类型', value: 'all' }, { label: '电影', value: 'Movie' },
@@ -330,6 +344,63 @@ const fmtBytes = (value) => {
 const fmtDate = (value) => { if (!value) return '-'; try { return new Date(value).toLocaleString(); } catch { return String(value); } };
 const tag = (value) => { const meta = statusMap[value] || { text: value || '未知', type: 'default' }; return h(NTag, { type: meta.type, size: 'small', round: true }, { default: () => meta.text }); };
 
+const appendYear = (title, year) => {
+  const base = String(title || '').trim() || '-';
+  const y = year ? String(year).trim() : '';
+  if (!y || base === '-') return base;
+  return new RegExp(`\\(${y}\\)\\s*$`).test(base) ? base : `${base} (${y})`;
+};
+const standardTitleText = (row, fallback = '') => appendYear(row?.title || row?.standard_title || row?.media_title || fallback || row?.file_name || row?.root_name || row?.tmdb_id, row?.release_year);
+const tmdbIdForRow = (row) => String(row?.parent_series_tmdb_id || row?.share_tmdb_id || row?.tmdb_id || '').trim();
+const tmdbMediaKind = (row) => {
+  const type = String(centerRowTypeSafe(row) || row?.display_type || row?.item_type || row?.share_type || '').toLowerCase();
+  if (type.includes('movie') || type === 'film' || type === '电影') return 'movie';
+  return 'tv';
+};
+const centerRowTypeSafe = (row) => row?.display_type || (row?.is_collapsed_pack || row?.pack_item_count ? 'Pack' : row?.item_type);
+const tmdbHref = (row) => {
+  const id = tmdbIdForRow(row);
+  if (!id) return '';
+  return `https://www.themoviedb.org/${tmdbMediaKind(row)}/${encodeURIComponent(id)}`;
+};
+const openTmdb = (row) => {
+  const href = tmdbHref(row);
+  if (!href) return;
+  const win = window.open(href, '_blank', 'noopener,noreferrer');
+  if (win) win.opener = null;
+};
+const tmdbLink = (row, labelPrefix = 'TMDb') => {
+  const id = tmdbIdForRow(row);
+  if (!id) return `${labelPrefix} -`;
+  return h('span', {
+    class: 'tmdb-pill',
+    role: 'link',
+    tabindex: 0,
+    title: `打开 TMDb ${id}`,
+    style: {
+      '--tmdb-color': themeVars.value.primaryColor,
+      '--tmdb-color-hover': themeVars.value.primaryColorHover || themeVars.value.primaryColor,
+    },
+    onClick: e => { e.stopPropagation(); openTmdb(row); },
+    onKeydown: e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        openTmdb(row);
+      }
+    },
+  }, [
+    h('span', { class: 'tmdb-pill-label' }, labelPrefix),
+    h('span', { class: 'tmdb-pill-id' }, id),
+  ]);
+};
+
+const centerCreatedTime = (row) => {
+  const t = new Date(row?.created_at || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+const metaLine = (row, parts = []) => h('div', { class: 'sub-title' }, [tmdbLink(row), ...parts.filter(Boolean)]);
+
 const hasCenterDevice = computed(() => Boolean((summary.value.credit || {}).device_id));
 
 const statCards = computed(() => {
@@ -352,8 +423,8 @@ const virtualColumns = [
     const epText = row.episode_number ? `E${String(row.episode_number).padStart(2, '0')}` : '';
     const packText = row.is_collapsed_pack ? ` · ${row.pack_item_count || 0}集包${row.pack_episode_numbers?.length ? ` · E${String(row.pack_episode_numbers[0]).padStart(2, '0')}-${String(row.pack_episode_numbers[row.pack_episode_numbers.length - 1]).padStart(2, '0')}` : ''}` : '';
     return h('div', [
-      h('div', { class: 'main-title' }, row.title || row.file_name || row.tmdb_id),
-      h('div', { class: 'sub-title' }, `${resourceTypeLabel(row.item_type)} · TMDb ${row.tmdb_id || '-'}${seasonText ? ` · ${seasonText}` : ''}${epText}${packText}`)
+      h('div', { class: 'main-title' }, standardTitleText(row, row.file_name)),
+      metaLine(row, [` · ${resourceTypeLabel(row.item_type)}`, seasonText ? ` · ${seasonText}` : '', epText, packText])
     ]);
   } },
   { title: '状态', key: 'status', width: 120, render: row => tag(row.status) },
@@ -373,8 +444,8 @@ const shareColumns = [
     const seasonText = row.season_number ? ` · S${String(row.season_number).padStart(2, '0')}` : '';
     const episodeText = row.episode_number ? `E${String(row.episode_number).padStart(2, '0')}` : '';
     return h('div', [
-      h('div', { class: 'main-title' }, row.title || row.root_name || row.share_code),
-      h('div', { class: 'sub-title' }, `${shareTypeLabel(row.share_type)} · TMDb ${row.tmdb_id || '-'}${seasonText}${episodeText}`)
+      h('div', { class: 'main-title' }, standardTitleText(row, row.root_name || row.share_code)),
+      metaLine(row, [` · ${shareTypeLabel(row.share_type)}`, seasonText, episodeText])
     ]);
   } },
   { title: '审核', key: 'review_status', width: 110, render: row => tag(row.review_status || row.status) },
@@ -402,8 +473,8 @@ const shareColumns = [
 
 const mediaSearchColumns = [
   { title: '媒体', key: 'display_title', minWidth: 260, render: row => h('div', [
-    h('div', { class: 'main-title' }, row.display_title || row.title || row.tmdb_id),
-    h('div', { class: 'sub-title' }, `${resourceTypeLabel(row.item_type)} · TMDb ${row.share_tmdb_id || row.tmdb_id || '-'}${row.release_year ? ` · ${row.release_year}` : ''}`)
+    h('div', { class: 'main-title' }, appendYear(row.display_title || row.standard_title || row.title || row.tmdb_id, row.release_year)),
+    metaLine(row, [` · ${resourceTypeLabel(row.item_type)}`])
   ]) },
   { title: '入库', key: 'in_library', width: 80, render: row => h(NTag, { size: 'small', type: row.in_library ? 'success' : 'default' }, { default: () => row.in_library ? '已入库' : '未入库' }) },
   { title: '可分享根目录/文件', key: 'root_name', minWidth: 260, render: row => h('div', [
@@ -580,21 +651,32 @@ const centerTypeLabel = (value) => ({
   Pack: '剧集包', pack: '剧集包', Season: '剧集包', season: '剧集包', Series: '剧集包', series: '剧集包', tv: '剧集包', season_pack: '剧集包', series_pack: '剧集包',
   Episode: '单集', episode: '单集', episodes: '单集', episode_file: '单集',
 }[value] || value || '-');
-const centerRowType = (row) => row.display_type || (row.is_collapsed_pack || row.pack_item_count ? 'Pack' : row.item_type);
-const centerTitleText = (row) => {
-  const title = row.title || row.media_title || '-';
-  const year = row.release_year ? ` (${row.release_year})` : '';
-  return `${title}${year}`;
-};
+const centerRowType = centerRowTypeSafe;
+const centerTitleText = (row) => standardTitleText(row);
 const centerSeasonText = (row) => {
   const displayType = centerRowType(row);
   const s = row.season_number ? `S${String(row.season_number).padStart(2, '0')}` : '';
   const e = row.episode_number ? `E${String(row.episode_number).padStart(2, '0')}` : '';
-  const pack = row.pack_item_count ? `${row.pack_item_count}集包` : '';
+
   if (centerTypeLabel(displayType) === '电影') return '电影';
-  if (centerTypeLabel(displayType) === '剧集包') return ['剧集包', s, pack].filter(Boolean).join(' · ');
+
+  if (centerTypeLabel(displayType) === '剧集包') {
+    const count = row.pack_item_count ? `${row.pack_item_count}集` : '';
+    let range = '';
+    // 如果有具体的集数列表，提取出范围 (例如 E01-E20)
+    if (row.pack_episode_numbers && row.pack_episode_numbers.length > 1) {
+      const nums = row.pack_episode_numbers;
+      range = `E${String(nums[0]).padStart(2, '0')}-E${String(nums[nums.length - 1]).padStart(2, '0')}`;
+    } else if (row.pack_episode_numbers && row.pack_episode_numbers.length === 1) {
+      range = `E${String(row.pack_episode_numbers[0]).padStart(2, '0')}`;
+    }
+    const packDesc = [count, range ? `(${range})` : ''].filter(Boolean).join(' ');
+    return [s, packDesc || '剧集包'].filter(Boolean).join(' · ');
+  }
+
   if (centerTypeLabel(displayType) === '单集') return ['单集', s && e ? `${s}${e}` : (s || e)].filter(Boolean).join(' · ');
-  return [centerTypeLabel(displayType), s ? `${s}${e}` : '', pack].filter(Boolean).join(' · ') || '-';
+
+  return [centerTypeLabel(displayType), s ? `${s}${e}` : '', row.pack_item_count ? `${row.pack_item_count}集包` : ''].filter(Boolean).join(' · ') || '-';
 };
 const centerStatusTag = (row) => {
   const text = row.status_label || statusMap[row.status]?.text || row.status || '未知';
@@ -622,6 +704,35 @@ const listCell = (items, limit = 3) => {
     more ? h('div', { class: 'sub-title' }, more) : null
   ]);
 };
+const executeImport = async (row, mode) => {
+  const modeText = mode === 'virtual' ? '入库' : '转存';
+  // 标记该行正在 loading
+  importingMap[row.source_id] = mode;
+  try {
+    const sourceIds = Array.isArray(row.pack_source_ids) && row.pack_source_ids.length ? row.pack_source_ids : [row.source_id];
+    const res = await axios.post('/api/shared/resources/center/import', {
+      source_ids: sourceIds,
+      mode,
+      context: {
+        title: row.title || '',
+        tmdb_id: row.tmdb_id || '',
+        item_type: centerRowType(row) || row.item_type || '',
+        season_number: row.season_number ?? null,
+        episode_number: row.episode_number ?? null,
+        year: row.release_year || '',
+        share_type: row.share_type || '',
+      }
+    });
+    message.success(res.data?.message || '已提交');
+    await Promise.allSettled([loadVirtualItems(), loadSummary(), loadLedger()]);
+  } catch (e) {
+    message.error(e.response?.data?.message || `${modeText}失败`);
+  } finally {
+    // 请求结束，移除 loading 状态
+    delete importingMap[row.source_id];
+  }
+};
+
 const importCenterSource = (row, mode) => {
   const modeText = mode === 'virtual' ? '入库' : '转存';
   dialog.info({
@@ -629,27 +740,9 @@ const importCenterSource = (row, mode) => {
     content: `确定将中心资源《${centerTitleText(row)}》执行${modeText}吗？`,
     positiveText: modeText,
     negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        const sourceIds = Array.isArray(row.pack_source_ids) && row.pack_source_ids.length ? row.pack_source_ids : [row.source_id];
-        const res = await axios.post('/api/shared/resources/center/import', {
-          source_ids: sourceIds,
-          mode,
-          context: {
-            title: row.title || '',
-            tmdb_id: row.tmdb_id || '',
-            item_type: centerRowType(row) || row.item_type || '',
-            season_number: row.season_number ?? null,
-            episode_number: row.episode_number ?? null,
-            year: row.release_year || '',
-            share_type: row.share_type || '',
-          }
-        });
-        message.success(res.data?.message || '已提交');
-        await Promise.allSettled([loadVirtualItems(), loadSummary(), loadLedger()]);
-      } catch (e) {
-        message.error(e.response?.data?.message || `${modeText}失败`);
-      }
+    // 注意：这里去掉了 async，让函数同步返回，这样弹窗会立刻关闭，不卡界面
+    onPositiveClick: () => {
+      executeImport(row, mode);
     }
   });
 };
@@ -667,7 +760,7 @@ const centerGroupKey = (row) => {
   return `${baseType}:${tmdb || title}:${season}:${episode}`;
 };
 
-const groupCenterSources = (items) => {
+const groupCenterSources = (items, orderBy = 'latest') => {
   const groups = [];
   const byKey = new Map();
   for (const item of (items || [])) {
@@ -676,14 +769,18 @@ const groupCenterSources = (items) => {
     if (!group) {
       group = {
         group_key: key,
-        title: item.title,
+        title: item.title || item.standard_title,
         media_title: item.media_title,
         tmdb_id: item.tmdb_id,
         share_tmdb_id: item.share_tmdb_id,
+        parent_series_tmdb_id: item.parent_series_tmdb_id,
         release_year: item.release_year,
         season_number: item.season_number,
         episode_number: item.episode_number,
         display_type: centerRowType(item),
+        pack_item_count: item.pack_item_count,
+        pack_episode_numbers: item.pack_episode_numbers,
+        is_collapsed_pack: item.is_collapsed_pack,
         versions: [],
       };
       byKey.set(key, group);
@@ -691,6 +788,30 @@ const groupCenterSources = (items) => {
     }
     group.versions.push(item);
   }
+  for (const group of groups) {
+    // 👇 根据不同排序规则，对组内版本排序，并提取组的排序基准值
+    if (orderBy === 'popular') {
+      group.versions.sort((a, b) => (b.success_count || 0) - (a.success_count || 0));
+      group.sort_val = Math.max(...group.versions.map(v => v.success_count || 0));
+    } else if (orderBy === 'size') {
+      group.versions.sort((a, b) => (b.size || 0) - (a.size || 0));
+      group.sort_val = Math.max(...group.versions.map(v => v.size || 0));
+    } else if (orderBy === 'name') {
+      group.versions.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+      group.sort_val = group.title || '';
+    } else {
+      group.versions.sort((a, b) => centerCreatedTime(b) - centerCreatedTime(a));
+      group.sort_val = centerCreatedTime(group.versions[0]);
+    }
+    group.created_at = group.versions[0]?.created_at || group.created_at;
+  }
+  
+  // 👇 对所有组进行排序
+  groups.sort((a, b) => {
+    if (orderBy === 'popular' || orderBy === 'size') return b.sort_val - a.sort_val;
+    if (orderBy === 'name') return String(a.sort_val).localeCompare(String(b.sort_val));
+    return b.sort_val - a.sort_val; // latest
+  });
   return groups;
 };
 
@@ -718,9 +839,10 @@ const allTrackTitle = (items) => {
 const centerColumns = [
   { title: '片名', key: 'title', minWidth: 190, fixed: 'left', render: row => h('div', null, [
     h('div', { class: 'main-title' }, centerTitleText(row)),
-    h('div', { class: 'sub-title' }, `TMDb ${row.tmdb_id || row.share_tmdb_id || '-'}`)
+    metaLine(row)
   ]) },
-  { title: '类型', key: 'item_type', width: 130, render: row => centerSeasonText(row) },
+  // 👇 将类型列改为按版本拆分多行 (lineStack)，并加宽到 160
+  { title: '类型', key: 'item_type', width: 160, render: row => lineStack(row.versions, it => h('span', centerSeasonText(it))) },
   { title: '分辨率', key: 'resolution', width: 90, render: row => lineStack(row.versions, it => h('span', it.version_summary?.resolution || '-')) },
   { title: '视频编码', key: 'video_codec', width: 120, render: row => lineStack(row.versions, it => {
     const v = it.version_summary || {};
@@ -731,11 +853,32 @@ const centerColumns = [
   { title: '音轨', key: 'audios', minWidth: 220, render: row => lineStack(row.versions, it => h('span', defaultTrackText(it.version_summary?.audio_list || it.version_summary?.audios)), it => allTrackTitle(it.version_summary?.audio_list || it.version_summary?.audios)) },
   { title: '字幕', key: 'subtitles', minWidth: 220, render: row => lineStack(row.versions, it => h('span', defaultTrackText(it.version_summary?.subtitle_list || it.version_summary?.subtitles)), it => allTrackTitle(it.version_summary?.subtitle_list || it.version_summary?.subtitles)) },
   { title: '大小', key: 'size', width: 95, render: row => lineStack(row.versions, it => h('span', formatCenterSize(it))) },
+  { title: '热度', key: 'success_count', width: 80, render: row => lineStack(row.versions, it => h('span', `${it.success_count || 0} 次`)) },
   { title: '可用性', key: 'status', width: 105, render: row => lineStack(row.versions, it => centerStatusTag(it)) },
-  { title: '操作', key: 'actions', width: 190, fixed: 'right', render: row => lineStack(row.versions, it => h(NSpace, { size: 6 }, { default: () => [
-    h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => importCenterSource(it, 'permanent') }, { default: () => '转存' }),
-    h(NButton, { size: 'small', secondary: true, onClick: () => importCenterSource(it, 'virtual') }, { default: () => '入库' })
-  ] })) },
+  { title: '操作', key: 'actions', width: 190, fixed: 'right', render: row => lineStack(row.versions, it => {
+    // 判断当前行是否正在转存或入库
+    const isImportingPermanent = importingMap[it.source_id] === 'permanent';
+    const isImportingVirtual = importingMap[it.source_id] === 'virtual';
+    const isAnyImporting = isImportingPermanent || isImportingVirtual;
+
+    return h(NSpace, { size: 6 }, { default: () => [
+      h(NButton, { 
+        size: 'small', 
+        type: 'primary', 
+        secondary: true, 
+        loading: isImportingPermanent, // 绑定转圈圈状态
+        disabled: isAnyImporting && !isImportingPermanent, // 如果正在入库，禁用转存按钮防误触
+        onClick: () => importCenterSource(it, 'permanent') 
+      }, { default: () => '转存' }),
+      h(NButton, { 
+        size: 'small', 
+        secondary: true, 
+        loading: isImportingVirtual, // 绑定转圈圈状态
+        disabled: isAnyImporting && !isImportingVirtual, // 如果正在转存，禁用入库按钮防误触
+        onClick: () => importCenterSource(it, 'virtual') 
+      }, { default: () => '入库' })
+    ] });
+  }) },
 ];
 
 const ledgerColumns = [
@@ -770,6 +913,7 @@ const loadCenterSources = async () => {
       keyword: centerFilters.keyword,
       item_type: centerFilters.item_type === 'all' ? '' : centerFilters.item_type,
       status: centerFilters.status,
+      order_by: centerFilters.order_by,
       limit: centerPagination.pageSize,
       offset: (centerPagination.page - 1) * centerPagination.pageSize,
     };
@@ -866,7 +1010,7 @@ const chooseMediaCandidate = (row) => {
     root_fid: row.root_fid || '',
     root_name: row.root_name || '',
     root_is_dir: row.root_is_dir !== false,
-    title: row.display_title || row.title || row.root_name || '',
+    title: row.standard_title || row.series_title || row.title || row.display_title || row.root_name || '',
     tmdb_id: row.share_tmdb_id || row.tmdb_id || '',
     parent_series_tmdb_id: row.parent_series_tmdb_id || '',
     share_type: row.share_type || 'season_pack',
@@ -914,7 +1058,51 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 .stat-desc { margin-top: 8px; font-size: 12px; opacity: .65; }
 .toolbar { margin-bottom: 14px; }
 .main-title { font-weight: 600; }
-.sub-title { font-size: 12px; opacity: .6; margin-top: 3px; }
+.sub-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--n-text-color-3, rgba(128,128,128,.78));
+  margin-top: 5px;
+  opacity: 1;
+}
+.tmdb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  color: var(--tmdb-color, #e91e63) !important;
+  background: rgba(233, 30, 99, .10);
+  background: color-mix(in srgb, currentColor 11%, transparent);
+  border: 1px solid rgba(233, 30, 99, .26);
+  border-color: color-mix(in srgb, currentColor 28%, transparent);
+  text-decoration: none !important;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: middle;
+  transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+.tmdb-pill:hover {
+  color: var(--tmdb-color-hover, var(--tmdb-color, #e91e63)) !important;
+  background: rgba(233, 30, 99, .16);
+  background: color-mix(in srgb, currentColor 17%, transparent);
+  border-color: rgba(233, 30, 99, .42);
+  border-color: color-mix(in srgb, currentColor 46%, transparent);
+  transform: translateY(-1px);
+}
+.tmdb-pill:active { transform: translateY(0); }
+.tmdb-pill:focus-visible {
+  outline: 2px solid var(--tmdb-color, #e91e63);
+  outline-offset: 2px;
+}
+.tmdb-pill-label { opacity: .74; letter-spacing: .02em; }
+.tmdb-pill-id { font-variant-numeric: tabular-nums; }
 .pre-line { white-space: pre-line; line-height: 1.55; }
 .selected-share-box { border: 1px solid rgba(128,128,128,.22); border-radius: 12px; padding: 12px 14px; background: rgba(128,128,128,.06); }
 .selected-title { font-weight: 700; margin-bottom: 6px; }
@@ -943,5 +1131,82 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 
 .center-version-stack { display: flex; flex-direction: column; gap: 8px; }
 .center-version-line { min-height: 24px; display: flex; align-items: center; }
+
+/* 共享资源管理：表格玻璃化 */
+.shared-page :deep(.n-data-table) {
+  --n-th-color: rgba(255, 255, 255, 0.045) !important;
+  --n-td-color: transparent !important;
+  --n-td-color-hover: rgba(255, 255, 255, 0.055) !important;
+  --n-border-color: rgba(148, 177, 255, 0.11) !important;
+  --n-merged-border-color: rgba(148, 177, 255, 0.11) !important;
+  background: transparent !important;
+}
+
+/* 表格外壳 */
+.shared-page :deep(.n-data-table-wrapper),
+.shared-page :deep(.n-data-table-base-table),
+.shared-page :deep(.n-data-table-base-table-body),
+.shared-page :deep(.n-data-table-table) {
+  background: transparent !important;
+}
+
+/* 表头 */
+.shared-page :deep(.n-data-table-th) {
+  background-color: rgba(255, 255, 255, 0.045) !important;
+  border-color: rgba(148, 177, 255, 0.11) !important;
+}
+
+/* 单元格 */
+.shared-page :deep(.n-data-table-td) {
+  background-color: transparent !important;
+  border-color: rgba(148, 177, 255, 0.11) !important;
+}
+
+/* hover 行 */
+.shared-page :deep(.n-data-table-tr:hover .n-data-table-td) {
+  background-color: rgba(255, 255, 255, 0.055) !important;
+}
+
+/* 空数据 / loading 区域 */
+.shared-page :deep(.n-data-table-empty),
+.shared-page :deep(.n-data-table-loading) {
+  background: transparent !important;
+}
+
+/* 分页区域也别实心 */
+.shared-page :deep(.n-data-table .n-pagination) {
+  background: transparent !important;
+}
+
+/* 弹窗里的 n-data-table 也玻璃化 */
+.custom-modal .n-data-table {
+  --n-th-color: rgba(255, 255, 255, 0.045) !important;
+  --n-td-color: transparent !important;
+  --n-td-color-hover: rgba(255, 255, 255, 0.055) !important;
+  --n-border-color: rgba(148, 177, 255, 0.11) !important;
+  --n-merged-border-color: rgba(148, 177, 255, 0.11) !important;
+  background: transparent !important;
+}
+
+.custom-modal .n-data-table-wrapper,
+.custom-modal .n-data-table-base-table,
+.custom-modal .n-data-table-base-table-body,
+.custom-modal .n-data-table-table,
+.custom-modal .n-data-table-empty,
+.custom-modal .n-data-table-loading {
+  background: transparent !important;
+}
+
+.custom-modal .n-data-table-th {
+  background-color: rgba(255, 255, 255, 0.045) !important;
+}
+
+.custom-modal .n-data-table-td {
+  background-color: transparent !important;
+}
+
+.custom-modal .n-data-table-tr:hover .n-data-table-td {
+  background-color: rgba(255, 255, 255, 0.055) !important;
+}
 
 </style>
