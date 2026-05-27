@@ -682,7 +682,8 @@ def _consume_virtual(client: SharedCenterClient, sources: List[Dict[str, Any]], 
 
 def _guess_se_from_source(src: Dict[str, Any], context: Dict[str, Any]):
     s_num = src.get('season_number') if src.get('season_number') not in (None, '') else context.get('season_number')
-    e_num = src.get('episode_number')
+    # ★ 核心修复：补充从 context 兜底获取 episode_number
+    e_num = src.get('episode_number') if src.get('episode_number') not in (None, '') else context.get('episode_number')
 
     try:
         s_num = int(s_num) if s_num not in (None, '') else None
@@ -830,8 +831,8 @@ def _select_sources_by_washing_before_import(
     """永久转存前按洗版规则筛选中心源。
 
     同一个 share_code 视为一个包：
-    - 包内任一视频 REJECT/SKIP，则整包不转存；
-    - 包内视频均 ACCEPT/REPLACE，才允许转存；
+    - 包内只要有任意一个视频是 ACCEPT/REPLACE，就允许转存整包；
+    - 只有当包内所有视频都被 REJECT/SKIP 时，才拒绝整包；
     - 多个包均合格时，选择洗版优先级最高的包。
     """
     from handler.resubscribe_service import WashingService
@@ -861,6 +862,7 @@ def _select_sources_by_washing_before_import(
         group_action_rank = 0
         group_quality = 0
         group_reasons = []
+        has_acceptable = False  # ★ 新增：记录包内是否有我们需要的文件
 
         for src in rows:
             file_name = src.get('file_name') or ''
@@ -933,10 +935,13 @@ def _select_sources_by_washing_before_import(
                 has_external_subtitle=False,
             )
 
+            # ★ 核心修复：不再一票否决，而是记录状态并跳过计分
             if action in ('REJECT', 'SKIP'):
-                rejected = True
-                errors.append(f"{file_name}: 洗版预检拒绝 [{action}] {reason}")
-                break
+                group_reasons.append(f"{file_name}: 洗版预检 [{action}] {reason}")
+                continue
+
+            # 只要走到这里，说明是 ACCEPT 或 REPLACE
+            has_acceptable = True
 
             level, level_reason = _washing_new_level(
                 sha1,
@@ -956,6 +961,11 @@ def _select_sources_by_washing_before_import(
             group_reasons.append(f"{file_name}: {action}; level={level}; {reason or level_reason}")
 
         if rejected:
+            continue
+
+        # ★ 核心修复：只有当包内【所有】视频都被跳过/拒绝时，才拒绝整个分享包
+        if not has_acceptable:
+            errors.append(f"分享包 {code} 内所有文件均被洗版拒绝/跳过")
             continue
 
         if rows:
@@ -995,18 +1005,12 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
     if not target_cid or target_cid == '0':
         raise RuntimeError('未配置 115 待整理目录 CID（p115_save_path_cid），无法转存共享资源')
     
-    # 无论当前是什么覆盖模式，都提前拉取中心 RAW 并写入本地 MediaInfo 缓存
-    # 避免后续 115 整理时因缺失缓存而触发缓慢的在线提取
     raw_map = _load_center_raw_map(client, sources)
-    for src in sources:
-        sha1 = _norm_sha1(src.get('sha1'))
-        raw = raw_map.get(sha1)
-        if raw:
-            _cache_center_raw_as_local_mediainfo(src, raw)
     
+    # ★ 核心修复：解决重复写入缓存的问题
     # 永久转存前预检：
-    # - replace：提前调用洗版模块裁决，避免不合格资源进入待整理；
-    # - skip / keep_both：不做洗版预检，直接放行，交给后续 SmartOrganizer 按覆盖模式处理。
+    # - replace：提前调用洗版模块裁决，洗版模块内部会负责写入缓存；
+    # - skip / keep_both：不做洗版预检，直接在这里遍历写入缓存。
     rename_config = settings_db.get_setting('p115_rename_config') or {}
     if rename_config.get('conflict_mode') == 'replace':
         sources, washing_errors = _select_sources_by_washing_before_import(
@@ -1027,7 +1031,13 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
                 'washing_rejected': True,
             }
     else:
-        logger.info(f"  ➜ [共享资源] 当前覆盖模式为 {rename_config.get('conflict_mode')}，跳过洗版预检，")
+        logger.info(f"  ➜ [共享资源] 当前覆盖模式为 {rename_config.get('conflict_mode')}，跳过洗版预检。")
+        # 非洗版模式下，在这里统一写入缓存
+        for src in sources:
+            sha1 = _norm_sha1(src.get('sha1'))
+            raw = raw_map.get(sha1)
+            if raw:
+                _cache_center_raw_as_local_mediainfo(src, raw)
 
     # 同一个季/剧分享可能返回多集，按 share_code 去重，避免重复转存同一分享包。
     unique = []
@@ -1053,19 +1063,45 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
             f"resp={str(resp)[:300]}"
         )
         text = json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp)
-        success = isinstance(resp, dict) and (resp.get('state') is True or resp.get('errno') in (0, '0') or resp.get('code') in (0, '0', 200, '200') or '已存在' in text)
+        
+        # =====================================================================
+        # ★ 核心修复 1：将 4100024 (你已经转存过该文件) 视为成功！
+        # =====================================================================
+        is_already_saved = isinstance(resp, dict) and str(resp.get('errno')) == '4100024'
+        
+        success = isinstance(resp, dict) and (
+            resp.get('state') is True 
+            or str(resp.get('errno')) in ('0', '4100024') 
+            or str(resp.get('code')) in ('0', '200') 
+            or '已存在' in text
+            or '已经转存过' in text
+        )
+        
         if success:
             ok += 1
             try:
-                client.report_transfer(src.get('source_id'), 'success', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message='permanent import submitted')
+                # 如果是已经转存过，向中心汇报时附带说明，但状态依然是 success
+                msg = 'already saved' if is_already_saved else 'permanent import submitted'
+                client.report_transfer(src.get('source_id'), 'success', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message=msg)
             except Exception:
                 pass
         else:
             errors.append(f"{src.get('file_name')}: {text[:120]}")
-            try:
-                client.report_transfer(src.get('source_id'), 'failed', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message=f'external_share_import_failed: {text[:160]}')
-            except Exception:
-                pass
+            
+            # =====================================================================
+            # ★ 核心修复 2：如果是用户自身的限制，绝对不要向中心上报 failed 误伤分享者
+            # 4100010: 空间不足 | 4100025: 转存超限 | 770004/990001: API 频率限制
+            # =====================================================================
+            is_user_limit = any(kw in text for kw in ['空间不足', '超过限制', '频繁', '上限', '770004', '990001', '4100010'])
+            
+            if not is_user_limit:
+                try:
+                    client.report_transfer(src.get('source_id'), 'failed', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message=f'external_share_import_failed: {text[:160]}')
+                except Exception:
+                    pass
+            else:
+                logger.warning(f"  ➜ [共享资源] 触发用户自身网盘限制(空间/次数/频率)，跳过向中心上报失败，以免误伤资源提供者。")
+                
     if ok > 0:
         kick_result = _kick_115_organize_detached(
             reason=f"共享资源转存成功 {ok} 个",
@@ -1095,6 +1131,21 @@ def try_consume_shared_resource(item: Dict[str, Any], title: str, tmdb_id, item_
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 查询中心共享池失败: {e}")
 
+    # =================================================================
+    # ★ 核心修复：精准过滤中心返回的无关单集，防止“幽灵追更”日志
+    # =================================================================
+    req_e_num = item.get('episode_number')
+    if req_e_num is not None and str(req_e_num).strip() != '':
+        filtered_sources = []
+        for src in sources:
+            src_e_num = src.get('episode_number')
+            # 如果中心返回的源明确标明了集号，且与我们请求的集号不符，直接丢弃！
+            # (如果 src_e_num 为空，说明可能是季包，保留放行)
+            if src_e_num is not None and str(src_e_num).strip() != '' and int(src_e_num) != int(req_e_num):
+                continue
+            filtered_sources.append(src)
+        sources = filtered_sources
+
     if not sources:
         reported = False
         try:
@@ -1110,6 +1161,7 @@ def try_consume_shared_resource(item: Dict[str, Any], title: str, tmdb_id, item_
         'item_type': item_type,
         'parent_tmdb_id': str(parent_tmdb_id or ''),
         'season_number': season_number,
+        'episode_number': item.get('episode_number'), # ★ 确保 context 里有 episode_number
         'year': year,
     }
 
