@@ -319,10 +319,10 @@ body::before {
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
-  font-size: 14px; 
-  transform: translateZ(0) !important;       /* 强制开启独立图层，不被侧边栏重绘波及 */
-  backface-visibility: hidden !important;    /* 关掉背面渲染，防止亚像素计算溢出 */
-  background-clip: padding-box !important;   /* 裁切背景，绝对不准毛玻璃渗出边框外 */
+  font-size: 14px;
+  overflow: hidden !important;               /* 强制裁剪，不准超出边框 */
+  isolation: isolate !important;             /* 建立独立渲染层，隔绝侧边栏动画的干扰 */
+  -webkit-mask-image: -webkit-radial-gradient(white, black) !important; /* 修复 Chrome 圆角毛玻璃漏边的祖传特效药 */
 }
 
 .n-card.dashboard-card:hover {
