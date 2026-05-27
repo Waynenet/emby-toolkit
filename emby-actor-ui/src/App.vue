@@ -320,6 +320,9 @@ body::before {
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px; 
+  transform: translateZ(0) !important;       /* 强制开启独立图层，不被侧边栏重绘波及 */
+  backface-visibility: hidden !important;    /* 关掉背面渲染，防止亚像素计算溢出 */
+  background-clip: padding-box !important;   /* 裁切背景，绝对不准毛玻璃渗出边框外 */
 }
 
 .n-card.dashboard-card:hover {
