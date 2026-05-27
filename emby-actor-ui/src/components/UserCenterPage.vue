@@ -17,17 +17,16 @@
       <n-gi><n-card class="dashboard-card stat-module" :bordered="false"><n-statistic label="未通过" :value="stats.failed" style="--n-value-text-color: #e88080" /></n-card></n-gi>
     </n-grid>
 
-    <!-- 2. 中部模块：账户信息 & 播放记录 (电脑端并列显示) -->
-    <n-grid :x-gap="24" :y-gap="24" cols="1 m:2" responsive="screen" style="margin-bottom: 24px;">
+    <!-- 2. 主体模块：账户信息、播放记录、订阅历史 (电脑端三列并排) -->
+    <n-grid :x-gap="24" :y-gap="24" cols="1 m:2 l:3" responsive="screen" style="margin-bottom: 24px; align-items: stretch;">
       
-      <!-- 左侧：账户信息卡片 -->
+      <!-- 第一列：账户信息卡片 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">账户详情</span></template>
           
           <!-- 用户信息垂直居中显示 -->
           <div class="account-info-vertical">
-            <!-- 头部垂直居中显示区：头像、名字 -->
             <div class="profile-header-vertical">
               <div class="avatar-wrapper" @click="triggerFileUpload">
                 <n-avatar round :size="64" :src="avatarUrl" object-fit="cover" style="background-color: rgba(255,255,255,0.1); width: 100%; height: 100%;">
@@ -37,43 +36,35 @@
                 <div class="avatar-overlay">更换</div>
                 <input type="file" ref="fileInput" style="display: none" accept="image/*" @change="handleAvatarChange" />
               </div>
-
-              <!-- 名字单独显示在头像正下方 -->
               <div class="profile-name">{{ accountInfo?.name || authStore.username }}</div>
             </div>
             
-            <!-- 等级与权限信息网格（三行两列，居中对齐） -->
+            <!-- 等级与权限信息网格 -->
             <div class="info-grid">
-              <!-- 1. 账户等级 -->
               <div class="info-row">
                 <span class="info-label">账户等级</span>
                 <span class="info-value">{{ authStore.isAdmin ? '管理员' : (accountInfo?.template_name || '未分配') }}</span>
               </div>
-              <!-- 2. 等级说明 -->
               <div class="info-row">
                 <span class="info-label">等级说明</span>
                 <span class="info-value desc-text">
                   {{ authStore.isAdmin ? '拥有系统所有管理权限' : (accountInfo?.template_description || '暂无说明') }}
                 </span>
               </div>
-              <!-- 3. 注册时间 -->
               <div class="info-row">
                 <span class="info-label">注册时间</span>
                 <span class="info-value">{{ accountInfo?.registration_date ? new Date(accountInfo.registration_date).toLocaleDateString() : '-' }}</span>
               </div>
-              <!-- 4. 到期时间 -->
               <div class="info-row">
                 <span class="info-label">到期时间</span>
                 <span class="info-value">{{ accountInfo?.expiration_date ? new Date(accountInfo.expiration_date).toLocaleDateString() : '永久有效' }}</span>
               </div>
-              <!-- 5. 账号状态 (文字颜色随状态变化) -->
               <div class="info-row">
                 <span class="info-label">账号状态</span>
                 <span class="info-value" :class="`text-${statusType}`">
                   {{ statusText }}
                 </span>
               </div>
-              <!-- 6. 订阅权限 -->
               <div class="info-row">
                 <span class="info-label">订阅权限</span>
                 <span class="info-value" :class="{'text-success': authStore.isAdmin || accountInfo?.allow_unrestricted_subscriptions, 'text-warning': !authStore.isAdmin && !accountInfo?.allow_unrestricted_subscriptions}">
@@ -102,7 +93,7 @@
         </n-card>
       </n-gi>
 
-      <!-- 右侧：播放记录卡片 -->
+      <!-- 第二列：播放记录卡片 -->
       <n-gi>
         <n-card :bordered="false" class="dashboard-card action-module" style="height: 100%;">
           <template #header><span class="card-title">近期播放</span></template>
@@ -111,6 +102,7 @@
               <n-radio-button value="all">全部</n-radio-button>
               <n-radio-button value="Movie">电影</n-radio-button>
               <n-radio-button value="Episode">剧集</n-radio-button>
+              <n-radio-button value="Audio">音乐</n-radio-button>
             </n-radio-group>
           </template>
 
@@ -127,7 +119,7 @@
 
           <n-divider style="margin: 12px 0; opacity: 0.1;" />
 
-          <n-scrollbar style="max-height: 200px;">
+          <n-scrollbar style="max-height: 400px;">
             <n-list hoverable clickable size="small" class="transparent-list">
               <n-list-item v-for="(item, index) in playbackData?.personal?.history_list" :key="index" style="padding: 8px;">
                 <n-thing :title="item.title" content-style="margin-top: 0;">
@@ -145,54 +137,58 @@
                 </n-thing>
               </n-list-item>
             </n-list>
-            <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 20px;" />
+            <n-empty v-if="!playbackData?.personal?.history_list?.length" description="暂无播放记录" style="margin-top: 40px;" />
           </n-scrollbar>
         </n-card>
       </n-gi>
-    </n-grid>
 
-    <!-- 3. 底部模块：订阅历史列表 -->
-    <n-card :bordered="false" class="dashboard-card list-module">
-      <template #header>
-        <span class="card-title">最近的订阅动态</span>
-      </template>
-      <template #header-extra>
-        <n-radio-group v-model:value="filterStatus" size="small" class="custom-radio-group">
-          <n-radio-button value="all">全部</n-radio-button>
-          <n-radio-button value="completed">已完成</n-radio-button>
-          <n-radio-button value="processing">处理中</n-radio-button>
-        </n-radio-group>
-      </template>
-      
-      <n-spin :show="loading">
-        <div v-if="subscriptionHistory.length > 0" class="custom-list">
-          <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
-            <div class="item-icon-block" :class="getStatusType(item.status)">
-              {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
-            </div>
-            <div class="item-content">
-              <div class="item-title">{{ item.title }}</div>
-              <div class="item-desc">
-                <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
-                  {{ getStatusText(item.status) }}
-                </n-tag>
-                <span v-if="item.notes" style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px;">
-                  备注: {{ item.notes }}
-                </span>
+      <!-- 第三列：订阅历史卡片 -->
+      <n-gi>
+        <n-card :bordered="false" class="dashboard-card list-module" style="height: 100%;">
+          <template #header>
+            <span class="card-title">订阅历史</span>
+          </template>
+          <template #header-extra>
+            <n-radio-group v-model:value="filterStatus" size="small" class="custom-radio-group">
+              <n-radio-button value="all">全部</n-radio-button>
+              <n-radio-button value="completed">已完成</n-radio-button>
+              <n-radio-button value="processing">处理中</n-radio-button>
+            </n-radio-group>
+          </template>
+          
+          <n-spin :show="loading">
+            <n-scrollbar style="max-height: 480px; padding-right: 8px;">
+              <div v-if="subscriptionHistory.length > 0" class="custom-list">
+                <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
+                  <div class="item-icon-block" :class="getStatusType(item.status)">
+                    {{ item.item_type === 'Movie' ? '电影' : '剧集' }}
+                  </div>
+                  <div class="item-content">
+                    <div class="item-title">{{ item.title }}</div>
+                    <div class="item-desc">
+                      <n-tag :type="getStatusType(item.status)" size="tiny" :bordered="false" round style="margin-right: 8px;">
+                        {{ getStatusText(item.status) }}
+                      </n-tag>
+                      <span v-if="item.notes" style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px;">
+                        {{ item.notes }}
+                      </span>
+                    </div>
+                  </div>
+                  <div class="item-meta">
+                    <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div class="item-meta">
-              <div class="item-time">{{ new Date(item.requested_at).toLocaleDateString() }}</div>
-            </div>
-          </div>
-        </div>
-        <n-empty v-else description="暂无订阅记录" style="margin: 40px 0;" />
-      </n-spin>
+              <n-empty v-else description="暂无订阅记录" style="margin: 40px 0;" />
+            </n-scrollbar>
+          </n-spin>
 
-      <div v-if="totalRecords > pageSize" style="margin-top: 20px; display: flex; justify-content: center;">
-        <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" class="custom-pagination" />
-      </div>
-    </n-card>
+          <div v-if="totalRecords > pageSize" style="margin-top: 16px; display: flex; justify-content: center;">
+            <n-pagination v-model:page="currentPage" :page-size="pageSize" :item-count="totalRecords" simple @update:page="fetchSubscriptionHistory" class="custom-pagination" />
+          </div>
+        </n-card>
+      </n-gi>
+    </n-grid>
 
   </div>
 </template>
@@ -455,15 +451,15 @@ onMounted(async () => {
 
 .custom-list { display: flex; flex-direction: column; gap: 12px; }
 .custom-list-item {
-  display: flex; align-items: center; padding: 16px;
+  display: flex; align-items: center; padding: 12px 16px;
   background: rgba(0, 0, 0, 0.2); border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.05); transition: background 0.2s;
 }
 .custom-list-item:hover { background: rgba(255, 255, 255, 0.05); }
 .item-icon-block {
-  width: 48px; height: 48px; border-radius: 12px; display: flex;
+  width: 44px; height: 44px; border-radius: 12px; display: flex;
   align-items: center; justify-content: center; font-weight: bold;
-  font-size: 12px; margin-right: 16px; flex-shrink: 0;
+  font-size: 12px; margin-right: 12px; flex-shrink: 0;
 }
 .item-icon-block.success { background: rgba(99, 226, 183, 0.2); color: #63e2b7; }
 .item-icon-block.warning { background: rgba(242, 201, 125, 0.2); color: #f2c97d; }
@@ -472,22 +468,20 @@ onMounted(async () => {
 .item-icon-block.default { background: rgba(255, 255, 255, 0.1); color: #fff; }
 
 .item-content { flex: 1; min-width: 0; }
-.item-title { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-title { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-desc { font-size: 12px; color: rgba(255,255,255,0.5); display: flex; align-items: center; }
-.item-meta { text-align: right; flex-shrink: 0; margin-left: 16px; }
+.item-meta { text-align: right; flex-shrink: 0; margin-left: 12px; }
 .item-time { font-size: 12px; color: rgba(255,255,255,0.4); }
 
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
-  
   .account-info-vertical { gap: 16px; }
   .profile-header-vertical { gap: 8px; }
   
   /* 移动端依然保持两列居中对齐 */
   .info-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .info-row { flex-direction: column; justify-content: center; align-items: center; }
-  
   .custom-list-item { padding: 12px; }
   .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
 }
