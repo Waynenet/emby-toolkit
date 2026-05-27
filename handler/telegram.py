@@ -520,14 +520,14 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
     """发起 TMDb 搜索并显示列表"""
     query = str(query or "").strip()
     if not query:
-        send_telegram_message(chat_id, "请输入要搜索的影视剧名称。")
+        send_telegram_message(chat_id, escape_markdown("请输入要搜索的影视剧名称。"))
         return
 
     def run():
         try:
             api_key = _tg_get_tmdb_api_key()
             if not api_key:
-                send_telegram_message(chat_id, "❌ 未配置 TMDb API Key，无法进行搜索。")
+                send_telegram_message(chat_id, escape_markdown("❌ 未配置 TMDb API Key，无法进行搜索。"))
                 return
 
             send_telegram_message(chat_id, f"⏳ 正在搜索：*{escape_markdown(query)}*", disable_notification=True)
@@ -565,7 +565,6 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
 
             _tg_set_session(chat_id, normalized_results)
 
-            # 修复：转义竖线 \|
             lines = [f"🔎 搜索结果 \\| *{escape_markdown(query)}*\n━━━━━━━━━━━━━━\n请点击下方按钮查看详情：\n"]
             keyboard = []
             row = []
@@ -575,7 +574,6 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
                 date_text = item.get("release_date") or item.get("first_air_date") or ""
                 year = str(date_text)[:4] if date_text else "未知"
                 
-                # 修复：已经使用了转义括号 \( \)
                 lines.append(f"{idx}\\. \\[{m_type}\\] {escape_markdown(title)} \\({escape_markdown(year)}\\)")
                 
                 row.append({"text": f"{idx:02d}", "callback_data": f"tg_tmdb:{idx}"})
@@ -590,7 +588,7 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
 
         except Exception as e:
             logger.error(f"  ➜ [TG搜索] 搜索失败: {e}", exc_info=True)
-            send_telegram_message(chat_id, f"❌ 搜索异常，请稍后再试。")
+            send_telegram_message(chat_id, escape_markdown("❌ 搜索异常，请稍后再试。"))
 
     threading.Thread(target=run, name="TG_Search_TMDb", daemon=True).start()
 
@@ -598,12 +596,12 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
     """显示选中的影视详情和订阅按钮"""
     session = _tg_get_session(chat_id)
     if not session:
-        send_telegram_message(chat_id, "❌ 搜索结果已过期，请重新输入名称搜索。")
+        send_telegram_message(chat_id, escape_markdown("❌ 搜索结果已过期，请重新输入名称搜索。"))
         return
 
     results = session.get("results", [])
     if selection_number < 1 or selection_number > len(results):
-        send_telegram_message(chat_id, "❌ 选择无效。")
+        send_telegram_message(chat_id, escape_markdown("❌ 选择无效。"))
         return
 
     item = results[selection_number - 1]
@@ -621,7 +619,6 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
 
     type_str = "🎬 电影" if media_type == "movie" else "📺 剧集"
     
-    # 修复：转义年份的括号 \( \) 和所有的变量
     caption = (
         f"*{escape_markdown(title)}* \\({escape_markdown(year)}\\)\n\n"
         f"🆔 *TMDb*: `{tmdb_id}`\n"
@@ -645,7 +642,8 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
 
 def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
     """处理用户点击订阅按钮"""
-    send_telegram_message(chat_id, "⏳ 正在提交订阅请求...", disable_notification=True)
+    # 这里用 escape_markdown 包装纯文本，防止里面所有的标点符号报错
+    send_telegram_message(chat_id, escape_markdown("⏳ 正在提交订阅请求..."), disable_notification=True)
     _tg_clear_session(chat_id)
 
     def run():
@@ -681,7 +679,7 @@ def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
                     })
 
             if not tmdb_items:
-                send_telegram_message(chat_id, "❌ 无法解析该项目的订阅信息。")
+                send_telegram_message(chat_id, escape_markdown("❌ 无法解析该项目的订阅信息。"))
                 return
 
             subscription_source = {'type': 'telegram_search', 'user_id': chat_id}
@@ -694,15 +692,13 @@ def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
             )
             
             if processed_ids:
-                # 修复：感叹号全角化，避免触发错误
                 send_telegram_message(chat_id, f"✅ *订阅已提交！*\n系统将在后台自动监控并处理。")
             else:
-                # 修复：转义括号
                 send_telegram_message(chat_id, f"⚠️ *请求已处理*\n\\(该项目可能已在库或已处于订阅状态\\)")
 
         except Exception as e:
             logger.error(f"  ➜ [TG交互] 提交订阅失败: {e}", exc_info=True)
-            send_telegram_message(chat_id, f"❌ 提交订阅异常：请查看系统日志。")
+            send_telegram_message(chat_id, escape_markdown("❌ 提交订阅异常：请查看系统日志。"))
 
     threading.Thread(target=run, name="TG_Resource_Subscribe", daemon=True).start()
 
