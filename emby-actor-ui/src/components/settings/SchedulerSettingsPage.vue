@@ -27,8 +27,8 @@
                 <n-switch v-model:value="configModel.task_chain_enabled" />
               </n-space>
               
-              <!-- ★ 加入 custom-spacing-form 类，利用 CSS 强制控制布局 -->
-              <n-form :model="configModel" label-placement="left" class="mt-3 custom-spacing-form" :show-feedback="false">
+              <!--靠底部的简单 CSS 增加上下间距 -->
+              <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3 form-with-gap" :show-feedback="false">
                 <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_cron" :disabled="!configModel.task_chain_enabled" placeholder="例如: 0 7-23/2 * * *" />
                 </n-form-item>
@@ -43,13 +43,14 @@
                   />
                 </n-form-item>
                 <n-form-item label="任务序列">
-                  <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
-                    <template #icon><n-icon :component="Settings24Regular" /></template>
-                    配置
-                  </n-button>
+                  <n-button-group>
+                    <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
+                      <template #icon><n-icon :component="Settings24Regular" /></template>
+                      配置
+                    </n-button>
+                  </n-button-group>
                 </n-form-item>
               </n-form>
-              
               <n-button 
                 type="primary" 
                 ghost 
@@ -98,9 +99,7 @@
                 <n-text strong>启用低频任务链</n-text>
                 <n-switch v-model:value="configModel.task_chain_low_freq_enabled" />
               </n-space>
-              
-              <!-- ★ 同上 -->
-              <n-form :model="configModel" label-placement="left" class="mt-3 custom-spacing-form" :show-feedback="false">
+              <n-form :model="configModel" label-placement="left" label-width="auto" class="mt-3 form-with-gap" :show-feedback="false">
                 <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_low_freq_cron" :disabled="!configModel.task_chain_low_freq_enabled" placeholder="例如: 0 1 * * *" />
                 </n-form-item>
@@ -121,7 +120,6 @@
                     </n-button>
                 </n-form-item>
               </n-form>
-              
               <n-button 
                 type="primary" 
                 ghost 
@@ -293,7 +291,7 @@ import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import {
   NForm, NFormItem, NInput, NCheckbox, NGrid, NGi, NAlert,
   NButton, NCard, NSpace, NSwitch, NIcon, NText, NInputNumber,
-  useMessage, NSpin, NModal
+  useMessage, NSpin, NModal, NButtonGroup
 } from 'naive-ui';
 import { Play24Regular, Settings24Regular, Drag24Regular, Save24Regular } from '@vicons/fluent';
 import { useConfig } from '../../composables/useConfig.js';
@@ -509,22 +507,13 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
 
 <style scoped>
 /* ========================================================= */
-/* ★ 强制修复表单间距与变胖问题的 CSS */
+/* ★ 增加表单行的上下距离 */
 /* ========================================================= */
-.custom-spacing-form :deep(.n-form-item-label) {
-  padding-right: 24px !important; /* 强制锁定左右间距 */
-  flex-shrink: 0 !important;      /* 防止标签因为容器变窄而被挤压 */
-  white-space: nowrap !important; /* 防止文字换行撑爆高度 */
+.form-with-gap :deep(.n-form-item) {
+  margin-bottom: 16px;
 }
-
-.custom-spacing-form :deep(.n-form-item-blank) {
-  display: flex;
-  justify-content: flex-start; /* 内部控件正常靠左排列，不强行填满 */
-}
-
-.custom-spacing-form :deep(.n-button) {
-  width: auto !important; /* 彻底防止按钮变胖/被异常拉伸 */
-  flex-shrink: 0;
+.form-with-gap :deep(.n-form-item:last-child) {
+  margin-bottom: 0;
 }
 
 :deep(.n-card__content) {
