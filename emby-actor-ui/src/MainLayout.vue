@@ -273,7 +273,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 </script>
 
 <style>
-/* CSS 保持不变 */
 .app-main-layout {
   height: 100vh;
   background: transparent !important;
@@ -344,6 +343,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   overflow-x: hidden;
   padding: 0 12px; 
   transition: padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
 }
 
 .n-layout-sider--collapsed .sider-menu-container {
@@ -376,6 +376,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   --n-item-color-hover: rgba(0, 190, 150, 0.15) !important;
   --n-item-color-active: rgba(0, 190, 150, 0.25) !important;
   --n-item-color-active-hover: rgba(0, 190, 150, 0.3) !important;
+  --n-item-color-active-collapsed: transparent !important;
   
   --n-item-text-color: rgba(255, 255, 255, 0.85) !important;
   --n-item-text-color-hover: #ffffff !important;
