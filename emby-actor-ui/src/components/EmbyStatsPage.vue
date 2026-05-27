@@ -205,5 +205,11 @@ onMounted(() => { fetchData(); });
 @media (max-width: 768px) {
   .modular-page-container { padding: 12px; }
   .greeting-title { font-size: 22px; }
+  
+  /* 在手机端隐藏数据卡片的图标，防止排版拥挤 */
+  .stat-icon-glass { display: none; }
+  
+  /* 隐藏图标后，让文字在手机端居中显示，看起来更美观 */
+  .stat-module > div { justify-content: center; text-align: center; }
 }
 </style>
