@@ -536,7 +536,6 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
             data = search_multi_media(query=query, api_key=api_key, page=1)
             results = (data or {}).get("results") or []
 
-            # 兼容：如果 multi 搜不到，再分别查电影/剧集
             if not results:
                 movie_results = search_media(query=query, api_key=api_key, item_type="movie") or []
                 tv_results = search_media(query=query, api_key=api_key, item_type="tv") or []
@@ -566,8 +565,8 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
 
             _tg_set_session(chat_id, normalized_results)
 
-            # 构造结果文本和键盘
-            lines = [f"🔎 搜索结果 | *{escape_markdown(query)}*\n━━━━━━━━━━━━━━\n请点击下方按钮查看详情：\n"]
+            # 修复：转义竖线 \|
+            lines = [f"🔎 搜索结果 \\| *{escape_markdown(query)}*\n━━━━━━━━━━━━━━\n请点击下方按钮查看详情：\n"]
             keyboard = []
             row = []
             for idx, item in enumerate(normalized_results, 1):
@@ -576,7 +575,8 @@ def _tg_start_tmdb_search(chat_id: str, query: str):
                 date_text = item.get("release_date") or item.get("first_air_date") or ""
                 year = str(date_text)[:4] if date_text else "未知"
                 
-                lines.append(f"{idx}\\. \\[{m_type}\\] {escape_markdown(title)} \\({year}\\)")
+                # 修复：已经使用了转义括号 \( \)
+                lines.append(f"{idx}\\. \\[{m_type}\\] {escape_markdown(title)} \\({escape_markdown(year)}\\)")
                 
                 row.append({"text": f"{idx:02d}", "callback_data": f"tg_tmdb:{idx}"})
                 if len(row) == 5:
@@ -616,17 +616,17 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
     overview = item.get("overview", "暂无简介。")
     poster_path = item.get("poster_path")
     
-    # 截断过长的剧情以防 Telegram 拒收图文消息 (限制1024字符)
     if len(overview) > 300:
         overview = overview[:300] + "..."
 
     type_str = "🎬 电影" if media_type == "movie" else "📺 剧集"
     
+    # 修复：转义年份的括号 \( \) 和所有的变量
     caption = (
-        f"*{escape_markdown(title)}* ({escape_markdown(year)})\n\n"
+        f"*{escape_markdown(title)}* \\({escape_markdown(year)}\\)\n\n"
         f"🆔 *TMDb*: `{tmdb_id}`\n"
-        f"🎭 *类型*: {type_str}\n"
-        f"⭐️ *评分*: {float(rating):.1f}\n\n"
+        f"🎭 *类型*: {escape_markdown(type_str)}\n"
+        f"⭐️ *评分*: {escape_markdown(f'{float(rating):.1f}')}\n\n"
         f"📝 *剧情*: {escape_markdown(overview)}"
     )
 
@@ -663,12 +663,10 @@ def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
                     'season': None
                 })
             elif media_type == "tv":
-                # 剧集需要按季订阅，拉取详情获取所有季
                 details = get_tv_details(tmdb_id, api_key)
                 if details and 'seasons' in details:
                     for s in details['seasons']:
                         s_num = s.get('season_number')
-                        # 过滤掉第 0 季 (特别篇)，通常只订阅正片
                         if s_num is not None and s_num > 0:
                             tmdb_items.append({
                                 'tmdb_id': tmdb_id,
@@ -676,7 +674,6 @@ def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
                                 'season': s_num
                             })
                 else:
-                    # 兜底订阅第 1 季
                     tmdb_items.append({
                         'tmdb_id': tmdb_id,
                         'media_type': 'Series',
@@ -697,9 +694,11 @@ def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
             )
             
             if processed_ids:
-                send_telegram_message(chat_id, f"✅ *订阅已提交!*\n系统将在后台自动监控并处理。")
+                # 修复：感叹号全角化，避免触发错误
+                send_telegram_message(chat_id, f"✅ *订阅已提交！*\n系统将在后台自动监控并处理。")
             else:
-                send_telegram_message(chat_id, f"⚠️ *请求已处理*\n(该项目可能已在库或已处于订阅状态)")
+                # 修复：转义括号
+                send_telegram_message(chat_id, f"⚠️ *请求已处理*\n\\(该项目可能已在库或已处于订阅状态\\)")
 
         except Exception as e:
             logger.error(f"  ➜ [TG交互] 提交订阅失败: {e}", exc_info=True)
