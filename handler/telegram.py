@@ -202,9 +202,8 @@ def send_telegram_message(chat_id: str, text: str, disable_notification: bool = 
         logger.error(f"  ➜ 发送 Telegram 文本消息时发生网络请求错误: {e}")
         return False
 
-# --- 通用的 Telegram 图文消息发送函数 ---
-def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_notification: bool = False):
-    """通用的 Telegram 图文消息发送函数。"""
+def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_notification: bool = False, reply_markup: dict = None):
+    """支持内联键盘的图文消息发送"""
     bot_token = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_BOT_TOKEN)
     if not bot_token or not chat_id or not photo_url:
         return False
@@ -223,11 +222,14 @@ def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_noti
         'parse_mode': 'MarkdownV2',
         'disable_notification': disable_notification,
     }
+    
+    if reply_markup:
+        payload['reply_markup'] = reply_markup
+
     try:
         proxies = get_proxies_for_requests()
         response = requests.post(api_url, json=payload, timeout=30, proxies=proxies)
         if response.status_code == 200:
-            logger.debug(f"  ➜ 成功发送 Telegram 图文消息至 Chat ID: {final_chat_id}")
             return True
         else:
             logger.error(f"  ➜ 发送 Telegram 图文消息失败, 状态码: {response.status_code}, 响应: {response.text}")
@@ -256,7 +258,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             overview = overview[:200] + "..."
             
         item_type = item_details.get("Type")
-
         escaped_title = escape_markdown(title)
         escaped_overview = escape_markdown(overview)
 
@@ -291,7 +292,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                 if path:
                     photo_url = f"https://image.tmdb.org/t/p/w780{path}"
         except Exception as e:
-            logger.error(f"  ➜ [通知] 从本地数据库获取图片信息时出错: {e}", exc_info=True)
+            pass
 
         # =================================================================
         # ★★★ 查询该项目是否被标记为【待复核】 ★★★
@@ -311,53 +312,35 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                     if row:
                         needs_review = True
                         review_reason = row['reason']
-        except Exception as e:
-            logger.error(f"  ➜ [通知] 查询待复核状态失败: {e}")
+        except Exception:
+            pass
         
-        # --- 4. 组装最终的通知文本 (Caption) ---
-        notification_title_map = {
-            'new': '✨ 入库成功',
-            'update': '🔄 已更新'
-        }
+        notification_title_map = {'new': '✨ 入库成功', 'update': '🔄 已更新'}
         notification_title = notification_title_map.get(notification_type, '🔔 状态更新')
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         media_icon = "🎬" if item_type == "Movie" else "📺"
 
-        # ★★★ 构建待复核警告文本 ★★★
         review_warning = ""
         if needs_review:
             escaped_reason = escape_markdown(review_reason)
-            review_warning = (
-                f"\n\n⚠️ *系统提示*: 本次处理被标记为【待复核】\n"
-                f"🔍 *原因*: {escaped_reason}\n"
-                f"💡 _请前往 WebUI 手动介入处理_"
-            )
+            review_warning = (f"\n\n⚠️ *系统提示*: 本次处理被标记为【待复核】\n"
+                              f"🔍 *原因*: {escaped_reason}\n💡 _请前往 WebUI 手动介入处理_")
 
-        # ★★★ 修改：将 review_warning 追加到 caption 尾部 ★★★
-        caption = (
-            f"{media_icon} *{escaped_title}* {notification_title}\n\n"
-            f"{episode_info_text}"
-            f"⏰ *时间*: `{current_time}`\n"
-            f"📝 *剧情*: {escaped_overview}"
-            f"{review_warning}"
-        )
+        caption = (f"{media_icon} *{escaped_title}* {notification_title}\n\n"
+                   f"{episode_info_text}⏰ *时间*: `{current_time}`\n📝 *剧情*: {escaped_overview}{review_warning}")
         
-        # --- 5. 查询订阅者 ---
         subscribers = request_db.get_subscribers_by_tmdb_id(tmdb_id, item_type) if tmdb_id else []
         subscriber_chat_ids = {
             user_db.get_user_telegram_chat_id(sub.get('user_id')) 
-            for sub in subscribers 
-            if sub.get('type') == 'user_request' and sub.get('user_id')
+            for sub in subscribers if sub.get('type') == 'user_request' and sub.get('user_id')
         }
         subscriber_chat_ids = {chat_id for chat_id in subscriber_chat_ids if chat_id}
 
-        # --- 6 & 7. 发送全局和管理员通知 ---
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         notify_types = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
         
         if 'library_new' in notify_types:
             if global_channel_id:
-                logger.info(f"  ➜ 正在向全局频道 {global_channel_id} 发送通知...")
                 if photo_url:
                     send_telegram_photo(global_channel_id, photo_url, caption)
                 else:
@@ -369,16 +352,11 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                 for admin_chat_id in all_admin_chat_ids:
                     if str(admin_chat_id) == str(global_channel_id) or str(admin_chat_id) in subscriber_id_set:
                         continue
-                    
-                    logger.info(f"  ➜ 正在向管理员 {admin_chat_id} 发送全局入库通知...")
                     if photo_url:
                         send_telegram_photo(admin_chat_id, photo_url, caption)
                     else:
                         send_telegram_message(admin_chat_id, caption)
-        else:
-            logger.debug(f"  ➜ [通知] '入库通知' 设置为关闭，跳过频道和管理员的全局广播。")
 
-        # --- 8. 发送个人订阅到货通知 ---
         if subscriber_chat_ids:
             personal_caption_map = {
                 'new': f"✅ *您的订阅已入库*\n\n{caption}",
@@ -388,7 +366,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             
             for chat_id in subscriber_chat_ids:
                 if chat_id == global_channel_id: continue
-                logger.info(f"  ➜ 正在向订阅者 {chat_id} 发送个人通知...")
                 if photo_url:
                     send_telegram_photo(chat_id, photo_url, personal_caption)
                 else:
@@ -433,12 +410,10 @@ def send_playback_notification(data: dict):
         if playback_info:
             position_ticks = playback_info.get("PositionTicks", 0)
             runtime_ticks = item.get("RunTimeTicks", 0)
-            
             if runtime_ticks > 0:
                 pos_str = _format_ticks_to_time(position_ticks)
                 total_str = _format_ticks_to_time(runtime_ticks)
-                percentage = (position_ticks / runtime_ticks) * 100
-                percentage = min(percentage, 100.0) # 限制不超过100%
+                percentage = min((position_ticks / runtime_ticks) * 100, 100.0)
                 progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)`\n"
         
         # --- 获取 IP 地理位置 ---
@@ -462,11 +437,9 @@ def send_playback_notification(data: dict):
                     path = db_info.get('parent_backdrop_path') or db_info.get('parent_poster_path')
                 if path:
                     photo_url = f"https://image.tmdb.org/t/p/w780{path}"
-                
                 if not raw_overview:
                     raw_overview = db_info.get('overview', '')
         
-        # 格式化剧情文本 (限制长度)
         overview_text = ""
         if raw_overview:
             if len(raw_overview) > 150:
@@ -482,29 +455,15 @@ def send_playback_notification(data: dict):
         action_str = action_map.get(event_type, "🎬 播放状态改变")
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # ★ 最终组装 Caption
-        caption = (
-            f"{action_str}\n\n"
-            f"👤 *用户*: `{escape_markdown(user_name)}`\n"
-            f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
-            f"{progress_text}"
-            f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
-            f"🌐 *地址*: {display_ip}\n"
-            f"🕒 *时间*: `{escape_markdown(current_time)}`"
-            f"{overview_text}" 
-        )
+        caption = (f"{action_str}\n\n👤 *用户*: `{escape_markdown(user_name)}`\n"
+                   f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n{progress_text}"
+                   f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
+                   f"🌐 *地址*: {display_ip}\n🕒 *时间*: `{escape_markdown(current_time)}`{overview_text}")
         
-        # --- 收集发送目标 ---
-        # 遵照需求：播放通知仅发送给管理员，不再发送给公共频道/群组
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
-
-        targets = set()
-        for aid in admin_ids:
-            if aid:
-                targets.add(str(aid))
+        targets = {str(aid) for aid in admin_ids if aid}
 
         if not targets:
-            logger.debug("  ➜ [播放通知] 未配置管理员接收人，跳过发送。")
             return
 
         for target in targets:
@@ -516,13 +475,237 @@ def send_playback_notification(data: dict):
     except Exception as e:
         logger.error(f"  ➜ 组装/发送播放图文通知时发生异常: {e}", exc_info=True)
 
+
 # ======================================================================
-# ★★★ Telegram 机器人交互监听 (长轮询) ★★★
+# ★★★ Telegram 机器人交互监听与搜索订阅功能 ★★★
 # ======================================================================
 
-# 全局变量控制轮询线程
 _tg_polling_thread = None
 _tg_polling_active = False
+
+# 搜索会话缓存，用于临时保存用户的搜索结果
+_tg_search_sessions = {}
+_tg_search_lock = threading.Lock()
+_TG_SEARCH_TTL = 15 * 60  # 缓存 15 分钟
+_TG_SEARCH_LIMIT = 10
+
+def _tg_get_tmdb_api_key() -> str:
+    constant_names = ["CONFIG_OPTION_TMDB_API_KEY", "CONFIG_OPTION_TMDB_APIKEY", "CONFIG_OPTION_TMDB_KEY"]
+    for name in constant_names:
+        config_key = getattr(constants, name, None)
+        if config_key and APP_CONFIG.get(config_key):
+            return str(APP_CONFIG.get(config_key)).strip()
+    return ""
+
+def _tg_set_session(chat_id: str, results: list):
+    with _tg_search_lock:
+        _tg_search_sessions[str(chat_id)] = {
+            "created_at": time.time(),
+            "results": results
+        }
+
+def _tg_get_session(chat_id: str):
+    with _tg_search_lock:
+        session = _tg_search_sessions.get(str(chat_id))
+        if session and (time.time() - session["created_at"]) < _TG_SEARCH_TTL:
+            return session
+        _tg_search_sessions.pop(str(chat_id), None)
+        return None
+
+def _tg_clear_session(chat_id: str):
+    with _tg_search_lock:
+        _tg_search_sessions.pop(str(chat_id), None)
+
+def _tg_start_tmdb_search(chat_id: str, query: str):
+    """发起 TMDb 搜索并显示列表"""
+    query = str(query or "").strip()
+    if not query:
+        send_telegram_message(chat_id, "请输入要搜索的影视剧名称。")
+        return
+
+    def run():
+        try:
+            api_key = _tg_get_tmdb_api_key()
+            if not api_key:
+                send_telegram_message(chat_id, "❌ 未配置 TMDb API Key，无法进行搜索。")
+                return
+
+            send_telegram_message(chat_id, f"⏳ 正在搜索：*{escape_markdown(query)}*", disable_notification=True)
+            from handler.tmdb import search_multi_media, search_media
+            
+            data = search_multi_media(query=query, api_key=api_key, page=1)
+            results = (data or {}).get("results") or []
+
+            # 兼容：如果 multi 搜不到，再分别查电影/剧集
+            if not results:
+                movie_results = search_media(query=query, api_key=api_key, item_type="movie") or []
+                tv_results = search_media(query=query, api_key=api_key, item_type="tv") or []
+                for item in movie_results: item["media_type"] = "movie"
+                for item in tv_results: item["media_type"] = "tv"
+                results = movie_results + tv_results
+
+            normalized_results = []
+            seen = set()
+            for item in results:
+                media_type = item.get("media_type")
+                tmdb_id = item.get("id")
+                if media_type not in {"movie", "tv"} or not tmdb_id:
+                    continue
+                key = (media_type, str(tmdb_id))
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized_results.append(item)
+                if len(normalized_results) >= _TG_SEARCH_LIMIT:
+                    break
+
+            if not normalized_results:
+                _tg_clear_session(chat_id)
+                send_telegram_message(chat_id, f"❌ 未搜索到关于 *{escape_markdown(query)}* 的结果。")
+                return
+
+            _tg_set_session(chat_id, normalized_results)
+
+            # 构造结果文本和键盘
+            lines = [f"🔎 搜索结果 | *{escape_markdown(query)}*\n━━━━━━━━━━━━━━\n请点击下方按钮查看详情：\n"]
+            keyboard = []
+            row = []
+            for idx, item in enumerate(normalized_results, 1):
+                m_type = "电影" if item.get("media_type") == "movie" else "剧集"
+                title = item.get("title") or item.get("name") or "未知"
+                date_text = item.get("release_date") or item.get("first_air_date") or ""
+                year = str(date_text)[:4] if date_text else "未知"
+                
+                lines.append(f"{idx}\\. \\[{m_type}\\] {escape_markdown(title)} \\({year}\\)")
+                
+                row.append({"text": f"{idx:02d}", "callback_data": f"tg_tmdb:{idx}"})
+                if len(row) == 5:
+                    keyboard.append(row)
+                    row = []
+                    
+            if row: keyboard.append(row)
+            keyboard.append([{"text": "❌ 取消搜索", "callback_data": "tg_search_cancel"}])
+            
+            send_telegram_message(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
+
+        except Exception as e:
+            logger.error(f"  ➜ [TG搜索] 搜索失败: {e}", exc_info=True)
+            send_telegram_message(chat_id, f"❌ 搜索异常，请稍后再试。")
+
+    threading.Thread(target=run, name="TG_Search_TMDb", daemon=True).start()
+
+def _tg_show_media_details(chat_id: str, selection_number: int):
+    """显示选中的影视详情和订阅按钮"""
+    session = _tg_get_session(chat_id)
+    if not session:
+        send_telegram_message(chat_id, "❌ 搜索结果已过期，请重新输入名称搜索。")
+        return
+
+    results = session.get("results", [])
+    if selection_number < 1 or selection_number > len(results):
+        send_telegram_message(chat_id, "❌ 选择无效。")
+        return
+
+    item = results[selection_number - 1]
+    media_type = item.get("media_type", "movie")
+    tmdb_id = item.get("id")
+    title = item.get("title") or item.get("name") or "未知"
+    date_text = item.get("release_date") or item.get("first_air_date") or ""
+    year = str(date_text)[:4] if date_text else "未知"
+    rating = item.get("vote_average", 0)
+    overview = item.get("overview", "暂无简介。")
+    poster_path = item.get("poster_path")
+    
+    # 截断过长的剧情以防 Telegram 拒收图文消息 (限制1024字符)
+    if len(overview) > 300:
+        overview = overview[:300] + "..."
+
+    type_str = "🎬 电影" if media_type == "movie" else "📺 剧集"
+    
+    caption = (
+        f"*{escape_markdown(title)}* ({escape_markdown(year)})\n\n"
+        f"🆔 *TMDb*: `{tmdb_id}`\n"
+        f"🎭 *类型*: {type_str}\n"
+        f"⭐️ *评分*: {float(rating):.1f}\n\n"
+        f"📝 *剧情*: {escape_markdown(overview)}"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [{"text": "🔔 订阅该项目", "callback_data": f"tg_sub:{media_type}:{tmdb_id}"}],
+            [{"text": "🔙 关闭", "callback_data": "tg_search_cancel"}]
+        ]
+    }
+
+    if poster_path:
+        photo_url = f"https://image.tmdb.org/t/p/w780{poster_path}"
+        send_telegram_photo(chat_id, photo_url, caption, reply_markup=reply_markup)
+    else:
+        send_telegram_message(chat_id, caption, reply_markup=reply_markup)
+
+def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
+    """处理用户点击订阅按钮"""
+    send_telegram_message(chat_id, "⏳ 正在提交订阅请求...", disable_notification=True)
+    _tg_clear_session(chat_id)
+
+    def run():
+        try:
+            from tasks.helpers import process_subscription_items_and_update_db
+            from handler.tmdb import get_tv_details
+            
+            api_key = _tg_get_tmdb_api_key()
+            tmdb_items = []
+            
+            if media_type == "movie":
+                tmdb_items.append({
+                    'tmdb_id': tmdb_id,
+                    'media_type': 'Movie',
+                    'season': None
+                })
+            elif media_type == "tv":
+                # 剧集需要按季订阅，拉取详情获取所有季
+                details = get_tv_details(tmdb_id, api_key)
+                if details and 'seasons' in details:
+                    for s in details['seasons']:
+                        s_num = s.get('season_number')
+                        # 过滤掉第 0 季 (特别篇)，通常只订阅正片
+                        if s_num is not None and s_num > 0:
+                            tmdb_items.append({
+                                'tmdb_id': tmdb_id,
+                                'media_type': 'Series',
+                                'season': s_num
+                            })
+                else:
+                    # 兜底订阅第 1 季
+                    tmdb_items.append({
+                        'tmdb_id': tmdb_id,
+                        'media_type': 'Series',
+                        'season': 1
+                    })
+
+            if not tmdb_items:
+                send_telegram_message(chat_id, "❌ 无法解析该项目的订阅信息。")
+                return
+
+            subscription_source = {'type': 'telegram_search', 'user_id': chat_id}
+            
+            processed_ids = process_subscription_items_and_update_db(
+                tmdb_items=tmdb_items,
+                tmdb_to_emby_item_map={}, 
+                subscription_source=subscription_source,
+                tmdb_api_key=api_key
+            )
+            
+            if processed_ids:
+                send_telegram_message(chat_id, f"✅ *订阅已提交!*\n系统将在后台自动监控并处理。")
+            else:
+                send_telegram_message(chat_id, f"⚠️ *请求已处理*\n(该项目可能已在库或已处于订阅状态)")
+
+        except Exception as e:
+            logger.error(f"  ➜ [TG交互] 提交订阅失败: {e}", exc_info=True)
+            send_telegram_message(chat_id, f"❌ 提交订阅异常：请查看系统日志。")
+
+    threading.Thread(target=run, name="TG_Resource_Subscribe", daemon=True).start()
 
 def _execute_task_from_tg(chat_id: str, task_key: str):
     """在后台线程中执行选定的任务"""
@@ -575,16 +758,13 @@ def _handle_callback_query(callback_query: dict):
     from_user = callback_query.get('from', {})
     chat_id = str(from_user.get('id', ''))
     data = callback_query.get('data', '')
-
     bot_token = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_BOT_TOKEN)
     
-    # 1. 权限校验
     admin_ids = [str(aid) for aid in user_db.get_admin_telegram_chat_ids()]
     if chat_id not in admin_ids:
         logger.warning(f"  ➜ [TG交互] 收到未授权用户 ({chat_id}) 的回调请求，已拒绝。")
         return
 
-    # 2. 响应 Callback Query (消除按钮上的加载圈圈)
     if bot_token and query_id:
         answer_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
         try:
@@ -592,7 +772,33 @@ def _handle_callback_query(callback_query: dict):
         except Exception:
             pass
 
-    # 3. 处理任务触发逻辑
+    # 1. 搜索取消
+    if data == 'tg_search_cancel':
+        _tg_clear_session(chat_id)
+        send_telegram_message(chat_id, "✅ 已关闭窗口。")
+        return
+
+    # 2. 点击搜索结果选项展示详情
+    if data.startswith('tg_tmdb:'):
+        try:
+            selection = int(data.split(':', 1)[1])
+            _tg_show_media_details(chat_id, selection)
+        except Exception as e:
+            logger.error(f"  ➜ [TG交互] 处理详情查看失败: {e}")
+        return
+
+    # 3. 点击订阅按钮
+    if data.startswith('tg_sub:'):
+        try:
+            parts = data.split(':')
+            media_type = parts[1]
+            tmdb_id = parts[2]
+            _tg_handle_subscribe(chat_id, media_type, tmdb_id)
+        except Exception as e:
+            logger.error(f"  ➜ [TG交互] 处理订阅失败: {e}")
+        return
+
+    # 4. 执行系统任务
     if data.startswith('run_task_'):
         task_key = data.replace('run_task_', '')
         _execute_task_from_tg(chat_id, task_key)
@@ -600,12 +806,11 @@ def _handle_callback_query(callback_query: dict):
 def _handle_incoming_message(message: dict):
     """处理接收到的单条消息 (纯手动遥控器模式)"""
     chat_id = str(message.get('chat', {}).get('id', ''))
-    text = message.get('text', '') or message.get('caption', '') # 兼容带图片的 caption
+    text = message.get('text', '') or message.get('caption', '')
     text = text.strip()
     if not chat_id or not text:
         return
 
-    # 1. 权限校验：只允许管理员发送指令 (或者来自全局频道)
     admin_ids = [str(aid) for aid in user_db.get_admin_telegram_chat_ids()]
     global_channel = str(APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID, ''))
     
@@ -613,9 +818,20 @@ def _handle_incoming_message(message: dict):
         logger.warning(f"  ➜ [TG交互] 收到未授权用户 ({chat_id}) 的消息，已忽略。")
         return
 
-    # ★★★ 处理 M 菜单发来的命令 ★★★
     if text.startswith('/'):
-        cmd = text[1:].lower()
+        cmd_body = text[1:].strip()
+        cmd_token = cmd_body.split()[0].lower() if cmd_body else ''
+        cmd = cmd_token.split('@', 1)[0]
+        cmd_args = cmd_body[len(cmd_token):].strip() if cmd_token else ''
+        
+        # 搜索命令
+        if cmd in ['search', 'find']:
+            if not cmd_args:
+                send_telegram_message(chat_id, "请输入要搜索的片名，例如：/search 阿凡达")
+                return
+            _tg_start_tmdb_search(chat_id, cmd_args)
+            return
+
         from tasks.core import get_task_registry
         registry = get_task_registry(context='all')
 
@@ -638,7 +854,15 @@ def _handle_incoming_message(message: dict):
             if cmd == expected_cmd:
                 _execute_task_from_tg(chat_id, key)
                 return
-    return
+        return
+
+    # 若输入普通纯文本（不是命令，不是链接），直接视为搜索请求
+    is_url = text.lower().startswith('http')
+    is_magnet = text.lower().startswith('magnet:?')
+    is_ed2k = text.lower().startswith('ed2k://')
+    
+    if not (is_url or is_magnet or is_ed2k):
+        _tg_start_tmdb_search(chat_id, text)
 
 def _setup_bot_commands(bot_token: str):
     """
@@ -652,7 +876,6 @@ def _setup_bot_commands(bot_token: str):
         constants.CONFIG_OPTION_TELEGRAM_MENU_TASKS, 
         constants.DEFAULT_TELEGRAM_MENU_TASKS
     )
-    
     if not allowed_tasks:
         allowed_tasks = constants.DEFAULT_TELEGRAM_MENU_TASKS
 
@@ -663,6 +886,7 @@ def _setup_bot_commands(bot_token: str):
             cmd_name = key.replace('-', '_').lower()
             commands.append({"command": cmd_name, "description": f"🚀 {desc}"})
 
+    commands.append({"command": "search", "description": "🔎 搜索并订阅影视剧"})
     commands.append({"command": "all_tasks", "description": "📋 查看所有可用任务"})
 
     api_url = f"https://api.telegram.org/bot{bot_token}/setMyCommands"
@@ -673,8 +897,6 @@ def _setup_bot_commands(bot_token: str):
         response = requests.post(api_url, json=payload, timeout=10, proxies=proxies)
         if response.status_code == 200:
             logger.trace("  ➜ 成功注册 Telegram 机器人快捷菜单。")
-        else:
-            logger.warning(f"  ➜ 注册 Telegram 菜单命令失败: {response.text}")
     except Exception as e:
         logger.error(f"  ➜ 注册 Telegram 菜单命令时发生网络异常: {e}")
 
@@ -687,10 +909,8 @@ def _telegram_polling_worker():
         return
 
     _setup_bot_commands(bot_token)
-
     api_url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
     offset = None
-    
     logger.trace("  ➜ Telegram 机器人交互监听已启动！")
     
     while _tg_polling_active:
@@ -707,20 +927,17 @@ def _telegram_polling_worker():
                 if data.get('ok'):
                     for update in data.get('result', []):
                         offset = update['update_id'] + 1
-                        
                         if 'message' in update:
                             _handle_incoming_message(update['message'])
                         elif 'callback_query' in update:
                             _handle_callback_query(update['callback_query'])
                             
             elif response.status_code == 401 or response.status_code == 404:
-                logger.error("  ➜ Telegram Bot Token 无效，停止轮询。")
                 break
                 
         except requests.exceptions.Timeout:
             pass 
-        except Exception as e:
-            logger.debug(f"  ➜ Telegram 轮询网络异常 (将自动重试): {e}")
+        except Exception:
             time.sleep(5) 
             
         time.sleep(1)
@@ -728,14 +945,11 @@ def _telegram_polling_worker():
 def start_telegram_bot():
     """启动 Telegram 机器人监听"""
     global _tg_polling_thread, _tg_polling_active
-
     if _tg_polling_active:
         return
-        
     bot_token = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_BOT_TOKEN)
     if not bot_token:
         return
-        
     _tg_polling_active = True
     _tg_polling_thread = threading.Thread(target=_telegram_polling_worker, daemon=True, name="TG_Polling_Thread")
     _tg_polling_thread.start()
