@@ -292,6 +292,10 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 .page-content-inner-wrapper { 
   flex: 1;
   overflow-y: auto; 
+  
+  /* 👇👇👇 加上这两行，强制重置 GPU 瓦片渲染系原点 👇👇👇 */
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
 }
 
 .glass-sider {
