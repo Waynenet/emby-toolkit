@@ -374,13 +374,14 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
     except Exception as e:
         logger.error(f"  ➜ 发送媒体通知时发生严重错误: {e}", exc_info=True)
 
+# --- 用于记录最后一次播放状态，防止 Emby 心跳包刷屏 ---
+_last_playback_events = {}
+
 def send_playback_notification(data: dict):
-    """发送图文并茂的播放状态通知 (增强版：带进度、集数、IP、归属地)"""
+    global _last_playback_events
     try:
         event_type = data.get("Event")
         user_name = data.get("User", {}).get("Name", "未知用户")
-        
-        # 提取会话与客户端信息
         session_info = data.get("Session", {})
         device_name = session_info.get("DeviceName", "未知设备")
         client_name = session_info.get("Client", "未知客户端")
@@ -390,8 +391,32 @@ def send_playback_notification(data: dict):
         original_item_name = item.get("Name", "未知项目")
         original_item_type = item.get("Type", "Unknown")
         item_id = item.get("Id")
+
+        # ====================================================
+        # ★★★ 新增：播放状态去重拦截逻辑 ★★★
+        # ====================================================
+        if event_type and item_id:
+            current_time = time.time()
+            # 依据 用户+设备+媒体ID 生成唯一标识
+            stream_key = f"{user_name}_{device_name}_{item_id}"
+            last_event, last_time = _last_playback_events.get(stream_key, (None, 0))
+            
+            # 如果当前状态和上一次完全一样，并且间隔在 12 小时内，说明是重复的心跳包，直接拦截！
+            if event_type == last_event and (current_time - last_time) < 43200:
+                logger.debug(f"  ➜ 忽略 Emby 重复的播放状态心跳包: {event_type} ({stream_key})")
+                # 更新心跳时间，但保持静默
+                _last_playback_events[stream_key] = (event_type, current_time)
+                return
+            
+            # 状态发生了改变（比如 播放->暂停，或 暂停->播放），更新记录并放行通知
+            _last_playback_events[stream_key] = (event_type, current_time)
+            
+            # 顺手清理一下过期的记录（超过24小时的），防止内存无限积压
+            keys_to_delete = [k for k, v in _last_playback_events.items() if current_time - v[1] > 86400]
+            for k in keys_to_delete:
+                del _last_playback_events[k]
+        # ====================================================
         
-        # --- 提取 SxxExx 季集号 ---
         sxe_string = ""
         if original_item_type == "Episode":
             season_num = item.get("ParentIndexNumber")
@@ -399,12 +424,10 @@ def send_playback_notification(data: dict):
             if season_num is not None and episode_num is not None:
                 sxe_string = f" S{int(season_num):02d}E{int(episode_num):02d}"
 
-        # 格式化标题：剧名 S01E01 - 分集名
         display_item_name = original_item_name
         if original_item_type == "Episode" and item.get("SeriesName"):
             display_item_name = f"{item.get('SeriesName')}{sxe_string} - {original_item_name}"
             
-        # --- 提取播放进度 ---
         progress_text = ""
         playback_info = data.get("PlaybackInfo", {})
         if playback_info:
@@ -414,20 +437,14 @@ def send_playback_notification(data: dict):
                 pos_str = _format_ticks_to_time(position_ticks)
                 total_str = _format_ticks_to_time(runtime_ticks)
                 percentage = min((position_ticks / runtime_ticks) * 100, 100.0)
-                progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)`\n"
+                progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)\`\n"
         
-        # --- 获取 IP 地理位置 ---
         ip_location = _get_ip_location(ip_address_raw)
-        
-        # 组装最终展示的 IP (等宽显示 IP，非等宽显示位置信息)
         display_ip = f"`{escape_markdown(ip_address_raw)}`"
         if ip_location:
             display_ip += f" {escape_markdown(ip_location)}"
 
-        # 优先从 Emby Webhook 数据中提取剧情
         raw_overview = item.get("Overview", "")
-        
-        # --- 本地数据库提取图片和剧情兜底 ---
         photo_url = None
         if item_id:
             db_info = media_db.get_notification_media_info_by_emby_id(item_id)
@@ -474,7 +491,6 @@ def send_playback_notification(data: dict):
                 
     except Exception as e:
         logger.error(f"  ➜ 组装/发送播放图文通知时发生异常: {e}", exc_info=True)
-
 
 # ======================================================================
 # ★★★ Telegram 机器人交互监听与搜索订阅功能 ★★★
