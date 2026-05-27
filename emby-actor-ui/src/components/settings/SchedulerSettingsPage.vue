@@ -27,8 +27,8 @@
                 <n-switch v-model:value="configModel.task_chain_enabled" />
               </n-space>
               
-              <!-- ★ 修改点：使用固定宽度 160px，并让 label 左对齐，完美拉开距离并垂直对齐右侧控件 -->
-              <n-form :model="configModel" label-placement="left" :label-width="160" label-align="left" class="mt-3" :show-feedback="false">
+              <!-- ★ 加入 custom-spacing-form 类，利用 CSS 强制控制布局 -->
+              <n-form :model="configModel" label-placement="left" class="mt-3 custom-spacing-form" :show-feedback="false">
                 <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_cron" :disabled="!configModel.task_chain_enabled" placeholder="例如: 0 7-23/2 * * *" />
                 </n-form-item>
@@ -43,14 +43,13 @@
                   />
                 </n-form-item>
                 <n-form-item label="任务序列">
-                  <!-- 去除了会导致变胖的 button-group -->
                   <n-button type="default" @click="showHighFreqChainConfigModal = true" :disabled="!configModel.task_chain_enabled">
                     <template #icon><n-icon :component="Settings24Regular" /></template>
                     配置
                   </n-button>
                 </n-form-item>
               </n-form>
-
+              
               <n-button 
                 type="primary" 
                 ghost 
@@ -100,8 +99,8 @@
                 <n-switch v-model:value="configModel.task_chain_low_freq_enabled" />
               </n-space>
               
-              <!-- ★ 修改点：同上 -->
-              <n-form :model="configModel" label-placement="left" :label-width="160" label-align="left" class="mt-3" :show-feedback="false">
+              <!-- ★ 同上 -->
+              <n-form :model="configModel" label-placement="left" class="mt-3 custom-spacing-form" :show-feedback="false">
                 <n-form-item label="定时执行 (CRON)">
                   <n-input v-model:value="configModel.task_chain_low_freq_cron" :disabled="!configModel.task_chain_low_freq_enabled" placeholder="例如: 0 1 * * *" />
                 </n-form-item>
@@ -509,7 +508,25 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
 </script>
 
 <style scoped>
-/* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
+/* ========================================================= */
+/* ★ 强制修复表单间距与变胖问题的 CSS */
+/* ========================================================= */
+.custom-spacing-form :deep(.n-form-item-label) {
+  padding-right: 24px !important; /* 强制锁定左右间距 */
+  flex-shrink: 0 !important;      /* 防止标签因为容器变窄而被挤压 */
+  white-space: nowrap !important; /* 防止文字换行撑爆高度 */
+}
+
+.custom-spacing-form :deep(.n-form-item-blank) {
+  display: flex;
+  justify-content: flex-start; /* 内部控件正常靠左排列，不强行填满 */
+}
+
+.custom-spacing-form :deep(.n-button) {
+  width: auto !important; /* 彻底防止按钮变胖/被异常拉伸 */
+  flex-shrink: 0;
+}
+
 :deep(.n-card__content) {
   padding-top: 16px !important;
 }
