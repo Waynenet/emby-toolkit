@@ -359,7 +359,32 @@
                         </n-form-item-grid-item>
 
                         <n-form-item-grid-item span="1 s:2" label="模型名称" path="ai_model_name">
-                          <n-input v-model:value="configModel.ai_model_name" placeholder="gpt-3.5-turbo等" />
+                          <n-input-group>
+                          <n-select
+                            v-model:value="configModel.ai_model_name"
+                            :options="aiModelSelectOptions"
+                            filterable
+                            tag
+                            clearable
+                            placeholder="点击右侧刷新后选择，或手动输入模型名"
+                            style="flex: 1;"
+                          />
+                          <n-button
+                            type="primary"
+                            ghost
+                            @click="refreshAIModels"
+                            :loading="isFetchingAIModels"
+                            :disabled="!configModel.ai_api_key"
+                          >
+                            <template #icon><n-icon :component="RefreshIcon" /></template>
+                            刷新
+                          </n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">
+                            从当前 AI 服务商的 models 接口读取，刷新后可直接下拉选择；仍支持手动输入。
+                          </n-text>
+                        </template>
                         </n-form-item-grid-item>
                         
                         <n-form-item-grid-item span="1 s:2" label="API Key" path="ai_api_key">
@@ -993,6 +1018,52 @@ const testProxy = async () => {
     isTestingProxy.value = false;
   }
 };
+
+const refreshAIModels = async () => {
+  if (!configModel.value?.ai_api_key) {
+    message.warning('请先填写 API Key 再刷新模型列表。');
+    return;
+  }
+
+  isFetchingAIModels.value = true;
+  try {
+    const response = await axios.post('/api/ai/models', configModel.value);
+    const models = Array.isArray(response.data?.models) ? response.data.models : [];
+
+    aiModelOptions.value = models.map(model => ({
+      label: model,
+      value: model
+    }));
+
+    if (models.length === 0) {
+      message.warning('接口连接成功，但没有返回可用模型。');
+      return;
+    }
+
+    if (!configModel.value.ai_model_name && models.length === 1) {
+      configModel.value.ai_model_name = models[0];
+    }
+
+    message.success(`已刷新 ${models.length} 个模型，请在下拉框中选择。`);
+  } catch (error) {
+    const errorMsg = error.response?.data?.message || error.message;
+    message.error(`刷新模型失败: ${errorMsg}`);
+  } finally {
+    isFetchingAIModels.value = false;
+  }
+};
+
+watch(
+  () => [
+    configModel.value?.ai_provider,
+    configModel.value?.ai_base_url,
+    configModel.value?.ai_api_key
+  ],
+  () => {
+    aiModelOptions.value = [];
+  }
+);
+
 const testAI = async () => {
   if (!configModel.value.ai_api_key) {
     message.warning('请先填写 API Key 再进行测试。');
@@ -1129,6 +1200,21 @@ const aiTranslationModeOptions = ref([
   { label: '快速模式 (仅翻译)', value: 'fast' },
   { label: '顾问模式 (带上下文)', value: 'quality' }
 ]);
+
+const isFetchingAIModels = ref(false);
+const aiModelOptions = ref([]);
+const aiModelSelectOptions = computed(() => {
+  const currentModel = (configModel.value?.ai_model_name || '').trim();
+  if (!currentModel) return aiModelOptions.value;
+
+  const exists = aiModelOptions.value.some(option => option.value === currentModel);
+  if (exists) return aiModelOptions.value;
+
+  return [
+    { label: currentModel, value: currentModel },
+    ...aiModelOptions.value
+  ];
+});
 
 const isExporting = ref(false);
 const exportModalVisible = ref(false);
