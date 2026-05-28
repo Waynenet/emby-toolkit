@@ -554,4 +554,34 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
 }
+
+/* ==================== 终极防溢出：彻底封死菜单内的任何元素 ==================== */
+
+/* 1. 锁死菜单项本身，任何悬浮产生的背景块、伪元素，绝对不准超出菜单项半步！ */
+.n-menu-item, 
+.n-menu-item-content {
+  position: relative !important;
+  overflow: hidden !important;   /* 暴力切断：谁敢飞出侧边栏，直接斩断 */
+}
+
+/* 2. 限制 Naive UI 菜单悬浮背景块的宽度，防止其宽度计算错误变成 100vw 飞到中间 */
+.n-menu-item-content::before,
+.n-menu-item-content::after,
+.n-menu-item-content__bg {
+  max-width: 100% !important;
+  left: 0 !important;
+  right: 0 !important;
+}
+
+/* 3. 锁死侧边栏容器，物理隔离渲染层，防止阴影或渐变线射出 */
+.glass-sider .n-menu {
+  overflow: hidden !important;
+  isolation: isolate !important;
+}
+
+/* 4. 防止菜单的“激活指示条(Indicator)”定位错乱飞到卡片上 */
+.n-menu-item-indicator {
+  max-width: 4px !important;
+  overflow: hidden !important;
+}
 </style>
