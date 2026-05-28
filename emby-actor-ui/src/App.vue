@@ -770,4 +770,24 @@ body {
 .n-descriptions-table-header { 
   background-color: transparent !important; 
 }
+
+/* ==================== 终极防撕裂：隔离 60fps 动态背景与毛玻璃 UI 层 ==================== */
+
+/* 1. 把动态星空画布死死锁在最底层的独立显存里，绝不准它干扰上层的 UI 重绘 */
+#starfield {
+  transform: translate3d(0, 0, 0) !important;
+  will-change: transform !important;
+}
+
+/* 2. 把整个 Vue 应用套上一层防弹玻璃，强迫显卡把所有卡片作为一个整体更新，消除隐形刷新框的边界 */
+#app {
+  transform: translate3d(0, 0, 0) !important;
+  will-change: transform !important;
+  background-color: transparent !important;
+}
+
+/* 3. 顺手给卡片加上毛玻璃硬件加速，让显卡算得更快，彻底告别抖动 */
+.n-card.dashboard-card {
+  will-change: transform, backdrop-filter !important;
+}
 </style>
