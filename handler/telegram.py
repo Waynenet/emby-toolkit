@@ -437,7 +437,7 @@ def send_playback_notification(data: dict):
                 pos_str = _format_ticks_to_time(position_ticks)
                 total_str = _format_ticks_to_time(runtime_ticks)
                 percentage = min((position_ticks / runtime_ticks) * 100, 100.0)
-                progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)\`\n"
+                progress_text = f"⏳ *进度*: `{pos_str} / {total_str} ({percentage:.1f}%)`\n"
         
         ip_location = _get_ip_location(ip_address_raw)
         display_ip = f"`{escape_markdown(ip_address_raw)}`"
