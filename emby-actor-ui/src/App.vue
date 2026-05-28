@@ -306,54 +306,71 @@ body::before {
   background: rgba(255, 255, 255, 0.05) !important;
 }
 
-/* ==================== 2. 全局卡片 (毛玻璃) ==================== */
+/* ==================== 2. 全局卡片 (分离式毛玻璃防断影) ==================== */
+
+/* 1. 卡片外壳：管边框、阴影、位移。绝对不加毛玻璃和裁切！ */
 .n-card.dashboard-card {
-  background: var(--glass-bg) !important;
-  backdrop-filter: var(--glass-blur) !important;
-  -webkit-backdrop-filter: var(--glass-blur) !important;
+  position: relative !important;
+  z-index: 1 !important;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
   border: 1px solid var(--glass-border) !important;
   box-shadow: var(--glass-shadow) !important;
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  transition: transform 0.2s, box-shadow 0.2s !important;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s !important;
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
-  opacity: 0.999 !important; /* 迫使浏览器将整个卡片压扁为一个独立的渲染层，隔离内部组件的破坏 */
-  clip-path: inset(0 round 16px) !important; /* 绝对物理裁切！无论底层怎么算错，接缝白线都会被瞬间切断 */
-  transform-style: flat !important; /* 压平内部所有 3D 变换层，防止穿透毛玻璃 */
 }
 
-/* 并且把卡片内部的滚动条等容器的 3D 穿透关掉 */
-.n-card.dashboard-card * {
-  backface-visibility: hidden;
+/* 2. 卡片内胆 (伪元素)：专门管毛玻璃。它在最底层负责切掉错位的边缘，但绝不会切到外面的阴影！ */
+.n-card.dashboard-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  z-index: -1;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  clip-path: inset(0 round 16px); /* 专门在这里切边，防溢出 */
+  pointer-events: none;
+  transition: background 0.2s;
 }
 
+/* 3. 悬浮状态拆解 */
 .n-card.dashboard-card:hover {
-  background: var(--glass-bg-hover) !important;
-  border-color: var(--glass-border-light) !important;
   transform: translateY(-2px) !important;
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
+  border-color: var(--glass-border-light) !important;
+}
+.n-card.dashboard-card:hover::before {
+  background: var(--glass-bg-hover);
 }
 
 .n-card.dashboard-card.no-hover:hover {
   transform: none !important;
   box-shadow: var(--glass-shadow) !important;
-  background: var(--glass-bg) !important;
   border-color: var(--glass-border) !important;
 }
+.n-card.dashboard-card.no-hover:hover::before {
+  background: var(--glass-bg);
+}
 
-.n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
-.n-card.dashboard-card.tint-blue:hover { background: var(--tint-blue-hover) !important; }
-.n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
-.n-card.dashboard-card.tint-green:hover { background: var(--tint-green-hover) !important; }
-.n-card.dashboard-card.tint-purple { background: var(--tint-purple) !important; }
-.n-card.dashboard-card.tint-purple:hover { background: var(--tint-purple-hover) !important; }
-.n-card.dashboard-card.tint-orange { background: var(--tint-orange) !important; }
-.n-card.dashboard-card.tint-orange:hover { background: var(--tint-orange-hover) !important; }
-.n-card.dashboard-card.tint-red { background: var(--tint-red) !important; }
-.n-card.dashboard-card.tint-red:hover { background: var(--tint-red-hover) !important; }
+/* 4. 彩色变体（把颜色作用在内胆上） */
+.n-card.dashboard-card.tint-blue::before { background: var(--tint-blue) !important; }
+.n-card.dashboard-card.tint-blue:hover::before { background: var(--tint-blue-hover) !important; }
+.n-card.dashboard-card.tint-green::before { background: var(--tint-green) !important; }
+.n-card.dashboard-card.tint-green:hover::before { background: var(--tint-green-hover) !important; }
+.n-card.dashboard-card.tint-purple::before { background: var(--tint-purple) !important; }
+.n-card.dashboard-card.tint-purple:hover::before { background: var(--tint-purple-hover) !important; }
+.n-card.dashboard-card.tint-orange::before { background: var(--tint-orange) !important; }
+.n-card.dashboard-card.tint-orange:hover::before { background: var(--tint-orange-hover) !important; }
+.n-card.dashboard-card.tint-red::before { background: var(--tint-red) !important; }
+.n-card.dashboard-card.tint-red:hover::before { background: var(--tint-red-hover) !important; }
 
 .dashboard-card > .n-card__content {
   flex-grow: 1 !important;
