@@ -291,11 +291,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
 
 .page-content-inner-wrapper { 
   flex: 1;
-  overflow-y: auto; 
-  
-  /* 👇👇👇 加上这两行，强制重置 GPU 瓦片渲染系原点 👇👇👇 */
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
+  overflow-y: auto;
 }
 
 .glass-sider {
@@ -307,6 +303,10 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   box-shadow: var(--glass-shadow);
   z-index: 10;
   height: calc(100vh - 32px) !important; 
+  
+  /* 👇 新增这两行，把侧边栏关进小黑屋，悬浮菜单不再引发全局重绘 👇 */
+  transform: translateZ(0);
+  will-change: transform, filter;
 }
 
 :deep(.n-layout-sider-scroll-container) {
