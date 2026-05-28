@@ -320,9 +320,6 @@ body::before {
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
-  /* 👇 新增这两行，让卡片免疫外界的所有干扰 👇 */
-  transform: translateZ(0) !important;
-  will-change: transform !important;
 }
 
 .n-card.dashboard-card:hover {
