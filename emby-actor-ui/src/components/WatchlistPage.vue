@@ -486,7 +486,9 @@
                 </n-collapse-transition>
               </div>
             </div>
+            
             <n-divider style="margin: 0" />
+            
             <div class="setting-item">
               <div class="setting-icon"><n-icon :component="MPSyncIcon" /></div>
               <div class="setting-content">
@@ -497,37 +499,39 @@
                 <div class="setting-desc">当发现 MoviePilot 中缺失在追剧订阅时自动补订。</div>
               </div>
             </div>
-          </div>
 
-          <div class="setting-item">
-            <div class="setting-icon"><n-icon :component="RefreshIcon" /></div>
-            <div class="setting-content">
-              <div class="setting-header">
-                <div class="setting-label">剧集订阅洗版参数</div>
-              </div>
-              <div class="setting-desc">
-                剧集向 MoviePilot 提交订阅时的洗版参数，已完结剧集始终强制全集洗版。
-              </div>
-              <div class="setting-sub-panel" style="margin-top: 8px; padding: 4px 12px; background-color: rgba(0,0,0,0.03);">
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--n-border-color);">
-                  <div style="display: flex; flex-direction: column; gap: 2px;">
-                    <span style="font-size: 13px; font-weight: 500;">分集洗版</span>
-                    <span style="font-size: 12px; color: var(--n-text-color-3);">适合边追更边洗版。</span>
-                  </div>
-                  <n-switch v-model:value="watchlistConfig.series_subscription_best_version" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+            <n-divider style="margin: 0" />
+
+            <div class="setting-item">
+              <div class="setting-icon"><n-icon :component="DownloadIcon" /></div>
+              <div class="setting-content">
+                <div class="setting-header">
+                  <div class="setting-label">订阅洗版参数</div>
                 </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0;">
-                  <div style="display: flex; flex-direction: column; gap: 2px;">
-                    <span style="font-size: 13px; font-weight: 500;">全集洗版</span>
-                    <span style="font-size: 12px; color: var(--n-text-color-3);">仅下载完结包。</span>
+                <div class="setting-desc">
+                  向 MoviePilot 提交追更订阅时使用的洗版参数。注：已完结剧集洗版始终强制为全集洗版。
+                </div>
+                <div class="setting-sub-panel">
+                  <div class="resub-item">
+                    <div style="display: flex; flex-direction: column; gap: 2px;">
+                      <span style="font-size: 13px; font-weight: 500; color: var(--n-text-color);">分集洗版</span>
+                      <span style="font-size: 12px; color: var(--n-text-color-depth-3);">适合边追更边替换更佳版本。</span>
+                    </div>
+                    <n-switch v-model:value="watchlistConfig.series_subscription_best_version" size="small">
+                      <template #checked>开启</template>
+                      <template #unchecked>关闭</template>
+                    </n-switch>
                   </div>
-                  <n-switch v-model:value="watchlistConfig.series_subscription_best_version_full" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <div class="resub-item" style="border-bottom: none;">
+                    <div style="display: flex; flex-direction: column; gap: 2px;">
+                      <span style="font-size: 13px; font-weight: 500; color: var(--n-text-color);">全集洗版</span>
+                      <span style="font-size: 12px; color: var(--n-text-color-depth-3);">仅下载包含整季的完结包。</span>
+                    </div>
+                    <n-switch v-model:value="watchlistConfig.series_subscription_best_version_full" size="small">
+                      <template #checked>开启</template>
+                      <template #unchecked>关闭</template>
+                    </n-switch>
+                  </div>
                 </div>
               </div>
             </div>
