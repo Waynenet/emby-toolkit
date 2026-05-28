@@ -284,9 +284,10 @@ def api_watchlist_settings():
         "auto_delete_mp_history": False,     
         "auto_delete_download_tasks": False,
         "enable_backfill": False,
-        "sync_mp_subscription": False,  
-        "revival_check_days": 365,
-        "tg_channel_tracking": False      
+        "sync_mp_subscription": False,
+        "series_subscription_best_version": False,
+        "series_subscription_best_version_full": False,
+        "revival_check_days": 365
     }
 
     if request.method == 'GET':

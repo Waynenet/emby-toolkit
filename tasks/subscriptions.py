@@ -4,7 +4,7 @@ import time
 import re
 from datetime import datetime, timedelta
 import logging
-from typing import List, Dict
+from typing import Any, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed 
 
 # 导入需要的底层模块和共享实例
@@ -41,6 +41,46 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "sub_yue": ["CHT", "繁中", "繁体", "Cantonese"], 
 }
 
+def _apply_watchlist_mp_wash_flags(
+    mp_payload: Dict[str, Any],
+    watchlist_config: Dict[str, Any],
+    *,
+    force_full: bool = False
+) -> str:
+    """
+    根据追剧配置决定向 MoviePilot 提交的洗版参数。
+    - `force_full=True`: 强制全集洗版，忽略开关。
+    - 两个开关都关: 不携带 best_version
+    - 分集洗版: 携带 best_version
+    - 全集洗版: 携带 best_version + best_version_full
+    """
+    episode_wash_enabled = bool(
+        watchlist_config.get(
+            'series_subscription_best_version',
+            watchlist_config.get('sync_mp_subscription_episode_wash', False)
+        )
+    )
+    full_wash_enabled = bool(
+        watchlist_config.get(
+            'series_subscription_best_version_full',
+            watchlist_config.get('sync_mp_subscription_full_wash', False)
+        )
+    )
+
+    mp_payload.pop('best_version', None)
+    mp_payload.pop('best_version_full', None)
+
+    if force_full or full_wash_enabled:
+        mp_payload['best_version'] = 1
+        mp_payload['best_version_full'] = 1
+        return '全集洗版'
+
+    if episode_wash_enabled:
+        mp_payload['best_version'] = 1
+        return '分集洗版'
+
+    return '补缺模式'
+
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
 def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Dict, tmdb_api_key: str, source: Dict = None) -> bool:
@@ -71,7 +111,10 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
         if not valid_seasons:
             logger.warning(f"  ➜ 剧集《{final_series_name}》没有有效的季信息，尝试直接订阅整剧。")
             # 兜底：直接订阅 ID
-            return moviepilot.subscribe_with_custom_payload({"name": final_series_name, "tmdbid": tmdb_id, "type": "电视剧"}, config)
+            mp_payload = {"name": final_series_name, "tmdbid": tmdb_id, "type": "电视剧"}
+            wash_mode = _apply_watchlist_mp_wash_flags(mp_payload, watchlist_config)
+            logger.info(f"  ➜ 《{final_series_name}》整剧兜底订阅使用 {wash_mode}。")
+            return moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
         # 3. 确定最后一季的季号
         last_season_num = valid_seasons[-1]['season_number']
@@ -171,8 +214,7 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
                 "name": final_series_name,
                 "tmdbid": tmdb_id,
                 "type": "电视剧",
-                "season": s_num,
-                "best_version": 0
+                "season": s_num
             }
             
             # ==============================================================
@@ -180,17 +222,25 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             # ==============================================================
             # 只有在【不满足】待定条件时，才去检查完结状态。
             # 如果已经是待定状态，说明肯定没完结，不需要检查，也不应该开启洗版。
-            is_completed = False # ★★★ 新增一个标志位
+            is_completed = False
             if not is_pending_logic:
-                if check_series_completion(tmdb_id, tmdb_api_key, season_number=s_num, series_name=final_series_name):
-                    mp_payload["best_version"] = 1
-                    mp_payload["best_version_full"] = 1 # ★★★ 新增字段，明确告诉 MP 这是全季洗版
-                    is_completed = True # ★★★ 标记为已完结
-                    logger.info(f"  ➜ S{s_num} 已完结，启用全集洗版模式订阅。")
+                is_completed = check_series_completion(
+                    tmdb_id,
+                    tmdb_api_key,
+                    season_number=s_num,
+                    series_name=final_series_name
+                )
+                wash_mode = _apply_watchlist_mp_wash_flags(
+                    mp_payload,
+                    watchlist_config,
+                    force_full=is_completed
+                )
+                if is_completed:
+                    logger.info(f"  ➜ S{s_num} 已完结，强制使用 {wash_mode} 订阅。")
                 else:
-                    logger.info(f"  ➜ S{s_num} 未完结，使用追更模式订阅。")
+                    logger.info(f"  ➜ S{s_num} 未完结，向 MoviePilot 提交 {wash_mode} 订阅。")
             else:
-                logger.info(f"  ➜ S{s_num} 处于待定模式，使用追更模式订阅。")
+                logger.info(f"  ➜ S{s_num} 处于待定模式，向 MoviePilot 提交补缺订阅。")
 
             # ==============================================================
             # 逻辑 E: 提交订阅 & 后置状态修正
@@ -333,13 +383,16 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                         season_number=season_number, 
                         series_name=series_name
                     )
+                    wash_mode = _apply_watchlist_mp_wash_flags(
+                        mp_payload,
+                        watchlist_config,
+                        force_full=is_completed
+                    )
 
                     if is_completed:
-                        mp_payload["best_version"] = 1
-                        mp_payload["best_version_full"] = 1 # ★★★ 新增字段，明确告诉 MP 这是全季洗版
-                        logger.info(f"  ➜ [手动订阅] 第{season_number}季 已完结，启用全集洗版模式。")
+                        logger.info(f"  ➜ [手动订阅] 第{season_number}季 已完结，强制使用 {wash_mode}。")
                     else:
-                        logger.info(f"  ➜ [手动订阅] 第{season_number}季 尚未完结 (连载中)，使用普通追更模式。")
+                        logger.info(f"  ➜ [手动订阅] 第{season_number}季 尚未完结，使用 {wash_mode}。")
                     
                     success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
@@ -847,12 +900,26 @@ def task_auto_subscribe(processor):
                 
                 # 判定洗版/追更
                 is_pending, fake_eps = should_mark_as_pending(int(parent_tmdb_id), int(season_number), tmdb_api_key)
-                is_completed = False # ★★★ 新增标志位
+                is_completed = False
                 
-                if not is_pending and check_series_completion(int(parent_tmdb_id), tmdb_api_key, season_number=int(season_number), series_name=title):
-                    mp_payload["best_version"] = 1
-                    mp_payload["best_version_full"] = 1
-                    is_completed = True # ★★★ 标记为已完结
+                if not is_pending:
+                    is_completed = check_series_completion(
+                        int(parent_tmdb_id),
+                        tmdb_api_key,
+                        season_number=int(season_number),
+                        series_name=title
+                    )
+                    wash_mode = _apply_watchlist_mp_wash_flags(
+                        mp_payload,
+                        watchlist_config,
+                        force_full=is_completed
+                    )
+                    if is_completed:
+                        logger.info(f"  ➜ 《{title}》S{season_number} 已完结，强制使用 {wash_mode} 订阅。")
+                    else:
+                        logger.info(f"  ➜ 《{title}》S{season_number} 未完结，向 MoviePilot 提交 {wash_mode} 订阅。")
+                else:
+                    logger.info(f"  ➜ 《{title}》S{season_number} 处于待定模式，向 MoviePilot 提交补缺订阅。")
                 
                 success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
                 if success and is_pending:
@@ -889,8 +956,8 @@ def task_auto_subscribe(processor):
                 for source in sources:
                     source_type = source.get('type')
                     if source_type == 'resubscribe':
-                        rule_name = source.get('rule_name', '未知规则')
-                        source_display_parts.append(f"自动洗版({rule_name})")
+                        rule_name = telegram.escape_markdown(source.get('rule_name', '未知规则'))
+                        source_display_parts.append(f"`[自动洗版]` ({rule_name})")
                     elif source_type == 'user_request' and (user_id := source.get('user_id')):
                         if user_id not in notifications_to_send:
                             notifications_to_send[user_id] = []
@@ -903,15 +970,21 @@ def task_auto_subscribe(processor):
                                 user_notify_title = f"{series_name} 第 {season_num} 季"
                         
                         notifications_to_send[user_id].append(user_notify_title)
-                        source_display_parts.append(f"用户请求({user_db.get_username_by_id(user_id) or user_id})")
+                        user_name = telegram.escape_markdown(user_db.get_username_by_id(user_id) or user_id)
+                        source_display_parts.append(f"`[用户请求]` ({user_name})")
                     elif source_type == 'actor_subscription':
-                        source_display_parts.append(f"演员订阅({source.get('name', '未知')})")
+                        actor_name = telegram.escape_markdown(source.get('name', '未知'))
+                        source_display_parts.append(f"`[演员订阅]` ({actor_name})")
                     elif source_type in ['custom_collection', 'native_collection']:
-                        source_display_parts.append(f"合集({source.get('name', '未知')})")
+                        coll_name = telegram.escape_markdown(source.get('name', '未知'))
+                        source_display_parts.append(f"`[合集]` ({coll_name})")
+                    elif source_type == 'telegram_search':
+                        tg_name = telegram.escape_markdown(source.get('name', '未知'))
+                        source_display_parts.append(f"`[TG搜索]` ({tg_name})")
                     elif source_type == 'watchlist':
-                        source_display_parts.append("追剧补全")
+                        source_display_parts.append("`[追剧补全]`")
                 
-                source_display = ", ".join(set(source_display_parts)) or "未知来源"
+                source_display = " ".join(set(source_display_parts)) or "`[未知来源]`"
                 subscription_details.append({'source': source_display, 'item': item_display_name, 'action': action_type})
 
             else:
@@ -951,12 +1024,13 @@ def task_auto_subscribe(processor):
             
             item_lines = []
             for detail in subscription_details:
-                source = telegram.escape_markdown(detail.get('source', '未知来源'))
+                source = detail.get('source', '`[未知来源]`')
                 item = telegram.escape_markdown(detail['item'])
                 
-                action_tag = "影巢转存" if detail.get('action') == '影巢' else "MP订阅"
+                action_tag = "TG搜索" if detail.get('action') == 'TG搜索' else "MP订阅"
                 
-                item_lines.append(f"├─ `[{action_tag}]` `[{source}]` {item}")
+                # 直接拼接 source，因为上面已经提前做好了 Markdown 格式化和转义
+                item_lines.append(f"├─ `[{action_tag}]` {source} {item}")
                 
             summary_message = header + "\n" + "\n".join(item_lines)
         else:
