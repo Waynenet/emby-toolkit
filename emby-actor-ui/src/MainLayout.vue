@@ -287,7 +287,6 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border-radius: 16px;
   display: flex;
   flex-direction: column;
-  contain: paint;
 }
 
 .page-content-inner-wrapper { 
@@ -303,8 +302,7 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   border-radius: 16px; 
   box-shadow: var(--glass-shadow);
   z-index: 10;
-  height: calc(100vh - 32px) !important; 
-  contain: paint;
+  height: calc(100vh - 32px) !important;
 }
 
 :deep(.n-layout-sider-scroll-container) {
@@ -555,5 +553,24 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   .mobile-sider-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.6); z-index: 999; backdrop-filter: blur(4px); }
   .n-layout-content .page-content-inner-wrapper { padding: 0 12px !important; }
   .top-header-bar { padding: 16px 12px; }
+}
+
+/* ==================== 终极修复：斩断菜单悬浮引发的排版波动 ==================== */
+
+/* 1. 锁死侧边栏菜单容器的布局，内部怎么预计算、怎么悬浮，绝对不准影响外部尺寸！ */
+.sider-menu-container {
+  contain: layout paint !important;
+}
+
+/* 2. 彻底固定菜单项的物理尺寸，防止悬浮（Hover）时产生任何亚像素级的体积膨胀或边距微调 */
+.n-menu-item, 
+.n-menu-item-content {
+  box-sizing: border-box !important;
+  backface-visibility: hidden !important;
+}
+
+/* 3. 给右侧的网格容器穿上“防挤压铁布衫”，即使外界有 0.1 像素的推挤，网格也绝对不重排！ */
+.n-layout-content .n-grid {
+  contain: layout !important;
 }
 </style>
