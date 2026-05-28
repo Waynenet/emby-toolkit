@@ -306,87 +306,54 @@ body::before {
   background: rgba(255, 255, 255, 0.05) !important;
 }
 
-/* ==================== 2. 全局卡片 (融合版：防碎裂 + 保留完美阴影) ==================== */
-
-/* 1. 卡片外壳：负责阴影、边框、层级。绝对不加毛玻璃和裁切，保留最完美的圆滑边缘！ */
+/* ==================== 2. 全局卡片 (毛玻璃) ==================== */
 .n-card.dashboard-card {
-  position: relative !important;
-  z-index: 1 !important;
-  background: transparent !important;
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
   border: 1px solid var(--glass-border) !important;
   box-shadow: var(--glass-shadow) !important;
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s, z-index 0.2s !important;
+  transition: transform 0.2s, box-shadow 0.2s !important;
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
+  opacity: 0.999 !important; /* 迫使浏览器将整个卡片压扁为一个独立的渲染层，隔离内部组件的破坏 */
+  clip-path: inset(0 round 16px) !important; /* 绝对物理裁切！无论底层怎么算错，接缝白线都会被瞬间切断 */
+  transform-style: flat !important; /* 压平内部所有 3D 变换层，防止穿透毛玻璃 */
 }
 
-/* 2. 内胆伪元素：承载你验证绝对有效的“防碎裂 3 行代码”和毛玻璃 */
-.n-card.dashboard-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit; /* 完美继承外壳的 16px 圆角 */
-  z-index: -1;            /* 垫在底层 */
-  
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  
-  /* 👇👇 你验证有效的 3 行魔法代码，放在这里绝不会切坏外面的阴影！ 👇👇 */
-  opacity: 0.999 !important; 
-  clip-path: inset(0 round 16px) !important; 
-  transform-style: flat !important; 
-  
-  pointer-events: none;
-  transition: background 0.2s;
-}
-
-/* 3. 卡片内部的 3D 穿透关掉（保留你的有效代码） */
+/* 并且把卡片内部的滚动条等容器的 3D 穿透关掉 */
 .n-card.dashboard-card * {
   backface-visibility: hidden;
 }
 
-/* 4. 悬浮状态：提层级！彻底解决“移到左边，右边出白线”的层级碰撞问题 */
 .n-card.dashboard-card:hover {
+  background: var(--glass-bg-hover) !important;
+  border-color: var(--glass-border-light) !important;
   transform: translateY(-2px) !important;
   box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
-  border-color: var(--glass-border-light) !important;
-  
-  /* ★ 核心修复：悬浮时拉高层级，绝对压制旁边的卡片，消除白线乱飞！ */
-  z-index: 10 !important; 
-}
-.n-card.dashboard-card:hover::before {
-  background: var(--glass-bg-hover);
 }
 
-/* 无悬浮动效的卡片兜底 */
 .n-card.dashboard-card.no-hover:hover {
   transform: none !important;
   box-shadow: var(--glass-shadow) !important;
+  background: var(--glass-bg) !important;
   border-color: var(--glass-border) !important;
-  z-index: 1 !important;
-}
-.n-card.dashboard-card.no-hover:hover::before {
-  background: var(--glass-bg);
 }
 
-/* 5. 恢复彩色卡片变体（颜色必须作用在内胆上） */
-.n-card.dashboard-card.tint-blue::before { background: var(--tint-blue) !important; }
-.n-card.dashboard-card.tint-blue:hover::before { background: var(--tint-blue-hover) !important; }
-.n-card.dashboard-card.tint-green::before { background: var(--tint-green) !important; }
-.n-card.dashboard-card.tint-green:hover::before { background: var(--tint-green-hover) !important; }
-.n-card.dashboard-card.tint-purple::before { background: var(--tint-purple) !important; }
-.n-card.dashboard-card.tint-purple:hover::before { background: var(--tint-purple-hover) !important; }
-.n-card.dashboard-card.tint-orange::before { background: var(--tint-orange) !important; }
-.n-card.dashboard-card.tint-orange:hover::before { background: var(--tint-orange-hover) !important; }
-.n-card.dashboard-card.tint-red::before { background: var(--tint-red) !important; }
-.n-card.dashboard-card.tint-red:hover::before { background: var(--tint-red-hover) !important; }
+.n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
+.n-card.dashboard-card.tint-blue:hover { background: var(--tint-blue-hover) !important; }
+.n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
+.n-card.dashboard-card.tint-green:hover { background: var(--tint-green-hover) !important; }
+.n-card.dashboard-card.tint-purple { background: var(--tint-purple) !important; }
+.n-card.dashboard-card.tint-purple:hover { background: var(--tint-purple-hover) !important; }
+.n-card.dashboard-card.tint-orange { background: var(--tint-orange) !important; }
+.n-card.dashboard-card.tint-orange:hover { background: var(--tint-orange-hover) !important; }
+.n-card.dashboard-card.tint-red { background: var(--tint-red) !important; }
+.n-card.dashboard-card.tint-red:hover { background: var(--tint-red-hover) !important; }
 
 .dashboard-card > .n-card__content {
   flex-grow: 1 !important;
