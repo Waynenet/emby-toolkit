@@ -770,27 +770,4 @@ body {
 .n-descriptions-table-header { 
   background-color: transparent !important; 
 }
-
-/* ==================== 终极修复：浏览器毛玻璃全屏渲染断层/接缝撕裂 Bug ==================== */
-
-/* 1. 强行把整个应用的最外层（App 挂载点）变为一个绝对统一的硬件加速图层，不允许内部产生悬浮瓦片断裂 */
-#app {
-  transform: translate3d(0, 0, 0);
-  -webkit-transform: translate3d(0, 0, 0);
-  backface-visibility: hidden;
-  perspective: 1000px;
-}
-
-/* 2. 给所有的毛玻璃卡片加上防污染结界，隔离渲染上下文，强迫显卡不要跟背景图层的重绘产生联动溢出 */
-.n-card.dashboard-card {
-  /* 只需要在原本的 .dashboard-card 里加上这两行神级抗锯齿和隔离属性 */
-  -webkit-font-smoothing: antialiased !important;
-  isolation: isolate !important;
-}
-
-/* 3. 【最关键】让右侧的主内容区在重新排版时，不准将内部元素切分成碎片交给显卡 */
-.app-main-content {
-  contain: layout style !important;
-  isolation: isolate !important;
-}
 </style>
