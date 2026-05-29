@@ -325,11 +325,6 @@ body::before {
   transform-style: flat !important; /* 压平内部所有 3D 变换层，防止穿透毛玻璃 */
 }
 
-/* 并且把卡片内部的滚动条等容器的 3D 穿透关掉 */
-.n-card.dashboard-card * {
-  backface-visibility: hidden;
-}
-
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
