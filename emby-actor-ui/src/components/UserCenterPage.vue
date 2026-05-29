@@ -485,4 +485,36 @@ onMounted(async () => {
   .custom-list-item { padding: 12px; }
   .item-icon-block { width: 40px; height: 40px; margin-right: 12px; }
 }
+
+/* ========================================================== */
+/* 修复：跨列快速滑动鼠标时触发的 GPU 渲染层撕裂（全屏白线）Bug   */
+/* ========================================================== */
+
+/* 1. 隔离整体页面容器，防止内部网格渲染错误溢出到整个 body 层 */
+.modular-page-container {
+  transform: translateZ(0); /* 强制开启 GPU 硬件加速 */
+  will-change: transform;
+}
+
+/* 2. 隔离每一个网格单元 (n-gi)
+   这是修复的核心：将毛玻璃卡片的重绘严格限制在自己的网格内，绝对不允许越界污染其他列 */
+:deep(.n-gi) {
+  transform: translateZ(0); /* 为每个单元格分配独立的 GPU 合成层 */
+  contain: paint layout;    /* 物理级裁切：内部无论怎么产生渲染毛边，都绝对不会溢出单元格 */
+  border-radius: 16px;      /* 贴合卡片圆角，防止四个角漏光 */
+}
+
+/* 3. 修复 Grid 伸缩布局下的物理抖动
+   因为你的卡片在 hover 时会 translateY(-2px)，向上偏移会导致底部空出 2px
+   这可能引起 Grid 重新计算高度。我们提前给底部留出 2px 弹性空间即可。 */
+:deep(.n-card.dashboard-card) {
+  will-change: transform, box-shadow; /* 提前通知浏览器对动画进行优化 */
+  margin-bottom: 2px !important;      /* 吸收悬浮向上移动的 2px 物理落差 */
+}
+
+/* 修复 Naive UI Grid 负边距引起的页面边缘像素溢出 */
+:deep(.n-grid) {
+  overflow: hidden; 
+  padding: 2px; /* 补偿 overflow hidden 吃掉的阴影边缘 */
+}
 </style>
