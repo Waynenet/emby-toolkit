@@ -593,8 +593,8 @@ def send_playback_notification(data: dict):
             stream_key = f"{user_name}_{device_name}_{item_id}"
             last_event, last_time = _last_playback_events.get(stream_key, (None, 0))
             
-            # 如果当前状态和上一次完全一样，并且间隔在 12 小时内，说明是重复的心跳包，直接拦截！
-            if event_type == last_event and (current_time - last_time) < 43200:
+            # 如果当前状态和上一次完全一样，并且间隔在 5 分钟内，说明是重复的心跳包，直接拦截！
+            if event_type == last_event and (current_time - last_time) < 300:
                 logger.debug(f"  ➜ 忽略 Emby 重复的播放状态心跳包: {event_type} ({stream_key})")
                 # 更新心跳时间，但保持静默
                 _last_playback_events[stream_key] = (event_type, current_time)
@@ -603,8 +603,8 @@ def send_playback_notification(data: dict):
             # 状态发生了改变（比如 播放->暂停，或 暂停->播放），更新记录并放行通知
             _last_playback_events[stream_key] = (event_type, current_time)
             
-            # 顺手清理一下过期的记录（超过24小时的），防止内存无限积压
-            keys_to_delete = [k for k, v in _last_playback_events.items() if current_time - v[1] > 86400]
+            # 顺手清理一下过期的记录（超过1小时的），防止内存无限积压
+            keys_to_delete = [k for k, v in _last_playback_events.items() if current_time - v[1] > 3600]
             for k in keys_to_delete:
                 del _last_playback_events[k]
         # ====================================================
