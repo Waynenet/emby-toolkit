@@ -320,9 +320,6 @@ body::before {
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
-  opacity: 0.999 !important; /* 迫使浏览器将整个卡片压扁为一个独立的渲染层，隔离内部组件的破坏 */
-  clip-path: inset(0 round 16px) !important; /* 绝对物理裁切！无论底层怎么算错，接缝白线都会被瞬间切断 */
-  transform-style: flat !important; /* 压平内部所有 3D 变换层，防止穿透毛玻璃 */
 }
 
 .n-card.dashboard-card:hover {
