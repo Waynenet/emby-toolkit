@@ -1448,7 +1448,6 @@ class WatchlistProcessor:
         # 2. 本地 1～N-1 集：视为追到一半，必须继续保持追剧，不能完结；
         # 3. 本地 N/N 集：本地已集齐，才允许完结并触发后续完结洗版/等待完结包逻辑。
         watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-        tg_channel_tracking = watchlist_cfg.get('tg_channel_tracking', False)
         
         tmdb_seasons_list = latest_series_data.get('seasons', [])
         valid_tmdb_seasons = sorted(
@@ -1677,19 +1676,8 @@ class WatchlistProcessor:
                     if local_target_count <= 0:
                         logger.info(f"  ➜ [完结洗版跳过] 《{item_name}》S{last_s_num} 本地 0 集，视为未追本季，不触发洗版/等待完结包。")
                     else:
-                        tg_channel_tracking = watchlist_cfg.get('tg_channel_tracking', False)
-
-                        if tg_channel_tracking:
-                            if self._check_season_consistency(tmdb_id, last_s_num, last_ep_count):
-                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 本地文件一致性完美，无需洗版。")
-                            else:
-                                # ★ 核心：不一致，开启等待标志！
-                                set_waiting_flag = True
-                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 完结但文件不一致。已开启 '等待完结包' 标志，静候 TG 频道发布。")
-                        else:
-                            # 未开启 TG 追更，走原来的 MP 洗版逻辑
-                            logger.info(f"  ➜ [完结洗版] 《{item_name}》由 {translate_internal_status(old_status)} 转为完结，立即提交 MP 洗版。")
-                            self._handle_auto_resub_ended(tmdb_id, item_name, last_s_num, last_ep_count)
+                        logger.info(f"  ➜ [完结洗版] 《{item_name}》由 {translate_internal_status(old_status)} 转为完结，立即提交 MP 洗版。")
+                        self._handle_auto_resub_ended(tmdb_id, item_name, last_s_num, last_ep_count)
 
         # 如果剧集恢复连载（出新季了），必须清除等待标志，防止误判
         if final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]:
