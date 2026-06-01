@@ -74,6 +74,191 @@ def escape_markdown(text: str) -> str:
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
+
+def _markdown_code_text(text) -> str:
+    """MarkdownV2 code span 内只需要处理反斜杠和反引号。"""
+    return str(text or '').replace('\\', '\\\\').replace('`', '\\`')
+
+
+def _format_size_for_notice(size_bytes) -> str:
+    try:
+        size = float(size_bytes or 0)
+    except Exception:
+        return ''
+    if size <= 0:
+        return ''
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    if units[idx] in {'GB', 'TB'}:
+        return f"{size:.1f}{units[idx]}" if size < 100 else f"{size:.0f}{units[idx]}"
+    if units[idx] == 'MB':
+        return f"{size:.0f}MB"
+    return f"{int(size)}{units[idx]}"
+
+
+def _notice_asset_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _load_notice_asset_details_by_emby_id(emby_item_id: str) -> list:
+    """从 media_metadata.asset_details_json 读取通知参数，不再重新查 Emby MediaSources。"""
+    emby_item_id = str(emby_item_id or '').strip()
+    if not emby_item_id:
+        return []
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT asset_details_json
+                    FROM media_metadata
+                    WHERE asset_details_json IS NOT NULL
+                      AND (
+                          emby_item_ids_json @> %s::jsonb
+                          OR asset_details_json @> %s::jsonb
+                      )
+                    ORDER BY
+                        CASE item_type
+                            WHEN 'Episode' THEN 0
+                            WHEN 'Movie' THEN 1
+                            WHEN 'Season' THEN 2
+                            WHEN 'Series' THEN 3
+                            ELSE 9
+                        END,
+                        in_library DESC,
+                        date_added DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (
+                        json.dumps([emby_item_id], ensure_ascii=False),
+                        json.dumps([{'emby_item_id': emby_item_id}], ensure_ascii=False),
+                    ),
+                )
+                row = cursor.fetchone()
+    except Exception as e:
+        logger.warning(f"  ➜ [通知] 查询 asset_details_json 失败: emby_item_id={emby_item_id}, err={e}")
+        return []
+
+    if not row:
+        return []
+
+    assets = _notice_asset_list(dict(row).get('asset_details_json'))
+    if not assets:
+        return []
+
+    # 一条剧集/季记录里可能有多个 asset，优先只取当前 Emby Item 对应的那一个。
+    matched = [item for item in assets if str(item.get('emby_item_id') or '').strip() == emby_item_id]
+    return matched or assets
+
+
+def _notice_asset_value(asset: dict, *keys) -> str:
+    for key in keys:
+        value = (asset or {}).get(key)
+        if value not in (None, ''):
+            return str(value).strip()
+    return ''
+
+
+def _notice_asset_size(asset: dict) -> int:
+    value = (asset or {}).get('size_bytes')
+    if value in (None, ''):
+        value = (asset or {}).get('size') or (asset or {}).get('file_size')
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return 0
+
+
+def _notice_asset_resolution(asset: dict) -> str:
+    resolution = _notice_asset_value(asset, 'resolution_display')
+    width = (asset or {}).get('width')
+    height = (asset or {}).get('height')
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except Exception:
+        width, height = 0, 0
+    dimension = f"{width}x{height}" if width and height else ''
+    if resolution and dimension and dimension not in resolution:
+        return f"{resolution} / {dimension}"
+    return resolution or dimension
+
+
+def _notice_join_unique(values, limit: int = 4) -> str:
+    out = []
+    for value in values or []:
+        value = str(value or '').strip()
+        if value and value not in out:
+            out.append(value)
+    if not out:
+        return ''
+    text = ' / '.join(out[:limit])
+    if len(out) > limit:
+        text += f" 等{len(out)}种"
+    return text
+
+
+def _build_notice_asset_params_text(emby_item_ids: list) -> str:
+    """生成入库/追更通知参数，数据源固定为 media_metadata.asset_details_json。"""
+    assets = []
+    seen = set()
+    for emby_item_id in emby_item_ids or []:
+        for asset in _load_notice_asset_details_by_emby_id(emby_item_id):
+            key = str(asset.get('emby_item_id') or '') or str(asset.get('path') or '')
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            assets.append(asset)
+
+    if not assets:
+        return ''
+
+    quality = _notice_join_unique(_notice_asset_value(a, 'quality_display') for a in assets)
+    resolution = _notice_join_unique(_notice_asset_resolution(a) for a in assets)
+    codec = _notice_join_unique(_notice_asset_value(a, 'codec_display', 'video_codec') for a in assets)
+    effect = _notice_join_unique(_notice_asset_value(a, 'effect_display') for a in assets)
+    audio = _notice_join_unique(_notice_asset_value(a, 'audio_display') for a in assets)
+    subtitle = _notice_join_unique(_notice_asset_value(a, 'subtitle_display') for a in assets)
+
+    total_size = sum(_notice_asset_size(a) for a in assets)
+    file_count = len(assets)
+
+    lines = []
+    quality_parts = [part for part in (quality, resolution, codec) if part]
+    if quality_parts:
+        lines.append(f"🎞️ *画质*: `{_markdown_code_text(' / '.join(quality_parts))}`")
+    if effect:
+        lines.append(f"🌈 *HDR/杜比*: `{_markdown_code_text(effect)}`")
+
+    size_text = _format_size_for_notice(total_size)
+    if size_text:
+        if file_count > 1:
+            size_text = f"{size_text}（{file_count}个文件）"
+        lines.append(f"💾 *体积*: `{_markdown_code_text(size_text)}`")
+
+    if audio:
+        lines.append(f"🎧 *音轨*: `{_markdown_code_text(audio)}`")
+    if subtitle:
+        lines.append(f"💬 *字幕*: `{_markdown_code_text(subtitle)}`")
+
+    return ('\n'.join(lines) + '\n') if lines else ''
+
 # --- 通用的 Telegram 文本消息发送函数 ---
 def send_telegram_message(chat_id: str, text: str, disable_notification: bool = False, reply_markup: dict = None):
     """通用的 Telegram 文本消息发送函数，支持内联键盘。"""
@@ -171,8 +356,11 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         escaped_title = escape_markdown(title)
         escaped_overview = escape_markdown(overview)
 
-        # --- 2. 准备剧集信息 (如果适用) ---
+        # --- 2. 准备剧集信息 + 媒体参数 ---
+        # 媒体参数不再临时查 Emby MediaSources，直接读取 process_single_item 已写入的
+        # media_metadata.asset_details_json，避免重复请求和字段口径不一致。
         episode_info_text = ""
+        notice_emby_item_ids = []
         if item_type == "Series" and new_episode_ids:
             emby_url = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
             api_key = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY)
@@ -187,11 +375,16 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                     episode_num = detail.get("IndexNumber", 0)
                     # 收集元组 (季号, 集号)
                     raw_episodes.append((season_num, episode_num))
+                notice_emby_item_ids.append(str(ep_id))
             
             # 调用辅助函数生成合并后的字符串
             if raw_episodes:
                 formatted_episodes = _format_episode_ranges(raw_episodes)
                 episode_info_text = f"🎞️ *集数*: `{formatted_episodes}`\n"
+        elif item_id:
+            notice_emby_item_ids.append(str(item_id))
+
+        media_param_text = _build_notice_asset_params_text(notice_emby_item_ids)
 
         # --- 3. 调用本地数据库获取图片路径 ---
         photo_url = None
@@ -251,6 +444,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         caption = (
             f"{media_icon} *{escaped_title}* {notification_title}\n\n"
             f"{episode_info_text}"
+            f"{media_param_text}"
             f"⏰ *时间*: `{current_time}`\n"
             f"📝 *剧情*: {escaped_overview}"
             f"{review_warning}"
@@ -1947,3 +2141,64 @@ def stop_telegram_bot():
     global _tg_polling_active
     _tg_polling_active = False
     logger.info("  ➜ Telegram 机器人交互监听已停止。")
+
+
+def send_share_request_push_notification(event: dict, result: dict = None, success: bool = True):
+    """求分享命中后，客户端长轮询自动转存完成通知。"""
+    try:
+        result = result or {}
+        title = str((event or {}).get('title') or ((event or {}).get('payload') or {}).get('title') or '未知资源')
+        group_id = str((event or {}).get('group_id') or '')
+        source_id = str((event or {}).get('source_id') or '')
+        target_type = str((event or {}).get('target_type') or '')
+        season_number = (event or {}).get('season_number')
+        episode_number = (event or {}).get('episode_number')
+        bounty = (event or {}).get('current_bounty')
+        mode = str(result.get('mode') or result.get('action_type') or '')
+        message = str(result.get('message') or result.get('error') or '')
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        target_text = ''
+        try:
+            if target_type in ('series', 'tv'):
+                target_text = '全剧'
+            elif target_type == 'season' and season_number not in (None, ''):
+                target_text = f"S{int(season_number):02d}"
+            elif target_type == 'episode' and season_number not in (None, '') and episode_number not in (None, ''):
+                target_text = f"S{int(season_number):02d}E{int(episode_number):02d}"
+        except Exception:
+            target_text = ''
+
+        status_title = '✅ 求分享已命中并自动转存成功' if success else '⚠️ 求分享命中但自动转存失败'
+        lines = [
+            f"*{escape_markdown(status_title)}*",
+            "",
+            f"🎬 *资源*: `{_markdown_code_text(title)}`",
+        ]
+        if target_text:
+            lines.append(f"🎯 *目标*: `{_markdown_code_text(target_text)}`")
+        if bounty not in (None, ''):
+            lines.append(f"🏆 *悬赏*: `{_markdown_code_text(str(bounty))}`")
+        if mode:
+            lines.append(f"📥 *模式*: `{_markdown_code_text(mode)}`")
+        if source_id:
+            lines.append(f"🆔 *来源*: `{_markdown_code_text(source_id)}`")
+        if group_id:
+            lines.append(f"🔖 *求分享*: `{_markdown_code_text(group_id)}`")
+        lines.append(f"🕒 *时间*: `{_markdown_code_text(current_time)}`")
+        if message:
+            lines.append(f"📝 *结果*: {escape_markdown(message[:300])}")
+
+        text = "\n".join(lines)
+        global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
+        admin_ids = set(user_db.get_admin_telegram_chat_ids())
+        targets = set()
+        if global_channel_id:
+            targets.add(str(global_channel_id))
+        for aid in admin_ids:
+            if aid:
+                targets.add(str(aid))
+        for target in targets:
+            send_telegram_message(target, text)
+    except Exception as e:
+        logger.error(f"  ➜ 发送求分享自动转存通知失败: {e}", exc_info=True)

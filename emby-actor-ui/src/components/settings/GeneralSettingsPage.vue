@@ -595,92 +595,6 @@
                         </template>
                     </n-form-item>
 
-                    <n-divider title-placement="left" style="margin: 12px 0 8px; font-size: 0.9em; color: gray;">共享资源中心</n-divider>
-
-                    <n-form-item label="共享资源" path="p115_shared_resource_enabled">
-                        <n-switch v-model:value="configModel.p115_shared_resource_enabled" :disabled="organizeDependentDisabled">
-                            <template #checked>启用共享池</template>
-                            <template #unchecked>关闭</template>
-                        </n-switch>
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">
-                                开启后，订阅优先查询共享资源池；未命中时自动登记缺口，仍继续走原有影巢 / TG / MP 流程。
-                            </n-text>
-                        </template>
-                    </n-form-item>
-
-                    <template v-if="configModel.p115_shared_resource_enabled">
-                        <n-form-item label="入库方式" path="p115_shared_resource_mode">
-                            <n-radio-group v-model:value="configModel.p115_shared_resource_mode" name="shared_resource_mode_group">
-                                <n-space vertical>
-                                    <n-radio value="permanent">
-                                        永久转存
-                                        <n-text depth="3" style="font-size:0.85em; margin-left: 6px;">命中共享池后直接转存到正式媒体目录，适合收藏。</n-text>
-                                    </n-radio>
-                                    <n-radio value="virtual">
-                                        虚拟入库
-                                        <n-text depth="3" style="font-size:0.85em; margin-left: 6px;">先生成 STRM 和媒体信息，播放时才临时转存。</n-text>
-                                    </n-radio>
-                                </n-space>
-                            </n-radio-group>
-                        </n-form-item>
-
-                        <n-form-item label="最大活跃分享数" path="p115_shared_max_active_shares">
-                            <n-input-number
-                                v-model:value="configModel.p115_shared_max_active_shares"
-                                :min="0"
-                                :max="10000"
-                                :step="10"
-                                style="width: 150px;"
-                            >
-                                <template #suffix>条</template>
-                            </n-input-number>
-                            <template #feedback>
-                                <n-text depth="3" style="font-size:0.8em;">
-                                    0 表示不限制。维护任务发现超过上限时，会按转存次数和创建时间综合评分，清理到约 80% 水位；违规/风控分享会直接删除。
-                                </n-text>
-                            </template>
-                        </n-form-item>
-
-                        <template v-if="configModel.p115_shared_resource_mode === 'virtual'">
-                            <n-form-item label="临时转存目录" path="p115_shared_cache_cid">
-                                <n-input-group>
-                                    <n-input
-                                        :value="configModel.p115_shared_cache_name || configModel.p115_shared_cache_cid"
-                                        placeholder="请选择虚拟入库播放时的临时转存目录"
-                                        readonly
-                                        @click="openFolderSelector('shared_cache_path', configModel.p115_shared_cache_cid)"
-                                    >
-                                        <template #prefix><n-icon :component="FolderIcon" /></template>
-                                    </n-input>
-                                    <n-button type="primary" ghost @click="openFolderSelector('shared_cache_path', configModel.p115_shared_cache_cid)">选择</n-button>
-                                </n-input-group>
-                                <template #feedback>
-                                    <n-text depth="3" style="font-size:0.8em;">
-                                        虚拟入库资源首次播放时会转存到这里；确认值得收藏后，可再转为永久转存。
-                                    </n-text>
-                                </template>
-                            </n-form-item>
-
-                            <n-form-item label="临时保留天数" path="p115_shared_cache_retention_days">
-                                <n-input-number
-                                    v-model:value="configModel.p115_shared_cache_retention_days"
-                                    :min="1"
-                                    :max="365"
-                                    :step="1"
-                                    style="width: 150px;"
-                                >
-                                    <template #suffix>天</template>
-                                </n-input-number>
-                                <template #feedback>
-                                    <n-text depth="3" style="font-size:0.8em;">
-                                        超过保留期且未转为永久的临时转存文件，可由后续清理任务删除。
-                                    </n-text>
-                                </template>
-                            </n-form-item>
-                        </template>
-                    </template>
-
                     <n-form-item label="媒体信息格式化" path="p115_generate_mediainfo">
                       <n-switch v-model:value="configModel.p115_generate_mediainfo" :disabled="organizeDependentDisabled">
                           <template #checked>生成自定义媒体信息</template>
@@ -1088,7 +1002,32 @@
                         <n-input type="password" show-password-on="mousedown" v-model:value="configModel.ai_api_key" placeholder="输入你的 API Key" />
                       </n-form-item>
                       <n-form-item label="模型名称" path="ai_model_name">
-                        <n-input v-model:value="configModel.ai_model_name" placeholder="例如: gpt-3.5-turbo, glm-4" />
+                        <n-input-group>
+                          <n-select
+                            v-model:value="configModel.ai_model_name"
+                            :options="aiModelSelectOptions"
+                            filterable
+                            tag
+                            clearable
+                            placeholder="点击右侧刷新后选择，或手动输入模型名"
+                            style="flex: 1;"
+                          />
+                          <n-button
+                            type="primary"
+                            ghost
+                            @click="refreshAIModels"
+                            :loading="isFetchingAIModels"
+                            :disabled="!configModel.ai_api_key"
+                          >
+                            <template #icon><n-icon :component="RefreshIcon" /></template>
+                            刷新
+                          </n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">
+                            从当前 AI 服务商的 models 接口读取，刷新后可直接下拉选择；仍支持手动输入。
+                          </n-text>
+                        </template>
                       </n-form-item>
                       <n-form-item label="API Base URL (可选)" path="ai_base_url">
                         <n-input v-model:value="configModel.ai_base_url" placeholder="用于代理或第三方兼容服务" />
@@ -1974,7 +1913,7 @@
           </n-radio-group>
 
           <div style="text-align: center; background: #fafafa; padding: 15px; border-radius: 8px; border: 1px dashed #eee;">
-            <n-image width="180" src="/img/wechat_pay.jpg" fallback-src="https://via.placeholder.com/180?text=WeChat+Pay" />
+            <n-image width="180" src="/img/wechat_pay.png" fallback-src="https://via.placeholder.com/180?text=WeChat+Pay" />
             <div style="margin-top: 10px; font-size: 14px;">
               请使用微信扫码支付 <b style="color: #d03050; font-size: 18px;">￥{{ proPrice }}</b>
             </div>
@@ -2477,6 +2416,51 @@ const testProxy = async () => {
     isTestingProxy.value = false;
   }
 };
+const refreshAIModels = async () => {
+  if (!configModel.value?.ai_api_key) {
+    message.warning('请先填写 API Key 再刷新模型列表。');
+    return;
+  }
+
+  isFetchingAIModels.value = true;
+  try {
+    const response = await axios.post('/api/ai/models', configModel.value);
+    const models = Array.isArray(response.data?.models) ? response.data.models : [];
+
+    aiModelOptions.value = models.map(model => ({
+      label: model,
+      value: model
+    }));
+
+    if (models.length === 0) {
+      message.warning('接口连接成功，但没有返回可用模型。');
+      return;
+    }
+
+    if (!configModel.value.ai_model_name && models.length === 1) {
+      configModel.value.ai_model_name = models[0];
+    }
+
+    message.success(`已刷新 ${models.length} 个模型，请在下拉框中选择。`);
+  } catch (error) {
+    const errorMsg = error.response?.data?.message || error.message;
+    message.error(`刷新模型失败: ${errorMsg}`);
+  } finally {
+    isFetchingAIModels.value = false;
+  }
+};
+
+watch(
+  () => [
+    configModel.value?.ai_provider,
+    configModel.value?.ai_base_url,
+    configModel.value?.ai_api_key
+  ],
+  () => {
+    aiModelOptions.value = [];
+  }
+);
+
 const testAI = async () => {
   if (!configModel.value.ai_api_key) {
     message.warning('请先填写 API Key 再进行测试。');
@@ -2487,7 +2471,7 @@ const testAI = async () => {
   try {
     // 将当前的 configModel 传给后端进行即时测试
     const response = await axios.post('/api/ai/test', configModel.value);
-    
+
     if (response.data.success) {
       // 使用 dialog 弹出详细结果，看起来更专业
       dialog.success({
@@ -2614,6 +2598,21 @@ const aiProviderOptions = ref([
   { label: '智谱AI (ZhipuAI)', value: 'zhipuai' },
   { label: 'Google Gemini', value: 'gemini' },
 ]);
+
+const isFetchingAIModels = ref(false);
+const aiModelOptions = ref([]);
+const aiModelSelectOptions = computed(() => {
+  const currentModel = (configModel.value?.ai_model_name || '').trim();
+  if (!currentModel) return aiModelOptions.value;
+
+  const exists = aiModelOptions.value.some(option => option.value === currentModel);
+  if (exists) return aiModelOptions.value;
+
+  return [
+    { label: currentModel, value: currentModel },
+    ...aiModelOptions.value
+  ];
+});
 const isExporting = ref(false);
 const exportModalVisible = ref(false);
 const allDbTables = ref([]);

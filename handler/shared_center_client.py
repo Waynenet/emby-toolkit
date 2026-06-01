@@ -7,8 +7,35 @@ import requests
 
 import config_manager
 import constants
+from database import settings_db
 
 logger = logging.getLogger(__name__)
+
+
+def _app_version() -> str:
+    return str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0').strip() or '0.0.0'
+
+
+def _client_user_agent() -> str:
+    return f"ETK/{_app_version()}"
+
+
+def _raise_for_center_error(resp):
+    if resp.ok:
+        return
+    if resp.status_code == 426:
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        min_version = body.get('min_client_version') if isinstance(body, dict) else ''
+        client_version = body.get('client_version') if isinstance(body, dict) else ''
+        message = body.get('message') if isinstance(body, dict) else ''
+        raise RuntimeError(
+            message or f"共享中心拒绝服务：当前客户端版本 {client_version or _app_version()} 低于中心要求 {min_version or '未知'}，请升级 ETK 后再使用共享资源。"
+        )
+    raise RuntimeError(f"共享中心请求失败: {resp.status_code} {resp.text[:200]}")
+
 
 def _request_kwargs(timeout: int) -> Dict[str, Any]:
     """共享中心 HTTP 请求参数。
@@ -25,36 +52,37 @@ def _request_kwargs(timeout: int) -> Dict[str, Any]:
     return kwargs
 
 
-def _cfg_const(name: str, fallback: str, default=None):
-    key = getattr(constants, name, fallback)
-    return (config_manager.APP_CONFIG or {}).get(key, default)
+def _shared_cfg() -> Dict[str, Any]:
+    return settings_db.get_shared_resource_config()
 
 
 def shared_center_enabled() -> bool:
-    value = _cfg_const('CONFIG_OPTION_115_SHARED_RESOURCE_ENABLED', 'p115_shared_resource_enabled', False)
-    if isinstance(value, str):
-        value = value.strip().lower() in ('1', 'true', 'yes', 'on', '启用')
-    return bool(value)
+    return bool(_shared_cfg().get('p115_shared_resource_enabled'))
 
 
 def shared_resource_mode() -> str:
-    mode = str(_cfg_const('CONFIG_OPTION_115_SHARED_RESOURCE_MODE', 'p115_shared_resource_mode', 'permanent') or 'permanent').strip().lower()
+    mode = str(_shared_cfg().get('p115_shared_resource_mode') or 'permanent').strip().lower()
     return 'virtual' if mode == 'virtual' else 'permanent'
 
 
 class SharedCenterClient:
     def __init__(self):
-        self.base_url = str(_cfg_const('CONFIG_OPTION_115_SHARED_CENTER_URL', 'p115_shared_center_url', 'https://shared.55565576.xyz') or '').rstrip('/')
-        self.device_token = str(_cfg_const('CONFIG_OPTION_115_SHARED_DEVICE_TOKEN', 'p115_shared_device_token', '') or '').strip()
+        cfg = _shared_cfg()
+        self.base_url = str(cfg.get('p115_shared_center_url') or 'https://shared.55565576.xyz').rstrip('/')
+        self.device_token = str(cfg.get('p115_shared_device_token') or '').strip()
 
     @property
     def ready(self) -> bool:
         return bool(self.base_url and self.device_token)
 
     def _headers(self) -> Dict[str, str]:
+        version = _app_version()
         return {
             'X-Device-Token': self.device_token,
+            'X-Client-Version': version,
+            'X-ETK-Version': version,
             'Content-Type': 'application/json',
+            'User-Agent': _client_user_agent(),
         }
 
     def _post(self, path: str, payload: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
@@ -62,8 +90,7 @@ class SharedCenterClient:
             raise RuntimeError('共享中心地址或 device_token 未配置')
         url = f"{self.base_url}{path}"
         resp = requests.post(url, headers=self._headers(), json=payload, **_request_kwargs(timeout))
-        if not resp.ok:
-            raise RuntimeError(f"共享中心请求失败: {resp.status_code} {resp.text[:200]}")
+        _raise_for_center_error(resp)
         return resp.json() if resp.text else {}
 
     def _get(self, path: str, timeout: int = 15) -> Dict[str, Any]:
@@ -71,8 +98,7 @@ class SharedCenterClient:
             raise RuntimeError('共享中心地址或 device_token 未配置')
         url = f"{self.base_url}{path}"
         resp = requests.get(url, headers=self._headers(), **_request_kwargs(timeout))
-        if not resp.ok:
-            raise RuntimeError(f"共享中心请求失败: {resp.status_code} {resp.text[:200]}")
+        _raise_for_center_error(resp)
         return resp.json() if resp.text else {}
 
 
@@ -81,7 +107,7 @@ class SharedCenterClient:
 
         首选公开自助注册接口 /api/v1/devices/register。
         如果中心尚未升级且传入 admin_token，则回退到旧的管理员注册接口。
-        注意：该方法不依赖现有 device_token，专门用于首次生成 p115_shared_device_token。
+        注意：该方法不依赖现有 device_token，专门用于首次生成共享中心 device_token。
         """
         if not self.base_url:
             raise RuntimeError('共享中心地址未配置')
@@ -89,18 +115,28 @@ class SharedCenterClient:
             'name': str(name or '').strip() or 'ETK Device',
             'install_id': str(install_id or '').strip(),
         }
+        headers = {
+            'X-Client-Version': _app_version(),
+            'X-ETK-Version': _app_version(),
+            'Content-Type': 'application/json',
+            'User-Agent': _client_user_agent(),
+        }
         url = f"{self.base_url}/api/v1/devices/register"
-        resp = requests.post(url, json=payload, **_request_kwargs(20))
+        resp = requests.post(url, headers=headers, json=payload, **_request_kwargs(20))
         if resp.status_code == 404 and admin_token:
             # 兼容未升级的私有中心：使用管理员接口注册，但这种方式无法按 install_id 幂等。
             admin_url = f"{self.base_url}/api/v1/admin/devices/register"
+            admin_headers = dict(headers)
+            admin_headers['X-Admin-Token'] = str(admin_token)
             resp = requests.post(
                 admin_url,
-                headers={'X-Admin-Token': str(admin_token)},
+                headers=admin_headers,
                 json={'name': payload['name']},
                 **_request_kwargs(20),
             )
         if not resp.ok:
+            if resp.status_code == 426:
+                _raise_for_center_error(resp)
             raise RuntimeError(f"共享中心设备注册失败: {resp.status_code} {resp.text[:300]}")
         return resp.json() if resp.text else {}
 
@@ -115,6 +151,38 @@ class SharedCenterClient:
         return self._post('/api/v1/sources/search', {'items': items, 'limit_per_item': limit_per_item}, timeout=25)
 
 
+
+
+    def list_share_requests(self, *, status: str = 'open', keyword: str = '', media_type: str = '', target_type: str = '', limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+        """拉取共享中心求分享列表。维护任务用于自动响应别人发布的求分享。"""
+        import urllib.parse
+        params = {
+            'status': status or 'open',
+            'keyword': keyword or '',
+            'media_type': media_type or '',
+            'target_type': target_type or '',
+            'limit': max(1, min(int(limit or 100), 200)),
+            'offset': max(0, int(offset or 0)),
+        }
+        return self._get(f"/api/v1/share-requests?{urllib.parse.urlencode(params)}", timeout=25)
+
+    def poll_share_request_events(self, *, timeout: int = 25, limit: int = 5) -> Dict[str, Any]:
+        """长轮询领取“我发起/同求的资源已有人分享”事件。"""
+        import urllib.parse
+        timeout = max(1, min(int(timeout or 25), 55))
+        limit = max(1, min(int(limit or 5), 20))
+        query = urllib.parse.urlencode({'timeout': timeout, 'limit': limit})
+        return self._get(f'/api/v1/share-requests/events/poll?{query}', timeout=timeout + 10)
+
+    def ack_share_request_event(self, event_id: str, result: str = 'success', message: str = '') -> Dict[str, Any]:
+        event_id = str(event_id or '').strip()
+        if not event_id:
+            return {'ok': False, 'message': 'missing event_id'}
+        return self._post(
+            f'/api/v1/share-requests/events/{event_id}/ack',
+            {'result': result or 'success', 'message': message or ''},
+            timeout=15,
+        )
 
     def list_open_gaps(self, limit: int = 100) -> Dict[str, Any]:
         limit = max(1, min(int(limit or 100), 500))
@@ -149,8 +217,11 @@ class SharedCenterClient:
 
 
 
-    def upload_raw_ffprobe(self, sha1: str, raw_ffprobe_json: Dict[str, Any], size=None) -> Dict[str, Any]:
-        """上传 raw_ffprobe_json 到共享中心，供其他设备复用媒体信息。"""
+    def upload_raw_ffprobe(self, sha1: str, raw_ffprobe_json: Dict[str, Any], size=None, summary_json: Dict[str, Any] = None) -> Dict[str, Any]:
+        """上传 raw_ffprobe_json 到共享中心，供其他设备复用媒体信息。
+
+        完整 RAW 仍然上传保存；summary_json 只给中心资源库列表页减小传输体积。
+        """
         sha1 = str(sha1 or '').strip().upper()
         if not sha1 or not raw_ffprobe_json:
             return {'ok': False, 'message': '缺少 sha1 或 raw_ffprobe_json'}
@@ -158,13 +229,35 @@ class SharedCenterClient:
             'sha1': sha1,
             'size': size,
             'raw_ffprobe_json': raw_ffprobe_json,
+            'summary_json': summary_json or None,
         }
         return self._post('/api/v1/rawffprobe/upload', payload, timeout=60)
+
+    def upload_raw_ffprobe_batch(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """批量上传 raw_ffprobe_json。用于季包；失败项由调用方单条重传。"""
+        payload_items = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            sha1 = str(item.get('sha1') or '').strip().upper()
+            raw = item.get('raw_ffprobe_json')
+            if not sha1 or not raw:
+                continue
+            payload_items.append({
+                'sha1': sha1,
+                'size': item.get('size'),
+                'raw_ffprobe_json': raw,
+                'summary_json': item.get('summary_json') or None,
+            })
+        if not payload_items:
+            return {'ok': True, 'ok_count': 0, 'fail_count': 0, 'items': []}
+        return self._post('/api/v1/rawffprobe/upload-batch', {'items': payload_items}, timeout=120)
 
     def register_source(self, *, tmdb_id, item_type, sha1, file_name, share_code,
                         receive_code='', season_number=None, episode_number=None,
                         title='', release_year=None, size=None, quality='',
-                        has_raw_ffprobe=True, source_provider='user_share') -> Dict[str, Any]:
+                        has_raw_ffprobe=True, source_provider='user_share',
+                        share_request_group_id: str = '') -> Dict[str, Any]:
         """登记一个可被共享中心消费的 115 分享源。
 
         中心端按“当前设备 + SHA1”幂等计分：首次登记 +1，重复登记只更新分享码/元数据。
@@ -185,7 +278,16 @@ class SharedCenterClient:
             'receive_code': str(receive_code or '').strip() or None,
             'has_raw_ffprobe': bool(has_raw_ffprobe),
         }
+        if str(share_request_group_id or '').strip():
+            payload['share_request_group_id'] = str(share_request_group_id).strip()
         return self._post('/api/v1/sources/register', payload, timeout=25)
+
+    def register_sources_batch(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """批量登记共享源。中心端任一条失败会整包回滚。"""
+        payload_items = [dict(x) for x in (items or []) if isinstance(x, dict)]
+        if not payload_items:
+            return {'ok': True, 'ok_count': 0, 'fail_count': 0, 'items': []}
+        return self._post('/api/v1/sources/register-batch', {'items': payload_items}, timeout=90)
 
     def cancel_sources(self, share_code: str = '', source_ids: List[str] = None, sha1_list: List[str] = None, reason: str = 'share_cancelled', delete_raw_ffprobe: bool = True) -> Dict[str, Any]:
         """从共享中心撤销当前设备登记的共享源，并同步删除对应媒体信息。

@@ -12,14 +12,26 @@ import config_manager
 
 logger = logging.getLogger(__name__)
 
-def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
+def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=None, title=None):
     """
     核心任务：从影巢解锁 -> 转存 115 -> 搜索真实ID -> 精准整理
     """
     logger.info(f"=== ➜ 开始从影巢获取资源: {title} (TMDB: {tmdb_id}) ===")
     
-    # api_key 参数保留兼容旧调用签名；新版影巢授权通过统一 Relay 完成。
-    hdhive = HDHiveClient(api_key)
+    # api_key 参数仅保留兼容旧调用签名；新版影巢授权通过统一 Relay + OpenAPI OAuth 完成。
+    hdhive = HDHiveClient()
+    if not hdhive.ping():
+        auth_url = ''
+        try:
+            auth_url = hdhive.authorize_url()
+        except Exception:
+            auth_url = ''
+        if auth_url:
+            logger.error(f"  ➜ 影巢尚未完成 OpenAPI 授权，无法解锁资源。请到影巢设置页授权，或打开授权链接: {auth_url}")
+        else:
+            logger.error("  ➜ 影巢尚未完成 OpenAPI 授权，无法解锁资源。请到影巢设置页完成授权。")
+        return False
+
     unlock_data = hdhive.unlock_resource(slug)
     
     if not unlock_data:
@@ -183,16 +195,6 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
             return True
 
         # 构造 root_item 触发 SmartOrganizer (补全 pc, sha1, fs 等生成 STRM 必需的关键信息)
-        shared_auto_context = {
-            'share_code': share_code,
-            'receive_code': access_code or '',
-            'tmdb_id': str(tmdb_id or ''),
-            'media_type': media_type,
-            'item_type': 'Movie' if str(media_type).lower() == 'movie' else 'Season',
-            'title': title,
-            'source_provider': 'hdhive',
-        }
-
         root_item = {
             'fid': target_item.get('fid') or target_item.get('file_id'),
             'fn': receive_title,
@@ -200,8 +202,7 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
             'pid': save_cid,
             'pc': target_item.get('pc') or target_item.get('pick_code'),
             'sha1': target_item.get('sha1') or target_item.get('sha'),
-            'fs': target_item.get('fs') or target_item.get('size'),
-            '_shared_auto_source_context': shared_auto_context,
+            'fs': target_item.get('fs') or target_item.get('size')
         }
         
         organizer = SmartOrganizer(
@@ -211,8 +212,6 @@ def task_download_from_hdhive(api_key, slug, tmdb_id, media_type, title):
             original_title=title,
             use_ai=False 
         )
-        # 影巢资源本身自带 115 分享链接：ffprobe 成功后自动上传 raw_ffprobe_json 并登记共享中心源。
-        organizer.shared_auto_source_context = shared_auto_context
         
         target_cid = organizer.get_target_cid()
         organizer.execute(root_item, target_cid)

@@ -13,7 +13,7 @@ import requests
 
 import config_manager
 import constants
-from database import shared_virtual_db
+from database import shared_virtual_db, settings_db
 from database.connection import get_db_connection
 from handler.p115_service import P115Service
 
@@ -40,31 +40,19 @@ _LAST_PLAY_GUARD = threading.Lock()
 VIDEO_EXTS = {'.mkv', '.mp4', '.ts', '.m2ts', '.avi', '.mov', '.wmv', '.flv', '.rmvb', '.webm', '.iso'}
 
 
-def _cfg(name: str, default=None):
-    key = getattr(constants, name, None)
-    if key:
-        return config_manager.APP_CONFIG.get(key, default)
-    fallback = {
-        'CONFIG_OPTION_115_SHARED_RESOURCE_ENABLED': 'p115_shared_resource_enabled',
-        'CONFIG_OPTION_115_SHARED_RESOURCE_MODE': 'p115_shared_resource_mode',
-        'CONFIG_OPTION_115_SHARED_CACHE_CID': 'p115_shared_cache_cid',
-        'CONFIG_OPTION_115_SHARED_CACHE_NAME': 'p115_shared_cache_name',
-        'CONFIG_OPTION_115_SHARED_CACHE_RETENTION_DAYS': 'p115_shared_cache_retention_days',
-        'CONFIG_OPTION_115_SHARED_CENTER_URL': 'p115_shared_center_url',
-        'CONFIG_OPTION_115_SHARED_DEVICE_TOKEN': 'p115_shared_device_token',
-    }.get(name)
-    return config_manager.APP_CONFIG.get(fallback, default) if fallback else default
+def _cfg(key: str, default=None):
+    return settings_db.get_shared_resource_config().get(key, default)
 
 
 def _is_enabled() -> bool:
-    value = _cfg('CONFIG_OPTION_115_SHARED_RESOURCE_ENABLED', False)
+    value = _cfg('p115_shared_resource_enabled', False)
     if isinstance(value, str):
         value = value.strip().lower() in ('1', 'true', 'yes', 'on', '启用')
     return bool(value)
 
 
 def _virtual_mode_enabled() -> bool:
-    return str(_cfg('CONFIG_OPTION_115_SHARED_RESOURCE_MODE', 'permanent') or '').lower() == 'virtual'
+    return str(_cfg('p115_shared_resource_mode', 'permanent') or '').lower() == 'virtual'
 
 
 def _safe_int(value, default=0) -> int:
@@ -168,17 +156,32 @@ def _normalize_node(node: Dict[str, Any], parent_id: str = '') -> Dict[str, Any]
     }
 
 
+def _resp_text(resp: Any) -> str:
+    try:
+        return json.dumps(resp, ensure_ascii=False)
+    except Exception:
+        return str(resp or '')
+
+
+def _resp_code(resp: Any) -> str:
+    if isinstance(resp, dict):
+        for key in ('errno', 'code', 'errNo'):
+            value = resp.get(key)
+            if value not in (None, ''):
+                return str(value)
+    return ''
+
+
 def _resp_ok(resp: Any) -> bool:
-    if not isinstance(resp, dict):
-        return False
-    if resp.get('state') is True or resp.get('success') is True:
-        return True
-    code = resp.get('code') or resp.get('errno') or resp.get('errNo')
-    if code in (0, '0', 200, '200', 4100024, '4100024'):
-        return True
-    text = json.dumps(resp, ensure_ascii=False).lower()
+    text = _resp_text(resp).lower()
+    if isinstance(resp, dict):
+        if resp.get('state') is True or resp.get('success') is True:
+            return True
+        code = _resp_code(resp)
+        if code in ('0', '200', '4100024'):
+            return True
     # 115 有时重复转存/秒传会返回“已存在/已经转存过”，对播放而言可以继续定位文件。
-    return any(k in text for k in ('已存在', '已经转存', '转存过', 'already', 'exist'))
+    return any(k in text for k in ('已存在', '已经转存', '转存过', 'already', 'exist', '4100024'))
 
 
 def _is_already_transferred_resp(resp: Any) -> bool:
@@ -188,16 +191,54 @@ def _is_already_transferred_resp(resp: Any) -> bool:
     但如果本地临时区已经找不到目标文件，就必须把 115 原始语义返回给用户，
     避免显示“转存成功但未定位到目标视频”这种容易误导的提示。
     """
-    if not isinstance(resp, dict):
-        return False
-    code = resp.get('errno') or resp.get('code') or resp.get('errNo')
-    if code in (4100024, '4100024'):
+    code = _resp_code(resp)
+    if code == '4100024':
         return True
+    text = _resp_text(resp).lower()
+    return any(k in text for k in ('4100024', '你已经转存过', '已经转存过', '已经转存', '转存过该文件'))
+
+
+def _find_local_p115_file_by_sha1(sha1: str) -> Dict[str, Any]:
+    sha1 = _norm_sha1(sha1)
+    if not sha1:
+        return {}
     try:
-        text = json.dumps(resp, ensure_ascii=False).lower()
-    except Exception:
-        text = str(resp).lower()
-    return any(k in text for k in ('你已经转存过', '已经转存过', '已经转存', '转存过该文件'))
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, parent_id, name, local_path, sha1, pick_code, size, updated_at
+                    FROM p115_filesystem_cache
+                    WHERE sha1 IS NOT NULL
+                      AND sha1 <> ''
+                      AND UPPER(sha1) = %s
+                      AND COALESCE(pick_code, '') <> ''
+                    ORDER BY updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (sha1,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as e:
+        logger.warning(f"  ➜ [共享虚拟播放] 按 SHA1 查询 p115_filesystem_cache 失败: sha1={sha1}, err={e}")
+    return {}
+
+
+def _node_from_p115_cache_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    if not row:
+        return {}
+    return {
+        'fid': str(row.get('id') or ''),
+        'parent_id': str(row.get('parent_id') or ''),
+        'name': str(row.get('name') or ''),
+        'pick_code': str(row.get('pick_code') or ''),
+        'sha1': _norm_sha1(row.get('sha1')),
+        'size': _safe_int(row.get('size'), 0),
+        'is_dir': False,
+        '_from_p115_filesystem_cache': True,
+        'local_path': row.get('local_path'),
+    }
 
 
 def _share_import_error_message(resp: Any) -> str:
@@ -611,9 +652,362 @@ def _backfill_virtual_pack_cache(
     return matched
 
 
+
+
+def _center_headers() -> Dict[str, str]:
+    token = str(_cfg('p115_shared_device_token', '') or '').strip()
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['X-Device-Token'] = token
+    version = ''
+    for attr in ('APP_VERSION', 'VERSION', '__version__'):
+        version = str(getattr(constants, attr, '') or '').strip()
+        if version:
+            break
+    if version:
+        headers['X-Client-Version'] = version
+        headers['X-ETK-Version'] = version
+    return headers
+
+
+def _center_search_sources(items: List[Dict[str, Any]], limit_per_item: int = 80) -> List[Dict[str, Any]]:
+    """播放失败时同步查询中心可用源；只用于救场，失败不能影响原错误返回。"""
+    center_url = str(_cfg('p115_shared_center_url', 'https://shared.55565576.xyz') or '').rstrip('/')
+    token = str(_cfg('p115_shared_device_token', '') or '').strip()
+    if not center_url or not token or not items:
+        return []
+    payload = {'items': items, 'limit_per_item': max(1, min(int(limit_per_item or 80), 200))}
+    try:
+        resp = requests.post(
+            f"{center_url}/api/v1/sources/search",
+            headers=_center_headers(),
+            json=payload,
+            **_center_request_kwargs(10),
+        )
+        if not resp.ok:
+            logger.warning("  ➜ [共享虚拟播放] 紧急查询中心备用源失败: http=%s, text=%s", resp.status_code, resp.text[:300])
+            return []
+        data = resp.json() if resp.content else {}
+    except Exception as e:
+        logger.warning(f"  ➜ [共享虚拟播放] 紧急查询中心备用源异常: {e}")
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for group in (data.get('results') or []):
+        for item in (group.get('items') or []):
+            if isinstance(item, dict):
+                rows.append(dict(item))
+    return rows
+
+
+def _raw_json_dict(value) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            obj = json.loads(value)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _virtual_parent_series_id(item: Dict[str, Any]) -> str:
+    item = item or {}
+    raw = _raw_json_dict(item.get('raw_json'))
+    context = raw.get('context') if isinstance(raw.get('context'), dict) else {}
+    source = raw.get('center_source') if isinstance(raw.get('center_source'), dict) else {}
+    for value in (
+        item.get('parent_series_tmdb_id'),
+        context.get('parent_series_tmdb_id'), context.get('series_tmdb_id'), context.get('parent_tmdb_id'),
+        source.get('parent_series_tmdb_id'), source.get('series_tmdb_id'),
+    ):
+        value = str(value or '').strip()
+        if value:
+            return value
+    item_type = str(item.get('item_type') or source.get('item_type') or context.get('item_type') or '').strip().lower()
+    if item_type in ('series', 'season'):
+        return str(item.get('tmdb_id') or context.get('tmdb_id') or source.get('tmdb_id') or '').strip()
+    return ''
+
+
+def _virtual_season_number(item: Dict[str, Any]):
+    raw = _raw_json_dict((item or {}).get('raw_json'))
+    context = raw.get('context') if isinstance(raw.get('context'), dict) else {}
+    source = raw.get('center_source') if isinstance(raw.get('center_source'), dict) else {}
+    for value in (item.get('season_number'), context.get('season_number'), source.get('season_number')):
+        n = _safe_int(value, None)
+        if n is not None:
+            return n
+    return None
+
+
+def _guess_episode_number_from_text(text: str):
+    text = str(text or '')
+    for pattern in (
+        r'(?i)\bS\d{1,3}\s*[._ -]*E(\d{1,4})\b',
+        r'(?i)\bE[P]?\s*(\d{1,4})\b',
+        r'第\s*(\d{1,4})\s*[集话話]',
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return _safe_int(match.group(1), None)
+    return None
+
+
+def _virtual_episode_number(item: Dict[str, Any]):
+    raw = _raw_json_dict((item or {}).get('raw_json'))
+    context = raw.get('context') if isinstance(raw.get('context'), dict) else {}
+    source = raw.get('center_source') if isinstance(raw.get('center_source'), dict) else {}
+    for value in (item.get('episode_number'), context.get('episode_number'), source.get('episode_number')):
+        n = _safe_int(value, None)
+        if n is not None:
+            return n
+    return _guess_episode_number_from_text(' '.join(str(v or '') for v in (item.get('title'), item.get('file_name'), item.get('strm_path'))))
+
+
+def _source_episode_number(source: Dict[str, Any]):
+    n = _safe_int((source or {}).get('episode_number'), None)
+    if n is not None:
+        return n
+    return _guess_episode_number_from_text(' '.join(str((source or {}).get(k) or '') for k in ('file_name', 'title')))
+
+
+def _build_emergency_source_queries(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """按“完结季包优先，其次单集备份”的顺序构造中心搜索请求。"""
+    item = item or {}
+    item_type = str(item.get('item_type') or '').strip().lower()
+    parent = _virtual_parent_series_id(item)
+    season = _virtual_season_number(item)
+    episode = _virtual_episode_number(item)
+    tmdb_id = str(item.get('tmdb_id') or '').strip()
+    queries: List[Dict[str, Any]] = []
+
+    if parent and season is not None:
+        # 中心 season 搜索会返回该季可用的季包，也会带出同季单集；后续排序仍强制季包优先。
+        queries.append({'tmdb_id': parent, 'item_type': 'Season', 'season_number': season})
+    if parent and season is not None and episode is not None:
+        queries.append({'tmdb_id': parent, 'item_type': 'Episode', 'season_number': season, 'episode_number': episode})
+    if tmdb_id and tmdb_id != parent and season is not None and episode is not None:
+        queries.append({'tmdb_id': tmdb_id, 'item_type': 'Episode', 'season_number': season, 'episode_number': episode})
+    if item_type == 'movie' and tmdb_id:
+        queries.append({'tmdb_id': tmdb_id, 'item_type': 'Movie'})
+
+    seen = set()
+    out = []
+    for q in queries:
+        key = json.dumps(q, ensure_ascii=False, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            out.append(q)
+    return out
+
+
+def _source_matches_current_virtual_item(source: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    source = source or {}
+    item = item or {}
+    source_type = str(source.get('item_type') or '').strip().lower()
+    item_type = str(item.get('item_type') or '').strip().lower()
+    target_sha1 = _norm_sha1(item.get('sha1'))
+    source_sha1 = _norm_sha1(source.get('sha1'))
+    if target_sha1 and source_sha1 and target_sha1 == source_sha1:
+        return True
+
+    if item_type in ('episode', 'season', 'series', 'tv') or item.get('episode_number') not in (None, ''):
+        target_ep = _virtual_episode_number(item)
+        source_ep = _source_episode_number(source)
+        target_season = _virtual_season_number(item)
+        source_season = _safe_int(source.get('season_number'), None)
+        if target_ep is None:
+            return False
+        if source_ep is None:
+            return False
+        if source_season is not None and target_season is not None and source_season != target_season:
+            return False
+        return source_ep == target_ep
+
+    if item_type == 'movie':
+        return bool(source.get('tmdb_id') and str(source.get('tmdb_id')) == str(item.get('tmdb_id')))
+    return source_type == item_type
+
+
+def _pick_emergency_backup_source(item: Dict[str, Any], failed_share_code: str = '', failed_source_id: str = '') -> Dict[str, Any]:
+    queries = _build_emergency_source_queries(item)
+    if not queries:
+        return {}
+    rows = _center_search_sources(queries, limit_per_item=120)
+    if not rows:
+        return {}
+
+    failed_share_code = str(failed_share_code or '').strip()
+    failed_source_id = str(failed_source_id or '').strip()
+    current_share_code = str((item or {}).get('share_code') or '').strip()
+    current_source_id = str((item or {}).get('source_id') or '').strip()
+    bad_share_codes = {x for x in (failed_share_code, current_share_code) if x}
+    bad_source_ids = {x for x in (failed_source_id, current_source_id) if x}
+
+    scored = []
+    for source in rows:
+        source_id = str(source.get('source_id') or '').strip()
+        share_code = str(source.get('share_code') or '').strip()
+        if source_id and source_id in bad_source_ids:
+            continue
+        if share_code and share_code in bad_share_codes:
+            continue
+        if str(source.get('status') or '').strip().lower() not in ('alive', 'pending', ''):
+            continue
+        if not share_code:
+            continue
+        if not _source_matches_current_virtual_item(source, item):
+            continue
+        source_type = str(source.get('item_type') or '').strip().lower()
+        # 严格优先季包，再单集；同类按中心 fair-search 已给出的热度顺序。
+        if source_type in ('season', 'season_pack', 'series', 'series_pack', 'tv', 'show'):
+            rank = 0
+        elif source_type == 'episode':
+            rank = 10
+        elif source_type == 'movie':
+            rank = 20
+        else:
+            rank = 50
+        scored.append((rank, len(scored), source))
+
+    if not scored:
+        return {}
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return scored[0][2]
+
+
+def _switch_virtual_item_to_backup_source(item: Dict[str, Any], source: Dict[str, Any], reason: str, failed_message: str = '') -> Dict[str, Any]:
+    """把当前虚拟项热切到中心备用源，并清掉旧临时转存缓存，随后播放链路可立即重试。"""
+    item = dict(item or {})
+    source = dict(source or {})
+    virtual_id = str(item.get('virtual_id') or '').strip()
+    if not virtual_id or not source.get('share_code'):
+        return {}
+
+    raw = _raw_json_dict(item.get('raw_json'))
+    failovers = raw.get('playback_failovers') if isinstance(raw.get('playback_failovers'), list) else []
+    failovers.append({
+        'at': datetime.now(timezone.utc).isoformat(),
+        'reason': reason,
+        'failed_message': str(failed_message or '')[:500],
+        'from': {
+            'source_id': item.get('source_id'),
+            'share_code': item.get('share_code'),
+            'sha1': item.get('sha1'),
+            'file_name': item.get('file_name'),
+        },
+        'to': {
+            'source_id': source.get('source_id'),
+            'share_code': source.get('share_code'),
+            'sha1': source.get('sha1'),
+            'file_name': source.get('file_name'),
+            'item_type': source.get('item_type'),
+        },
+    })
+    raw['center_source'] = source
+    raw['playback_failovers'] = failovers[-10:]
+
+    # 对 Emby 来说这条记录仍然是原来的虚拟电影/分集；切源只替换中心源、分享码和文件指纹。
+    # 特别是季包行在中心 item_type=Season，但本地虚拟分集仍必须保持 Episode。
+    keep_item_type = item.get('item_type') or source.get('item_type') or ''
+    season_number = _virtual_season_number(item)
+    episode_number = _virtual_episode_number(item)
+    parent_series_id = _virtual_parent_series_id(item)
+    title = item.get('title') or source.get('title') or source.get('file_name') or ''
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE shared_virtual_items
+                    SET source_id=%s,
+                        source_key=COALESCE(NULLIF(%s, ''), source_key),
+                        source_provider=COALESCE(NULLIF(%s, ''), source_provider, 'shared_center'),
+                        parent_series_tmdb_id=COALESCE(NULLIF(%s, ''), parent_series_tmdb_id),
+                        season_number=COALESCE(%s, season_number),
+                        episode_number=COALESCE(%s, episode_number),
+                        title=COALESCE(NULLIF(%s, ''), title),
+                        release_year=COALESCE(%s, release_year),
+                        sha1=COALESCE(NULLIF(%s, ''), sha1),
+                        size=CASE WHEN %s > 0 THEN %s ELSE size END,
+                        file_name=COALESCE(NULLIF(%s, ''), file_name),
+                        quality=COALESCE(NULLIF(%s, ''), quality),
+                        share_code=%s,
+                        receive_code=COALESCE(%s, ''),
+                        contributor_id=COALESCE(NULLIF(%s, ''), contributor_id),
+                        real_fid=NULL,
+                        real_pick_code=NULL,
+                        real_parent_id=NULL,
+                        status='virtual_ready',
+                        last_error=%s,
+                        raw_json=%s::jsonb,
+                        updated_at=NOW()
+                    WHERE virtual_id=%s
+                    RETURNING *
+                    """,
+                    (
+                        str(source.get('source_id') or ''),
+                        str(source.get('source_key') or ''),
+                        str(source.get('source_provider') or 'shared_center'),
+                        parent_series_id,
+                        season_number,
+                        episode_number,
+                        title,
+                        _safe_int(source.get('release_year'), None),
+                        _norm_sha1(source.get('sha1')),
+                        _safe_int(source.get('size'), 0),
+                        _safe_int(source.get('size'), 0),
+                        str(source.get('file_name') or ''),
+                        str(source.get('quality') or ''),
+                        str(source.get('share_code') or ''),
+                        str(source.get('receive_code') or ''),
+                        str(source.get('contributor_id') or ''),
+                        f"播放临时转存失败，已紧急切换中心备用源：{reason}",
+                        json.dumps(raw, ensure_ascii=False, default=str),
+                        virtual_id,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row:
+            logger.warning(
+                "  ➜ [共享虚拟播放] 临时转存失败，已紧急切换备用源: virtual_id=%s, old_share=%s, new_share=%s, source=%s",
+                virtual_id, item.get('share_code'), source.get('share_code'), source.get('source_id')
+            )
+            shared_virtual_db.add_credit_ledger(
+                event_type='virtual_play_failover_source_switched',
+                delta=0,
+                reason=f"播放失败紧急切换备用源：{title or virtual_id}",
+                ref_id=str(source.get('source_id') or virtual_id),
+                source_id=str(source.get('source_id') or ''),
+                virtual_id=virtual_id,
+                tmdb_id=str(item.get('tmdb_id') or source.get('tmdb_id') or ''),
+                item_type=str(keep_item_type or ''),
+                title=str(title or source.get('file_name') or ''),
+                raw_json={'source': source, 'failed_message': failed_message, 'reason': reason},
+            )
+            return dict(row)
+    except Exception as e:
+        logger.warning(f"  ➜ [共享虚拟播放] 切换虚拟备用源失败: virtual_id={virtual_id}, err={e}", exc_info=True)
+    return {}
+
+
+def _try_emergency_failover_for_playback(item: Dict[str, Any], reason: str, failed_message: str = '') -> Dict[str, Any]:
+    backup = _pick_emergency_backup_source(
+        item,
+        failed_share_code=str((item or {}).get('share_code') or ''),
+        failed_source_id=str((item or {}).get('source_id') or ''),
+    )
+    if not backup:
+        return {}
+    return _switch_virtual_item_to_backup_source(item, backup, reason=reason, failed_message=failed_message)
+
 def _report_transfer_to_center(item: Dict[str, Any], node: Dict[str, Any], result='success', message='', whole_pack: bool = False):
-    center_url = str(_cfg('CONFIG_OPTION_115_SHARED_CENTER_URL', 'https://shared.55565576.xyz') or '').rstrip('/')
-    token = str(_cfg('CONFIG_OPTION_115_SHARED_DEVICE_TOKEN', '') or '').strip()
+    center_url = str(_cfg('p115_shared_center_url', 'https://shared.55565576.xyz') or '').rstrip('/')
+    token = str(_cfg('p115_shared_device_token', '') or '').strip()
     if not center_url or not token:
         return
 
@@ -675,6 +1069,84 @@ def _mark_played_debounced(virtual_id: str, interval_seconds: int = 60):
     return shared_virtual_db.mark_virtual_played(virtual_id)
 
 
+def _is_tv_virtual_item(item: Dict[str, Any]) -> bool:
+    """判断虚拟项是否属于电视剧/剧集。"""
+    item = item or {}
+    item_type = str(item.get('item_type') or '').strip().lower()
+    return (
+        item_type in ('series', 'season', 'episode', 'tv')
+        or item.get('season_number') not in (None, '')
+        or item.get('episode_number') not in (None, '')
+        or bool(item.get('parent_series_tmdb_id'))
+    )
+
+
+def _touch_virtual_playback_metadata(
+    virtual_id: str,
+    item: Dict[str, Any],
+    emby_item_id: str = '',
+    user_id: str = '',
+    media_source_id: str = '',
+):
+    """回写虚拟项与 Emby 播放事件的绑定关系，并按最后播放时间续期电视剧临时缓存。"""
+    if not virtual_id:
+        return
+    raw_patch = {
+        'last_play_emby_item_id': str(emby_item_id or ''),
+        'last_play_user_id': str(user_id or ''),
+        'last_play_media_source_id': str(media_source_id or ''),
+        'last_play_touched_at': datetime.now(timezone.utc).isoformat(),
+    }
+    retention_days = max(1, _safe_int(_cfg('p115_shared_cache_retention_days', 7), 7))
+    reset_expire = _is_tv_virtual_item(item)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if reset_expire:
+                    cur.execute(
+                        """
+                        UPDATE shared_virtual_items
+                        SET emby_item_id = COALESCE(NULLIF(%s, ''), emby_item_id),
+                            media_source_id = COALESCE(NULLIF(%s, ''), media_source_id),
+                            expires_at = CASE
+                                WHEN status IN ('cached','watched') AND COALESCE(real_fid, '') <> ''
+                                THEN NOW() + (%s || ' days')::interval
+                                ELSE expires_at
+                            END,
+                            raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
+                            updated_at = NOW()
+                        WHERE virtual_id = %s
+                        """,
+                        (
+                            str(emby_item_id or ''),
+                            str(media_source_id or ''),
+                            int(retention_days),
+                            json.dumps(raw_patch, ensure_ascii=False),
+                            str(virtual_id),
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE shared_virtual_items
+                        SET emby_item_id = COALESCE(NULLIF(%s, ''), emby_item_id),
+                            media_source_id = COALESCE(NULLIF(%s, ''), media_source_id),
+                            raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
+                            updated_at = NOW()
+                        WHERE virtual_id = %s
+                        """,
+                        (
+                            str(emby_item_id or ''),
+                            str(media_source_id or ''),
+                            json.dumps(raw_patch, ensure_ascii=False),
+                            str(virtual_id),
+                        ),
+                    )
+            conn.commit()
+    except Exception as e:
+        logger.debug(f"  ➜ [共享虚拟播放] 回写播放绑定/续期信息失败: virtual_id={virtual_id}, err={e}")
+
+
 def ensure_playable_by_emby_item(
     emby_item_id: str = '',
     user_id: str = '',
@@ -707,6 +1179,13 @@ def ensure_playable_by_emby_item(
     with lock:
         # 可能其他并发请求已经完成转存，重新读一次。
         item = shared_virtual_db.get_virtual_item(virtual_id) or item
+        _touch_virtual_playback_metadata(
+            virtual_id,
+            item,
+            emby_item_id=str(emby_item_id or ''),
+            user_id=str(user_id or ''),
+            media_source_id=media_source_id,
+        )
         if item.get('real_pick_code'):
             cached_node = None
             raw_json = item.get('raw_json') if isinstance(item.get('raw_json'), dict) else {}
@@ -740,9 +1219,9 @@ def ensure_playable_by_emby_item(
             shared_virtual_db.mark_virtual_error(virtual_id, msg)
             return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg}
 
-        cache_cid = str(item.get('cache_parent_id') or _cfg('CONFIG_OPTION_115_SHARED_CACHE_CID', '0') or '0').strip()
-        cache_name = str(item.get('cache_parent_name') or _cfg('CONFIG_OPTION_115_SHARED_CACHE_NAME', '共享资源临时区') or '共享资源临时区')
-        retention_days = max(1, _safe_int(_cfg('CONFIG_OPTION_115_SHARED_CACHE_RETENTION_DAYS', 7), 7))
+        cache_cid = str(item.get('cache_parent_id') or _cfg('p115_shared_cache_cid', '0') or '0').strip()
+        cache_name = str(item.get('cache_parent_name') or _cfg('p115_shared_cache_name', '共享资源临时区') or '共享资源临时区')
+        retention_days = max(1, _safe_int(_cfg('p115_shared_cache_retention_days', 7), 7))
         expires_at = datetime.now(timezone.utc) + timedelta(days=retention_days)
 
         client = P115Service.get_client()
@@ -854,52 +1333,121 @@ def ensure_playable_by_emby_item(
                 cached=True,
             )
 
-        shared_virtual_db.mark_virtual_transferring(virtual_id, '播放触发临时转存')
-        logger.info(f"  ➜ [共享虚拟播放] 开始临时转存: {item.get('title') or item.get('file_name')} -> cid={cache_cid}")
+        # 全局 SHA1 兜底：如果正式库/待整理目录已经有同 SHA1 文件，直接复用 pickcode，
+        # 不写入 shared_virtual_items 的 real_fid，避免过期清理误删正式媒体库文件。
+        local_row = _find_local_p115_file_by_sha1(item.get('sha1') or '')
+        local_node = _node_from_p115_cache_row(local_row)
+        if local_node and local_node.get('pick_code'):
+            logger.info(
+                f"  ➜ [共享虚拟播放] p115_filesystem_cache 已存在目标 SHA1，跳过临时转存并复用 pickcode: "
+                f"{local_node.get('name') or item.get('file_name')}"
+            )
+            shared_virtual_db.mark_virtual_played(virtual_id)
+            return {
+                'matched': True,
+                'success': True,
+                'virtual_id': virtual_id,
+                'pick_code': local_node.get('pick_code'),
+                'real_pick_code': local_node.get('pick_code'),
+                'real_fid': local_node.get('fid'),
+                'file_name': local_node.get('name') or item.get('file_name') or display_name,
+                'title': item.get('title') or display_name,
+                'cached': True,
+                'local_existing': True,
+            }
 
+        failover_attempted = False
         import_resp = None
-        try:
-            import_resp = client.share_import(share_code, receive_code, cache_cid)
-        except Exception as e:
-            msg = f'调用 115 share_import 失败: {e}'
-            shared_virtual_db.mark_virtual_error(virtual_id, msg)
-            _report_transfer_to_center(item, {}, result='failed', message=msg)
-            return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg}
+        while True:
+            share_code = str(item.get('share_code') or '').strip()
+            receive_code = str(item.get('receive_code') or '').strip()
+            shared_virtual_db.mark_virtual_transferring(virtual_id, '播放触发临时转存')
+            logger.info(f"  ➜ [共享虚拟播放] 开始临时转存: {item.get('title') or item.get('file_name')} -> cid={cache_cid}, share={share_code}")
 
-        if not _resp_ok(import_resp):
-            msg = f"115 share_import 返回失败: {json.dumps(import_resp, ensure_ascii=False)[:300]}"
-            shared_virtual_db.mark_virtual_error(virtual_id, msg)
-            _report_transfer_to_center(item, {}, result='failed', message=msg)
-            return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg, 'raw': import_resp}
+            try:
+                import_resp = client.share_import(share_code, receive_code, cache_cid)
+            except Exception as e:
+                msg = f'调用 115 share_import 失败: {e}'
+                _report_transfer_to_center(item, {}, result='failed', message=msg)
+                if not failover_attempted:
+                    failover_attempted = True
+                    fallback_item = _try_emergency_failover_for_playback(item, reason='share_import_exception', failed_message=msg)
+                    if fallback_item:
+                        item = fallback_item
+                        logger.warning("  ➜ [共享虚拟播放] 已切换备用源，立即重试临时转存: %s", item.get('share_code'))
+                        continue
+                shared_virtual_db.mark_virtual_error(virtual_id, msg)
+                return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg}
 
-        # 115 转存后不一定直接返回目标文件 PC，统一按 SHA1 / 文件名在临时目录里定位。
-        node = _find_file_recursive(
-            client,
-            cache_cid,
-            sha1=item.get('sha1') or '',
-            file_name=item.get('file_name') or display_name,
-            size=_safe_int(item.get('size'), 0),
-            max_depth=6,
-            item=item,
-        ) or _find_file_by_fs_search(client, cache_cid, item)
+            if not _resp_ok(import_resp):
+                msg = f"115 share_import 返回失败: {_resp_text(import_resp)[:300]}"
+                if _is_already_transferred_resp(import_resp):
+                    local_row = _find_local_p115_file_by_sha1(item.get('sha1') or '')
+                    local_node = _node_from_p115_cache_row(local_row)
+                    if local_node and local_node.get('pick_code'):
+                        logger.info(
+                            f"  ➜ [共享虚拟播放] 115 返回已转存过，且本地 SHA1 缓存命中，复用 pickcode: "
+                            f"{local_node.get('name') or item.get('file_name')}"
+                        )
+                        shared_virtual_db.mark_virtual_played(virtual_id)
+                        return {
+                            'matched': True,
+                            'success': True,
+                            'virtual_id': virtual_id,
+                            'pick_code': local_node.get('pick_code'),
+                            'real_pick_code': local_node.get('pick_code'),
+                            'real_fid': local_node.get('fid'),
+                            'file_name': local_node.get('name') or item.get('file_name') or display_name,
+                            'title': item.get('title') or display_name,
+                            'cached': True,
+                            'local_existing': True,
+                        }
+                    # 4100024 本身不是死链，但在本地临时区被清理后也会导致播放不可用；允许紧急换源救场。
+                    failover_reason = 'already_transferred_but_missing_local_cache'
+                else:
+                    _report_transfer_to_center(item, {}, result='failed', message=msg)
+                    failover_reason = 'share_import_failed'
 
-        if not node or not node.get('pick_code'):
+                if not failover_attempted:
+                    failover_attempted = True
+                    fallback_item = _try_emergency_failover_for_playback(item, reason=failover_reason, failed_message=msg)
+                    if fallback_item:
+                        item = fallback_item
+                        logger.warning("  ➜ [共享虚拟播放] 已切换备用源，立即重试临时转存: %s", item.get('share_code'))
+                        continue
+                shared_virtual_db.mark_virtual_error(virtual_id, msg)
+                return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg, 'raw': import_resp}
+
+            # 115 转存后不一定直接返回目标文件 PC，统一按 SHA1 / 文件名在临时目录里定位。
+            node = _find_file_recursive(
+                client,
+                cache_cid,
+                sha1=item.get('sha1') or '',
+                file_name=item.get('file_name') or display_name,
+                size=_safe_int(item.get('size'), 0),
+                max_depth=6,
+                item=item,
+            ) or _find_file_by_fs_search(client, cache_cid, item)
+
+            if node and node.get('pick_code'):
+                return _finalize_cached_node(node, import_resp=import_resp, message='播放触发临时转存成功', cached=False)
+
             if _is_already_transferred_resp(import_resp):
                 msg = _share_import_error_message(import_resp)
-                shared_virtual_db.mark_virtual_error(virtual_id, msg)
+                failover_reason = 'already_transferred_but_target_missing'
                 # 注意：4100024 只是“本账号已接收过该分享”，不是共享源失效。
-                # 本地临时缓存被释放后无法再次定位目标文件时，不要向中心上报 failed。
-                return {
-                    'matched': True,
-                    'success': False,
-                    'virtual_id': virtual_id,
-                    'message': msg,
-                    'raw': import_resp,
-                }
+                # 但如果本地临时缓存已释放导致无法定位，仍允许查询备用源救场。
+            else:
+                msg = '转存成功但未能在临时目录定位到目标视频或 pickcode'
+                _report_transfer_to_center(item, node or {}, result='failed', message=msg)
+                failover_reason = 'import_success_but_target_missing'
 
-            msg = '转存成功但未能在临时目录定位到目标视频或 pickcode'
+            if not failover_attempted:
+                failover_attempted = True
+                fallback_item = _try_emergency_failover_for_playback(item, reason=failover_reason, failed_message=msg)
+                if fallback_item:
+                    item = fallback_item
+                    logger.warning("  ➜ [共享虚拟播放] 已切换备用源，立即重试临时转存: %s", item.get('share_code'))
+                    continue
             shared_virtual_db.mark_virtual_error(virtual_id, msg)
-            _report_transfer_to_center(item, node or {}, result='failed', message=msg)
             return {'matched': True, 'success': False, 'virtual_id': virtual_id, 'message': msg, 'raw': import_resp}
-
-        return _finalize_cached_node(node, import_resp=import_resp, message='播放触发临时转存成功', cached=False)
