@@ -522,7 +522,8 @@ def has_existing_share_for_gap(gap: Dict[str, Any], candidate: Dict[str, Any] = 
                     LEFT JOIN shared_share_items i ON i.share_record_id = r.id
                     WHERE (r.tmdb_id = ANY(%s) OR r.parent_series_tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
                       AND COALESCE(i.season_number, r.season_number, -1)=COALESCE(%s, -1)
-                      AND COALESCE(i.episode_number, -1)=COALESCE(%s, -1)
+                      -- 修复：同时检查明细表和主表的 episode_number
+                      AND COALESCE(i.episode_number, r.episode_number, -1)=COALESCE(%s, -1)
                       AND r.status = ANY(%s)
                     LIMIT 1
                     """,
@@ -544,6 +545,136 @@ def has_existing_share_for_gap(gap: Dict[str, Any], candidate: Dict[str, Any] = 
                 (tmdb_ids, tmdb_ids, tmdb_ids, season, statuses),
             )
             return cur.fetchone() is not None
+
+
+def has_hard_blocked_share_for_gap(gap: Dict[str, Any], candidate: Dict[str, Any] = None,
+                                   files: List[Dict[str, Any]] = None, statuses=None,
+                                   review_statuses=None) -> bool:
+    """判断中心缺口是否命中确定性失败黑名单。
+
+    与 has_existing_share_for_gap 不同，这里只用于非活动态记录，避免普通
+    cancelled/deleted 把后续自动分享永久堵死。只有 review_status/raw_json
+    明确标记为源文件不存在、115 违规/风控、AUTOFAIL 黑名单时才返回 True。
+    """
+    gap = gap or {}
+    candidate = candidate or {}
+    files = files or []
+    item_type = str(gap.get('item_type') or candidate.get('share_item_type') or candidate.get('item_type') or '').strip()
+    season = _safe_int(gap.get('season_number', candidate.get('season_number')), -1)
+    episode = _safe_int(gap.get('episode_number', candidate.get('episode_number')), -1)
+    root_fid = str(candidate.get('root_fid') or '').strip()
+    tmdb_ids = _dedupe_values(
+        gap.get('tmdb_id'),
+        candidate.get('share_tmdb_id'),
+        candidate.get('tmdb_id'),
+        candidate.get('parent_series_tmdb_id'),
+    )
+    sha1s = _dedupe_values([str(x.get('sha1') or '').strip().upper() for x in files or [] if x.get('sha1')])
+    statuses = _status_list(statuses or ['cancelled', 'deleted'])
+    hard_reasons = [str(x or '').strip().lower() for x in (review_statuses or [
+        'violation', 'blocked', 'share_blocked', 'source_missing',
+        'source_deleted', 'share_invalid_or_blocked',
+    ]) if str(x or '').strip()]
+    if not hard_reasons:
+        return False
+
+    hard_block_sql = """
+      AND (
+            LOWER(COALESCE(r.review_status, '')) = ANY(%s)
+         OR LOWER(COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->>'blacklist_reason', '')) = ANY(%s)
+         OR LOWER(COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->'share_maintenance_delete'->>'reason', '')) = ANY(%s)
+         OR LOWER(COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->>'auto_gap_blacklist', '')) IN ('true','1','yes','on')
+         OR LOWER(COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->>'auto_share_blocked', '')) IN ('true','1','yes','on')
+      )
+    """
+
+    def hard_args():
+        return [hard_reasons, hard_reasons, hard_reasons]
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if root_fid:
+                cur.execute(
+                    f"""
+                    SELECT 1 FROM shared_share_records r
+                    WHERE r.root_fid=%s
+                      AND r.status = ANY(%s)
+                      {hard_block_sql}
+                    LIMIT 1
+                    """,
+                    [root_fid, statuses] + hard_args(),
+                )
+                if cur.fetchone() is not None:
+                    return True
+
+            if sha1s:
+                cur.execute(
+                    f"""
+                    SELECT 1
+                    FROM shared_share_records r
+                    JOIN shared_share_items i ON i.share_record_id = r.id
+                    WHERE UPPER(COALESCE(i.sha1, '')) = ANY(%s)
+                      AND r.status = ANY(%s)
+                      {hard_block_sql}
+                    LIMIT 1
+                    """,
+                    [sha1s, statuses] + hard_args(),
+                )
+                if cur.fetchone() is not None:
+                    return True
+
+            if not tmdb_ids:
+                return False
+
+            if item_type == 'Movie':
+                cur.execute(
+                    f"""
+                    SELECT 1
+                    FROM shared_share_records r
+                    LEFT JOIN shared_share_items i ON i.share_record_id = r.id
+                    WHERE (r.tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
+                      AND (r.item_type IN ('Movie','movie','movie_file','movie_folder') OR i.item_type IN ('Movie','movie','movie_file'))
+                      AND r.status = ANY(%s)
+                      {hard_block_sql}
+                    LIMIT 1
+                    """,
+                    [tmdb_ids, tmdb_ids, statuses] + hard_args(),
+                )
+                return cur.fetchone() is not None
+
+            if item_type == 'Episode':
+                cur.execute(
+                    f"""
+                    SELECT 1
+                    FROM shared_share_records r
+                    LEFT JOIN shared_share_items i ON i.share_record_id = r.id
+                    WHERE (r.tmdb_id = ANY(%s) OR r.parent_series_tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
+                      AND COALESCE(i.season_number, r.season_number, -1)=COALESCE(%s, -1)
+                      -- 修复：同时检查明细表和主表的 episode_number
+                      AND COALESCE(i.episode_number, r.episode_number, -1)=COALESCE(%s, -1)
+                      AND r.status = ANY(%s)
+                      {hard_block_sql}
+                    LIMIT 1
+                    """,
+                    [tmdb_ids, tmdb_ids, tmdb_ids, season, episode, statuses] + hard_args(),
+                )
+                return cur.fetchone() is not None
+
+            cur.execute(
+                f"""
+                SELECT 1
+                FROM shared_share_records r
+                LEFT JOIN shared_share_items i ON i.share_record_id = r.id
+                WHERE (r.tmdb_id = ANY(%s) OR r.parent_series_tmdb_id = ANY(%s) OR i.tmdb_id = ANY(%s))
+                  AND COALESCE(i.season_number, r.season_number, -1)=COALESCE(%s, -1)
+                  AND r.status = ANY(%s)
+                  {hard_block_sql}
+                LIMIT 1
+                """,
+                [tmdb_ids, tmdb_ids, tmdb_ids, season, statuses] + hard_args(),
+            )
+            return cur.fetchone() is not None
+
 
 def _center_norm_sha1(value: str) -> str:
     text = str(value or '').strip().upper()
@@ -957,16 +1088,31 @@ def get_watching_missing_episodes(limit: int) -> List[Dict[str, Any]]:
             """, (int(limit),))
             return [_row_to_dict(r) for r in cur.fetchall()]
 
-def check_local_virtual_projection_exists(parent: str, season: int, episode: int) -> bool:
+def find_media_by_emby_item_id(emby_item_id: str, item_type: str = '') -> Dict[str, Any]:
+    """按 Emby 条目 ID 反查 media_metadata 行，供 webhook 入库事件精确定位 Movie/Episode。"""
+    emby_item_id = str(emby_item_id or '').strip()
+    item_type = str(item_type or '').strip()
+    if not emby_item_id:
+        return None
+    where = ["emby_item_ids_json @> %s::jsonb"]
+    args = [json.dumps([emby_item_id], ensure_ascii=False)]
+    if item_type:
+        where.append("item_type=%s")
+        args.append(item_type)
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT 1 FROM shared_virtual_items
-                WHERE status <> 'deleted' AND (parent_series_tmdb_id=%s OR tmdb_id=%s)
-                  AND COALESCE(season_number, -1)=COALESCE(%s, -1) AND COALESCE(episode_number, -1)=COALESCE(%s, -1)
+            cur.execute(f"""
+                SELECT *
+                FROM media_metadata
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE item_type WHEN 'Episode' THEN 0 WHEN 'Movie' THEN 1 WHEN 'Season' THEN 2 WHEN 'Series' THEN 3 ELSE 9 END,
+                    last_synced_at DESC NULLS LAST,
+                    last_updated_at DESC NULLS LAST
                 LIMIT 1
-            """, (parent, parent, season, episode))
-            return cur.fetchone() is not None
+            """, args)
+            return _row_to_dict(cur.fetchone())
+
 
 def find_local_media_for_gap(tmdb_id: str, item_type: str, season: Any, episode: Any) -> Dict[str, Any]:
     with get_db_connection() as conn:
@@ -989,7 +1135,7 @@ def find_local_media_for_gap(tmdb_id: str, item_type: str, season: Any, episode:
                 return None
             return _row_to_dict(cur.fetchone())
 
-def get_completed_season_episode_share_groups(statuses: List[str], max_rows: int) -> List[Dict[str, Any]]:
+def get_completed_season_episode_share_groups(statuses: List[str], max_rows: int, include_rollup_blocked: bool = True) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1005,10 +1151,111 @@ def get_completed_season_episode_share_groups(statuses: List[str], max_rows: int
                 WHERE r.status = ANY(%s) AND COALESCE(s.watching_status, '') = 'Completed' AND COALESCE(r.share_code, '') <> '' AND r.season_number IS NOT NULL
                   AND (LOWER(COALESCE(r.share_type, '')) = 'episode_file' OR COALESCE(r.item_type, '') = 'Episode' OR r.episode_number IS NOT NULL)
                   AND LOWER(COALESCE(r.share_type, '')) NOT IN ('season_pack', 'series_pack', 'tv_pack', 'season')
+                  AND (
+                        %s = TRUE
+                        OR COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->'season_completed_rollup_skip'->>'blocked', '') <> 'true'
+                  )
                 ORDER BY s.last_updated_at DESC NULLS LAST, r.parent_series_tmdb_id, r.season_number, r.episode_number NULLS LAST, r.created_at ASC
                 LIMIT %s
-            """, (statuses, max_rows))
+            """, (statuses, bool(include_rollup_blocked), max_rows))
             return [_row_to_dict(r) for r in cur.fetchall()]
+
+def get_active_episode_share_records_for_season(
+    parent_series_tmdb_id: str,
+    season_number: int,
+    statuses: List[str],
+    include_rollup_blocked: bool = True,
+) -> List[Dict[str, Any]]:
+    """查询某剧某季当前仍活动的单集分享记录，用于完结季包创建后清理旧单集分享。
+
+    和 get_completed_season_episode_share_groups 不同，这个函数不要求 Season 行仍然能 JOIN 到，
+    也不按 watching_status 过滤；调用方已经处在“智能追剧一致性通过”的链路中。
+    这样可以兜住：Webhook/追剧触发季包分享时，旧维护汇总任务没有再扫描到的单集分享。
+    """
+    parent_series_tmdb_id = str(parent_series_tmdb_id or '').strip()
+    season_number = _nullable_int(season_number)
+    if not parent_series_tmdb_id or season_number is None:
+        return []
+    statuses = [str(x) for x in (statuses or []) if str(x or '').strip()]
+    if not statuses:
+        return []
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT r.*
+                FROM shared_share_records r
+                LEFT JOIN shared_share_items i ON i.share_record_id = r.id
+                WHERE r.status = ANY(%s)
+                  AND COALESCE(r.share_code, '') <> ''
+                  AND COALESCE(r.season_number, i.season_number, -1) = %s
+                  AND (
+                        COALESCE(r.parent_series_tmdb_id, '') = %s
+                     OR COALESCE(r.tmdb_id, '') = %s
+                     OR EXISTS (
+                            SELECT 1
+                            FROM shared_share_items ii
+                            WHERE ii.share_record_id = r.id
+                              AND COALESCE(ii.season_number, -1) = %s
+                              AND (
+                                    COALESCE(ii.raw_json, '{}'::jsonb)->>'parent_series_tmdb_id' = %s
+                                 OR COALESCE(ii.raw_json, '{}'::jsonb)->'_etk'->>'parent_series_tmdb_id' = %s
+                              )
+                        )
+                  )
+                  AND (
+                        LOWER(COALESCE(r.share_type, '')) = 'episode_file'
+                     OR COALESCE(r.item_type, '') = 'Episode'
+                     OR r.episode_number IS NOT NULL
+                     OR LOWER(COALESCE(i.item_type, '')) = 'episode'
+                     OR i.episode_number IS NOT NULL
+                  )
+                  AND LOWER(COALESCE(r.share_type, '')) NOT IN ('season_pack', 'series_pack', 'tv_pack', 'season')
+                  AND (
+                        %s = TRUE
+                        OR COALESCE(COALESCE(r.raw_json, '{}'::jsonb)->'season_completed_rollup_skip'->>'blocked', '') <> 'true'
+                  )
+                ORDER BY r.episode_number NULLS LAST, r.created_at ASC, r.id ASC
+            """, (
+                statuses,
+                season_number,
+                parent_series_tmdb_id,
+                parent_series_tmdb_id,
+                season_number,
+                parent_series_tmdb_id,
+                parent_series_tmdb_id,
+                bool(include_rollup_blocked),
+            ))
+            return [_row_to_dict(r) for r in cur.fetchall()]
+
+
+def mark_season_rollup_skipped_for_records(record_ids: List[Any], reason: str, message: str, raw_json_patch: Dict[str, Any] = None) -> int:
+    ids = []
+    for rid in record_ids or []:
+        try:
+            rid = int(rid)
+        except Exception:
+            continue
+        if rid not in ids:
+            ids.append(rid)
+    if not ids:
+        return 0
+
+    patch = raw_json_patch or {}
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE shared_share_records
+                SET raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE id = ANY(%s)
+                RETURNING id
+            """, (_as_jsonb(patch), str(message or reason or ''), ids))
+            rows = cur.fetchall()
+            conn.commit()
+            return len(rows)
+
 
 def check_active_season_pack_share(parent_series_tmdb_id: str, season_number: int, statuses: List[str]) -> bool:
     with get_db_connection() as conn:
@@ -1020,90 +1267,6 @@ def check_active_season_pack_share(parent_series_tmdb_id: str, season_number: in
                 LIMIT 1
             """, (statuses, season_number, parent_series_tmdb_id, parent_series_tmdb_id))
             return cur.fetchone() is not None
-
-def get_expired_virtual_cache_rows(limit: int) -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT virtual_id, title, file_name, share_code, raw_json, real_fid, real_pick_code, real_parent_id, expires_at, strm_path, mediainfo_path, nfo_path, emby_item_id
-                FROM shared_virtual_items
-                WHERE status IN ('cached','watched') AND COALESCE(real_fid, '') <> '' AND expires_at IS NOT NULL AND expires_at < NOW()
-                ORDER BY expires_at ASC LIMIT %s
-            """, (int(limit),))
-            return [_row_to_dict(r) for r in cur.fetchall()]
-
-def get_virtual_items_for_share_health(limit: int = 300) -> List[Dict[str, Any]]:
-    """查询仍保留虚拟投影、需要校验中心分享有效性的虚拟入库记录。"""
-    limit = max(1, min(int(limit or 300), 1000))
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT *
-                FROM shared_virtual_items
-                WHERE COALESCE(status, '') NOT IN ('deleted','promoted','promote_pending')
-                  AND (
-                        COALESCE(source_id, '') <> ''
-                     OR COALESCE(share_code, '') <> ''
-                  )
-                ORDER BY
-                    CASE
-                        WHEN COALESCE(real_pick_code, '') = '' THEN 0
-                        ELSE 1
-                    END,
-                    updated_at ASC NULLS FIRST,
-                    created_at ASC NULLS FIRST
-                LIMIT %s
-            """, (limit,))
-            return [_row_to_dict(r) for r in cur.fetchall()]
-
-
-def update_virtual_item_center_source(virtual_id: str, source: Dict[str, Any], message: str = '') -> Dict[str, Any]:
-    """把虚拟入库记录切换到新的中心共享源。媒体身份保持原虚拟项不变，只替换分享来源。"""
-    if not virtual_id or not source:
-        return None
-    raw_patch = {
-        'virtual_source_replaced_at': datetime.utcnow().isoformat(),
-        'virtual_source_replace_message': message or '',
-        'replacement_center_source': source,
-    }
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE shared_virtual_items
-                SET source_id = COALESCE(NULLIF(%s, ''), source_id),
-                    source_key = COALESCE(NULLIF(%s, ''), source_key),
-                    source_provider = COALESCE(NULLIF(%s, ''), source_provider),
-                    share_code = COALESCE(NULLIF(%s, ''), share_code),
-                    receive_code = COALESCE(%s, receive_code),
-                    contributor_id = COALESCE(NULLIF(%s, ''), contributor_id),
-                    sha1 = COALESCE(NULLIF(%s, ''), sha1),
-                    size = CASE WHEN COALESCE(%s, 0) > 0 THEN %s ELSE size END,
-                    file_name = COALESCE(NULLIF(%s, ''), file_name),
-                    quality = COALESCE(NULLIF(%s, ''), quality),
-                    status = CASE WHEN status='error' THEN 'virtual_ready' ELSE status END,
-                    last_error = %s,
-                    raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
-                    updated_at = NOW()
-                WHERE virtual_id=%s
-                RETURNING *
-            """, (
-                str(source.get('source_id') or ''),
-                str(source.get('source_key') or ''),
-                str(source.get('source_provider') or 'shared_center'),
-                str(source.get('share_code') or ''),
-                str(source.get('receive_code') or ''),
-                str(source.get('contributor_id') or source.get('provider_id') or ''),
-                _center_norm_sha1(source.get('sha1')),
-                _safe_int(source.get('size'), 0), _safe_int(source.get('size'), 0),
-                str(source.get('file_name') or ''),
-                str(source.get('quality') or ''),
-                message or '',
-                _as_jsonb(raw_patch),
-                str(virtual_id),
-            ))
-            row = _row_to_dict(cur.fetchone())
-            conn.commit()
-            return row
 
 def find_local_cache_rows_by_sha1s(sha1s: List[str]) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
@@ -1126,12 +1289,6 @@ def get_seed_media_row_for_share_request(target: str, media: str, tmdb_id: str, 
             else:
                 return {}
             return _row_to_dict(cur.fetchone())
-
-def update_virtual_target_parent(virtual_id: str, target_cid: str, target_name: str):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE shared_virtual_items SET target_parent_id=%s, target_parent_name=%s, updated_at=NOW() WHERE virtual_id=%s", (str(target_cid), target_name or '', virtual_id))
-            conn.commit()
 
 def update_p115_cache_parent(fid: str, target_cid: str, new_name: str = None):
     with get_db_connection() as conn:

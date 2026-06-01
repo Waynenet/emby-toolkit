@@ -13,7 +13,7 @@ import task_manager
 from .actors import (task_enrich_aliases, task_persons_translation, 
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_contribute_mediainfo_to_center, task_restore_nfo_and_images, task_fill_studio_images
+from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_repair_p115_fingerprints, task_contribute_mediainfo_to_center, task_restore_nfo_and_images, task_fill_studio_images
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -27,8 +27,108 @@ from .vector_tasks import task_generate_embeddings
 from .system_update import task_check_and_update_container
 from .p115 import task_scan_and_organize_115, task_sync_115_directory_tree, task_full_sync_strm_and_subs, task_monitor_115_life_events
 from .hdhive import task_hdhive_auto_checkin
+from .shared_resource_tasks import task_shared_resource_maintenance, task_shared_share_status_sync_high_freq
 
 logger = logging.getLogger(__name__)
+
+
+# 任务说明：作为任务注册表的补充元数据，供前端悬停提示、TG 菜单说明等场景复用。
+# 新增任务时只需要在 full_registry 里登记任务，再在这里补一句 help，不需要再改前端。
+TASK_HELP_TEXTS = {
+    'task-chain-high-freq': '按已配置的高频刷新任务链顺序执行多个子任务，适合白天定时刷新媒体数据、追剧和订阅等轻量任务。',
+    'task-chain-low-freq': '按已配置的低频维护任务链顺序执行多个子任务，适合夜间处理耗时更长、资源占用更高的维护任务。',
+    'populate-metadata': '同步 Emby 媒体库基础数据到本地缓存，用于后续追剧、订阅、整理、统计和共享匹配。',
+    'role-translation': '为影视条目中的角色名补充中文显示，让演员角色展示更友好。',
+    'actor-translation': '为演员、导演等人物信息补充中文名。',
+    'process-watchlist': '刷新智能追剧列表，检查连载剧更新、补充集图片和元数据。',
+    'actor-tracking': '刷新演员订阅，根据关注演员检查新作品并触发后续订阅处理。',
+    'custom-collections': '刷新全部自建合集，重新拉取榜单并匹配、订阅。',
+    'auto-subscribe': '统一处理电影、剧集、追更和求资源等订阅需求，按规则搜索、转存或登记缺口。',
+    'generate-all-covers': '批量生成原生媒体封面，适合封面缺失或封面风格需要统一时执行。',
+    'generate-custom-collection-covers': '批量生成自建合集封面，让合集封面保持统一风格。',
+    'check-expired-users': '检查会员或体验卡到期用户，并执行到期后的权限处理。',
+    'refresh_completed_series': '刷新完结剧集状态和季集信息，补充图片和元数据，以及订阅新季。',
+    'scan-monitor-folders': '扫描配置的监控目录，发现新增媒体文件后进入识别、整理或入库流程，适合查漏补缺。',
+    'scan-organize-115': '扫描 115 网盘待整理目录，并按规则识别、整理、生成记录，适合新增资源后手动触发。',
+    'full-sync-strm': '全量重建 STRM 与字幕文件，保持网盘和本地一致，适合媒体库重建或迁移时使用。',
+    'monitor-115-life-events': '增量处理 115 网盘文件变化，功能较弱，不熟悉不建议使用。',
+    'backup-mediainfo': '备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。',
+    'repair-p115-fingerprints': '扫描在库电影和分集，补齐共享资源必需的 115 PC 与 SHA1；优先从本地 115 缓存恢复，必要时查询 115。',
+    'restore_mediainfo': '从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。',
+    'hdhive-auto-checkin': '执行影巢自动签到，获取签到奖励或保持账号活跃。',
+    'restore-nfo-and-images': '从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。',
+    'shared-resource-maintenance': '维护共享资源池，包含登记缺口、自动分享、状态检查、清理失效分享和共享订阅消费等。',
+    'add-all-series-to-watchlist': '扫描全库剧集并加入智能追剧管理，适合首次处理存量剧集时使用。',
+    'process_all_custom_collections': '立即重新生成所有自建合集，通常用于合集规则调整后手动刷新。',
+    'process-single-custom-collection': '只刷新指定的单个自建合集，通常由合集详情页触发。',
+    'scan-cleanup-issues': '扫描重复媒体、异常文件和可清理项目，帮助发现占空间或重复入库的问题。',
+    'resubscribe-library': '执行媒体订阅删除/洗版相关处理，按配置清理并重新订阅需要替换的资源。',
+    'update-daily-theme': '更新每日主题推荐内容，用于影视探索页的主题展示。',
+    'manual_subscribe_batch': '处理手动批量订阅队列，适合一次性提交多个想看的电影或剧集。',
+    'scan_old_seasons_backfill': '扫描缺季老剧并尝试补齐缺失季度，适合老剧季信息不完整时使用。',
+    'contribute-mediainfo': '把本地媒体信息贡献到中心。',
+    'generate_embeddings': '为媒体生成向量索引，用于语义搜索、相似推荐等智能功能。',
+    'refresh-collections': '刷新 TMDb 原生合集信息，让电影系列合集保持最新。',
+    'update-resubscribe-cache': '刷新媒体整理/洗版缓存，为后续洗版筛选和订阅判断提供基础数据。',
+    'merge-duplicate-actors': '合并重复演员条目，减少同一演员因别名、翻译不同造成的分身。',
+    'sync-all-user-data': '同步全部用户数据，例如播放记录、收藏、观看状态等用户维度信息。',
+    'execute-auto-tagging-rules': '执行自动打标规则，根据媒体参数、路径、类型等条件批量添加标签。',
+    'enrich-aliases': '补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。',
+    'purge-ghost-actors': '删除没有有效关联作品的幽灵演员，清理人物库冗余数据。',
+    'sync-115-directory-tree': '同步 115 网盘目录树缓存，适合目录结构变化大或缓存不准时使用。',
+    'fill-studio-images': '补全制作公司/工作室图标，让媒体详情页展示更完整。',
+    'shared-share-status-sync': '高频同步共享分享状态，检查分享是否仍可用并更新中心状态。',
+    'system-auto-update': '检查并执行系统容器自动更新，适合需要保持 ETK 最新版本时使用。',
+}
+
+
+# 任务链入口只应该作为页面顶部的专用按钮出现，不放进“临时任务”网格里重复展示。
+TASK_KEYS_HIDDEN_FROM_MANUAL_RUN = {
+    'task-chain-high-freq',
+    'task-chain-low-freq',
+}
+
+
+def get_task_help(task_key: str, fallback_name: str = '') -> str:
+    """返回任务说明文案，供前端和其它展示入口复用。"""
+    return TASK_HELP_TEXTS.get(task_key) or fallback_name or '暂无任务说明。'
+
+
+def get_available_task_definitions(context: str = 'chain'):
+    """
+    返回给前端使用的任务列表。
+    - chain：只返回适合任务链编排的子任务。
+    - all：返回全部任务，供 TG 菜单等需要完整任务池的地方使用。
+    - manual：返回临时任务按钮列表，沿用任务链可编排任务池，只额外排除页面顶部已有专用按钮的任务链入口。
+    - 保持 get_task_registry() 的执行侧返回结构不变，避免影响任务调度。
+    """
+    normalized_context = context if context in ('chain', 'all', 'manual') else 'chain'
+
+    # manual 是页面上的“临时任务”按钮池。
+    # 这里不能从 all 取，否则 full_registry 里标记为 False 的后台/参数型任务也会全部暴露到前端。
+    # 原页面行为等同于 chain：只展示 info[3] == True 的常规任务。
+    registry_context = 'chain' if normalized_context == 'manual' else normalized_context
+    registry = get_task_registry(context=registry_context)
+
+    available_tasks = []
+    for key, info in registry.items():
+        if normalized_context == 'manual' and key in TASK_KEYS_HIDDEN_FROM_MANUAL_RUN:
+            continue
+
+        task_name = info[1]
+        task_help = get_task_help(key, task_name)
+        task_item = {
+            'key': key,
+            'name': task_name,
+            'help': task_help,
+            # 兼容前端旧字段命名，避免部分组件仍然读 description 时显示为空。
+            'description': task_help,
+        }
+        if registry_context == 'all' and len(info) >= 3:
+            task_item['processor_type'] = info[2]
+        available_tasks.append(task_item)
+
+    return available_tasks
 
 def _task_run_chain_internal(processor, task_name: str, sequence_config_key: str, max_runtime_config_key: str):
     """
@@ -191,17 +291,17 @@ def get_task_registry(context: str = 'all'):
         'auto-subscribe': (task_auto_subscribe, "统一订阅处理", 'media', True),
         'generate-all-covers': (task_generate_all_covers, "生成原生封面", 'media', True),
         'generate-custom-collection-covers': (task_generate_all_custom_collection_covers, "生成合集封面", 'media', True),
-        'check-expired-users': (task_check_expired_users, "检查过期用户", 'media', True),
         'refresh_completed_series': (task_refresh_completed_series, "全量刷新剧集", 'watchlist', True),
         'scan-monitor-folders': (task_scan_monitor_folders, "扫描监控目录", 'media', True),
-        'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         'scan-organize-115': (task_scan_and_organize_115, "网盘文件整理", 'media', True),
         'full-sync-strm': (task_full_sync_strm_and_subs, "全量生成STRM", 'media', True),
         'monitor-115-life-events': (task_monitor_115_life_events, "增量生成STRM", 'media', True),
         'backup-mediainfo': (task_backup_mediainfo, "备份媒体信息", 'media', True),
+        'repair-p115-fingerprints': (task_repair_p115_fingerprints, "补齐共享指纹", 'media', True),
         'restore_mediainfo': (task_restore_mediainfo, "还原媒体信息", 'media', True),
         'hdhive-auto-checkin': (task_hdhive_auto_checkin, "影巢自动签到", 'media', True),
         'restore-nfo-and-images': (task_restore_nfo_and_images, "还原NFO和封面", 'media', True),
+        'shared-resource-maintenance': (task_shared_resource_maintenance, "共享资源维护", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "扫描全库剧集", 'watchlist', False),
@@ -223,6 +323,9 @@ def get_task_registry(context: str = 'all'):
         'purge-ghost-actors': (task_purge_ghost_actors, "删除幽灵演员", 'media', False),
         'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', False),
         'fill-studio-images': (task_fill_studio_images, "补全工作室图标", 'media', False),
+        'shared-share-status-sync': (task_shared_share_status_sync_high_freq, "共享分享状态同步", 'media', False),
+        'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', False),
+        'check-expired-users': (task_check_expired_users, "检查过期用户", 'media', False),
     }
 
     if context == 'chain':

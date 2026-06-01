@@ -47,6 +47,19 @@ def translate_internal_status(status: str) -> str:
     """★★★ 新增：一个辅助函数，用于翻译内部状态，用于日志显示 ★★★"""
     return INTERNAL_STATUS_TRANSLATION.get(status, status)
 
+
+def _shared_resource_auto_share_enabled() -> bool:
+    try:
+        cfg = settings_db.get_shared_resource_config() or {}
+        value = cfg.get('p115_shared_resource_enabled', False)
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on', '启用', '开启')
+        return bool(value)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 读取共享资源总开关失败，跳过完结季包分享探测: {e}")
+        return False
+
+
 class WatchlistProcessor:
     """
     【V13 - media_metadata 适配版】
@@ -1103,70 +1116,70 @@ class WatchlistProcessor:
             logger.warning(f"同步状态给 MoviePilot 时出错: {e}")
 
     def _check_season_consistency(self, tmdb_id: str, season_number: int, expected_episode_count: int) -> bool:
+        """统一调用 tasks.helpers.check_season_consistency，保留旧方法名兼容现有调用。"""
+        result = helpers.check_season_consistency(
+            tmdb_id=tmdb_id,
+            season_number=season_number,
+            expected_episode_count=expected_episode_count,
+        )
+        return bool(result.get('ok'))
+
+    def _trigger_completed_season_pack_share_detached(self, tmdb_id: str, season_number: int, series_name: str = ''):
+        """完结一致性通过后异步触发季包分享探测（命中缺口正常分享，count=1 补备份），避免阻塞单线程任务队列。
+
+        这里不能走 task_manager.submit_task：智能追剧本身通常已经运行在 task_manager
+        的单 worker / 全局锁里，内部再提交任务容易被全局锁挡住，或者让追剧刷新长时间
+        等待 115 创建备份分享、删除单集分享、中心撤销等慢 I/O。
         """
-        检查指定季的本地文件是否满足“无需洗版”的条件：
-        1. 集数已齐 (本地集数 >= TMDb集数)
-        2. 一致性达标 (分辨率、制作组、编码 必须完全统一)
-        """
+        parent_series_tmdb_id = str(tmdb_id or '').strip()
         try:
-            with connection.get_db_connection() as conn:
-                cursor = conn.cursor()
-                # 获取该季所有集的文件资产信息
-                sql = """
-                    SELECT asset_details_json 
-                    FROM media_metadata 
-                    WHERE parent_series_tmdb_id = %s 
-                      AND season_number = %s 
-                      AND item_type = 'Episode'
-                      AND in_library = TRUE
-                """
-                cursor.execute(sql, (tmdb_id, season_number))
-                rows = cursor.fetchall()
+            season_no = int(season_number)
+        except Exception:
+            logger.debug(
+                "  ➜ [共享资源] 完结季包分享跳过：无效季号 tmdb=%s season=%s",
+                parent_series_tmdb_id, season_number,
+            )
+            return
+        if not parent_series_tmdb_id:
+            return
+        if not _shared_resource_auto_share_enabled():
+            logger.debug(
+                "  ➜ [共享资源] 共享资源未启用，跳过完结季包分享探测：%s S%02d",
+                series_name or parent_series_tmdb_id, season_no,
+            )
+            return
 
-            local_episode_count = len(rows)
-            if expected_episode_count and local_episode_count < expected_episode_count:
-                logger.info(
-                    f"  ➜ [一致性检查] 第 {season_number} 季 本地集数不足: "
-                    f"{local_episode_count}/{expected_episode_count}，不能视为完结达标。"
+        def _runner():
+            try:
+                from tasks.shared_resource_tasks import trigger_completed_season_pack_share_task
+                result = trigger_completed_season_pack_share_task(
+                    None,
+                    parent_series_tmdb_id=parent_series_tmdb_id,
+                    season_number=season_no,
+                ) or {}
+                logger.debug(
+                    "  ➜ [共享资源] 完结季包分享探测异步任务完成：%s S%02d created=%s, episode_cancelled=%s, message=%s",
+                    series_name or parent_series_tmdb_id,
+                    season_no,
+                    result.get('created', 0),
+                    result.get('episode_cancelled', 0),
+                    result.get('message') or result.get('share_code') or '',
                 )
-                return False
+            except Exception as e:
+                logger.warning(
+                    "  ➜ [共享资源] 完结季包分享探测异步任务失败：%s S%02d -> %s",
+                    series_name or parent_series_tmdb_id, season_no, e, exc_info=True,
+                )
 
-            # 检查一致性 (分辨率、制作组、编码)
-            resolutions = set()
-            groups = set()
-            codecs = set()
-
-            for row in rows:
-                assets = row.get('asset_details_json')
-                if not assets: continue
-                
-                # 取主文件 (第一个)
-                main_asset = assets[0]
-                
-                resolutions.add(main_asset.get('resolution_display', 'Unknown'))
-                codecs.add(main_asset.get('codec_display', 'Unknown'))
-                
-                # 制作组处理：取第一个识别到的组，如果没有则标记为 Unknown
-                raw_groups = main_asset.get('release_group_raw', [])
-                group_name = raw_groups[0] if raw_groups else 'Unknown'
-                groups.add(group_name)
-
-            # 判定逻辑：所有集合长度必须为 1 (即只有一种规格)
-            is_consistent = (len(resolutions) == 1 and len(groups) == 1 and len(codecs) == 1)
-            
-            if is_consistent:
-                # 获取唯一的那个规格，用于日志展示
-                res = list(resolutions)[0]
-                grp = list(groups)[0]
-                logger.info(f"  ➜ [一致性检查] 第 {season_number} 季 完美达标: [{res} / {grp}]，跳过洗版。")
-                return True
-            else:
-                logger.info(f"  ➜ [一致性检查] 第 {season_number} 季 版本混杂，需要洗版。分布: 分辨率{resolutions}, 制作组{groups}, 编码{codecs}")
-                return False
-
-        except Exception as e:
-            logger.error(f"  ➜ 检查 第 {season_number} 季 一致性时出错: {e}")
-            return False # 出错默认不跳过，继续洗版以防万一
+        threading.Thread(
+            target=_runner,
+            name=f"shared-season-pack-share-{parent_series_tmdb_id}-S{season_no:02d}",
+            daemon=True,
+        ).start()
+        logger.info(
+            "  ➜ [共享资源] 检查完结季包是否需要分享/备份：%s S%02d",
+            series_name or parent_series_tmdb_id, season_no,
+        )
 
     def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
         """
@@ -1182,6 +1195,8 @@ class WatchlistProcessor:
                 return
             # 2. 直接使用传入的集数进行一致性检查
             if self._check_season_consistency(tmdb_id, season_number, episode_count):
+                logger.info(f"  ➜ [完结洗版] 《{series_name}》S{season_number} 本地文件一致性完美，无需洗版，异步触发季包分享探测。")
+                self._trigger_completed_season_pack_share_detached(tmdb_id, season_number, series_name)
                 return
             
             # 3. 检查是否需要删除旧文件 (Emby)
@@ -1824,7 +1839,8 @@ class WatchlistProcessor:
                         
                         if tg_channel_tracking:
                             if self._check_season_consistency(tmdb_id, last_s_num, last_ep_count):
-                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 本地文件一致性完美，无需洗版。")
+                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 本地文件一致性完美，无需洗版，异步触发季包分享探测。")
+                                self._trigger_completed_season_pack_share_detached(tmdb_id, last_s_num, item_name)
                             else:
                                 # ★ 核心：不一致，开启等待标志！
                                 set_waiting_flag = True

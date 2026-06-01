@@ -218,6 +218,83 @@ def _enqueue_mp_file(file_info):
         logger.info(f"  ➜ [MP缓冲] 文件 '{file_name}' 加入队列。当前批次 {len(task['files'])} 个文件。最多等待 {delay} 秒后合并执行...")
         task['timer'] = spawn_later(delay, _flush_mp_batch, key)
 
+
+def _shared_resource_auto_share_enabled() -> bool:
+    try:
+        cfg = settings_db.get_shared_resource_config() or {}
+        value = cfg.get('p115_shared_resource_enabled', False)
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on', '启用', '开启')
+        return bool(value)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 读取共享资源总开关失败，跳过自动分享探测: {e}")
+        return False
+
+
+def _run_shared_auto_share_detached(task_name: str, **kwargs):
+    """共享供给侧探测/创建分享必须脱离 task_manager 单线程队列。
+
+    Webhook 本身已经运行在 task_manager 的单 worker + task_lock 中。
+    如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致 Webhook 任务假死。
+    """
+    if not _shared_resource_auto_share_enabled():
+        logger.debug(f"  ➜ [共享资源] 共享资源未启用，跳过自动分享探测: {task_name}")
+        return
+
+    def _runner():
+        try:
+            from tasks.shared_resource_tasks import trigger_shared_auto_share_for_library_item
+            logger.debug(f"  ➜ [共享资源] 检查是否需要分享: {task_name}")
+            result = trigger_shared_auto_share_for_library_item(None, **kwargs)
+            logger.debug(
+                "  ➜ [共享资源] 检查完成: %s，created=%s，message=%s",
+                task_name,
+                result.get('created', 0) if isinstance(result, dict) else '-',
+                result.get('message', '') if isinstance(result, dict) else '',
+            )
+        except Exception as e:
+            logger.warning(f"  ➜ [共享资源] 自动分享探测失败: {task_name} -> {e}", exc_info=True)
+
+    threading.Thread(
+        target=_runner,
+        name=f"shared-auto-share-{str(task_name)[:40]}",
+        daemon=True,
+    ).start()
+
+
+def _submit_shared_auto_share_after_library_ready(item_details: dict, item_id: str, item_type: str, tmdb_id: str, new_episode_ids: Optional[List[str]] = None):
+    """Movie/Episode 入库完成后，异步询问共享中心是否需要本机创建分享。
+
+    这里保持原有正常分享链路：Movie 命中缺口分享、Episode 追更命中缺口分享。
+    Movie 的备份分享由任务内部在“正常分享不需要创建且中心可用分享数=1”时额外补充；
+    Episode 仍不创建备份分享。
+    """
+    try:
+        if item_type == 'Movie' and tmdb_id:
+            _run_shared_auto_share_detached(
+                f"共享电影入库探测: {item_details.get('Name') or tmdb_id}",
+                item_type='Movie',
+                tmdb_id=str(tmdb_id),
+                emby_item_id=str(item_id),
+                title=item_details.get('Name') or '',
+                year=item_details.get('ProductionYear') or '',
+            )
+            return
+
+        if item_type == 'Series' and new_episode_ids:
+            for ep_id in list(dict.fromkeys([str(x) for x in new_episode_ids if str(x or '').strip()])):
+                _run_shared_auto_share_detached(
+                    f"共享追更新集探测: {item_details.get('Name') or tmdb_id} / {ep_id}",
+                    item_type='Episode',
+                    emby_item_id=ep_id,
+                    parent_series_tmdb_id=str(tmdb_id or ''),
+                    title=item_details.get('Name') or '',
+                    year=item_details.get('ProductionYear') or '',
+                )
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源] 提交 webhook 自动分享探测失败: {e}", exc_info=True)
+
+
 def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True):
     """
     【Webhook 统一入口】
@@ -247,7 +324,10 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         logger.warning(f"  ➜ 项目 '{item_name_for_log}' 的元数据处理未成功完成，跳过后续步骤。")
         return
 
-    # 2. 智能追剧判断 - 初始入库
+    # 2. 共享资源供给侧实时触发：保留 Movie/追更新集命中缺口分享，Movie 额外按 count=1 补备份；季包交给智能追剧完结流程。
+    _submit_shared_auto_share_after_library_ready(item_details, item_id, item_type, tmdb_id, new_episode_ids)
+
+    # 3. 智能追剧判断 - 初始入库
     if is_new_item and item_type == "Series":
         processor.check_and_add_to_watchlist(item_details)
 
@@ -1181,15 +1261,6 @@ def emby_webhook():
         if not user_id or not item_id_from_webhook:
             return jsonify({"status": "event_ignored_missing_data"}), 200
 
-        # Webhook 只当传达室：播放事件先投递给共享虚拟入库任务。
-        # 这里不能依赖后面的 Series 反查或 user_media_data 更新成功，
-        # 虚拟入库的 Episode 在某些情况下反查父剧失败，会导致剧集自动转正事件被提前吞掉。
-        if event_type in ["playback.start", "playback.pause", "playback.stop"]:
-            try:
-                from tasks.shared_virtual_playback_tasks import dispatch_shared_virtual_playback_event
-                dispatch_shared_virtual_playback_event(data, event_type, item_id_from_webhook, item_type_from_webhook, user_id)
-            except Exception as e:
-                logger.warning(f"  ➜ [共享虚拟转正] 播放事件任务投递失败: {e}", exc_info=True)
 
         id_to_update_in_db = None
         if item_type_from_webhook in ['Movie', 'Series']:

@@ -1,13 +1,11 @@
 # handler/shared_subscription_service.py
-# 统一订阅共享资源消费入口：登记缺口、优先从中心共享池转存或虚拟入库。
+# 统一订阅共享资源消费入口：登记缺口、优先从中心共享池永久转存。
 import json
 import logging
 import os
 import re
 import threading
 import time
-import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import config_manager
@@ -80,6 +78,29 @@ def _safe_int(value, default=0):
         return int(float(value))
     except Exception:
         return default
+
+
+def _normalize_episode_number_list(value) -> List[int]:
+    """共享池按季查询后，本地用缺集号列表做精确过滤。"""
+    if value in (None, ''):
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = re.split(r'[，,\s]+', value.strip()) if value.strip() else []
+    if not isinstance(value, (list, tuple, set)):
+        value = [value]
+
+    out = []
+    for v in value:
+        try:
+            n = int(float(v))
+            if n > 0 and n not in out:
+                out.append(n)
+        except Exception:
+            pass
+    return sorted(out)
 
 
 def _extract_episode_number_fallback(source: Dict[str, Any] | None = None, context: Dict[str, Any] | None = None):
@@ -294,7 +315,15 @@ def _source_relevant_to_context(src: Dict[str, Any], context: Dict[str, Any]) ->
     if item_type == 'Season':
         ctx_s = _safe_int(context.get('season_number'), -999)
         src_s_raw = src.get('season_number')
-        return src_s_raw in (None, '') or ctx_s == -999 or _safe_int(src_s_raw, -998) == ctx_s
+        if not (src_s_raw in (None, '') or ctx_s == -999 or _safe_int(src_s_raw, -998) == ctx_s):
+            return False
+        missing_eps = _normalize_episode_number_list(context.get('missing_episode_numbers'))
+        src_e_raw = src.get('episode_number')
+        # SUBSCRIBED 补库会带缺集列表：中心按季返回，客户端只消费缺失单集；
+        # 季包/旧数据没有 episode_number 时继续保留，因为它可能覆盖整季。
+        if missing_eps and src_e_raw not in (None, ''):
+            return _safe_int(src_e_raw, -998) in missing_eps
+        return True
     if item_type == 'Movie':
         src_type = str(src.get('item_type') or '').strip()
         return src_type in ('', 'Movie')
@@ -302,10 +331,36 @@ def _source_relevant_to_context(src: Dict[str, Any], context: Dict[str, Any]) ->
 
 
 def _local_existing_hit_for_import_group(src: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-    """同一 share_code 可能聚合多条中心源；优先用本次目标相关源的 SHA1 查本地。"""
+    """同一 share_code 可能聚合多条中心源；优先用本次目标相关源的 SHA1 查本地。
+
+    SUBSCRIBED 补库场景可能是“本季已有一部分、缺一部分”。如果中心返回的是季包，
+    不能因为包内任意一集已在本地就跳过整个季包；只有相关文件全部已存在时才跳过。
+    """
     rows = src.get('_group_sources') if isinstance(src, dict) else None
     rows = [r for r in (rows or [src]) if isinstance(r, dict)]
     relevant_rows = [r for r in rows if _source_relevant_to_context(r, context)] or rows
+
+    item_type = str((context or {}).get('item_type') or '').strip()
+    missing_eps = _normalize_episode_number_list((context or {}).get('missing_episode_numbers'))
+    partial_season_recheck = item_type == 'Season' and bool(missing_eps)
+
+    if partial_season_recheck:
+        checked = 0
+        first_hit = None
+        for row in relevant_rows:
+            sha1 = _norm_sha1(row.get('sha1'))
+            if not sha1:
+                continue
+            checked += 1
+            local = _find_local_p115_file_by_sha1(sha1)
+            if local and first_hit is None:
+                first_hit = {'source': row, 'local': local}
+            elif not local:
+                # 至少还有一个相关文件本地不存在，不能跳过本次导入。
+                return {}
+        if checked > 0 and first_hit:
+            return first_hit
+        return {}
 
     # 先查与本次目标相关的 SHA1；若命中，说明同一个文件已经在本账号存在。
     for row in relevant_rows:
@@ -379,7 +434,11 @@ def _build_gap_item(*, tmdb_id, item_type, title='', season_number=None, episode
 
 
 def _build_center_queries(item: Dict[str, Any], title: str, tmdb_id, item_type: str, parent_tmdb_id=None, season_number=None, year='') -> List[Dict[str, Any]]:
-    """把本地待订阅项转换成中心查询。Season/Series 查询依赖中心端支持按季/剧返回 Episode 源。"""
+    """把本地待订阅项转换成中心查询。
+
+    关键约定：剧集缺口只按季登记/查询，不再按 Episode 建缺口。
+    客户端拿到同季共享源后，再用本地缺集列表精确匹配具体 SxxEyy。
+    """
     item_type = str(item_type or '').strip()
     queries = []
     if item_type == 'Movie':
@@ -390,14 +449,12 @@ def _build_center_queries(item: Dict[str, Any], title: str, tmdb_id, item_type: 
     elif item_type == 'Series':
         queries.append(_build_gap_item(tmdb_id=tmdb_id, item_type='Series', title=title, year=year))
     elif item_type == 'Episode':
-        sid = parent_tmdb_id or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id')
+        sid = parent_tmdb_id or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or tmdb_id
         s_num = season_number if season_number not in (None, '') else item.get('season_number')
-        e_num = item.get('episode_number')
-        # 中心 Episode 查询以“父剧 TMDb + SxxEyy”为主；部分旧数据可能按单集 TMDb 登记，保留兜底。
-        if sid:
-            queries.append(_build_gap_item(tmdb_id=sid, item_type='Episode', title=title, season_number=s_num, episode_number=e_num, year=year))
-        if tmdb_id and str(tmdb_id) != str(sid or ''):
-            queries.append(_build_gap_item(tmdb_id=tmdb_id, item_type='Episode', title=title, season_number=s_num, episode_number=e_num, year=year))
+        # Episode 只用于本地精确消费，中心缺口/搜索统一提升到 Season 粒度。
+        # 这样一季 1000 集也只会产生一个 open gap。
+        if sid and s_num not in (None, ''):
+            queries.append(_build_gap_item(tmdb_id=sid, item_type='Season', title=title, season_number=s_num, year=year))
     return [q for q in queries if q.get('tmdb_id')]
 
 
@@ -455,527 +512,8 @@ def _filter_sources_by_episode_transfer_policy(sources: List[Dict[str, Any]]) ->
     return filtered
 
 
-def _get_local_strm_root() -> str:
-    return str(_cfg('CONFIG_OPTION_LOCAL_STRM_ROOT', 'local_strm_root', '/mnt/media') or '/mnt/media')
 
-
-def _sanitize_rel_path(path: str) -> str:
-    """清理相对路径，保留 / 分层；用于复用 115 正式整理的分类目录。"""
-    parts = []
-    for part in re.split(r'[\\/]+', str(path or '')):
-        part = _sanitize_filename(part)
-        if part and part not in ('.', '..'):
-            parts.append(part)
-    return '/'.join(parts)
-
-
-def _path_node_id(node: Dict[str, Any]) -> str:
-    return str(
-        (node or {}).get('cid')
-        or (node or {}).get('file_id')
-        or (node or {}).get('fid')
-        or (node or {}).get('id')
-        or ''
-    )
-
-
-def _path_node_name(node: Dict[str, Any]) -> str:
-    return str(
-        (node or {}).get('file_name')
-        or (node or {}).get('fn')
-        or (node or {}).get('name')
-        or (node or {}).get('n')
-        or ''
-    ).strip()
-
-
-def _strip_media_root_from_local_path(local_path: str) -> str:
-    """p115_filesystem_cache.local_path 有时包含媒体库根目录名，这里转成本地 STRM 根目录下的相对分类路径。"""
-    path = _sanitize_rel_path(local_path)
-    if not path:
-        return ''
-    media_root_name = str(_cfg('CONFIG_OPTION_115_MEDIA_ROOT_NAME', 'p115_media_root_name', '') or '').strip('/\\')
-    if media_root_name:
-        parts = [p for p in path.split('/') if p]
-        if media_root_name in parts:
-            idx = parts.index(media_root_name)
-            return '/'.join(parts[idx + 1:])
-    return path
-
-
-def _derive_category_path_from_115(client, target_cid: str) -> str:
-    """按正式整理逻辑，从 115 path 面包屑推导分类目录相对路径。"""
-    if not client or not target_cid:
-        return ''
-    try:
-        res = client.fs_files({'cid': str(target_cid), 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-        path_nodes = (res or {}).get('path') or (res or {}).get('paths') or (res or {}).get('breadcrumb') or []
-        if not isinstance(path_nodes, list):
-            return ''
-
-        media_root_cid = str(_cfg('CONFIG_OPTION_115_MEDIA_ROOT_CID', 'p115_media_root_cid', '0') or '0')
-        start_idx = 0
-        found_root = False
-        if media_root_cid == '0':
-            start_idx = 0 if str(target_cid) == '0' else 1
-            found_root = True
-        else:
-            for idx, node in enumerate(path_nodes):
-                if _path_node_id(node) == media_root_cid:
-                    start_idx = idx + 1
-                    found_root = True
-                    break
-
-        if found_root and start_idx < len(path_nodes):
-            rel = '/'.join(_path_node_name(n) for n in path_nodes[start_idx:] if _path_node_name(n))
-            return _sanitize_rel_path(rel)
-    except Exception as e:
-        logger.debug(f"  ➜ [共享虚拟] 从 115 面包屑推导分类路径失败: cid={target_cid}, err={e}")
-    return ''
-
-
-def _resolve_category_rel_path(organizer: SmartOrganizer, target_cid: str, client=None) -> str:
-    """复用正式 115 整理规则，把目标 CID 转成本地 STRM 分类相对目录。"""
-    target_cid = str(target_cid or '')
-    matched_rule = None
-    for rule in getattr(organizer, 'rules', []) or []:
-        if str(rule.get('cid') or '') == target_cid:
-            matched_rule = rule
-            break
-
-    if matched_rule:
-        if matched_rule.get('category_path'):
-            return _sanitize_rel_path(matched_rule.get('category_path'))
-
-    # 优先复用本地 115 缓存里的 local_path。
-    try:
-        cached_path = P115CacheManager.get_local_path(target_cid)
-        cached_rel = _strip_media_root_from_local_path(cached_path)
-        if cached_rel:
-            return cached_rel
-    except Exception:
-        pass
-
-    # 再按正式整理逻辑从 115 path 面包屑推导，并回写到规则，避免下次重复查。
-    derived = _derive_category_path_from_115(client, target_cid)
-    if derived:
-        if matched_rule is not None:
-            try:
-                matched_rule['category_path'] = derived
-                settings_db.save_setting('p115_sorting_rules', organizer.rules)
-            except Exception:
-                pass
-        return derived
-
-    if matched_rule:
-        return _sanitize_rel_path(matched_rule.get('dir_name') or matched_rule.get('name') or '未识别')
-    return '未识别'
-
-
-def _build_standard_root_name(organizer: SmartOrganizer, media_type: str, fallback_title: str) -> str:
-    cfg = getattr(organizer, 'rename_config', {}) or {}
-    details = getattr(organizer, 'details', {}) or {}
-    title = details.get('title') or fallback_title or getattr(organizer, 'original_title', '')
-    original_title = details.get('original_title') or title
-    main_format = cfg.get('main_dir_format', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
-    try:
-        root_name = organizer._build_name_from_format(
-            main_format,
-            is_tv=(media_type == 'tv'),
-            original_title=original_title,
-        )
-    except Exception:
-        root_name = ''
-    if not root_name:
-        root_name = title
-    return _sanitize_rel_path(root_name) or _sanitize_filename(fallback_title or 'Unknown')
-
-
-def _build_standard_season_dir(organizer: SmartOrganizer, season_number) -> str:
-    try:
-        s_num = int(season_number)
-    except Exception:
-        s_num = 1
-    cfg = getattr(organizer, 'rename_config', {}) or {}
-    details = getattr(organizer, 'details', {}) or {}
-    original_title = details.get('original_title') or details.get('title') or getattr(organizer, 'original_title', '')
-    season_format = cfg.get('season_dir_format', ['season_name_en'])
-    try:
-        name = organizer._build_name_from_format(
-            season_format,
-            is_tv=True,
-            season_num=s_num,
-            original_title=original_title,
-        )
-    except Exception:
-        name = ''
-    return _sanitize_filename(name or f"Season {s_num:02d}")
-
-
-def _legacy_virtual_rel_dir(source: Dict[str, Any], context: Dict[str, Any]) -> str:
-    """兜底路径：不再生成到“共享虚拟”根目录，避免和正式媒体分类割裂。"""
-    title = _sanitize_filename(context.get('title') or source.get('title') or '共享资源')
-    item_type = str(source.get('item_type') or context.get('item_type') or '')
-    season = source.get('season_number') or context.get('season_number')
-    if item_type in ('Episode', 'Season', 'Series') or season is not None:
-        try:
-            return f"未识别/{title}/Season {int(season or 1):02d}"
-        except Exception:
-            return f"未识别/{title}/Season 01"
-    year = context.get('year') or source.get('release_year') or ''
-    suffix = f" ({year})" if year else ''
-    return f"未识别/{title}{suffix}"
-
-
-def _virtual_rel_dir(source: Dict[str, Any], context: Dict[str, Any]) -> str:
-    """虚拟入库 STRM 目录。
-
-    这里不再固定写入“共享虚拟”，而是复用正式 115 入库的 SmartOrganizer：
-    - 根据 p115_sorting_rules / 历史整理记忆判断分类目录；
-    - 根据 p115_rename_config 生成主目录和季目录；
-    - 只生成本地 STRM，不移动 115 文件。
-    """
-    title = context.get('title') or source.get('title') or source.get('file_name') or '共享资源'
-    item_type = str(source.get('item_type') or context.get('item_type') or '')
-    season = source.get('season_number') or context.get('season_number')
-
-    media_type = 'movie'
-    if item_type in ('Episode', 'Season', 'Series') or str(context.get('item_type') or '') in ('Season', 'Series') or season is not None:
-        media_type = 'tv'
-
-    tmdb_id = _tv_parent_tmdb_id(context, source) if media_type == 'tv' else None
-    tmdb_id = tmdb_id or context.get('tmdb_id') or source.get('tmdb_id')
-
-    try:
-        tmdb_id_int = int(str(tmdb_id))
-    except Exception:
-        logger.warning(f"  ➜ [共享虚拟] 缺少可用 TMDb ID，无法复用正式分类规则，使用未识别目录: {tmdb_id}")
-        return _legacy_virtual_rel_dir(source, context)
-
-    try:
-        p115_client = P115Service.get_client()
-        organizer = SmartOrganizer(p115_client, tmdb_id_int, media_type, title, None, False)
-        if media_type == 'tv' and season is not None:
-            try:
-                organizer.forced_season = int(season)
-            except Exception:
-                pass
-
-        target_cid = organizer.get_target_cid(season_num=int(season) if media_type == 'tv' and season is not None else None)
-        category_rel = _resolve_category_rel_path(organizer, target_cid, p115_client) if target_cid else '未识别'
-        root_name = _build_standard_root_name(organizer, media_type, title)
-
-        if media_type == 'tv':
-            season_dir = _build_standard_season_dir(organizer, season or 1)
-            return os.path.join(category_rel, root_name, season_dir)
-        return os.path.join(category_rel, root_name)
-    except Exception as e:
-        logger.warning(f"  ➜ [共享虚拟] 复用正式分类规则失败，使用未识别目录: {e}", exc_info=True)
-        return _legacy_virtual_rel_dir(source, context)
-
-
-def _build_virtual_id(source: Dict[str, Any]) -> str:
-    sha1 = _norm_sha1(source.get('sha1'))
-    sid = str(source.get('source_id') or '')
-    if sha1:
-        return f"virt_{sha1[:20].lower()}"
-    return f"virt_{uuid.uuid4().hex}"
-
-
-def _write_text_file(path: str, text: str):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(text, encoding='utf-8')
-    try:
-        from monitor_service import enqueue_file_actively
-        enqueue_file_actively(path)
-    except Exception:
-        pass
-
-
-def _remove_empty_parents(path: str, stop_root: str):
-    try:
-        stop = Path(stop_root).resolve()
-        current = Path(path).resolve().parent
-        while current != stop and stop in current.parents:
-            try:
-                current.rmdir()
-            except OSError:
-                break
-            current = current.parent
-    except Exception:
-        pass
-
-
-def _media_root_cid() -> str:
-    # 正式媒体根目录必须和临时转存目录分离。
-    # 旧版曾 fallback 到 p115_shared_cache_cid，会导致“转正”目标仍在临时目录下。
-    return str(
-        _cfg('CONFIG_OPTION_115_MEDIA_ROOT_CID', 'p115_media_root_cid', '')
-        or '0'
-    ).strip() or '0'
-
-
-def _safe_path_parts(rel_dir: str) -> List[str]:
-    parts = []
-    for part in str(rel_dir or '').replace('\\', '/').split('/'):
-        part = part.strip()
-        if not part or part in ('.', '..'):
-            continue
-        parts.append(_sanitize_filename(part))
-    return parts
-
-
-def ensure_virtual_target_by_rel_dir(rel_dir: str, client=None) -> Dict[str, str]:
-    """按本地 STRM 相对目录，在 115 正式媒体根目录下确保对应目录存在。
-
-    虚拟入库只生成本地 STRM，真实文件首次播放时临时转存到缓存目录。
-    手动“转正”时需要把真实文件移动到正式媒体库目录，因此创建虚拟项时就把
-    target_parent_id 解析/创建好；老数据缺失时 promote 接口也会调用本函数兜底。
-    """
-    parts = _safe_path_parts(rel_dir)
-    if not parts:
-        return {}
-
-    client = client or P115Service.get_client()
-    if not client:
-        raise RuntimeError('未配置可用的 115 客户端，无法解析正式媒体目录')
-
-    current_cid = _media_root_cid()
-    if not current_cid or str(current_cid) == '0':
-        raise RuntimeError('未配置 115 正式媒体库根目录 CID（p115_media_root_cid），无法为虚拟入库解析转正目录')
-    built_parts = []
-    for part in parts:
-        built_parts.append(part)
-        res = client.fs_mkdir(part, current_cid)
-        if not res or not res.get('state'):
-            # fs_mkdir 本身已经做“已存在”回收；这里再查一次 DB 缓存兜底。
-            cached = None
-            try:
-                cached = P115CacheManager.get_cid(current_cid, part)
-            except Exception:
-                cached = None
-            if not cached:
-                raise RuntimeError(f"创建/定位正式目录失败: {part} -> {res}")
-            next_cid = str(cached)
-        else:
-            data = res.get('data') if isinstance(res.get('data'), dict) else {}
-            next_cid = str(
-                res.get('cid')
-                or res.get('file_id')
-                or res.get('id')
-                or data.get('cid')
-                or data.get('file_id')
-                or data.get('id')
-                or ''
-            ).strip()
-            if not next_cid:
-                cached = P115CacheManager.get_cid(current_cid, part)
-                next_cid = str(cached or '').strip()
-        if not next_cid:
-            raise RuntimeError(f"无法取得正式目录 CID: {part}")
-        try:
-            P115CacheManager.save_cid(next_cid, current_cid, part)
-            P115CacheManager.update_local_path(next_cid, '/'.join(built_parts))
-        except Exception:
-            pass
-        current_cid = next_cid
-
-    return {
-        'target_parent_id': current_cid,
-        'target_parent_name': parts[-1],
-        'target_rel_dir': '/'.join(parts),
-    }
-
-
-def ensure_virtual_target_from_strm_path(strm_path: str, client=None) -> Dict[str, str]:
-    """通过已生成 STRM 路径反推正式 115 目标目录，给旧虚拟项转正兜底。"""
-    if not strm_path:
-        return {}
-    root = os.path.abspath(_get_local_strm_root())
-    parent_dir = os.path.abspath(os.path.dirname(strm_path))
-    try:
-        rel_dir = os.path.relpath(parent_dir, root)
-    except Exception:
-        return {}
-    if rel_dir.startswith('..') or os.path.isabs(rel_dir):
-        return {}
-    return ensure_virtual_target_by_rel_dir(rel_dir, client=client)
-
-
-def _cleanup_old_virtual_files(virtual_id: str, new_strm_path: str, new_mediainfo_path: str = ''):
-    """同一个 virtual_id 重新生成到分类目录时，清掉旧的“共享虚拟/...”残留文件。"""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT strm_path, mediainfo_path FROM shared_virtual_items WHERE virtual_id=%s",
-                    (virtual_id,),
-                )
-                row = cur.fetchone()
-        if not row:
-            return
-        row = dict(row)
-        root = _get_local_strm_root()
-        for old_path, new_path in (
-            (row.get('strm_path'), new_strm_path),
-            (row.get('mediainfo_path'), new_mediainfo_path),
-        ):
-            if old_path and old_path != new_path and os.path.exists(old_path):
-                try:
-                    os.remove(old_path)
-                    logger.info(f"  ➜ [共享虚拟] 已清理旧投影文件: {old_path}")
-                    _remove_empty_parents(old_path, root)
-                except Exception as e:
-                    logger.debug(f"  ➜ [共享虚拟] 清理旧投影文件失败: {old_path}, err={e}")
-    except Exception:
-        pass
-
-
-def _save_raw_and_write_mediainfo(source: Dict[str, Any], raw_map: Dict[str, Dict[str, Any]], mediainfo_path: str) -> bool:
-    sha1 = _norm_sha1(source.get('sha1'))
-    raw = raw_map.get(sha1)
-    if not raw:
-        return False
-    file_name = source.get('file_name') or f'{sha1}.mkv'
-    file_node = {
-        'fn': file_name,
-        'file_name': file_name,
-        'size': _safe_int(source.get('size'), 0),
-        'fs': _safe_int(source.get('size'), 0),
-        'sha1': sha1,
-    }
-    try:
-        builder = _MediainfoBuilder()
-        emby_obj = builder._build_emby_mediainfo_from_ffprobe(raw, file_node, sha1=sha1)
-        if not emby_obj:
-            return False
-        P115CacheManager.save_mediainfo_cache(sha1, emby_obj, raw)
-        _write_text_file(mediainfo_path, json.dumps(emby_obj, ensure_ascii=False, indent=2))
-        return True
-    except Exception as e:
-        logger.warning(f"  ➜ [共享虚拟] 生成 mediainfo 失败: sha1={sha1[:12]}, err={e}")
-        return False
-
-
-def _upsert_virtual_item(source: Dict[str, Any], context: Dict[str, Any], strm_path: str, mediainfo_path: str = '', target_info: Dict[str, str] = None):
-    target_info = target_info or {}
-    virtual_id = _build_virtual_id(source)
-    raw_json = {
-        'center_source': source,
-        'context': context,
-        'virtual_protocol': f'etk-shared://{virtual_id}',
-        'target_info': target_info,
-    }
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO shared_virtual_items(
-                    virtual_id, source_id, source_key, source_provider,
-                    tmdb_id, item_type, parent_series_tmdb_id, season_number, episode_number,
-                    title, release_year, sha1, size, file_name, quality,
-                    strm_path, mediainfo_path, share_code, receive_code, contributor_id,
-                    cache_parent_id, cache_parent_name, target_parent_id, target_parent_name, status, raw_json, updated_at
-                )
-                VALUES(
-                    %s,%s,%s,'shared_center',
-                    %s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,'virtual_ready',%s::jsonb,NOW()
-                )
-                ON CONFLICT(virtual_id) DO UPDATE SET
-                    source_id=EXCLUDED.source_id,
-                    tmdb_id=EXCLUDED.tmdb_id,
-                    item_type=EXCLUDED.item_type,
-                    parent_series_tmdb_id=EXCLUDED.parent_series_tmdb_id,
-                    season_number=EXCLUDED.season_number,
-                    episode_number=EXCLUDED.episode_number,
-                    title=EXCLUDED.title,
-                    release_year=EXCLUDED.release_year,
-                    sha1=EXCLUDED.sha1,
-                    size=CASE WHEN EXCLUDED.size > 0 THEN EXCLUDED.size ELSE shared_virtual_items.size END,
-                    file_name=EXCLUDED.file_name,
-                    strm_path=EXCLUDED.strm_path,
-                    mediainfo_path=COALESCE(NULLIF(EXCLUDED.mediainfo_path,''), shared_virtual_items.mediainfo_path),
-                    share_code=EXCLUDED.share_code,
-                    receive_code=EXCLUDED.receive_code,
-                    contributor_id=EXCLUDED.contributor_id,
-                    cache_parent_id=EXCLUDED.cache_parent_id,
-                    cache_parent_name=EXCLUDED.cache_parent_name,
-                    target_parent_id=COALESCE(NULLIF(EXCLUDED.target_parent_id,''), shared_virtual_items.target_parent_id),
-                    target_parent_name=COALESCE(NULLIF(EXCLUDED.target_parent_name,''), shared_virtual_items.target_parent_name),
-                    raw_json=EXCLUDED.raw_json,
-                    status=CASE WHEN shared_virtual_items.status='deleted' THEN 'virtual_ready' ELSE shared_virtual_items.status END,
-                    updated_at=NOW()
-                """,
-                (
-                    virtual_id,
-                    source.get('source_id'),
-                    source.get('source_key'),
-                    str(source.get('tmdb_id') or context.get('tmdb_id') or ''),
-                    source.get('item_type') or context.get('item_type') or 'Movie',
-                    _tv_parent_tmdb_id(context, source) or None,
-                    source.get('season_number') or context.get('season_number'),
-                    _extract_episode_number_fallback(source, context),
-                    context.get('title') or source.get('title') or source.get('file_name'),
-                    _safe_int(source.get('release_year') or context.get('year'), None),
-                    _norm_sha1(source.get('sha1')),
-                    _safe_int(source.get('size'), 0),
-                    source.get('file_name') or '',
-                    source.get('quality') or '',
-                    strm_path,
-                    mediainfo_path,
-                    source.get('share_code') or '',
-                    source.get('receive_code') or '',
-                    source.get('contributor_id') or source.get('provider_id') or '',
-                    str(_shared_cfg('p115_shared_cache_cid', '') or ''),
-                    str(_shared_cfg('p115_shared_cache_name', '') or ''),
-                    str(target_info.get('target_parent_id') or ''),
-                    str(target_info.get('target_parent_name') or ''),
-                    json.dumps(raw_json, ensure_ascii=False),
-                )
-            )
-            conn.commit()
-    return virtual_id
-
-
-def _consume_virtual(client: SharedCenterClient, sources: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
-    root = _get_local_strm_root()
-    sha1s = [_norm_sha1(s.get('sha1')) for s in sources if s.get('sha1')]
-    raw_map = {}
-    try:
-        raw_result = client.fetch_raw_ffprobe_batch(sha1s)
-        for item in raw_result.get('items') or []:
-            if item.get('status') == 'ok' and item.get('raw_ffprobe_json'):
-                raw_map[_norm_sha1(item.get('sha1'))] = item.get('raw_ffprobe_json')
-    except Exception as e:
-        logger.warning(f"  ➜ [共享虚拟] 拉取 raw_ffprobe_json 失败，将先生成 STRM 占位: {e}")
-
-    created = 0
-    for source in sources:
-        file_name = source.get('file_name') or f"{source.get('sha1')}.mkv"
-        rel_dir = _virtual_rel_dir(source, context)
-        # 虚拟入库阶段只生成本地 STRM，不提前在 115 正式媒体库创建目录。
-        # 否则用户还没转正，就会看到正式分类目录里多出空目录。
-        # 真正转正时 promote_virtual_item_internal 会按 strm_path 再解析/创建目标目录。
-        target_info = {'target_rel_dir': rel_dir}
-        stem = os.path.splitext(_sanitize_filename(file_name))[0]
-        strm_path = os.path.join(root, rel_dir, f"{stem}.strm")
-        mediainfo_path = os.path.join(root, rel_dir, f"{stem}-mediainfo.json")
-        virtual_id = _build_virtual_id(source)
-        _cleanup_old_virtual_files(virtual_id, strm_path, mediainfo_path)
-        _write_text_file(strm_path, f"etk-shared://{virtual_id}")
-        has_mi = _save_raw_and_write_mediainfo(source, raw_map, mediainfo_path)
-        _upsert_virtual_item(source, context, strm_path, mediainfo_path if has_mi else '', target_info=target_info)
-        created += 1
-    return {
-        'success': created > 0,
-        'mode': 'virtual',
-        'count': created,
-        'action_type': '虚拟入库',
-        'message': '虚拟入库成功' if created > 0 else '虚拟入库未生成任何资源',
-    }
+# 虚拟入库已移除：不再生成本地 STRM 投影/sidecar，也不再写 shared_virtual_items。
 
 def _guess_se_from_source(src: Dict[str, Any], context: Dict[str, Any]):
     s_num = src.get('season_number') if src.get('season_number') not in (None, '') else context.get('season_number')
@@ -1186,43 +724,6 @@ def _build_permanent_import_plan(sources: List[Dict[str, Any]], context: Dict[st
     return plan
 
 
-def _filter_backup_sources_for_virtual(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """虚拟入库只取每个资源的当前公平主源，避免同 SHA1 备份反复覆盖同一个 STRM。"""
-    package_groups: Dict[str, Dict[str, Any]] = {}
-    singles: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
-
-    for src in sources or []:
-        if not isinstance(src, dict):
-            continue
-        item_type = str(src.get('item_type') or '').strip().lower()
-        key = str(src.get('_resource_key') or '').strip() or _permanent_resource_key_for_rows([src], {})
-        if not key:
-            key = str(src.get('source_id') or src.get('sha1') or len(order))
-        if key not in order:
-            order.append(key)
-        if item_type == 'season' and str(src.get('share_code') or '').strip():
-            pkg_key = str(src.get('_package_key') or src.get('share_code') or src.get('source_id') or '').strip()
-            pack = package_groups.setdefault(key, {}).setdefault(pkg_key, [])
-            pack.append(src)
-        else:
-            old = singles.get(key)
-            if old is None or _source_retry_sort_key(src) < _source_retry_sort_key(old):
-                singles[key] = src
-
-    selected: List[Dict[str, Any]] = []
-    for key in order:
-        if key in package_groups:
-            packages = list((package_groups.get(key) or {}).values())
-            if not packages:
-                continue
-            packages.sort(key=lambda rows: _source_retry_sort_key({'_group_sources': rows, **(rows[0] if rows else {})}))
-            selected.extend(packages[0])
-        elif key in singles:
-            selected.append(singles[key])
-    return selected
-
-
 def _source_season_number(src: Dict[str, Any], context: Dict[str, Any] = None):
     context = context or {}
     for value in (
@@ -1253,363 +754,8 @@ def _extract_created_cid(resp: Dict[str, Any]) -> str:
     ).strip()
 
 
-def _node_id_from_115(node: Dict[str, Any]) -> str:
-    return str(
-        (node or {}).get('cid')
-        or (node or {}).get('file_id')
-        or (node or {}).get('fid')
-        or (node or {}).get('id')
-        or ''
-    ).strip()
 
-
-def _node_name_from_115(node: Dict[str, Any]) -> str:
-    return str(
-        (node or {}).get('file_name')
-        or (node or {}).get('fn')
-        or (node or {}).get('name')
-        or (node or {}).get('n')
-        or ''
-    ).strip()
-
-
-def _node_sha1_from_115(node: Dict[str, Any]) -> str:
-    return _norm_sha1((node or {}).get('sha1') or (node or {}).get('sha') or (node or {}).get('file_sha1'))
-
-
-def _node_is_dir_from_115(node: Dict[str, Any]) -> bool:
-    if not isinstance(node, dict):
-        return False
-    for key in ('is_dir', 'is_folder', 'folder'):
-        if key in node:
-            return bool(node.get(key))
-    fc = str(node.get('fc') or node.get('file_category') or '').strip()
-    if fc == '0':
-        return True
-    if str(node.get('type') or '').lower() in ('folder', 'dir', 'directory'):
-        return True
-    return not bool(_node_sha1_from_115(node)) and not os.path.splitext(_node_name_from_115(node))[1]
-
-
-def _list_115_children(client, cid: str, limit: int = 1000) -> List[Dict[str, Any]]:
-    try:
-        resp = client.fs_files({'cid': str(cid), 'limit': limit, 'offset': 0, 'show_dir': 1, 'record_open_time': 0, 'count_folders': 0})
-        data = (resp or {}).get('data') or []
-        return [x for x in data if isinstance(x, dict)]
-    except Exception as e:
-        logger.debug(f"  ➜ [共享资源] 查询 115 子节点失败: cid={cid}, err={e}")
-        return []
-
-
-def _season_dir_name_candidates(season_number) -> List[str]:
-    season = _safe_int(season_number, None)
-    if season is None:
-        return []
-    return [
-        f"Season {season}",
-        f"Season {season:02d}",
-        f"S{season}",
-        f"S{season:02d}",
-        f"第{season}季",
-    ]
-
-
-def _first_source_season_number(sources: List[Dict[str, Any]]):
-    for row in sources or []:
-        season = _safe_int((row or {}).get('season_number'), None)
-        if season is not None:
-            return season
-    return None
-
-
-def _node_as_backup_root(node: Dict[str, Any], source: str, fallback_name: str = '') -> Dict[str, Any]:
-    fid = _node_id_from_115(node)
-    if not fid:
-        return {}
-    return {
-        'fid': fid,
-        'name': _node_name_from_115(node) or fallback_name or fid,
-        'is_dir': _node_is_dir_from_115(node),
-        'source': source,
-        'node': node,
-    }
-
-
-def _find_season_dir_child(children: List[Dict[str, Any]], season_number) -> Dict[str, Any]:
-    candidates = {x.lower() for x in _season_dir_name_candidates(season_number)}
-    if not candidates:
-        return {}
-    for node in children or []:
-        if not _node_is_dir_from_115(node):
-            continue
-        name = _node_name_from_115(node)
-        if name.lower() in candidates:
-            return _node_as_backup_root(node, 'prepared_tv_import_season_dir', name)
-    return {}
-
-
-def _prepare_fallback_season_dir_for_backup(client, parent_cid: str, children: List[Dict[str, Any]], season_number) -> Dict[str, Any]:
-    """标准剧目录下没有季目录时，临时创建 Season xx 并把本次接收内容移进去。
-
-    这是兜底保护：备份分享绝不直接分享标准剧目录，避免该剧后续其它季进入同目录后，
-    被已有分享码一并暴露出去。
-    """
-    season = _safe_int(season_number, None)
-    if season is None:
-        return {}
-    movable_ids = []
-    for node in children or []:
-        fid = _node_id_from_115(node)
-        if fid:
-            movable_ids.append(fid)
-    if not movable_ids:
-        return {}
-
-    season_name = f"Season {season:02d}"
-    try:
-        mk_resp = client.fs_mkdir(season_name, parent_cid)
-        season_cid = _extract_created_cid(mk_resp)
-        if not (mk_resp and mk_resp.get('state') and season_cid):
-            logger.warning(f"  ➜ [共享资源] 创建备份季目录失败，放弃自动备份分享: name={season_name}, resp={mk_resp}")
-            return {}
-        try:
-            move_resp = client.fs_move(movable_ids, season_cid)
-        except Exception as e:
-            logger.warning(f"  ➜ [共享资源] 移动备份季内容失败，放弃自动备份分享: season={season_name}, err={e}")
-            return {}
-        if move_resp and move_resp.get('state'):
-            try:
-                P115CacheManager.save_cid(season_cid, str(parent_cid), season_name)
-            except Exception:
-                pass
-            logger.info(
-                "  ➜ [共享资源] 已为备份分享创建季目录并移动接收内容：%s -> cid=%s, files=%s",
-                season_name, season_cid, len(movable_ids),
-            )
-            return {
-                'fid': str(season_cid),
-                'name': season_name,
-                'is_dir': True,
-                'source': 'prepared_tv_import_created_season_dir',
-                'node': {'cid': str(season_cid), 'file_id': str(season_cid), 'file_name': season_name, 'name': season_name},
-            }
-        logger.warning(f"  ➜ [共享资源] 移动备份季内容失败，放弃自动备份分享: season={season_name}, resp={move_resp}")
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 准备备份季目录异常，放弃自动备份分享: season={season_name}, err={e}")
-    return {}
-
-
-def _find_received_backup_root(client, import_resp: Dict[str, Any], target_cid: str, sources: List[Dict[str, Any]], import_container: Dict[str, Any] = None) -> Dict[str, Any]:
-    """根据 share_import 返回和待整理目录定位刚转存的根节点，供备份分享使用。
-
-    注意：v12 会在待整理目录下先创建“剧名 (年份) {tmdb=xxx}”标准剧目录，
-    再把季包转存进去。这个标准剧目录只用于整理任务识别，不能作为备份分享根；
-    备份分享必须仍然分享真实季目录（如 Season 1），避免把该剧目录下其它季一并分享出去。
-    """
-    data = (import_resp or {}).get('data') if isinstance(import_resp, dict) else {}
-    data = data if isinstance(data, dict) else {}
-    receive_title = str(data.get('receive_title') or data.get('title') or '').strip()
-    expected_sha1s = {_norm_sha1(s.get('sha1')) for s in (sources or []) if _norm_sha1(s.get('sha1'))}
-
-    children = _list_115_children(client, target_cid)
-    wrapped_tv_import = bool((import_container or {}).get('wrapped') and (import_container or {}).get('cid'))
-
-    # 优先按接收标题定位。对季包来说，这里通常会命中 Season 1 / S01 等真实季目录。
-    if receive_title:
-        for node in children:
-            if _node_name_from_115(node) == receive_title:
-                return _node_as_backup_root(node, 'target_children_title', receive_title)
-
-    if wrapped_tv_import:
-        # v12 以后，target_cid 是临时创建的“剧标准目录”。备份分享不能直接分享它，
-        # 必须从它下面找真实季目录。
-        season = _first_source_season_number(sources)
-        season_root = _find_season_dir_child(children, season)
-        if season_root:
-            return season_root
-
-        dir_children = [node for node in children if _node_is_dir_from_115(node)]
-        if len(dir_children) == 1:
-            return _node_as_backup_root(dir_children[0], 'prepared_tv_import_single_child_dir')
-
-        # 如果接收结果被 115 直接平铺到剧目录下，兜底创建 Season xx，把本次接收内容移进去，
-        # 再分享这个季目录。这样不会把同剧其它季暴露到这个备份分享里。
-        prepared = _prepare_fallback_season_dir_for_backup(client, target_cid, children, season)
-        if prepared:
-            return prepared
-
-        logger.warning(
-            "  ➜ [共享资源] 季包备份分享未找到可分享的季目录，已放弃自动备份，避免误分享整剧目录: "
-            f"target_cid={target_cid}, receive_title={receive_title or '-'}"
-        )
-        return {}
-
-    # 电影文件转存时，115 可能直接落文件；按 SHA1 兜底定位。
-    if expected_sha1s:
-        for node in children:
-            if _node_sha1_from_115(node) in expected_sha1s:
-                return _node_as_backup_root(node, 'target_children_sha1')
-
-    # 最后才使用 share_import 返回里的明确 ID。pid 在不同接口里有歧义，所以只作为兜底。
-    for key in ('fid', 'file_id', 'cid', 'id', 'pid'):
-        value = str(data.get(key) or '').strip()
-        if value and value != str(target_cid):
-            return {
-                'fid': value,
-                'name': receive_title or value,
-                'is_dir': bool(_safe_int(data.get('recv_folder_count'), 0) > 0),
-                'source': f'import_resp_{key}',
-                'node': data,
-            }
-    return {}
-
-
-def _build_backup_share_items(client, root: Dict[str, Any], sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    try:
-        from routes import shared_resource as sr
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 无法加载备份分享文件收集辅助函数: {e}")
-        return []
-
-    files = sr._collect_files_from_115(
-        client,
-        str(root.get('fid') or ''),
-        root_name=root.get('name') or '',
-        max_depth=8,
-        assume_dir=bool(root.get('is_dir')),
-    )
-    source_by_sha1 = {_norm_sha1(s.get('sha1')): s for s in (sources or []) if _norm_sha1(s.get('sha1'))}
-    for item in files or []:
-        sha1 = _norm_sha1(item.get('sha1'))
-        src = source_by_sha1.get(sha1) or {}
-        if src:
-            item['tmdb_id'] = str(src.get('tmdb_id') or item.get('tmdb_id') or '')
-            item['item_type'] = src.get('item_type') or item.get('item_type')
-            item['season_number'] = src.get('season_number') if src.get('season_number') not in (None, '') else item.get('season_number')
-            item['episode_number'] = src.get('episode_number') if src.get('episode_number') not in (None, '') else item.get('episode_number')
-            item['size'] = item.get('size') or src.get('size') or 0
-            item['file_name'] = item.get('file_name') or src.get('file_name') or ''
-    return files or []
-
-
-def _create_backup_share_after_import(
-    center_client: SharedCenterClient,
-    p115,
-    src: Dict[str, Any],
-    import_resp: Dict[str, Any],
-    target_cid: str,
-    report_resp: Dict[str, Any] | None,
-    context: Dict[str, Any],
-    import_container: Dict[str, Any] = None,
-) -> Dict[str, Any]:
-    """中心下发备份指令后，用刚转存到本机 115 的资源创建一个普通分享并登记中心。"""
-    instruction = _backup_instruction_from_report(report_resp)
-    if not instruction:
-        return {'created': False, 'skipped': True, 'reason': 'no_instruction'}
-
-    item_type = str(instruction.get('item_type') or src.get('item_type') or '').strip().lower()
-    if item_type == 'episode':
-        return {'created': False, 'skipped': True, 'reason': 'episode_no_backup'}
-
-    group_sources = [x for x in (src.get('_group_sources') or []) if isinstance(x, dict)] or [src]
-    instruction_sources = [x for x in (instruction.get('sources') or []) if isinstance(x, dict)]
-    sources = instruction_sources or group_sources
-
-    root = _find_received_backup_root(p115, import_resp, target_cid, sources, import_container=import_container)
-    if not root.get('fid'):
-        return {'created': False, 'skipped': False, 'reason': 'received_root_not_found', 'instruction': instruction}
-
-    try:
-        share_resp = p115.share_create([str(root['fid'])], share_duration=-1, receive_code=None)
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 创建备份分享失败: root={root}, err={e}")
-        return {'created': False, 'skipped': False, 'reason': 'share_create_exception', 'message': str(e)}
-    if not share_resp or not share_resp.get('state'):
-        logger.warning(f"  ➜ [共享资源] 创建备份分享失败: root={root}, resp={share_resp}")
-        return {'created': False, 'skipped': False, 'reason': 'share_create_failed', 'response': share_resp}
-
-    share_data = share_resp.get('data') or {}
-    share_code = share_data.get('share_code') or share_resp.get('share_code')
-    receive_code = share_data.get('receive_code') or ''
-    share_url = share_data.get('share_url') or (f"https://115.com/s/{share_code}" if share_code else '')
-    is_season_pack = item_type == 'season'
-
-    files = _build_backup_share_items(p115, root, sources)
-    if not files:
-        logger.warning(f"  ➜ [共享资源] 备份分享已创建但未能收集文件明细，暂不登记中心: share={share_code}, root={root}")
-        return {'created': True, 'registered': False, 'reason': 'no_files', 'share_code': share_code, 'share_response': share_resp}
-
-    try:
-        from routes import shared_resource as sr
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 备份分享无法加载登记辅助函数: {e}")
-        return {'created': True, 'registered': False, 'reason': 'helper_unavailable', 'share_code': share_code}
-
-    standard = sources[0] if sources else src
-    record = shared_share_db.create_share_record({
-        'share_code': share_code,
-        'receive_code': receive_code,
-        'share_url': share_url,
-        'share_type': 'season_pack' if is_season_pack else ('movie_folder' if root.get('is_dir') else 'movie_file'),
-        'root_fid': str(root.get('fid') or ''),
-        'root_name': root.get('name') or standard.get('title') or standard.get('file_name') or str(root.get('fid') or ''),
-        'root_is_dir': bool(root.get('is_dir')),
-        'tmdb_id': str(standard.get('tmdb_id') or context.get('tmdb_id') or ''),
-        'item_type': 'Season' if is_season_pack else 'Movie',
-        'parent_series_tmdb_id': context.get('parent_series_tmdb_id') or context.get('parent_tmdb_id') or None,
-        'season_number': standard.get('season_number') if standard.get('season_number') not in (None, '') else context.get('season_number'),
-        'episode_number': None,
-        'title': standard.get('title') or context.get('title') or root.get('name') or '',
-        'release_year': standard.get('release_year') or context.get('year'),
-        'status': 'pending_review',
-        'review_status': 'pending_review',
-        'center_status': 'not_reported',
-        'raw_json': {
-            'auto_backup_share': True,
-            'backup_share': True,
-            'backup_mirror': True,
-            'source_provider': 'backup_mirror',
-            'share_source': 'backup_mirror',
-            'source_provider_label': '备份分享',
-            'source_label': '备份分享',
-            'backup_instruction': instruction,
-            'source_share_code': src.get('share_code'),
-            'import_response': import_resp,
-            'backup_share_response': share_resp,
-            'received_root': root,
-        },
-    })
-    count = shared_share_db.replace_share_items(record['id'], files)
-    record = shared_share_db.update_share_record(record['id'], item_count=count) or record
-
-    # 备份分享刚创建出来时，115 可能仍处于审核中。
-    # 这里不能立即上传 RAW 并登记中心，否则中心资源库会出现“本地仍审核中、中心已上线”的脏状态。
-    # 正确流程是：只落本地“我的分享”记录，等待维护任务/手动检查确认 share_info=alive 后，再走既有登记中心逻辑。
-    items = shared_share_db.list_share_items(record['id']) or []
-    shared_share_db.update_share_record(
-        record['id'],
-        center_status='not_reported',
-        status='pending_review',
-        review_status='pending_review',
-        reported_count=0,
-        last_error='自动备份分享已创建，等待 115 审核通过后由维护任务登记中心',
-    )
-    logger.info(
-        "  ➜ [共享资源] 已按中心指令创建备份分享，等待审核通过后再登记中心：share=%s, files=%s",
-        share_code, len(items),
-    )
-    return {
-        'created': True,
-        'registered': False,
-        'share_code': share_code,
-        'record_id': record.get('id'),
-        'reported': 0,
-        'total': len(items),
-        'center_status': 'not_reported',
-        'reason': 'pending_review_wait_for_maintenance',
-    }
-
-
+# 被动备份分享创建链路已移除：共享池消费只负责转存与上报；主动备份由 webhook / watchlist 触发。
 def _cache_center_raw_as_local_mediainfo(src: Dict[str, Any], raw: Dict[str, Any]) -> bool:
     """中心 RAW -> 本地 p115_mediainfo_cache.mediainfo_json，供 WashingService 读取。"""
     sha1 = _norm_sha1(src.get('sha1'))
@@ -1854,6 +1000,79 @@ def _select_sources_by_washing_before_import(
         return [], errors or ['所有中心共享源均未通过洗版预检']
 
     candidates.sort(key=lambda x: (x['score'], -x['index']), reverse=True)
+
+    # ★ 修复：Season SUBSCRIBED 补库时，不能在整季 51 个缺集中只全局选 1 个最佳源。
+    # 应该按“每一集”各自选出最佳版本；同一集的同版本备份分享仍保留给后续重试。
+    missing_eps = _normalize_episode_number_list((context or {}).get('missing_episode_numbers'))
+    is_partial_season_recheck = (
+        str((context or {}).get('item_type') or '').strip() == 'Season'
+        and bool(missing_eps)
+    )
+
+    def _candidate_single_episode_number(candidate):
+        eps = set()
+        for row in candidate.get('rows') or []:
+            _, e_num = _guess_se_from_source(row, context)
+            e_num = _safe_int(e_num, None)
+            if e_num is not None and (not missing_eps or e_num in missing_eps):
+                eps.add(e_num)
+        return next(iter(eps)) if len(eps) == 1 else None
+
+    if is_partial_season_recheck:
+        best_by_episode = {}
+
+        # candidates 已经按分数从高到低排好了；第一次遇到的就是该集最佳版本。
+        for candidate in candidates:
+            ep_num = _candidate_single_episode_number(candidate)
+            if ep_num is None:
+                continue
+            if ep_num not in best_by_episode:
+                best_by_episode[ep_num] = candidate
+
+        if best_by_episode:
+            wanted_pairs = {
+                (
+                    ep_num,
+                    str(best.get('resource_key') or '').strip(),
+                )
+                for ep_num, best in best_by_episode.items()
+            }
+
+            selected_candidates = []
+            seen_candidate = set()
+
+            # 同一集选定最佳 resource_key 后，把该 resource_key 的备份分享也带上。
+            for candidate in candidates:
+                ep_num = _candidate_single_episode_number(candidate)
+                resource_key = str(candidate.get('resource_key') or '').strip()
+                if (ep_num, resource_key) not in wanted_pairs:
+                    continue
+
+                dedupe_key = (candidate.get('share_code'), resource_key)
+                if dedupe_key in seen_candidate:
+                    continue
+                seen_candidate.add(dedupe_key)
+                selected_candidates.append(candidate)
+
+            selected_candidates.sort(key=lambda x: (
+                _safe_int(_candidate_single_episode_number(x), 999999),
+                -x['score'],
+                x['index'],
+            ))
+
+            selected_rows = []
+            for candidate in selected_candidates:
+                selected_rows.extend(candidate.get('rows') or [])
+
+            logger.info(
+                f"  ➜ [共享资源] SUBSCRIBED 补库洗版预检按缺集选源: "
+                f"缺集={missing_eps}, 选中={len(best_by_episode)} 集/{len(selected_candidates)} 个分享, "
+                f"示例={[c.get('share_code') for c in selected_candidates[:5]]}"
+            )
+
+            return selected_rows, errors
+
+    # 普通电影 / 单集 / 非补库场景：保持原来的“全局选最佳版本”逻辑。
     best = candidates[0]
     best_resource_key = best.get('resource_key') or ''
     selected_candidates = [c for c in candidates if best_resource_key and c.get('resource_key') == best_resource_key]
@@ -1885,9 +1104,9 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
     ).strip()
     if not target_cid or target_cid == '0':
         raise RuntimeError('未配置 115 待整理目录 CID（p115_save_path_cid），无法转存共享资源')
-    
+
     raw_map = _load_center_raw_map(client, sources)
-    
+
     # ★ 核心修复：解决重复写入缓存的问题
     # 永久转存前预检：
     # - replace：提前调用洗版模块裁决，洗版模块内部会负责写入缓存；
@@ -2000,23 +1219,16 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
                             message='permanent import submitted',
                         )
                     except Exception as e:
-                        logger.debug(f"  ➜ [共享资源] 上报转存成功失败，跳过备份分享触发: share={share_code}, err={e}")
+                        logger.debug(f"  ➜ [共享资源] 上报转存成功失败：share={share_code}, err={e}")
 
                     if report_resp:
-                        backup_result = _create_backup_share_after_import(
-                            client,
-                            p115,
-                            src,
-                            resp,
-                            import_target_cid,
-                            report_resp,
-                            context,
-                            import_container=import_container,
-                        )
-                        if backup_result.get('created'):
-                            logger.info(f"  ➜ [共享资源] 自动备份分享处理完成: {backup_result}")
-                        elif not backup_result.get('skipped'):
-                            logger.warning(f"  ➜ [共享资源] 自动备份分享未完成: {backup_result}")
+                        # 备份分享改为供给侧主动创建：电影由 webhook 入库后探测，季包由智能追剧完结汇总触发。
+                        # 共享池消费路径只负责转存结果上报，不再根据中心返回的 backup_instruction 被动创建备份分享。
+                        if _backup_instruction_from_report(report_resp):
+                            logger.debug(
+                                "  ➜ [共享资源] 已忽略中心返回的被动备份指令：share=%s，备份分享将由入库/完结流程主动探测创建",
+                                share_code,
+                            )
                 break
 
             errors.append(f"{src.get('file_name')}: {text[:120]}")
@@ -2105,18 +1317,45 @@ def try_consume_shared_resource(
         logger.warning(f"  ➜ [共享资源] 查询中心共享池失败: {e}")
 
     # =================================================================
-    # ★ 核心修复：精准过滤中心返回的无关单集，防止“幽灵追更”日志
+    # 中心查询按季返回后，本地仍然必须精确过滤到当前缺失集。
+    # - 单集源：必须同季同集；
+    # - SUBSCRIBED Season 会带 missing_episode_numbers，只消费缺失单集；
+    # - 季包/旧数据没有 episode_number：保留，后续按 SHA1/包内文件消费。
     # =================================================================
+    req_s_num = season_number if season_number not in (None, '') else item.get('season_number')
     req_e_num = item.get('episode_number')
+    req_missing_eps = _normalize_episode_number_list(item.get('missing_episode_numbers'))
     if req_e_num is not None and str(req_e_num).strip() != '':
         filtered_sources = []
         for src in sources:
+            src_s_num = src.get('season_number')
             src_e_num = src.get('episode_number')
-            # 如果中心返回的源明确标明了集号，且与我们请求的集号不符，直接丢弃！
-            # (如果 src_e_num 为空，说明可能是季包，保留放行)
-            if src_e_num is not None and str(src_e_num).strip() != '' and int(src_e_num) != int(req_e_num):
-                continue
+            if src_s_num is not None and str(src_s_num).strip() != '' and req_s_num not in (None, ''):
+                if int(src_s_num) != int(req_s_num):
+                    continue
+            if src_e_num is not None and str(src_e_num).strip() != '':
+                if int(src_e_num) != int(req_e_num):
+                    continue
             filtered_sources.append(src)
+        sources = filtered_sources
+    elif req_missing_eps and str(item_type or '').strip() == 'Season':
+        filtered_sources = []
+        for src in sources:
+            src_s_num = src.get('season_number')
+            src_e_num = src.get('episode_number')
+            if src_s_num is not None and str(src_s_num).strip() != '' and req_s_num not in (None, ''):
+                if int(src_s_num) != int(req_s_num):
+                    continue
+            # 单集源必须在缺失列表内；季包/旧数据没有集号，保留。
+            if src_e_num is not None and str(src_e_num).strip() != '':
+                if int(src_e_num) not in req_missing_eps:
+                    continue
+            filtered_sources.append(src)
+        if len(filtered_sources) != len(sources):
+            logger.info(
+                f"  ➜ [共享资源] SUBSCRIBED 补库按缺集过滤中心源：{len(sources)} -> {len(filtered_sources)}，"
+                f"缺失集={req_missing_eps}"
+            )
         sources = filtered_sources
 
     excluded_codes = {
@@ -2164,19 +1403,18 @@ def try_consume_shared_resource(
         'parent_series_tmdb_id': str(parent_tmdb_id or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or ''),
         'season_number': season_number,
         'episode_number': item.get('episode_number'), # ★ 确保 context 里有 episode_number
+        'missing_episode_numbers': req_missing_eps,
         'year': year,
     }
 
     override_mode = str(force_mode or '').strip().lower()
-    mode = override_mode if override_mode in ('permanent', 'virtual') else shared_resource_mode()
-    if mode == 'virtual':
-        sources = _filter_backup_sources_for_virtual(sources)
+    if override_mode == 'virtual':
+        logger.info('  ➜ [共享资源] 虚拟入库已移除，本次共享池消费改为永久转存。')
+    mode = 'permanent'
     matched_share_codes = sorted({_source_identity_code(src) for src in sources if _source_identity_code(src)})
     covered_episode_keys = _collect_episode_guard_keys(sources, context)
-    if mode == 'virtual':
-        result = _consume_virtual(client, sources, context)
-    else:
-        result = _consume_permanent(client, sources, context)
+    result = _consume_permanent(client, sources, context)
+    result['mode'] = mode
     result['matched_share_codes'] = matched_share_codes
     result['covered_episode_keys'] = covered_episode_keys
     return result
@@ -2269,7 +1507,7 @@ def _expand_sources_with_permanent_backups(client: SharedCenterClient, sources: 
 def consume_center_sources(source_ids: List[str], mode: str = 'permanent', context: Dict[str, Any] = None) -> Dict[str, Any]:
     """按中心 source_id 手动消费共享资源。
 
-    用于前端“中心资源库”标签页：管理员可以直接选择中心已有版本，按永久转存或虚拟入库处理。
+    虚拟入库已移除；前端“中心资源库”只允许永久转存。
     """
     if not shared_center_enabled():
         return {'enabled': False, 'success': False, 'message': '共享资源未启用'}
@@ -2303,10 +1541,8 @@ def consume_center_sources(source_ids: List[str], mode: str = 'permanent', conte
     ctx.setdefault('year', first.get('release_year'))
 
     selected_mode = str(mode or '').strip().lower()
-    if selected_mode not in ('permanent', 'virtual'):
-        selected_mode = shared_resource_mode()
-
     if selected_mode == 'virtual':
-        return _consume_virtual(client, _filter_backup_sources_for_virtual(sources), ctx)
+        return {'enabled': True, 'success': False, 'message': '虚拟入库已移除，请使用“转存”。'}
+
     sources = _expand_sources_with_permanent_backups(client, sources, ctx)
     return _consume_permanent(client, sources, ctx)

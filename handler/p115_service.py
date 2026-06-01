@@ -20,6 +20,7 @@ import handler.tmdb as tmdb
 from tasks import helpers
 import utils
 from handler.p115_media_analyzer import P115MediaAnalyzerMixin
+from handler.tg_media_candidate import candidate_to_recognition_hints, is_recognition_hint_eligible, lookup_candidate_hint_for_name
 try:
     from p115client import P115Client
 except ImportError:
@@ -69,6 +70,7 @@ _TMDB_METADATA_CACHE = LimitedCache(maxsize=1000)
 _TMDB_SEARCH_CACHE = LimitedCache(maxsize=1000)
 _AI_PARSE_CACHE = LimitedCache(maxsize=1000)
 _MP_PARSE_CACHE = LimitedCache(maxsize=1000)
+_RULE_PARSE_CACHE = LimitedCache(maxsize=2000)
 
 # 全局直链缓存池，供反向代理和Web路由共享 
 _DIRECT_URL_CACHE = LimitedCache(maxsize=2000)
@@ -76,6 +78,28 @@ _DIRECT_URL_CACHE = LimitedCache(maxsize=2000)
 # 全局目录缓存池
 _GLOBAL_DIR_CACHE = LimitedCache(maxsize=5000)
 _GLOBAL_DIR_LOCK = threading.Lock()
+
+_NOISE_TOKEN_PATTERNS = [
+    r'(?i)\b(?:WEB[-_. ]?DL|WEB[-_. ]?RIP|BLU[-_. ]?RAY|BDRIP|BRRIP|REMUX|DVDRIP|HDTV|UHD)\b',
+    r'(?i)\b(?:HDR10\+?|HDR|DV|DOVI|DOLBY[.\s_-]*VISION|HLG)\b',
+    r'(?i)\b(?:HEVC|AVC|X265|X264|H265|H264|10BIT|8BIT|AAC\d?(?:\.\d)?|DDP\d?(?:\.\d)?|DD\d?(?:\.\d)?|TRUEHD|ATMOS|DTS(?:[-_. ]?HD)?|FLAC)\b',
+    r'(?i)\b(?:2160P|1080P|720P|576P|480P|4K)\b',
+    r'(?i)\b(?:NF|NETFLIX|AMZN|AMAZON|DSNP|DISNEY|HMAX|MAX|ATVP|APPLE|IQIYI|YOUKU|WEB)\b',
+    r'(?i)\b(?:MULTI|DUAL[-_. ]?AUDIO|DUAL|PROPER|REPACK|READNFO|EXTENDED|UNCUT|COMPLETE|FINAL)\b',
+    r'(?i)\b(?:CHS|CHT|ENG|JPN|KOR|GB|BIG5|简中|繁中|中字|双语|国粤|内封|外挂|特效字幕)\b',
+    r'(?i)\b(?:AAC2\.0|AAC5\.1|DDP5\.1|DD5\.1|DTS5\.1|TRUEHD7\.1|ATMOS7\.1)\b',
+    r'(?i)\b(?:CAM|TS|TC|R5)\b',
+]
+
+_DATE_EPISODE_PATTERNS = [
+    re.compile(r'(?<!\d)(20\d{2})[.\-_ ](0[1-9]|1[0-2])[.\-_ ]([0-3]\d)(?!\d)'),
+    re.compile(r'(?<!\d)(20\d{2})(0[1-9]|1[0-2])([0-3]\d)(?!\d)'),
+]
+
+_SPECIAL_FLAG_PATTERNS = [
+    re.compile(r'(?i)(?:^|[ \.\-_/\[(])(?:specials?|sp|ova|oad|oads|extra(?:s)?|ncop|nced)(?:$|[ \.\-_/)\]])'),
+    re.compile(r'(?:特别篇|特別篇|番外(?:篇)?|外传|外傳|总集篇|總集篇|OVA|OAD)', re.IGNORECASE),
+]
 
 def get_115_tokens():
     """唯一真理：只从独立数据库获取 Token 和 Cookie"""
@@ -1874,6 +1898,115 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ➜ 写入 115 文件缓存失败: {e}")
 
+
+    @staticmethod
+    def _filesystem_cache_row_to_dict(row):
+        """把 p115_filesystem_cache 查询结果转成普通 dict，方便任务层复用。"""
+        if not row:
+            return None
+        try:
+            return dict(row)
+        except Exception:
+            return row
+
+    @staticmethod
+    def get_file_cache_by_id(fid):
+        """按 115 文件 FID 获取完整文件缓存行。"""
+        if not fid:
+            return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        FROM p115_filesystem_cache
+                        WHERE id = %s
+                        LIMIT 1
+                    """, (str(fid),))
+                    return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
+        except Exception as e:
+            logger.debug(f"  ➜ 读取 115 文件缓存失败(fid={fid}): {e}")
+            return None
+
+    @staticmethod
+    def get_file_cache_by_pickcode(pick_code):
+        """按 115 PickCode 获取完整文件缓存行。"""
+        if not pick_code:
+            return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        FROM p115_filesystem_cache
+                        WHERE pick_code = %s
+                        LIMIT 1
+                    """, (str(pick_code),))
+                    return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
+        except Exception as e:
+            logger.debug(f"  ➜ 读取 115 文件缓存失败(pc={pick_code}): {e}")
+            return None
+
+    @staticmethod
+    def get_file_cache_by_sha1(sha1):
+        """按 SHA1 获取完整文件缓存行。"""
+        if not sha1:
+            return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        FROM p115_filesystem_cache
+                        WHERE UPPER(sha1) = UPPER(%s)
+                        ORDER BY updated_at DESC NULLS LAST
+                        LIMIT 1
+                    """, (str(sha1),))
+                    return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
+        except Exception as e:
+            logger.debug(f"  ➜ 读取 115 文件缓存失败(sha1={str(sha1)[:12]}...): {e}")
+            return None
+
+    @staticmethod
+    def get_file_cache_by_local_path(local_path):
+        """按本地相对路径获取完整文件缓存行，兼容 / 与 \\ 分隔符。"""
+        if not local_path:
+            return None
+
+        normalized = str(local_path).strip().replace('\\', '/')
+        normalized = re.sub(r'/+', '/', normalized).strip('/')
+        if not normalized:
+            return None
+
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        FROM p115_filesystem_cache
+                        WHERE local_path = %s
+                        LIMIT 1
+                    """, (normalized,))
+                    row = cursor.fetchone()
+                    if row:
+                        return P115CacheManager._filesystem_cache_row_to_dict(row)
+
+                    # 挂载/路径前缀不一致时的兜底：只允许“完整路径段后缀”匹配，避免单文件名误命中。
+                    if '/' in normalized:
+                        cursor.execute("""
+                            SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                            FROM p115_filesystem_cache
+                            WHERE local_path IS NOT NULL
+                              AND %s LIKE '%%/' || local_path
+                            ORDER BY length(local_path) DESC
+                            LIMIT 1
+                        """, (normalized,))
+                        return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
+        except Exception as e:
+            logger.debug(f"  ➜ 读取 115 文件缓存失败(local_path={normalized}): {e}")
+
+        return None
+
     @staticmethod
     def delete_files(fids):
         """批量从缓存中物理删除文件记录"""
@@ -2589,6 +2722,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         self.rating_priority = settings_db.get_setting('rating_priority') or utils.DEFAULT_RATING_PRIORITY
         self.country_map = settings_db.get_setting('country_mapping') or utils.DEFAULT_COUNTRY_MAPPING
         self.language_map = settings_db.get_setting('language_mapping') or utils.DEFAULT_LANGUAGE_MAPPING
+        self.recognition_hints = {}
 
         self.raw_metadata = self._fetch_raw_metadata()
         self.details = self.raw_metadata
@@ -3273,8 +3407,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         return None, None, None
 
-    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False):
+    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False, recognition_hints=None):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
+        rel_path = file_node.get('rel_path', '')
+        rule_result = _build_rule_parse_result(
+            filename=original_name,
+            main_dir_name=os.path.basename(rel_path) if rel_path else None,
+            has_season_subdirs=False,
+            forced_media_type='tv' if is_tv else 'movie',
+            is_folder=False,
+        )
+        normalized_hints = candidate_to_recognition_hints(recognition_hints or file_node.get('_recognition_hints') or {})
         
         # ★ 修复 1：无后缀文件的提前返回，补齐为 8 个返回值
         if '.' not in original_name: 
@@ -3371,8 +3514,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     f"E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
                 )
 
+        if is_tv and normalized_hints:
+            if season_num is None and normalized_hints.get('season_number') is not None:
+                season_num = _se_int(normalized_hints.get('season_number'))
+            if episode_num is None and normalized_hints.get('episode_number') is not None:
+                episode_num = _se_int(normalized_hints.get('episode_number'))
+            if (
+                (normalized_hints.get('season_number') not in (None, '') or normalized_hints.get('episode_number') not in (None, ''))
+                and not silent_log
+            ):
+                logger.info(
+                    f"  ➜ [TG Candidate季集] 命中 hints -> "
+                    f"S{int(season_num if season_num is not None else 1):02d}"
+                    f"E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
+                )
+
         if is_tv and (season_num is None or episode_num is None):
-            rel_path = file_node.get('rel_path', '')
 
             # 0. ★ 先跑用户自定义规则，命中即优先使用
             custom_season, custom_episode, custom_rule_name = self._parse_season_episode_by_custom_regex(
@@ -3388,6 +3545,19 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if custom_rule_name and not silent_log:
                 logger.info(
                     f"  ➜ [自定义季集号识别] 命中规则 '{custom_rule_name}' -> "
+                    f"S{int(season_num if season_num is not None else 1):02d}E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
+                )
+
+            if rule_result.get('season_number') is not None and season_num is None:
+                season_num = int(rule_result.get('season_number'))
+            if rule_result.get('episode_number') is not None and episode_num is None:
+                episode_num = int(rule_result.get('episode_number'))
+            if (
+                (rule_result.get('season_number') is not None or rule_result.get('episode_number') is not None)
+                and not silent_log
+            ):
+                logger.info(
+                    f"  ➜ [规则预解析季集] 命中 evidence={','.join(rule_result.get('evidence') or []) or 'rule'} -> "
                     f"S{int(season_num if season_num is not None else 1):02d}E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
                 )
 
@@ -3453,6 +3623,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             # 4. 终极兜底
             if season_num is None:
                 season_num = 1
+
+        if is_tv and normalized_hints.get('is_special') and season_num is None:
+            season_num = 0
+
+        if is_tv and normalized_hints.get('is_special') and season_num == 1 and episode_num is None:
+            season_num = 0
+
+        if is_tv and rule_result.get('is_special') and season_num is None:
+            season_num = 0
+
+        if is_tv and rule_result.get('is_special') and season_num == 1 and episode_num is None:
+            season_num = 0
 
         # ★★★ 动漫绝对集数转季号逻辑 (解决海贼王 S01E1158 的问题) ★★★
         if is_tv and episode_num is not None and episode_num > 30:
@@ -3671,12 +3853,14 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     except Exception:
                         pass
 
+                sub_hint = lookup_candidate_hint_for_name(sub_name, alt_texts=[root_name])
                 tmdb_id, sub_type, sub_title = _identify_media_enhanced(
                     sub_name, 
                     ai_translator=self.ai_translator, 
                     use_ai=self.use_ai,
                     is_folder=(str(sub_fc_val) == '0'),
-                    sha1=sub_sha1
+                    sha1=sub_sha1,
+                    recognition_hints=sub_hint
                 )
                 
                 # 2. 模糊匹配 (仅当有官方合集列表时)
@@ -3743,6 +3927,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 logger.info(f"    ├─ 准备批量整理合集子项: {sub_title} -> ID:{tmdb_id} (共 {len(items)} 个文件)")
                 try:
                     organizer = SmartOrganizer(self.client, tmdb_id, sub_type, sub_title, self.ai_translator, self.use_ai)
+                    organizer.recognition_hints = sub_hint or {}
                     target_cid_for_sub = organizer.get_target_cid()
                     if organizer.execute(items, target_cid_for_sub):
                         processed_count += len(items)
@@ -4197,7 +4382,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), 
                         original_title=original_title, pre_fetched_mediainfo=pre_fetched_mediainfo, 
                         local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
-                        silent_log=True  # ★ 开启静默，防止预扫描时重复打印日志
+                        silent_log=True,  # ★ 开启静默，防止预扫描时重复打印日志
+                        recognition_hints=self.recognition_hints,
                     )
                     key = (v_s, v_e, v_part) if self.media_type == 'tv' else ('movie', v_part)
                     # 电影只保留第一个视频作为基准 (通常电影只有一个正片)
@@ -4359,7 +4545,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     original_title=original_title,
                     pre_fetched_mediainfo=pre_fetched_mediainfo,
                     local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
-                    silent_log=True
+                    silent_log=True,
+                    recognition_hints=self.recognition_hints,
                 )
 
                 # ★ 核心：只保留文件名
@@ -4431,7 +4618,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 new_filename, season_num, episode_num, s_name, video_info, has_real_info, part_num = self._rename_file_node(
                     file_item, safe_title, year=year, is_tv=(self.media_type=='tv'), original_title=original_title,
                     pre_fetched_mediainfo=pre_fetched_mediainfo,
-                    local_pre_fetched_mediainfo=local_pre_fetched_mediainfo 
+                    local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
+                    recognition_hints=self.recognition_hints,
                 )
 
                 real_target_cid = final_home_cid
@@ -5434,7 +5622,276 @@ def _get_raw_ffprobe_identity_by_sha1(sha1):
         return None
 
 
-def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=False, forced_media_type=None, ai_translator=None, use_ai=False, is_folder=False, sha1=None, raw_ffprobe_json=None):
+def _normalize_rule_media_type(value):
+    text = str(value or '').strip().lower()
+    if text in ['movie', 'movies', 'film', '电影']:
+        return 'movie'
+    if text in ['tv', 'series', 'episode', 'season', 'show', '电视剧', '剧集', '番剧', '动漫']:
+        return 'tv'
+    return None
+
+
+def _parse_rule_cn_number(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+
+    digit_map = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+    unit_map = {'十': 10, '百': 100}
+    total = 0
+    current = 0
+    for ch in text:
+        if ch in digit_map:
+            current = digit_map[ch]
+        elif ch in unit_map:
+            unit = unit_map[ch]
+            if current == 0:
+                current = 1
+            total += current * unit
+            current = 0
+    total += current
+    return total or None
+
+
+def _clean_rule_title(text):
+    if not text:
+        return ''
+
+    value = str(text).replace('\\', '/')
+    value = os.path.basename(value.strip())
+    value = os.path.splitext(value)[0]
+
+    for pattern in _NOISE_TOKEN_PATTERNS:
+        value = re.sub(pattern, ' ', value)
+
+    value = re.sub(r'(?i)\b(?:s\d{1,4}[ .\-_]*e\d{1,4}|season[ .\-_]*\d{1,4}|ep(?:isode)?[ .\-_]*\d{1,4}|第[一二三四五六七八九十百零\d]+[季集话話回])\b', ' ', value)
+    value = re.sub(r'(?i)\b(?:part|pt|cd)[ .\-_]*\d{1,2}\b', ' ', value)
+    value = re.sub(r'(?i)\b(?:tmdb|tmdbid)[=\-_ ]*\d+\b', ' ', value)
+    value = re.sub(r'(?<!\d)(?:19|20)\d{2}(?!\d)', ' ', value)
+    value = re.sub(r'(?i)\b(?:specials?|ova|oad|sp|extra(?:s)?|collection|complete)\b', ' ', value)
+    value = re.sub(r'[\[\]\(\)\{\}]', ' ', value)
+    value = re.sub(r'[._]+', ' ', value)
+    value = re.sub(r'\s+', ' ', value).strip(' -_./')
+    return value.strip()
+
+
+def _extract_rule_year(text):
+    if not text:
+        return None
+    matches = list(re.finditer(r'(?<!\d)((?:19|20)\d{2})(?!\d)', str(text)))
+    if not matches:
+        return None
+    try:
+        return int(matches[-1].group(1))
+    except Exception:
+        return None
+
+
+def _rule_detect_special(text):
+    if not text:
+        return False
+    for pattern in _SPECIAL_FLAG_PATTERNS:
+        if pattern.search(str(text)):
+            return True
+    return False
+
+
+def _rule_extract_tmdb_id(*texts):
+    tmdb_regex = re.compile(r'(?i)(?:tmdb|tmdbid)[=\-_ ]*(\d{2,10})')
+    for text in texts:
+        if not text:
+            continue
+        match = tmdb_regex.search(str(text))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _rule_extract_date_episode(text):
+    if not text:
+        return None
+    for pattern in _DATE_EPISODE_PATTERNS:
+        match = pattern.search(str(text))
+        if match:
+            year, month, day = match.groups()
+            try:
+                return int(f"{year}{month}{day}")
+            except Exception:
+                return None
+    return None
+
+
+def _rule_extract_season_episode_from_text(text):
+    if not text:
+        return None, None, []
+
+    evidence = []
+    normalized = str(text).replace('\\', '/')
+    lower_text = normalized.lower()
+
+    match = re.search(r'(?i)(?:^|[ \.\-_/\[(])s(\d{1,4})[ \.\-_]*[eEpP](\d{1,4})(?:$|[ \.\-_/)\]])', normalized)
+    if match:
+        evidence.append('sxe')
+        return int(match.group(1)), int(match.group(2)), evidence
+
+    match = re.search(r'(?i)(?:^|[ \.\-_/\[(])season[ \.\-_]*(\d{1,4})(?:$|[ \.\-_/)\]])', normalized)
+    season_num = int(match.group(1)) if match else None
+    if match:
+        evidence.append('season_word')
+
+    match = re.search(r'第\s*([一二三四五六七八九十百零\d]+)\s*季', normalized)
+    if match and season_num is None:
+        cn_number = _parse_rule_cn_number(match.group(1))
+        if cn_number is not None:
+            season_num = int(cn_number)
+            evidence.append('season_zh')
+
+    match = re.search(r'(?i)(?:^|[ \.\-_/\[(])(?:ep|episode)[ \.\-_]*(\d{1,4})(?:$|[ \.\-_/)\]])', normalized)
+    episode_num = int(match.group(1)) if match else None
+    if match:
+        evidence.append('episode_word')
+
+    match = re.search(r'(?i)(?:^|[ \.\-_/\[(])e(\d{1,4})(?:$|[ \.\-_/)\]])', normalized)
+    if match and episode_num is None:
+        episode_num = int(match.group(1))
+        evidence.append('episode_e')
+
+    match = re.search(r'第\s*([一二三四五六七八九十百零\d]+)\s*[集话話回]', normalized)
+    if match and episode_num is None:
+        cn_number = _parse_rule_cn_number(match.group(1))
+        if cn_number is not None:
+            episode_num = int(cn_number)
+            evidence.append('episode_zh')
+
+    if episode_num is None:
+        date_ep = _rule_extract_date_episode(normalized)
+        if date_ep is not None:
+            episode_num = date_ep
+            evidence.append('episode_date')
+
+    if _rule_detect_special(normalized):
+        if season_num is None:
+            season_num = 0
+        evidence.append('special')
+
+    if episode_num is None:
+        match = re.search(r'(?i)(?:^|[ \.\-_/\[(])(?:sp|ova|oad)(\d{1,4})(?:$|[ \.\-_/)\]])', normalized)
+        if match:
+            episode_num = int(match.group(1))
+            evidence.extend(['special', 'episode_special_code'])
+
+    if season_num is None and episode_num is not None and any(flag in lower_text for flag in ['ep', 'episode', '第', '话', '話', '回']):
+        season_num = 1
+
+    return season_num, episode_num, evidence
+
+
+def _build_rule_parse_result(filename, main_dir_name=None, has_season_subdirs=False, forced_media_type=None, is_folder=False):
+    cache_key = json.dumps({
+        'filename': filename or '',
+        'main_dir_name': main_dir_name or '',
+        'has_season_subdirs': bool(has_season_subdirs),
+        'forced_media_type': forced_media_type or '',
+        'is_folder': bool(is_folder),
+    }, ensure_ascii=False, sort_keys=True)
+    if cache_key in _RULE_PARSE_CACHE:
+        return _RULE_PARSE_CACHE[cache_key]
+
+    source_texts = [str(x) for x in [filename, main_dir_name] if x]
+    combined_text = ' / '.join(source_texts)
+    result = {
+        'tmdb_id': None,
+        'media_type': _normalize_rule_media_type(forced_media_type),
+        'title': None,
+        'year': None,
+        'season_number': None,
+        'episode_number': None,
+        'is_special': False,
+        'confidence': 'low',
+        'evidence': [],
+        'source': 'rules',
+    }
+
+    explicit_tmdb_id = _rule_extract_tmdb_id(filename, main_dir_name)
+    if explicit_tmdb_id:
+        result['tmdb_id'] = explicit_tmdb_id
+        result['confidence'] = 'high'
+        result['evidence'].append('explicit_tmdb')
+
+    season_num = None
+    episode_num = None
+    season_evidence = []
+    for text in source_texts:
+        s_val, e_val, evi = _rule_extract_season_episode_from_text(text)
+        if season_num is None and s_val is not None:
+            season_num = s_val
+        if episode_num is None and e_val is not None:
+            episode_num = e_val
+        season_evidence.extend(evi)
+        if season_num is not None and episode_num is not None and 'special' not in season_evidence:
+            break
+
+    if has_season_subdirs and season_num is None:
+        season_num = 1
+        season_evidence.append('season_subdir')
+
+    result['season_number'] = season_num
+    result['episode_number'] = episode_num
+    result['is_special'] = 'special' in season_evidence or _rule_detect_special(combined_text)
+    result['evidence'].extend([e for e in season_evidence if e not in result['evidence']])
+
+    title_candidates = []
+    generic_dir = bool(main_dir_name and re.search(r'(?i)\b(collection|合集|系列|pack|misc|unknown)\b', str(main_dir_name)))
+    if filename:
+        title_candidates.append(filename)
+    if main_dir_name and str(main_dir_name).strip() and str(main_dir_name) != str(filename) and not generic_dir:
+        title_candidates.insert(0, main_dir_name)
+
+    for candidate in title_candidates:
+        clean_title = _clean_rule_title(candidate)
+        if clean_title:
+            result['title'] = clean_title
+            break
+
+    if not result['title'] and main_dir_name:
+        result['title'] = _clean_rule_title(main_dir_name)
+
+    for candidate in title_candidates:
+        year_val = _extract_rule_year(candidate)
+        if year_val:
+            result['year'] = year_val
+            result['evidence'].append('year')
+            break
+
+    if result['media_type'] is None:
+        if result['season_number'] is not None or has_season_subdirs:
+            result['media_type'] = 'tv'
+            result['evidence'].append('tv_structure')
+        elif result['episode_number'] is not None and result['season_number'] is not None:
+            result['media_type'] = 'tv'
+            result['evidence'].append('tv_structure')
+        elif result['tmdb_id']:
+            result['media_type'] = 'movie'
+        elif result['title'] and result['year']:
+            result['media_type'] = 'movie'
+
+    if result['is_special'] and result['season_number'] is None:
+        result['season_number'] = 0
+
+    if result['tmdb_id']:
+        result['confidence'] = 'high'
+    elif result['title'] and (result['year'] or result['media_type'] or result['episode_number'] is not None):
+        result['confidence'] = 'medium'
+    elif result['title']:
+        result['confidence'] = 'low'
+
+    _RULE_PARSE_CACHE[cache_key] = result
+    return result
+
+
+def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=False, forced_media_type=None, ai_translator=None, use_ai=False, is_folder=False, sha1=None, raw_ffprobe_json=None, recognition_hints=None):
     """
     【绝对正确版】识别逻辑：
     1. 先定类型：综合主目录、子目录特征、文件名，判断是 Movie 还是 TV。
@@ -5448,6 +5905,20 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
     api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
     
     is_same_name = (main_dir_name == filename)
+    rule_result = _build_rule_parse_result(
+        filename=filename,
+        main_dir_name=main_dir_name,
+        has_season_subdirs=has_season_subdirs,
+        forced_media_type=forced_media_type,
+        is_folder=is_folder,
+    )
+    normalized_hints = candidate_to_recognition_hints(recognition_hints or {})
+    eligible_hints = normalized_hints if is_recognition_hint_eligible(normalized_hints) else {}
+    if normalized_hints:
+        if normalized_hints.get('media_type') and not forced_media_type:
+            media_type = normalized_hints.get('media_type')
+        if normalized_hints.get('identify_title') or normalized_hints.get('clean_title') or normalized_hints.get('title'):
+            title = normalized_hints.get('identify_title') or normalized_hints.get('clean_title') or normalized_hints.get('title')
 
     # =================================================================
     # ★ 第一步：铁腕判定媒体类型 (Movie or TV)
@@ -5455,10 +5926,33 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
     if forced_media_type:
         media_type = forced_media_type
     else:
-        # 将主目录名和文件名拼在一起，寻找剧集特征
-        combined_text = f"{main_dir_name or ''} {filename}"
-        if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第[一二三四五六七八九十\d]+季|Season', combined_text, re.IGNORECASE):
-            media_type = 'tv'
+        if rule_result.get('media_type'):
+            media_type = rule_result.get('media_type')
+        else:
+            # 将主目录名和文件名拼在一起，寻找剧集特征
+            combined_text = f"{main_dir_name or ''} {filename}"
+            if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第[一二三四五六七八九十\d]+季|Season', combined_text, re.IGNORECASE):
+                media_type = 'tv'
+
+    if rule_result.get('title'):
+        title = rule_result.get('title')
+
+    if rule_result.get('confidence') in ('medium', 'high') and rule_result.get('title'):
+        evidence_text = ','.join(rule_result.get('evidence') or []) or 'rule'
+        logger.debug(
+            f"  ➜ [规则预解析] 命中预解析: title='{rule_result.get('title')}', "
+            f"year={rule_result.get('year')}, type={rule_result.get('media_type')}, "
+            f"season={rule_result.get('season_number')}, episode={rule_result.get('episode_number')}, "
+            f"special={rule_result.get('is_special')} (confidence={rule_result.get('confidence')}, evidence={evidence_text})"
+        )
+
+    if normalized_hints:
+        logger.debug(
+            f"  ➜ [TG Candidate] 命中识别 hints: title='{normalized_hints.get('identify_title') or normalized_hints.get('clean_title') or normalized_hints.get('title')}', "
+            f"year={normalized_hints.get('year')}, type={normalized_hints.get('media_type')}, "
+            f"season={normalized_hints.get('season_number')}, episode={normalized_hints.get('episode_number')}, "
+            f"special={normalized_hints.get('is_special')} (confidence={normalized_hints.get('confidence')})"
+        )
 
     # 辅助函数：用已锁定的类型去 TMDb 查官方标题
     def _fetch_title_by_id(ext_id, m_type):
@@ -5507,6 +6001,23 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
             )
             return tmdb_id, media_type, official_title or filename
 
+    if normalized_hints.get('tmdb_id') and normalized_hints.get('confidence') == 'high':
+        hinted_type = normalized_hints.get('media_type') or media_type
+        official_title = _fetch_title_by_id(normalized_hints.get('tmdb_id'), hinted_type)
+        logger.info(
+            f"  ➜ [TG Candidate] 命中高置信显式 TMDb ID: {normalized_hints.get('tmdb_id')} "
+            f"(evidence={','.join(normalized_hints.get('evidence') or []) or 'candidate'})"
+        )
+        return normalized_hints.get('tmdb_id'), hinted_type, official_title or title or filename
+
+    if rule_result.get('tmdb_id') and rule_result.get('confidence') == 'high':
+        official_title = _fetch_title_by_id(rule_result.get('tmdb_id'), media_type)
+        logger.info(
+            f"  ➜ [规则预解析] 命中高置信显式 TMDb ID: {rule_result.get('tmdb_id')} "
+            f"(evidence={','.join(rule_result.get('evidence') or []) or 'rule'})"
+        )
+        return rule_result.get('tmdb_id'), media_type, official_title or title or filename
+
     # =================================================================
     # ★ 第二步：按优先级提取信息并定向查询
     # =================================================================
@@ -5536,7 +6047,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
         return None, None, None
 
     # 优先级 2: 提取 Title (Year) 进行搜索 (仅限文件)
-    def _search_by_title_year(text):
+    def _search_by_title_year(text, query_override=None, year_override=None, type_override=None):
         # 剔除 S01E01 等干扰字符 (连同前面的点和下划线一起剔除，防止留下 "The.Crown.")
         clean_text = re.sub(r'(?i)[\.\s\-_]*s\d{1,4}(?:e\d{1,4})?\b.*$', '', text).strip()
         clean_text = re.sub(r'(?i)[\.\s\-_]*ep?\d{1,4}\b.*$', '', clean_text).strip()
@@ -5552,6 +6063,11 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
             # 把年份从名字里剔除
             name_part = clean_text[:match_std.start()].strip()
 
+        if query_override:
+            name_part = str(query_override).strip()
+        if year_override not in [None, '']:
+            year_part = str(year_override).strip()
+
         # 清理名字里的点和下划线
         name_part = name_part.replace('.', ' ').replace('_', ' ').strip()
 
@@ -5559,12 +6075,13 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
 
         try:
             if api_key:
-                search_key = f"{name_part}_{year_part}_{media_type}"
+                search_media_type = type_override or media_type
+                search_key = f"{name_part}_{year_part}_{search_media_type}"
                 if search_key in _TMDB_SEARCH_CACHE:
                     results = _TMDB_SEARCH_CACHE[search_key]
                 else:
                     # 严格按照锁定的 media_type 搜索
-                    results = tmdb.search_media(query=name_part, api_key=api_key, item_type=media_type, year=year_part)
+                    results = tmdb.search_media(query=name_part, api_key=api_key, item_type=search_media_type, year=year_part)
                     _TMDB_SEARCH_CACHE[search_key] = results
 
                 if results and len(results) > 0:
@@ -5590,10 +6107,39 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
                         if part_match:
                             break
                             
-                    return str(best['id']), media_type, (best.get('title') or best.get('name'))
+                    return str(best['id']), search_media_type, (best.get('title') or best.get('name'))
         except Exception:
             pass
         return None
+
+    if rule_result.get('title') and rule_result.get('confidence') in ('medium', 'high'):
+        res = _search_by_title_year(
+            filename,
+            query_override=rule_result.get('title'),
+            year_override=rule_result.get('year'),
+            type_override=rule_result.get('media_type') or media_type
+        )
+        if res:
+            logger.info(
+                f"  ➜ [规则预解析] 规则命中后 TMDb 搜索成功: "
+                f"title='{rule_result.get('title')}', year={rule_result.get('year')}, type={rule_result.get('media_type') or media_type}"
+            )
+            return res
+
+    if normalized_hints.get('identify_title') and normalized_hints.get('confidence') in ('medium', 'high'):
+        res = _search_by_title_year(
+            filename,
+            query_override=normalized_hints.get('identify_title') or normalized_hints.get('clean_title'),
+            year_override=normalized_hints.get('year'),
+            type_override=normalized_hints.get('media_type') or media_type,
+        )
+        if res:
+            logger.info(
+                f"  ➜ [TG Candidate] hints 命中后 TMDb 搜索成功: "
+                f"title='{normalized_hints.get('identify_title') or normalized_hints.get('clean_title')}', year={normalized_hints.get('year')}, "
+                f"type={normalized_hints.get('media_type') or media_type}"
+            )
+            return res
 
     # 2.1 优先从 filename 搜索
     res = _search_by_title_year(filename)
@@ -5618,7 +6164,11 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
                 return _MP_PARSE_CACHE[target_name]
                 
             logger.debug(f"  ➜ 本地正则失败，尝试调用 MoviePilot 辅助识别: {target_name}")
-            mp_res = mp.recognize_media(target_name, config_manager.APP_CONFIG)
+            mp_res = mp.recognize_media_from_candidate(
+                eligible_hints if eligible_hints else rule_result,
+                fallback_title=target_name,
+                config=config_manager.APP_CONFIG
+            )
             
             if mp_res:
                 logger.info(f"  ➜ [MP辅助识别] 成功命中: {mp_res[2]} (ID:{mp_res[0]})")
@@ -5661,6 +6211,12 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
                 ai_title = ai_result.get('title')
                 ai_year = ai_result.get('year')
                 ai_type = forced_media_type or ai_result.get('type') or media_type
+                if rule_result.get('title') and not ai_title:
+                    ai_title = rule_result.get('title')
+                if rule_result.get('year') and not ai_year:
+                    ai_year = rule_result.get('year')
+                if rule_result.get('media_type') and not forced_media_type:
+                    ai_type = rule_result.get('media_type')
                 
                 if api_key:
                     search_key = f"AI_{ai_title}_{ai_year}_{ai_type}"
