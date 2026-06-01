@@ -1739,7 +1739,6 @@ def _select_sources_by_washing_before_import(
         group_action_rank = 0
         group_quality = 0
         group_reasons = []
-        has_acceptable = False  # ★ 新增：记录包内是否有我们需要的文件
 
         for src in rows:
             file_name = src.get('file_name') or ''
@@ -1812,9 +1811,11 @@ def _select_sources_by_washing_before_import(
                 has_external_subtitle=False,
             )
 
+            # ★ 回退为一票否决：只要包内有任意一个视频被拒绝/跳过，整个包就拒绝，避免转存残缺季包
             if action in ('REJECT', 'SKIP'):
                 rejected = True
-                errors.append(f"{file_name}: 洗版预检拒绝 [{action}] {reason}")
+                # 直接把具体的文件名和拒绝原因加入到 errors 中，这样日志和前端都能直接看到
+                errors.append(f"[{code}] {file_name}: 洗版预检 [{action}] {reason}")
                 break
 
             level, level_reason = _washing_new_level(
@@ -1835,11 +1836,6 @@ def _select_sources_by_washing_before_import(
             group_reasons.append(f"{file_name}: {action}; level={level}; {reason or level_reason}")
 
         if rejected:
-            continue
-
-        # ★ 核心修复：只有当包内【所有】视频都被跳过/拒绝时，才拒绝整个分享包
-        if not has_acceptable:
-            errors.append(f"分享包 {code} 内所有文件均被洗版拒绝/跳过")
             continue
 
         if rows:
@@ -1916,45 +1912,147 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
                 'washing_rejected': True,
             }
     else:
-        logger.info(f"  ➜ [共享资源] 当前覆盖模式为 {rename_config.get('conflict_mode')}，跳过洗版预检，")
+        logger.info(f"  ➜ [共享资源] 当前覆盖模式为 {rename_config.get('conflict_mode')}，跳过洗版预检。")
+        # 非洗版模式下，在这里统一写入缓存
+        for src in sources:
+            sha1 = _norm_sha1(src.get('sha1'))
+            raw = raw_map.get(sha1)
+            if raw:
+                _cache_center_raw_as_local_mediainfo(src, raw)
 
-    # 同一个季/剧分享可能返回多集，按 share_code 去重，避免重复转存同一分享包。
-    unique = []
-    seen_share = set()
-    for src in sources:
-        code = src.get('share_code') or src.get('source_id')
-        if code in seen_share:
-            continue
-        seen_share.add(code)
-        unique.append(src)
-
+    import_plan = _build_permanent_import_plan(sources, context)
     ok = 0
+    skipped_existing = 0
+    failed_resources = 0
     errors = []
-    for src in unique:
-        share_code = src.get('share_code') or ''
-        receive_code = src.get('receive_code') or ''
-        if not share_code:
-            errors.append(f"{src.get('file_name')}: 缺少分享码")
+
+    for plan_item in import_plan:
+        resource_key = plan_item.get('resource_key') or ''
+        alternatives = plan_item.get('alternatives') or []
+        if not alternatives:
             continue
-        resp = p115.share_import(share_code, receive_code, target_cid)
-        logger.info(
-            f"  ➜ [共享资源] 115分享转存返回：share={share_code}, "
-            f"resp={str(resp)[:300]}"
-        )
-        text = json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp)
-        success = isinstance(resp, dict) and (resp.get('state') is True or resp.get('errno') in (0, '0') or resp.get('code') in (0, '0', 200, '200') or '已存在' in text)
-        if success:
-            ok += 1
-            try:
-                client.report_transfer(src.get('source_id'), 'success', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message='permanent import submitted')
-            except Exception:
-                pass
-        else:
+
+        group_done = False
+        group_had_local_account_issue = False
+        if len(alternatives) > 1:
+            logger.info(
+                "  ➜ [共享资源] 永久转存启用备份重试：resource=%s, alternatives=%s",
+                resource_key[:96] or '-', len(alternatives)
+            )
+
+        for alt_index, src in enumerate(alternatives, start=1):
+            share_code = src.get('share_code') or ''
+            receive_code = src.get('receive_code') or ''
+            if not share_code:
+                errors.append(f"{src.get('file_name')}: 缺少分享码")
+                continue
+
+            if alt_index > 1:
+                logger.warning(
+                    "  ➜ [共享资源] 主分享转存失败，切换备用分享继续尝试：resource=%s, backup=%s/%s, share=%s",
+                    resource_key[:96] or '-', alt_index, len(alternatives), share_code
+                )
+
+            # 关键兜底：真正调用 115 share_import 前，先按中心源 SHA1 查本地 115 文件树缓存。
+            # 命中说明这个文件已经在本账号存在，直接跳过转存，避免 115 返回 4100024 后再误伤中心源。
+            local_hit = _local_existing_hit_for_import_group(src, context)
+            if local_hit:
+                hit_src = local_hit.get('source') or src
+                local = local_hit.get('local') or {}
+                skipped_existing += 1
+                logger.info(
+                    "  ➜ [共享资源] 本地 p115_filesystem_cache 已存在相同 SHA1，跳过重复转存："
+                    f"share={share_code}, sha1={_norm_sha1(hit_src.get('sha1'))}, "
+                    f"local={local.get('name') or local.get('id')}, pick_code={local.get('pick_code') or '-'}"
+                )
+                group_done = True
+                break
+
+            import_target_cid = str(target_cid)
+            import_container = {}
+
+            resp = p115.share_import(share_code, receive_code, import_target_cid)
+            logger.info(
+                f"  ➜ [共享资源] 115分享转存返回：share={share_code}, cid={import_target_cid}, "
+                f"backup={alt_index}/{len(alternatives)}, resp={str(resp)[:300]}"
+            )
+            text = _share_import_resp_text(resp)
+            is_already_saved = _is_share_import_already_saved(resp)
+            success = _share_import_success(resp)
+
+            if success:
+                ok += 1
+                group_done = True
+                if is_already_saved:
+                    # 4100024 是本账号已经接收过该分享，不是本次真实转存成功；不要向中心重复报 success，
+                    # 但也绝不能报 failed。触发一次整理扫描，让已存在文件尽快被识别入库。
+                    logger.info(
+                        f"  ➜ [共享资源] 115 提示本账号已转存过，视为本地幂等命中，跳过中心 failed 上报：share={share_code}"
+                    )
+                else:
+                    report_resp = None
+                    try:
+                        report_resp = client.report_transfer(
+                            src.get('source_id'),
+                            'success',
+                            expected_sha1=_norm_sha1(src.get('sha1')),
+                            expected_size=_safe_int(src.get('size'), 0) or None,
+                            message='permanent import submitted',
+                        )
+                    except Exception as e:
+                        logger.debug(f"  ➜ [共享资源] 上报转存成功失败，跳过备份分享触发: share={share_code}, err={e}")
+
+                    if report_resp:
+                        backup_result = _create_backup_share_after_import(
+                            client,
+                            p115,
+                            src,
+                            resp,
+                            import_target_cid,
+                            report_resp,
+                            context,
+                            import_container=import_container,
+                        )
+                        if backup_result.get('created'):
+                            logger.info(f"  ➜ [共享资源] 自动备份分享处理完成: {backup_result}")
+                        elif not backup_result.get('skipped'):
+                            logger.warning(f"  ➜ [共享资源] 自动备份分享未完成: {backup_result}")
+                break
+
             errors.append(f"{src.get('file_name')}: {text[:120]}")
-            try:
-                client.report_transfer(src.get('source_id'), 'failed', expected_sha1=_norm_sha1(src.get('sha1')), expected_size=_safe_int(src.get('size'), 0) or None, message=f'external_share_import_failed: {text[:160]}')
-            except Exception:
-                pass
+
+            if _is_share_import_local_account_issue(resp):
+                group_had_local_account_issue = True
+                logger.warning(
+                    "  ➜ [共享资源] 转存失败属于本账号限制/幂等问题，跳过向中心上报 failed，也不继续切换备份，"
+                    f"避免误伤资源提供者：share={share_code}, resp={text[:180]}"
+                )
+                break
+            elif _is_share_import_source_dead(resp):
+                try:
+                    client.report_transfer(
+                        src.get('source_id'),
+                        'failed',
+                        expected_sha1=_norm_sha1(src.get('sha1')),
+                        expected_size=_safe_int(src.get('size'), 0) or None,
+                        message=f'external_share_import_failed: {text[:160]}',
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.warning(
+                    "  ➜ [共享资源] 转存失败原因不确定，先只记本地错误，不上报中心 failed，继续尝试同资源备份："
+                    f"share={share_code}, resp={text[:180]}"
+                )
+
+        if not group_done:
+            failed_resources += 1
+            if len(alternatives) > 1 and not group_had_local_account_issue:
+                logger.warning(
+                    "  ➜ [共享资源] 同资源所有备份分享均转存失败：resource=%s, alternatives=%s",
+                    resource_key[:96] or '-', len(alternatives)
+                )
+
     if ok > 0:
         kick_result = _kick_115_organize_detached(
             reason=f"共享资源转存成功 {ok} 个",
@@ -2005,6 +2103,39 @@ def try_consume_shared_resource(
         sources = _filter_sources_by_episode_transfer_policy(sources)
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 查询中心共享池失败: {e}")
+
+    # =================================================================
+    # ★ 核心修复：精准过滤中心返回的无关单集，防止“幽灵追更”日志
+    # =================================================================
+    req_e_num = item.get('episode_number')
+    if req_e_num is not None and str(req_e_num).strip() != '':
+        filtered_sources = []
+        for src in sources:
+            src_e_num = src.get('episode_number')
+            # 如果中心返回的源明确标明了集号，且与我们请求的集号不符，直接丢弃！
+            # (如果 src_e_num 为空，说明可能是季包，保留放行)
+            if src_e_num is not None and str(src_e_num).strip() != '' and int(src_e_num) != int(req_e_num):
+                continue
+            filtered_sources.append(src)
+        sources = filtered_sources
+
+    excluded_codes = {
+        str(code or '').strip()
+        for code in (exclude_share_codes or [])
+        if str(code or '').strip()
+    }
+    excluded_hits = 0
+    if excluded_codes:
+        filtered_sources = []
+        for src in sources:
+            code = _source_identity_code(src)
+            if code and code in excluded_codes:
+                excluded_hits += 1
+                continue
+            filtered_sources.append(src)
+        if excluded_hits:
+            logger.info(f"  ➜ [共享资源] 已过滤 {excluded_hits} 个本轮已消费的 share_code，避免重复转存同一季包。")
+        sources = filtered_sources
 
     if not sources:
         if excluded_hits:
