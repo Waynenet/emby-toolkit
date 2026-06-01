@@ -102,9 +102,8 @@
 </template>
 
 <script setup>
-// [原样保留了 Script 内的逻辑代码...]
 import { useRouter } from 'vue-router';
-import { ref, onMounted, computed, h } from 'vue';
+import { ref, onMounted, computed, h, onUnmounted } from 'vue';
 import axios from 'axios';
 import {
     NCard, NSpin, NAlert, NText, NDataTable, NButton, NSpace, NPopconfirm, NEmpty, NInput, NIcon, NSelect,
@@ -134,6 +133,13 @@ const searchQuery = ref('');
 const loadingAction = ref({});
 const currentRowId = ref(null);
 const isShowingSearchResults = ref(false);
+
+// 新增：用于判断是否为手机端
+const isMobile = ref(false);
+
+const updateDeviceType = () => {
+  isMobile.value = window.innerWidth <= 768;
+};
 
 const selectedReason = ref(null);
 const reasonOptions = ref([]);
@@ -301,9 +307,11 @@ const columns = computed(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 360, 
+    // 手机端缩减列宽让按钮换行显示，PC端保持 360 宽度在一行显示
+    width: isMobile.value ? 180 : 360, 
     align: 'center',
-    fixed: 'right',
+    // PC端固定在右侧，手机端取消固定防止重叠
+    fixed: isMobile.value ? undefined : 'right', 
     render(row) {
       const actionButtons = [];
       
@@ -492,8 +500,15 @@ const handleSearch = () => {
 };
 
 onMounted(() => {
+  updateDeviceType(); // 初始化判断
+  window.addEventListener('resize', updateDeviceType); // 监听窗口变化
+  
   fetchReasons(); 
   fetchReviewItems();
+});
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateDeviceType); // 销毁时移除监听
 });
 </script>
 
