@@ -31,12 +31,9 @@ DEBOUNCE_DELAY = 3 # 防抖延迟秒数
 # 表现为“前一个媒体没处理完，后一个媒体先处理完成”。
 MONITOR_WORKER_RUNNING = False
 
-# --- 媒体信息更新专用队列 ---
-MEDIAINFO_EVENT_QUEUE = set()
-MEDIAINFO_QUEUE_LOCK = threading.Lock()
-MEDIAINFO_DEBOUNCE_TIMER = None
 # --- 全局队列抑制标志 ---
 IS_PROCESSING_PAUSED = False
+
 class MediaFileHandler(FileSystemEventHandler):
     """
     文件系统事件处理器 (纯净版：仅监控新增和修改，忽略删除)
@@ -75,26 +72,10 @@ class MediaFileHandler(FileSystemEventHandler):
         if not event.is_directory and self._is_valid_media_file(event.dest_path):
             self._enqueue_file(event.dest_path)
 
-    def on_modified(self, event):
-        """专门监听 -mediainfo.json 的修改事件"""
-        if not event.is_directory and event.src_path.endswith('-mediainfo.json'):
-            self._enqueue_mediainfo(event.src_path)
-
     def _enqueue_file(self, file_path: str):
         """新增/移动文件入队 (被动监听)"""
         enqueue_file_actively(file_path)
 
-    def _enqueue_mediainfo(self, file_path: str):
-        """媒体信息入队逻辑 (独立防抖)"""
-        global MEDIAINFO_DEBOUNCE_TIMER
-        with MEDIAINFO_QUEUE_LOCK:
-            if file_path not in MEDIAINFO_EVENT_QUEUE:
-                logger.debug(f"  ➜ [实时监控] 媒体信息更新加入队列: {file_path}")
-            
-            MEDIAINFO_EVENT_QUEUE.add(file_path)
-            
-            if MEDIAINFO_DEBOUNCE_TIMER: MEDIAINFO_DEBOUNCE_TIMER.kill()
-            MEDIAINFO_DEBOUNCE_TIMER = spawn_later(DEBOUNCE_DELAY, process_mediainfo_queue)
 
 def _is_path_excluded(file_path: str, exclude_paths: List[str]) -> bool:
     if not exclude_paths:
@@ -241,23 +222,6 @@ def _handle_monitor_batch_task(processor, file_paths: List[str], refresh_only_pa
         logger.error(f"  ➜ [实时监控] 批次处理异常: {e}", exc_info=True)
     finally:
         _finish_monitor_batch_worker()
-
-def process_mediainfo_queue():
-    """处理媒体信息更新队列"""
-    if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_ENABLED, False):
-        with MEDIAINFO_QUEUE_LOCK:
-            MEDIAINFO_EVENT_QUEUE.clear()
-        return
-    
-    global MEDIAINFO_DEBOUNCE_TIMER
-    with MEDIAINFO_QUEUE_LOCK:
-        files_to_process = list(MEDIAINFO_EVENT_QUEUE)
-        MEDIAINFO_EVENT_QUEUE.clear()
-        MEDIAINFO_DEBOUNCE_TIMER = None
-    
-    if not files_to_process: return
-    
-    threading.Thread(target=_handle_mediainfo_update_task, args=(files_to_process,)).start()
 
 def _handle_batch_file_task(processor, file_paths: List[str]):
     """
