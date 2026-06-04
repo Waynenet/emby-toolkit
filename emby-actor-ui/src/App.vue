@@ -311,29 +311,37 @@ body::before {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
   -webkit-backdrop-filter: var(--glass-blur) !important;
-  border: 1px solid var(--glass-border) !important;
-  box-shadow: var(--glass-shadow) !important;
+  
+  /* 删除会导致漏光的物理 border，改用 inset(内阴影) 完美描边 */
+  border: none !important;
+  box-shadow: inset 0 0 0 1px var(--glass-border), var(--glass-shadow) !important;
+  
   color: var(--text-primary) !important;
   border-radius: 16px !important;
-  transition: transform 0.2s, box-shadow 0.2s !important;
+  transition: transform 0.2s, box-shadow 0.2s, background 0.2s !important;
   height: 100%;
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
+
+  /* 用 background-clip 限制背景溢出，利用 outline 消除抗锯齿白边 */
+  background-clip: padding-box !important;
+  outline: 1px solid transparent !important;
 }
 
+/* 卡片悬浮状态 */
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
-  border-color: var(--glass-border-light) !important;
+  /* 悬浮时的边框高亮也同步改用 inset box-shadow */
+  box-shadow: inset 0 0 0 1px var(--glass-border-light), 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
   transform: translateY(-2px) !important;
-  box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
 }
 
+/* 禁用悬浮动画的卡片兜底 */
 .n-card.dashboard-card.no-hover:hover {
   transform: none !important;
-  box-shadow: var(--glass-shadow) !important;
+  box-shadow: inset 0 0 0 1px var(--glass-border), var(--glass-shadow) !important;
   background: var(--glass-bg) !important;
-  border-color: var(--glass-border) !important;
 }
 
 .n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }

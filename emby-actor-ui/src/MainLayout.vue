@@ -298,9 +298,14 @@ function handleMenuUpdate(key) { router.push({ name: key }); }
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
+  
+  /* 去掉侧边栏的物理 border，改用内阴影描边 */
+  border: none !important;
+  box-shadow: inset 0 0 0 1px var(--glass-border), var(--glass-shadow);
+  background-clip: padding-box !important;
+  outline: 1px solid transparent !important;
+  
   border-radius: 16px; 
-  box-shadow: var(--glass-shadow);
   z-index: 10;
   height: calc(100vh - 32px) !important;
 }
