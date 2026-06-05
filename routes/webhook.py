@@ -47,6 +47,10 @@ WEBHOOK_BATCH_QUEUE = collections.deque()
 WEBHOOK_BATCH_LOCK = threading.Lock()
 WEBHOOK_BATCH_DEBOUNCE_TIME = 30
 WEBHOOK_BATCH_DEBOUNCER = None
+WEBHOOK_REQUEUE_DELAY = 5
+WEBHOOK_PENDING_TASKS = collections.deque()
+WEBHOOK_PENDING_TASKS_LOCK = threading.Lock()
+WEBHOOK_PENDING_TASKS_DRAINER = None
 
 UPDATE_DEBOUNCE_TIMERS = {}
 UPDATE_DEBOUNCE_LOCK = threading.Lock()
@@ -62,6 +66,137 @@ SYNDROME_API_LOCK = Semaphore(1)
 # --- MP 单文件上传智能合并缓冲池 ---
 MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
+
+
+def _submit_webhook_media_task(
+    task_name,
+    *,
+    task_function=None,
+    processor_type='media',
+    from_pending_queue=False,
+    **kwargs,
+):
+    task_function = task_function or _handle_full_processing_flow
+    task_payload = {
+        "task_name": task_name,
+        "task_function": task_function,
+        "processor_type": processor_type,
+        "kwargs": dict(kwargs),
+    }
+    submitted = task_manager.submit_task(
+        task_function,
+        task_name=task_name,
+        processor_type=processor_type,
+        **kwargs,
+    )
+    if submitted:
+        if from_pending_queue:
+            logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 已从待提交队列成功分派。")
+        return True
+
+    if from_pending_queue:
+        logger.debug(f"  ➜ [Webhook队列] 任务 '{task_name}' 分派时媒体任务仍繁忙，稍后继续尝试。")
+        return False
+
+    logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 因媒体任务繁忙，已加入待提交队列。")
+    _enqueue_pending_webhook_task(task_payload)
+    return False
+
+
+def _is_same_pending_webhook_task(existing_task, new_task):
+    return (
+        existing_task.get("task_name") == new_task.get("task_name")
+        and existing_task.get("processor_type") == new_task.get("processor_type")
+        and existing_task.get("task_function") == new_task.get("task_function")
+        and existing_task.get("kwargs") == new_task.get("kwargs")
+    )
+
+
+def _schedule_pending_webhook_drain(delay=WEBHOOK_REQUEUE_DELAY):
+    global WEBHOOK_PENDING_TASKS_DRAINER
+    with WEBHOOK_PENDING_TASKS_LOCK:
+        if WEBHOOK_PENDING_TASKS_DRAINER is not None:
+            return
+        WEBHOOK_PENDING_TASKS_DRAINER = spawn_later(delay, _drain_pending_webhook_tasks)
+
+
+def _enqueue_pending_webhook_task(task_payload):
+    with WEBHOOK_PENDING_TASKS_LOCK:
+        for pending_task in WEBHOOK_PENDING_TASKS:
+            if _is_same_pending_webhook_task(pending_task, task_payload):
+                logger.debug(f"  ➜ [Webhook队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
+                break
+        else:
+            WEBHOOK_PENDING_TASKS.append(task_payload)
+            logger.info(
+                f"  ➜ [Webhook队列] 当前待提交任务数: {len(WEBHOOK_PENDING_TASKS)} "
+                f"(最新: {task_payload['task_name']})"
+            )
+
+    _schedule_pending_webhook_drain()
+
+
+def _drain_pending_webhook_tasks():
+    global WEBHOOK_PENDING_TASKS_DRAINER
+    try:
+        while True:
+            with WEBHOOK_PENDING_TASKS_LOCK:
+                if not WEBHOOK_PENDING_TASKS:
+                    return
+                task_payload = WEBHOOK_PENDING_TASKS[0]
+
+            submitted = _submit_webhook_media_task(
+                task_payload["task_name"],
+                task_function=task_payload["task_function"],
+                processor_type=task_payload["processor_type"],
+                from_pending_queue=True,
+                **task_payload["kwargs"],
+            )
+            if not submitted:
+                return
+
+            with WEBHOOK_PENDING_TASKS_LOCK:
+                if WEBHOOK_PENDING_TASKS and _is_same_pending_webhook_task(WEBHOOK_PENDING_TASKS[0], task_payload):
+                    WEBHOOK_PENDING_TASKS.popleft()
+    finally:
+        with WEBHOOK_PENDING_TASKS_LOCK:
+            WEBHOOK_PENDING_TASKS_DRAINER = None
+            has_pending_tasks = bool(WEBHOOK_PENDING_TASKS)
+        if has_pending_tasks:
+            _schedule_pending_webhook_drain()
+
+
+def _fix_mp_tv_parent_id(client, file_info):
+    """MP 直出剧集父目录轻量修正：直接使用 fs_get_info 获取真实的父目录 ID。"""
+    try:
+        if (file_info.get('media_type') or '').lower() != 'tv':
+            return
+
+        file_id = file_info.get('file_id')
+        if not file_id:
+            return
+
+        # 直接通过 OpenAPI 获取真实的文件详情
+        info_res = client.fs_get_info(file_id)
+        if info_res and info_res.get('state') and info_res.get('data'):
+            data = info_res['data']
+            
+            # ★ 兼容 OpenAPI 的 paths 字段提取父目录 ID
+            real_parent_id = data.get('parent_id') or data.get('pid') or data.get('cid')
+            if not real_parent_id and 'paths' in data and isinstance(data['paths'], list) and len(data['paths']) > 0:
+                last_path_node = data['paths'][-1]
+                real_parent_id = last_path_node.get('file_id') or last_path_node.get('cid')
+            
+            if real_parent_id and str(real_parent_id) != str(file_info.get('parent_id')):
+                old_parent_id = file_info.get('parent_id')
+                file_info['parent_id'] = str(real_parent_id)
+                
+                logger.info(
+                    f"  ➜ [MP直出] 季目录已修正: "
+                    f"{old_parent_id} -> {real_parent_id} | {file_info.get('name')}"
+                )
+    except Exception as e:
+        logger.warning(f"  ➜ [MP直出] 查询真实父目录CID失败，沿用 MP 目录ID: {file_info.get('name')} -> {e}")
 
 def _flush_mp_batch(key):
     """缓冲结束，将收集到的同集视频和字幕打包送入核心处理"""
@@ -106,6 +241,8 @@ def _flush_mp_batch(key):
                 'parent_id': f.get('parent_id'),
                 'pc': f.get('pickcode'),
                 'pick_code': f.get('pickcode'),
+                'size': f.get('size'),
+                'fs': f.get('fs') or f.get('size'),
                 '115_path': f.get('115_path'), # ★ 核心新增：将 115 物理路径传递给底层
                 '_forced_season': f.get('season_num'),
                 '_forced_episode': f.get('episode_num'),
@@ -149,6 +286,8 @@ def _process_mp_passthrough_immediate(file_info):
     title = file_info.get('title') or ''
     file_name = file_info.get('name')
 
+    _fix_mp_tv_parent_id(client, file_info)
+
     logger.info(f"  ➜ [MP直出] 开始处理单文件: {file_name} -> ID:{tmdb_id}")
 
     try:
@@ -168,6 +307,8 @@ def _process_mp_passthrough_immediate(file_info):
             'parent_id': file_info.get('parent_id'),
             'pc': file_info.get('pickcode'),
             'pick_code': file_info.get('pickcode'),
+            'size': file_info.get('size'),
+            'fs': file_info.get('fs') or file_info.get('size'),
             '115_path': file_info.get('115_path'),
             '_forced_season': season_num,
             '_forced_episode': file_info.get('episode_num'),
@@ -262,38 +403,172 @@ def _run_shared_auto_share_detached(task_name: str, **kwargs):
     ).start()
 
 
-def _submit_shared_auto_share_after_library_ready(item_details: dict, item_id: str, item_type: str, tmdb_id: str, new_episode_ids: Optional[List[str]] = None):
-    """Movie/Episode 入库完成后，异步询问共享中心是否需要本机创建分享。
+def _submit_shared_auto_share_after_library_ready(item_details: dict, item_id: str, item_type: str, tmdb_id: str):
+    """Movie 入库完成后，异步询问共享中心是否需要本机创建分享。
 
-    这里保持原有正常分享链路：Movie 命中缺口分享、Episode 追更命中缺口分享。
-    Movie 的备份分享由任务内部在“正常分享不需要创建且中心可用分享数=1”时额外补充；
-    Episode 仍不创建备份分享。
+    Webhook 只保留电影分享入口。剧集不管是单集追更还是完结季包，
+    都交给 watchlist_processor 在完成最终追更/完结判定后处理，避免整季入库时
+    webhook 只看到 new_episode_ids 就误把整季拆成单集分享。
+    Movie 的备份分享由任务内部在“正常分享不需要创建且中心可用分享数=1”时额外补充。
     """
     try:
-        if item_type == 'Movie' and tmdb_id:
-            _run_shared_auto_share_detached(
-                f"共享电影入库探测: {item_details.get('Name') or tmdb_id}",
-                item_type='Movie',
-                tmdb_id=str(tmdb_id),
-                emby_item_id=str(item_id),
-                title=item_details.get('Name') or '',
-                year=item_details.get('ProductionYear') or '',
-            )
+        if item_type != 'Movie' or not tmdb_id:
             return
 
-        if item_type == 'Series' and new_episode_ids:
-            for ep_id in list(dict.fromkeys([str(x) for x in new_episode_ids if str(x or '').strip()])):
-                _run_shared_auto_share_detached(
-                    f"共享追更新集探测: {item_details.get('Name') or tmdb_id} / {ep_id}",
-                    item_type='Episode',
-                    emby_item_id=ep_id,
-                    parent_series_tmdb_id=str(tmdb_id or ''),
-                    title=item_details.get('Name') or '',
-                    year=item_details.get('ProductionYear') or '',
-                )
+        _run_shared_auto_share_detached(
+            f"共享电影入库探测: {item_details.get('Name') or tmdb_id}",
+            item_type='Movie',
+            tmdb_id=str(tmdb_id),
+            emby_item_id=str(item_id),
+            title=item_details.get('Name') or '',
+            year=item_details.get('ProductionYear') or '',
+        )
     except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 提交 webhook 自动分享探测失败: {e}", exc_info=True)
+        logger.warning(f"  ➜ [共享资源] 提交 webhook 电影自动分享探测失败: {e}", exc_info=True)
 
+def _get_processor_local_strm_root(processor) -> str:
+    """从 MediaProcessor / 配置中提取本地 STRM 根目录，用于补齐 p115_filesystem_cache.local_path。"""
+    candidates = []
+
+    if processor:
+        for attr in (
+            'local_strm_root',
+            'p115_local_strm_root',
+            'strm_root',
+            'p115_strm_root',
+        ):
+            try:
+                value = getattr(processor, attr, None)
+                if value:
+                    candidates.append(value)
+            except Exception:
+                pass
+
+    try:
+        nb_config = get_config() or {}
+        for key in (
+            'local_strm_root',
+            'p115_local_strm_root',
+            'strm_root',
+            'p115_strm_root',
+        ):
+            value = nb_config.get(key)
+            if value:
+                candidates.append(value)
+    except Exception:
+        pass
+
+    try:
+        app_config = config_manager.APP_CONFIG or {}
+        for key in (
+            'local_strm_root',
+            'p115_local_strm_root',
+            'strm_root',
+            'p115_strm_root',
+        ):
+            value = app_config.get(key)
+            if value:
+                candidates.append(value)
+    except Exception:
+        pass
+
+    for value in candidates:
+        text = str(value).strip().replace('\\', '/').rstrip('/')
+        if text:
+            return text
+
+    return ''
+
+def _repair_webhook_p115_fingerprints_for_emby_ids(
+    processor,
+    item_name_for_log: str,
+    emby_item_ids,
+    *,
+    expected_item_type: Optional[str] = None,
+    log_prefix: str = "Webhook指纹补齐",
+) -> int:
+    """Webhook 入库后按 Emby ID 找 media_metadata 行，并执行 115 指纹体检补齐。"""
+    ids = [str(x).strip() for x in (emby_item_ids or []) if str(x or '').strip()]
+    if not ids:
+        return 0
+
+    try:
+        rows_to_repair = []
+        seen_keys = set()
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for emby_id in ids:
+                    if expected_item_type:
+                        cursor.execute(
+                            """
+                            SELECT *
+                            FROM media_metadata
+                            WHERE item_type = %s
+                              AND emby_item_ids_json::text LIKE %s
+                            """,
+                            (expected_item_type, f'%"{emby_id}"%')
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT *
+                            FROM media_metadata
+                            WHERE emby_item_ids_json::text LIKE %s
+                            """,
+                            (f'%"{emby_id}"%',)
+                        )
+
+                    for row in cursor.fetchall() or []:
+                        row_dict = dict(row)
+                        dedupe_key = (
+                            row_dict.get("id"),
+                            row_dict.get("tmdb_id"),
+                            row_dict.get("parent_series_tmdb_id"),
+                            row_dict.get("item_type"),
+                            row_dict.get("season_number"),
+                            row_dict.get("episode_number"),
+                        )
+                        if dedupe_key in seen_keys:
+                            continue
+
+                        seen_keys.add(dedupe_key)
+                        rows_to_repair.append(row_dict)
+
+        if not rows_to_repair:
+            logger.debug(
+                f"  ➜ [指纹补齐] 未在 media_metadata 中找到可体检记录: "
+                f"{item_name_for_log} ids={ids} type={expected_item_type or 'Any'}"
+            )
+            return 0
+
+        logger.info(
+            f"  ➜ [指纹补齐] 正在为《{item_name_for_log}》执行 115 指纹体检，"
+            f"记录数: {len(rows_to_repair)}"
+        )
+
+        from tasks.p115_fingerprint_helpers import repair_p115_fingerprints_for_rows
+
+        local_root = _get_processor_local_strm_root(processor)
+        if not local_root:
+            logger.warning(
+                "  ➜ [指纹补齐] 未获取到 local_strm_root，本次只能补齐 PC/SHA1/115 缓存基础字段，无法可靠写入 local_path。"
+            )
+
+        repair_p115_fingerprints_for_rows(
+            processor=processor,
+            rows=rows_to_repair,
+            local_root=local_root,
+            update_db=True,
+            allow_api_fetch=True,
+            log_prefix=log_prefix,
+        )
+
+        return len(rows_to_repair)
+
+    except Exception as e:
+        logger.warning(f"  ➜ [指纹补齐] 执行失败: {e}", exc_info=True)
+        return 0
 
 def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True):
     """
@@ -324,8 +599,19 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         logger.warning(f"  ➜ 项目 '{item_name_for_log}' 的元数据处理未成功完成，跳过后续步骤。")
         return
 
-    # 2. 共享资源供给侧实时触发：保留 Movie/追更新集命中缺口分享，Movie 额外按 count=1 补备份；季包交给智能追剧完结流程。
-    _submit_shared_auto_share_after_library_ready(item_details, item_id, item_type, tmdb_id, new_episode_ids)
+    # 2. 电影入库后先做 115 指纹体检，再进入共享资源探测。
+    # 共享电影创建分享依赖 PC/SHA1/FID/缓存字段，体检要放在分享探测前。
+    if item_type == "Movie":
+        _repair_webhook_p115_fingerprints_for_emby_ids(
+            processor,
+            item_name_for_log,
+            [item_id],
+            expected_item_type="Movie",
+            log_prefix="Webhook电影指纹补齐",
+        )
+
+    # 3. 共享资源供给侧实时触发：Webhook 只负责 Movie；剧集单集/季包由智能追剧最终判定后触发。
+    _submit_shared_auto_share_after_library_ready(item_details, item_id, item_type, tmdb_id)
 
     # 3. 智能追剧判断 - 初始入库
     if is_new_item and item_type == "Series":
@@ -497,12 +783,28 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
 
                 # =======================================================
 
-                logger.info(f"  ➜ [智能追剧] 触发单项刷新...")
+                precise_new_episode_ids = [str(x).strip() for x in (new_episode_ids or []) if str(x or '').strip()]
+
+                # 在触发追剧刷新前，先对新入库的集进行体检补齐缺失的数据
+                if precise_new_episode_ids:
+                    _repair_webhook_p115_fingerprints_for_emby_ids(
+                        processor,
+                        item_name_for_log,
+                        precise_new_episode_ids,
+                        expected_item_type="Episode",
+                        log_prefix="Webhook新集指纹补齐",
+                    )
+
+                logger.info(
+                    f"  ➜ [智能追剧] 触发单项刷新..."
+                    f"{' (透传新增分集: ' + str(len(precise_new_episode_ids)) + ' 个)' if precise_new_episode_ids else ''}"
+                )
                 task_manager.submit_task(
                     task_process_watchlist,
                     task_name=f"刷新智能追剧: 《{item_name_for_log}》",
                     processor_type='watchlist', 
-                    tmdb_id=str(tmdb_id)
+                    tmdb_id=str(tmdb_id),
+                    new_episode_ids=precise_new_episode_ids or None
                 )
             except Exception as e:
                 logger.error(f"  ➜ 触发智能追剧任务失败: {e}")
@@ -646,17 +948,15 @@ def _process_batch_webhook_events():
         
         logger.info(f"  ➜ 为 '{parent_name}' 分派任务: {task_name_prefix} (分集数: {len(episode_ids)})")
         
-        task_manager.submit_task(
-            _handle_full_processing_flow,
-            task_name=f"{task_name_prefix}: {parent_name}",
-            processor_type='media', # 确保传递 processor 实例
+        _submit_webhook_media_task(
+            f"{task_name_prefix}: {parent_name}",
             item_id=parent_id,
-            force_full_update=False, # Webhook 触发通常不需要强制深度刷新 TMDb
+            force_full_update=False,
             new_episode_ids=episode_ids if episode_ids else None,
             is_new_item=not is_already_processed
         )
 
-    logger.info("  ➜ 所有 Webhook 批量任务已成功分派。")
+    logger.info("  ➜ 所有 Webhook 批量任务已完成分派或进入待提交队列。")
 
 def _trigger_metadata_update_task(item_id, item_name):
     """触发元数据同步任务"""
@@ -711,10 +1011,8 @@ def _dispatch_item(item_id, item_name, item_type):
         task_name_prefix = "Webhook追更" if is_already_processed else "Webhook入库"
         
         # 直接提交给任务管理器，不经过 WEBHOOK_BATCH_QUEUE
-        task_manager.submit_task(
-            _handle_full_processing_flow,
-            task_name=f"{task_name_prefix}: {item_name}",
-            processor_type='media',
+        _submit_webhook_media_task(
+            f"{task_name_prefix}: {item_name}",
             item_id=item_id,
             force_full_update=False,
             new_episode_ids=None,
@@ -1134,12 +1432,19 @@ def emby_webhook():
             
             target_item = transfer_info.get("target_item", {})
             target_dir = transfer_info.get("target_diritem", {})
+            source_item = transfer_info.get("fileitem") or data.get("data", {}).get("fileitem") or {}
             
             file_id = target_item.get("fileid")
             file_name = target_item.get("name")
             file_type = target_item.get("type") 
             pickcode = target_item.get("pickcode")
             dir_cid = target_dir.get("fileid")
+
+            file_size = (
+                target_item.get("size")
+                or source_item.get("size")
+                or transfer_info.get("total_size")
+            )
             
             tmdb_id = media_info.get("tmdb_id")
             media_type_cn = media_info.get("type") 
@@ -1165,6 +1470,8 @@ def emby_webhook():
                     'title': title,
                     'season_num': begin_season,
                     'episode_num': begin_episode,
+                    'size': file_size,
+                    'fs': file_size,
                     '115_path': target_item.get("path") # ★ 核心新增：直接提取 115 物理路径
                 }
                 

@@ -79,6 +79,84 @@ _DIRECT_URL_CACHE = LimitedCache(maxsize=2000)
 _GLOBAL_DIR_CACHE = LimitedCache(maxsize=5000)
 _GLOBAL_DIR_LOCK = threading.Lock()
 
+
+def _extract_sidecar_episode_number(*texts):
+    for text in texts:
+        if not text:
+            continue
+        value = str(text)
+        match = re.search(
+            r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b'
+            r'|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b'
+            r'|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b'
+            r'|第\s*\d{1,4}\s*季\s*(\d{1,4})\s*[集话話回]'
+            r'|第\s*(\d{1,4})\s*[集话話回]',
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            episode = match.group(2) or match.group(3) or match.group(4) or match.group(5) or match.group(6)
+            if episode is not None:
+                return int(episode)
+    return None
+
+
+def _extract_sidecar_part_number(*texts):
+    for text in texts:
+        if not text:
+            continue
+        value = str(text)
+        match = re.search(r'(?i)[ \.\-\_\[\(]*(part|pt|cd)[ \.\-\_]*(\d{1,2})\b', value)
+        if match:
+            return int(match.group(2))
+    return None
+
+
+def _extract_sidecar_season_number(*texts):
+    for text in texts:
+        if not text:
+            continue
+        value = str(text)
+        match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', value, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'Season\s*(\d{1,4})\b', value, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'第\s*(\d{1,4})\s*季', value)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _is_related_sidecar_name(video_name, other_name):
+    video_name = str(video_name or '')
+    other_name = str(other_name or '')
+    if not video_name or not other_name:
+        return False
+
+    video_base = video_name.rsplit('.', 1)[0] if '.' in video_name else video_name
+    if other_name.startswith(video_base):
+        return True
+
+    video_season = _extract_sidecar_season_number(video_name)
+    other_season = _extract_sidecar_season_number(other_name)
+    video_episode = _extract_sidecar_episode_number(video_name)
+    other_episode = _extract_sidecar_episode_number(other_name)
+    video_part = _extract_sidecar_part_number(video_name)
+    other_part = _extract_sidecar_part_number(other_name)
+
+    if video_episode is None or other_episode is None:
+        return False
+
+    if video_season is not None and other_season is not None and video_season != other_season:
+        return False
+
+    if video_part is not None and other_part is not None and video_part != other_part:
+        return False
+
+    return video_episode == other_episode
+
 _NOISE_TOKEN_PATTERNS = [
     r'(?i)\b(?:WEB[-_. ]?DL|WEB[-_. ]?RIP|BLU[-_. ]?RAY|BDRIP|BRRIP|REMUX|DVDRIP|HDTV|UHD)\b',
     r'(?i)\b(?:HDR10\+?|HDR|DV|DOVI|DOLBY[.\s_-]*VISION|HLG)\b',
@@ -424,6 +502,27 @@ def _p115_as_list(value):
     if isinstance(value, (list, tuple, set)):
         return list(value)
     return [value]
+
+
+def _p115_normalize_rename_pairs(rename_pairs):
+    """统一批量重命名参数，输出 [(fid, new_name), ...]。"""
+    pairs = []
+    for item in _p115_as_list(rename_pairs):
+        fid = None
+        new_name = None
+
+        if isinstance(item, dict):
+            fid = item.get('fid') or item.get('file_id') or item.get('id')
+            new_name = item.get('new_name') or item.get('file_name') or item.get('name')
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            fid, new_name = item[0], item[1]
+
+        fid = str(fid).strip() if fid is not None else ''
+        new_name = str(new_name).strip() if new_name is not None else ''
+        if fid and new_name:
+            pairs.append((fid, new_name))
+
+    return pairs
 
 
 def _p115_success(resp):
@@ -813,6 +912,24 @@ class P115CookieClient:
         url = "https://webapi.115.com/files/batch_rename"
         r = self.request(url, method='POST', data={f'files_new_name[{fid}]': str(new_name)})
         return _p115_normalize_common_response(self._json_result(r))
+
+    def fs_rename_batch(self, fid_name_tuples):
+        """Cookie/webapi 批量重命名。
+
+        115 的 /files/batch_rename 支持一次提交多个 files_new_name[fid]，
+        这里只在 Cookie 优先策略下由上层调用；OpenAPI 仍保持逐条 update。
+        """
+        pairs = _p115_normalize_rename_pairs(fid_name_tuples)
+        if not pairs:
+            return {"state": True, "data": {"count": 0}, "_batch_count": 0}
+
+        payload = {f'files_new_name[{fid}]': new_name for fid, new_name in pairs}
+        url = "https://webapi.115.com/files/batch_rename"
+        r = self.request(url, method='POST', data=payload)
+        resp = _p115_normalize_common_response(self._json_result(r))
+        if resp.get('state'):
+            resp['_batch_count'] = len(pairs)
+        return resp
 
     def fs_delete(self, fids):
         ids = [str(i) for i in _p115_as_list(fids) if i is not None]
@@ -1250,7 +1367,9 @@ class P115Service:
                 return self._call_api('fs_search', payload, normalizer=_p115_normalize_list_response)
             
             def fs_get_info(self, file_id):
-                return self._call_api('fs_get_info', file_id, normalizer=_p115_normalize_info_response)
+                # 强制使用 OpenAPI 获取详情，因为 Cookie 接口存在不返回父目录 ID 的缺陷
+                self._check_openapi()
+                return self._call_api('fs_get_info', file_id, normalizer=_p115_normalize_info_response, force_openapi=True)
 
             def _is_exists_error(self, resp):
                 text = json.dumps(resp, ensure_ascii=False).lower() if resp is not None else ""
@@ -1478,6 +1597,79 @@ class P115Service:
 
             def fs_rename(self, fid_name_tuple):
                 return self._call_api('fs_rename', fid_name_tuple, normalizer=_p115_normalize_common_response)
+
+            def fs_rename_batch(self, fid_name_tuples):
+                """按用户配置选择批量/逐条重命名。
+
+                - 115 API 优先级为 cookie：优先调用 Cookie /files/batch_rename；
+                - 其他情况：保持 OpenAPI 逐条 /open/ufile/update；
+                - 批量接口失败时自动退回逐条，避免后续 STRM 使用错误文件名。
+                """
+                pairs = _p115_normalize_rename_pairs(fid_name_tuples)
+                if not pairs:
+                    return {
+                        'state': True,
+                        'data': {'total': 0, 'success_count': 0, 'failed_count': 0},
+                        '_rename_mode': 'noop',
+                        '_rename_failures': {},
+                    }
+
+                def _sequential_rename(reason=None):
+                    successes = []
+                    failures = {}
+                    for fid, new_name in pairs:
+                        resp = self.fs_rename((fid, new_name))
+                        if _p115_success(resp):
+                            successes.append(fid)
+                        else:
+                            failures[fid] = resp
+
+                    result = {
+                        'state': not failures,
+                        'data': {
+                            'total': len(pairs),
+                            'success_count': len(successes),
+                            'failed_count': len(failures),
+                        },
+                        '_rename_mode': 'sequential',
+                        '_rename_successes': successes,
+                        '_rename_failures': failures,
+                    }
+                    if reason:
+                        result['_fallback_reason'] = reason
+                    return result
+
+                if get_115_api_priority() == 'cookie' and self._cookie and hasattr(self._cookie, 'fs_rename_batch'):
+                    try:
+                        self._rate_limit()
+                        resp = self._cookie.fs_rename_batch(pairs)
+                        resp = _p115_normalize_common_response(resp)
+                        if _p115_success(resp):
+                            resp.update({
+                                '_rename_mode': 'cookie_batch',
+                                '_rename_successes': [fid for fid, _ in pairs],
+                                '_rename_failures': {},
+                            })
+                            resp.setdefault('data', {})
+                            if isinstance(resp.get('data'), dict):
+                                resp['data'].setdefault('total', len(pairs))
+                                resp['data'].setdefault('success_count', len(pairs))
+                                resp['data'].setdefault('failed_count', 0)
+                            logger.info(f"  ➜ [批量重命名] Cookie 批量接口成功处理 {len(pairs)} 个文件。")
+                            return resp
+
+                        logger.warning(
+                            f"  ➜ [批量重命名] Cookie 批量接口失败，回退逐条重命名: "
+                            f"{_p115_error_text(resp)}"
+                        )
+                        return _sequential_rename(reason=_p115_error_text(resp))
+                    except Exception as e:
+                        if _p115_is_severe_failure(e):
+                            P115Service.reset_cookie_client()
+                        logger.warning(f"  ➜ [批量重命名] Cookie 批量接口异常，回退逐条重命名: {e}")
+                        return _sequential_rename(reason=str(e))
+
+                return _sequential_rename(reason='openapi_priority_or_cookie_unavailable')
 
             def fs_delete(self, fids):
                 return self._call_api('fs_delete', fids, normalizer=_p115_normalize_common_response)
@@ -2322,12 +2514,21 @@ class P115CacheManager:
 
 
     @staticmethod
-    def patch_raw_ffprobe_etk_context(sha1, *, season_number=None, episode_number=None):
-        """在已经生成 ffprobe RAW 之后，回填整理链路最终确认的季集号。
+    def patch_raw_ffprobe_etk_context(
+        sha1,
+        *,
+        tmdb_id=None,
+        media_type=None,
+        original_language=None,
+        season_number=None,
+        episode_number=None,
+        force_identity=False,
+    ):
+        """回填/修复 raw_ffprobe_json 顶层 _etk 媒体身份。
 
-        生成 raw_ffprobe_json 的时机早于 _rename_file_node 最终解析季集号，
-        所以这里在季集号落定后反向补写 p115_mediainfo_cache，确保后续上传中心的 RAW
-        顶层 _etk 自带 season_number / episode_number。
+        raw_ffprobe_json 的生成可能早于整理链路最终确认 TMDb 与季集号；
+        如果第一次识别错了，_etk.tmdb_id/type 也会被污染。手动重组时需要用
+        用户最终指定的 TMDb 身份强制覆盖，避免后续共享 RAW / 再识别继续吃到旧错误。
         """
         if not sha1:
             return False
@@ -2344,15 +2545,35 @@ class P115CacheManager:
             except Exception:
                 return None
 
-        patch = {}
+        def _normalize_type(value):
+            text = str(value or '').strip().lower()
+            if text in {'movie', 'movies', 'film', '电影'}:
+                return 'movie'
+            if text in {'tv', 'series', 'season', 'episode', '电视剧', '剧集', '季', '集', '分集'}:
+                return 'tv'
+            return None
+
+        patch = {'sha1': sha1}
+
+        if tmdb_id not in (None, ''):
+            patch['tmdb_id'] = str(tmdb_id).strip()
+
+        normalized_type = _normalize_type(media_type)
+        if normalized_type:
+            patch['type'] = normalized_type
+
+        if original_language not in (None, ''):
+            patch['original_language'] = str(original_language).strip()
+
         sn = _ctx_int(season_number)
         en = _ctx_int(episode_number)
         if sn is not None:
             patch['season_number'] = sn
         if en is not None:
             patch['episode_number'] = en
-        if not patch:
-            return False
+
+        # 即使只有 sha1，也允许写回 _etk.sha1。旧缓存可能已有 tmdb_id/type，
+        # 但缺少 sha1；共享 RAW 上传前应把这个稳定身份字段补齐。
 
         try:
             from psycopg2.extras import Json
@@ -2364,34 +2585,67 @@ class P115CacheManager:
                         (sha1,)
                     )
                     row = cursor.fetchone()
-                    if not row or not row.get('raw_ffprobe_json'):
+                    if not row:
                         return False
 
                     raw_probe = row.get('raw_ffprobe_json')
-                    try:
-                        if isinstance(raw_probe, str):
-                            raw_probe = json.loads(raw_probe)
-                    except Exception:
-                        return False
 
-                    if not isinstance(raw_probe, dict):
-                        return False
+                    if raw_probe:
+                        try:
+                            if isinstance(raw_probe, str):
+                                raw_probe = json.loads(raw_probe)
+                        except Exception:
+                            return False
+
+                        if not isinstance(raw_probe, dict):
+                            return False
+                    else:
+                        # 老缓存可能只有 mediainfo_json 没有 RAW；重组时至少补一个最小 _etk，
+                        # 这样后续上传中心仍能携带被用户纠正后的媒体身份。
+                        raw_probe = {}
 
                     raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
                     ctx = raw_probe.get('_etk') if isinstance(raw_probe.get('_etk'), dict) else {}
+                    ctx = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
                     changed = False
 
-                    # sha1 也顺手固定为当前缓存键，避免老 RAW 里大小写/缺失不一致。
+                    def _put(key, value, *, force=False):
+                        nonlocal changed
+                        if value in (None, '', [], {}):
+                            return
+                        old_value = ctx.get(key)
+                        if force or old_value in (None, '', [], {}):
+                            if old_value != value:
+                                ctx[key] = value
+                                changed = True
+
+                    # sha1 永远以当前缓存键为准。
                     if ctx.get('sha1') != sha1:
                         ctx['sha1'] = sha1
                         changed = True
 
-                    for key, value in patch.items():
-                        if ctx.get(key) != value:
+                    # 手动重组时，用户指定的 TMDb 身份拥有最高可信度，必须覆盖旧污染。
+                    _put('tmdb_id', patch.get('tmdb_id'), force=force_identity)
+                    _put('type', patch.get('type'), force=force_identity)
+                    _put('original_language', patch.get('original_language'), force=force_identity)
+
+                    # 季集号属于文件级身份；整理链路落定后可以直接覆盖旧值。
+                    for key in ('season_number', 'episode_number'):
+                        value = patch.get(key)
+                        if value is not None and ctx.get(key) != value:
                             ctx[key] = value
                             changed = True
 
                     if not changed:
+                        # 手动重组即使本地 RAW 已经是正确身份，也可能只是之前已修过本地，
+                        # 中心对象存储里仍然是旧污染 RAW；继续把对应分享项标脏，触发覆盖上传。
+                        if force_identity:
+                            P115CacheManager.mark_shared_raw_dirty_for_sha1(
+                                sha1,
+                                reason='manual_reorganize_raw_etk_verified',
+                                tmdb_id=patch.get('tmdb_id'),
+                                media_type=patch.get('type'),
+                            )
                         return True
 
                     raw_probe['_etk'] = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
@@ -2407,14 +2661,93 @@ class P115CacheManager:
                     )
                     conn.commit()
 
+            P115CacheManager.mark_shared_raw_dirty_for_sha1(
+                sha1,
+                reason='raw_ffprobe_etk_context_fixed',
+                tmdb_id=patch.get('tmdb_id'),
+                media_type=patch.get('type'),
+            )
+
+            ctx_log = raw_probe.get('_etk', {}) if isinstance(raw_probe, dict) else {}
             logger.debug(
-                f"  ➜ [raw_ffprobe缓存] 已回填整理季集号: sha1={sha1[:12]}..., "
-                f"season={patch.get('season_number')}, episode={patch.get('episode_number')}"
+                f"  ➜ [raw_ffprobe缓存] 已修复 _etk: sha1={sha1[:12]}..., "
+                f"tmdb={ctx_log.get('tmdb_id')}, type={ctx_log.get('type')}, "
+                f"season={ctx_log.get('season_number')}, episode={ctx_log.get('episode_number')}, "
+                f"force_identity={force_identity}"
             )
             return True
         except Exception as e:
-            logger.debug(f"  ➜ 回填 raw_ffprobe 季集号失败: {sha1[:12]}... -> {e}")
+            logger.debug(f"  ➜ 修复 raw_ffprobe _etk 失败: {sha1[:12]}... -> {e}")
             return False
+
+    @staticmethod
+    def mark_shared_raw_dirty_for_sha1(sha1, *, reason='raw_ffprobe_etk_context_fixed', tmdb_id=None, media_type=None):
+        """本地 RAW 被修正后，标记已分享到中心的同 SHA1 资源需要重新上传 RAW。
+
+        手动重组通常就是为了纠正识别错误；如果旧 RAW 已经登记到中心，中心对象存储
+        会继续保存污染的 _etk。这里不直接依赖路由层上传逻辑，只把本地分享项置为
+        raw_ffprobe_uploaded=FALSE / center_reported=FALSE，并把分享记录改成 not_reported，
+        交给共享高频同步任务强制重传并重新登记中心。
+        """
+        sha1 = str(sha1 or '').strip().upper()
+        if not sha1:
+            return 0
+
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE shared_share_items
+                        SET raw_ffprobe_uploaded = FALSE,
+                            center_reported = FALSE,
+                            updated_at = NOW()
+                        WHERE UPPER(COALESCE(sha1, '')) = %s
+                        RETURNING share_record_id
+                        """,
+                        (sha1,)
+                    )
+                    record_ids = sorted({r.get('share_record_id') for r in cursor.fetchall() if r.get('share_record_id') is not None})
+
+                    if record_ids:
+                        dirty_payload = {
+                            'raw_etk_dirty': {
+                                'pending': True,
+                                'reason': reason,
+                                'sha1': sha1,
+                                'tmdb_id': str(tmdb_id or '').strip() or None,
+                                'type': str(media_type or '').strip() or None,
+                                'marked_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            }
+                        }
+                        cursor.execute(
+                            """
+                            UPDATE shared_share_records
+                            SET center_status = 'not_reported',
+                                last_error = %s,
+                                raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
+                                updated_at = NOW()
+                            WHERE id = ANY(%s)
+                              AND COALESCE(status, '') NOT IN ('cancelled', 'deleted', 'dead', 'blocked', 'violation')
+                            """,
+                            (
+                                f'本地 RAW _etk 已修复，等待覆盖中心 RAW：{sha1[:12]}...',
+                                json.dumps(dirty_payload, ensure_ascii=False),
+                                record_ids,
+                            )
+                        )
+                    conn.commit()
+
+            if record_ids:
+                logger.info(
+                    f"  ➜ [raw_ffprobe缓存] 已标记 {len(record_ids)} 个共享记录重新上传 RAW："
+                    f"sha1={sha1[:12]}..., reason={reason}"
+                )
+            return len(record_ids)
+        except Exception as e:
+            # 没启用共享资源或旧库缺表时不能影响 115 整理主流程。
+            logger.debug(f"  ➜ 标记共享 RAW 重传失败: sha1={sha1[:12]}... -> {e}")
+            return 0
 
 # ======================================================================
 # ★★★ 115 整理记录 DB 管理器 ★★★
@@ -2707,6 +3040,8 @@ def get_config():
     return config_manager.APP_CONFIG
 
 class SmartOrganizer(P115MediaAnalyzerMixin):
+    _P115_INVALID_NAME_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
+
     def __init__(self, client, tmdb_id, media_type, original_title, ai_translator=None, use_ai=False):
         self.client = client
         self.tmdb_id = tmdb_id
@@ -3155,7 +3490,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 name_to_check = row['renamed_name'] or row['original_name'] or ""
                                 m1 = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', name_to_check)
                                 m2 = re.search(r'Season\s*(\d{1,4})\b', name_to_check, re.IGNORECASE)
-                                m3 = re.search(r'第(\d{1,4})季', name_to_check)
+                                m3 = re.search(r'第\s*(\d{1,4})\s*季', name_to_check)
                                 s_val = None
                                 if m1: s_val = int(m1.group(1))
                                 elif m2: s_val = int(m2.group(1))
@@ -3259,10 +3594,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             val = None
             is_sep = False
             
-            # 优先使用传入的 safe_title，防止文件名包含 \/:*?"<>| 导致报错
-            if block == 'title_zh': val = safe_title if safe_title else (self.details.get('title') or self.original_title)
-            elif block == 'title_en': val = self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title
-            elif block == 'title_orig': val = original_title or self.details.get('original_title') or self.original_title
+            # 标题块统一做 115 非法字符清洗，避免目录/文件名因原文标题中的引号等字符创建失败。
+            if block == 'title_zh':
+                raw_title = safe_title if safe_title else (self.details.get('title') or self.original_title)
+                val = self._sanitize_115_name_component(raw_title)
+            elif block == 'title_en':
+                raw_title = self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title
+                val = self._sanitize_115_name_component(raw_title)
+            elif block == 'title_orig':
+                raw_title = original_title or self.details.get('original_title') or self.original_title
+                val = self._sanitize_115_name_component(raw_title)
             elif block == 'year': val = f"({self.details.get('date', '')[:4]})" if self.details.get('date') else None
             elif block == 'year_pure': val = self.details.get('date', '')[:4] if self.details.get('date') else None
             elif block == 'tmdb_bracket': val = f"{{tmdb={self.tmdb_id}}}"
@@ -3274,17 +3615,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 val = f"S{s_val:02d}E{e_val:02d}" 
             elif block in ('episode_name_zh', 'episode_no_zh') and is_tv:
                 e_val = episode_num if episode_num is not None else 1
-                val = f"第{e_val}集"
+                val = f"第 {e_val} 集"
             elif block in ('s_e_zh', 'season_episode_zh') and is_tv:
                 s_val = season_num if season_num is not None else 1
                 e_val = episode_num if episode_num is not None else 1
-                val = f"第{s_val}季{e_val}集"
+                val = f"第 {s_val} 季 {e_val} 集"
             elif block == 'season_name_en' and is_tv:
                 val = f"Season {season_num:02d}" if season_num is not None else None
             elif block == 'season_name_en_no0' and is_tv:
                 val = f"Season {season_num}" if season_num is not None else None
             elif block == 'season_name_zh' and is_tv:
-                val = f"第{season_num}季" if season_num is not None else None
+                val = f"第 {season_num} 季" if season_num is not None else None
             elif block == 'season_name_s' and is_tv:
                 val = f"S{season_num:02d}" if season_num is not None else None
             elif block == 'season_name_s_no0' and is_tv:
@@ -3318,6 +3659,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 final_parts.append(item['val'])
 
         return "".join(final_parts)
+
+    @classmethod
+    def _sanitize_115_name_component(cls, text):
+        cleaned = utils.clean_invisible_chars(text)
+        cleaned = cls._P115_INVALID_NAME_CHARS_RE.sub('', cleaned).strip()
+        return cleaned
 
     def _get_episode_regex_rules(self):
         """懒加载自定义季集号识别规则，避免每个文件都查数据库"""
@@ -3490,9 +3837,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         video_info[k] = v
                     
         # 解析季集号
-        # ★ 优先使用 Webhook 强塞进来的精准数据，其次直接吃 raw_ffprobe_json 顶层 _etk 的季集号。
+        # ★ 优先使用文件级精准数据（Webhook 强塞 / raw_ffprobe / 文件名与路径显式特征），
+        #   TG Candidate hints 仅在本地证据缺失时做兜底，避免群组级集号污染整包文件。
         season_num = file_node.get('_forced_season')
         episode_num = file_node.get('_forced_episode')
+        season_source = 'forced' if season_num is not None else None
+        episode_source = 'forced' if episode_num is not None else None
 
         def _se_int(value):
             try:
@@ -3502,31 +3852,25 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             except Exception:
                 return None
 
+        hint_season = _se_int(normalized_hints.get('season_number')) if normalized_hints else None
+        hint_episode = _se_int(normalized_hints.get('episode_number')) if normalized_hints else None
+
         if is_tv and real_info:
+            raw_probe_season = _se_int(real_info.get('season_number'))
+            raw_probe_episode = _se_int(real_info.get('episode_number'))
             if season_num is None:
-                season_num = _se_int(real_info.get('season_number'))
+                season_num = raw_probe_season
+                if raw_probe_season is not None:
+                    season_source = 'raw_ffprobe'
             if episode_num is None:
-                episode_num = _se_int(real_info.get('episode_number'))
-            if (real_info.get('season_number') not in (None, '') or real_info.get('episode_number') not in (None, '')) and not silent_log:
+                episode_num = raw_probe_episode
+                if raw_probe_episode is not None:
+                    episode_source = 'raw_ffprobe'
+            if (raw_probe_season is not None or raw_probe_episode is not None) and not silent_log:
                 logger.info(
                     f"  ➜ [raw_ffprobe季集号] 命中缓存身份 -> "
-                    f"S{int(season_num if season_num is not None else 1):02d}"
-                    f"E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
-                )
-
-        if is_tv and normalized_hints:
-            if season_num is None and normalized_hints.get('season_number') is not None:
-                season_num = _se_int(normalized_hints.get('season_number'))
-            if episode_num is None and normalized_hints.get('episode_number') is not None:
-                episode_num = _se_int(normalized_hints.get('episode_number'))
-            if (
-                (normalized_hints.get('season_number') not in (None, '') or normalized_hints.get('episode_number') not in (None, ''))
-                and not silent_log
-            ):
-                logger.info(
-                    f"  ➜ [TG Candidate季集] 命中 hints -> "
-                    f"S{int(season_num if season_num is not None else 1):02d}"
-                    f"E{int(episode_num if episode_num is not None else 0):02d} | {original_name}"
+                    f"S{int(raw_probe_season if raw_probe_season is not None else 1):02d}"
+                    f"E{int(raw_probe_episode if raw_probe_episode is not None else 0):02d} | {original_name}"
                 )
 
         if is_tv and (season_num is None or episode_num is None):
@@ -3539,8 +3883,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
             if custom_season is not None and season_num is None:
                 season_num = custom_season
+                season_source = 'custom_rule'
             if custom_episode is not None and episode_num is None:
                 episode_num = custom_episode
+                episode_source = 'custom_rule'
 
             if custom_rule_name and not silent_log:
                 logger.info(
@@ -3550,8 +3896,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
             if rule_result.get('season_number') is not None and season_num is None:
                 season_num = int(rule_result.get('season_number'))
+                season_source = 'rule'
             if rule_result.get('episode_number') is not None and episode_num is None:
                 episode_num = int(rule_result.get('episode_number'))
+                episode_source = 'rule'
             if (
                 (rule_result.get('season_number') is not None or rule_result.get('episode_number') is not None)
                 and not silent_log
@@ -3567,7 +3915,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*?(?:e|E|p|P)(\d{1,4})\b'
                     r'|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b'
                     r'|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b'
-                    r'|第(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+                    r'|第\s*\d{1,4}\s*季\s*(\d{1,4})\s*[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
+                    r'|第\s*(\d{1,4})\s*[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
                     r'|(?:^|[ \.\-\_\[\(])(\d{1,4})[集话話回](?=$|[^\u4e00-\u9fff]|完|完结|完結)'
                 )
 
@@ -3577,10 +3926,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     e = match.group(2)
                     ep_only = match.group(3)
                     e_only = match.group(4)
-                    zh_ep = match.group(5) or match.group(6)
+                    zh_ep = match.group(5) or match.group(6) or match.group(7)
 
                     if season_num is None:
                         season_num = int(s) if s else None
+                        if season_num is not None:
+                            season_source = 'filename'
 
                     if episode_num is None:
                         episode_num = int(e) if e else (
@@ -3588,18 +3939,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 int(e_only) if e_only else int(zh_ep)
                             )
                         )
+                        if episode_num is not None:
+                            episode_source = 'filename'
 
             # 2. 从相对路径提取季号，支持 Specials / SP / OVA / 第0季
             if season_num is None and rel_path:
                 season_from_path = self._extract_season_from_path_or_text(rel_path)
                 if season_from_path is not None:
                     season_num = season_from_path
+                    season_source = 'path'
 
             # 3. ★ 纯数字 / 动漫数字兜底提取集号
             if episode_num is None:
                 name_without_ext = original_name.rsplit('.', 1)[0]
                 if name_without_ext.isdigit():
                     episode_num = int(name_without_ext)
+                    episode_source = 'filename'
                 else:
                     clean_name = re.sub(
                         r'(19|20)\d{2}|1080[pP]?|2160[pP]?|720[pP]?|480[pP]?|4[kK]|264|265|10bit|8bit|5\.1|7\.1|2\.0',
@@ -3611,30 +3966,52 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     if anime_match:
                         ep_str = anime_match.group(1) or anime_match.group(2) or anime_match.group(3)
                         episode_num = int(ep_str)
+                        episode_source = 'filename'
                     else:
                         end_match = re.search(r'(?:^|[ \.\-\_\[\(])(\d{1,4})(?:[\]\)]|\s*)$', clean_name)
                         if end_match:
                             episode_num = int(end_match.group(1))
+                            episode_source = 'filename'
                         else:
                             mid_match = re.search(r'(?:^|[ \-\_\[\(])(\d{1,4})(?:[ \.\-\_\]\)]|$)', clean_name)
-                            if mid_match:
-                                episode_num = int(mid_match.group(1))
+                    if mid_match:
+                        episode_num = int(mid_match.group(1))
+                        episode_source = 'filename'
 
             # 4. 终极兜底
             if season_num is None:
                 season_num = 1
+                season_source = 'default'
+
+        if is_tv and normalized_hints:
+            if season_num is None and hint_season is not None:
+                season_num = hint_season
+                season_source = 'hint'
+            if episode_num is None and hint_episode is not None:
+                episode_num = hint_episode
+                episode_source = 'hint'
+            if (hint_season is not None or hint_episode is not None) and not silent_log:
+                logger.info(
+                    f"  ➜ [TG Candidate季集] 命中 hints -> "
+                    f"S{int(hint_season if hint_season is not None else 1):02d}"
+                    f"E{int(hint_episode if hint_episode is not None else 0):02d} | {original_name}"
+                )
 
         if is_tv and normalized_hints.get('is_special') and season_num is None:
             season_num = 0
+            season_source = 'hint'
 
         if is_tv and normalized_hints.get('is_special') and season_num == 1 and episode_num is None:
             season_num = 0
+            season_source = 'hint'
 
         if is_tv and rule_result.get('is_special') and season_num is None:
             season_num = 0
+            season_source = 'rule'
 
         if is_tv and rule_result.get('is_special') and season_num == 1 and episode_num is None:
             season_num = 0
+            season_source = 'rule'
 
         # ★★★ 动漫绝对集数转季号逻辑 (解决海贼王 S01E1158 的问题) ★★★
         if is_tv and episode_num is not None and episode_num > 30:
@@ -3655,6 +4032,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # 捷径：如果是最新集，直接取最新季
                 if last_ep_data and last_ep_data.get('episode_number') == episode_num:
                     season_num = last_ep_data.get('season_number', 1)
+                    season_source = 'season_capacity_fix'
                     if not silent_log:
                         logger.info(f"  ➜ [分季修正] 命中最新集，自动修正为第 {season_num} 季")
                 elif seasons_data:
@@ -3665,6 +4043,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         cumulative += s.get('episode_count', 0)
                         if episode_num <= cumulative:
                             season_num = s['season_number']
+                            season_source = 'season_capacity_fix'
                             if not silent_log:
                                 logger.info(f"  ➜ [分季修正] 绝对集数 {episode_num} 超出原季容量，已自动推算并修正为第 {season_num} 季！")
                             break
@@ -3678,7 +4057,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 has_explicit_season = False
                 explicit_season_re = (
                     r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)|'
-                    r'Season\s*\d{1,4}|第\d{1,4}季|'
+                    r'Season\s*\d{1,4}|第\s*\d{1,4}\s*季|'
                     r'(?:^|[ \.\-\_\[\(])(?:Specials?|SP|OVA|OAD|特别篇|特別篇|番外(?:篇)?|外传|外傳)(?=$|[ \.\-\_\]\)])'
                 )
 
@@ -3689,6 +4068,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     
                 if not has_explicit_season:
                     season_num = int(self.forced_season)
+                    season_source = 'forced'
 
         # ★★★ 核心升级：直接调用统一乐高引擎生成文件名 ★★★
         default_format = ['title_zh', 'sep_dash_space', 'year', 'sep_middot_space', 's_e', 'sep_middot_space', 'resolution', 'sep_middot_space', 'codec', 'sep_middot_space', 'audio', 'sep_middot_space', 'group']
@@ -3731,16 +4111,31 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             )
             if not s_name: s_name = f"Season {season_num:02d}"
 
-        # raw_ffprobe_json 生成早于最终季集号识别；此时季集号已经落定，反向补写本地 RAW，
-        # 后续上传中心时 _etk 就能直接携带 season_number / episode_number。
-        if is_tv and not is_sub:
+        # raw_ffprobe_json 生成早于最终识别结果；此时 TMDb 身份与季集号已经落定，
+        # 反向补写本地 RAW。手动重组时强制覆盖 _etk.tmdb_id/type，避免旧错误身份继续污染共享 RAW。
+        if not is_sub:
             try:
                 raw_patch_sha1 = file_node.get('sha1') or file_node.get('sha')
-                if raw_patch_sha1 and (season_num is not None or episode_num is not None):
+                force_identity = bool(getattr(self, 'is_manual_correct', False))
+                trusted_season = None
+                trusted_episode = None
+
+                if is_tv:
+                    trusted_season = season_num if (
+                        season_source not in (None, 'hint')
+                        and episode_source not in ('hint',)
+                    ) else None
+                    trusted_episode = episode_num if episode_source not in (None, 'hint') else None
+
+                if raw_patch_sha1 and (force_identity or trusted_season is not None or trusted_episode is not None):
                     P115CacheManager.patch_raw_ffprobe_etk_context(
                         raw_patch_sha1,
-                        season_number=season_num,
-                        episode_number=episode_num,
+                        tmdb_id=self.tmdb_id,
+                        media_type=self.media_type,
+                        original_language=(self.raw_metadata or {}).get('lang_code'),
+                        season_number=trusted_season,
+                        episode_number=trusted_episode,
+                        force_identity=force_identity,
                     )
             except Exception:
                 pass
@@ -4101,7 +4496,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 if self._extract_season_from_path_or_text(rel_path) is not None:
                     is_actually_tv = True
                     break
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\d{1,4}[集话話回]', c_name, re.IGNORECASE):
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\s*\d{1,4}\s*季\s*\d{1,4}\s*[集话話回]|第\s*\d{1,4}\s*[集话話回]', c_name, re.IGNORECASE):
                     is_actually_tv = True
                     break
                 
@@ -4149,7 +4544,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if extracted_season is None:
                 m1 = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})(?:[ \.\-]*(?:e|E|p|P)\d{1,4}\b)?', parse_name, re.IGNORECASE)
                 m2 = re.search(r'Season\s*(\d{1,4})\b', parse_name, re.IGNORECASE)
-                m3 = re.search(r'第(\d{1,4})季', parse_name)
+                m3 = re.search(r'第\s*(\d{1,4})\s*季', parse_name)
 
                 if m1:
                     extracted_season = int(m1.group(1))
@@ -4158,7 +4553,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 elif m3:
                     extracted_season = int(m3.group(1))
             else:
-                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', parse_name, re.IGNORECASE):
+                if re.search(r'(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第\s*(\d{1,4})\s*[集话話回]', parse_name, re.IGNORECASE):
                     extracted_season = 1
             
             if extracted_season is not None:
@@ -4185,7 +4580,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         
         # ★ 必须保留 safe_title 的计算，供后续文件重命名使用
         base_title = original_title if cfg.get('main_title_lang', 'zh') == 'original' else title
-        safe_title = re.sub(r'[\\/:*?"<>|]', '', base_title).strip()
+        safe_title = self._sanitize_115_name_component(base_title)
 
         # ★ 保留原名只影响文件名，不影响主目录
         # batch 模式 root_name 可能是“批量文件”，绝不能拿它当目标主目录
@@ -4193,7 +4588,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         std_root_name = self._build_name_from_format(
             main_format,
             is_tv=(self.media_type == 'tv'),
-            original_title=original_title
+            original_title=original_title,
+            safe_title=safe_title
         )
 
         # 兜底防空
@@ -4371,7 +4767,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # ★★★ 同批次字幕完美对齐视频命名 (解决 MP 单文件上传分离问题) ★★★
         # =================================================================
         batch_video_names = {} # key: (season, episode, part) -> base_name
-        if not keep_original and is_batch:
+        if is_batch:
             # 1. 预扫描视频，生成标准命名
             for file_item in candidates:
                 fn = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
@@ -4385,10 +4781,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         silent_log=True,  # ★ 开启静默，防止预扫描时重复打印日志
                         recognition_hints=self.recognition_hints,
                     )
+                    video_base_name = fn.rsplit('.', 1)[0]
+                    if not keep_original:
+                        video_base_name = v_name.rsplit('.', 1)[0]
                     key = (v_s, v_e, v_part) if self.media_type == 'tv' else ('movie', v_part)
                     # 电影只保留第一个视频作为基准 (通常电影只有一个正片)
                     if key not in batch_video_names:
-                        batch_video_names[key] = v_name.rsplit('.', 1)[0]
+                        batch_video_names[key] = video_base_name
             
             # 2. 将视频基础名注入到同批次的字幕中
             if batch_video_names:
@@ -4417,13 +4816,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         # ★ 剧集匹配逻辑：使用强大的正则和纯数字兜底提取集号
                         if self.media_type == 'tv' and (s_num is None or e_num is None):
                             # 1. 标准特征匹配
-                            match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第(\d{1,4})[集话話回]', fn, re.IGNORECASE)
+                            match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*?(\d{1,4})\b|(?:^|[ \.\-\_\[\(])e(\d{1,4})\b|第\s*\d{1,4}\s*季\s*(\d{1,4})\s*[集话話回]|第\s*(\d{1,4})\s*[集话話回]', fn, re.IGNORECASE)
                             if match:
                                 s = match.group(1)
                                 e = match.group(2)
                                 ep_only = match.group(3)
                                 e_only = match.group(4)
-                                zh_ep = match.group(5)
+                                zh_ep = match.group(5) or match.group(6)
                                 if s_num is None: s_num = int(s) if s else None
                                 if e_num is None: e_num = int(e) if e else (int(ep_only) if ep_only else (int(e_only) if e_only else int(zh_ep)))
                             
@@ -4549,8 +4948,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     recognition_hints=self.recognition_hints,
                 )
 
-                # ★ 核心：只保留文件名
-                new_filename = file_name
+                # ★ 核心：保留原名只对主视频生效。
+                # 外挂字幕若已绑定到同批视频，仍需跟随视频基名改名，避免 Emby/Jellyfin 挂载失配。
+                if ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'] and file_item.get('_forced_base_name'):
+                    new_filename = parsed_filename
+                else:
+                    new_filename = file_name
 
                 # ★ 目录仍走标准逻辑
                 real_target_cid = final_home_cid
@@ -5002,18 +5405,66 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # -----------------------------------------------------------
                 # ★ 4. 执行重命名
                 # -----------------------------------------------------------
+                rename_items = []
                 for item in valid_items:
-                    fid = str(item.get('fid') or item.get('file_id'))
+                    fid = str(item.get('fid') or item.get('file_id') or '').strip()
                     old_name = item.get('fn') or item.get('n') or item.get('file_name')
                     new_name = item['_new_filename']
-                    if old_name != new_name:
-                        ren_res = self.client.fs_rename((fid, new_name))
-                        if ren_res.get('state'):
-                            logger.info(f"  ➜ [重命名] {old_name} -> {new_name}")
+                    if fid and old_name != new_name:
+                        rename_items.append({
+                            'fid': fid,
+                            'old_name': old_name,
+                            'new_name': new_name,
+                            'item': item,
+                        })
+
+                if rename_items:
+                    rename_pairs = [(x['fid'], x['new_name']) for x in rename_items]
+                    if hasattr(self.client, 'fs_rename_batch'):
+                        ren_res = self.client.fs_rename_batch(rename_pairs)
+                    else:
+                        # 极旧客户端兜底：保持原有逐条行为。
+                        failures = {}
+                        successes = []
+                        for fid, new_name in rename_pairs:
+                            one_res = self.client.fs_rename((fid, new_name))
+                            if one_res.get('state'):
+                                successes.append(fid)
+                            else:
+                                failures[fid] = one_res
+                        ren_res = {
+                            'state': not failures,
+                            '_rename_mode': 'legacy_sequential',
+                            '_rename_successes': successes,
+                            '_rename_failures': failures,
+                            'data': {
+                                'total': len(rename_pairs),
+                                'success_count': len(successes),
+                                'failed_count': len(failures),
+                            }
+                        }
+
+                    failures = ren_res.get('_rename_failures') or {}
+                    mode = ren_res.get('_rename_mode') or 'unknown'
+                    success_count = len(rename_items) - len(failures)
+
+                    if success_count > 0:
+                        if mode == 'cookie_batch':
+                            logger.info(f"  ➜ [批量重命名] 成功批量重命名 {success_count}/{len(rename_items)} 个文件。")
                         else:
-                            logger.warning(f"  ➜ [重命名失败] {old_name} -> {new_name}, 原因: {ren_res.get('error_msg', ren_res)}")
+                            logger.info(f"  ➜ [逐条重命名] 成功重命名 {success_count}/{len(rename_items)} 个文件。")
+
+                    for x in rename_items:
+                        fail_res = failures.get(x['fid'])
+                        if fail_res:
+                            logger.warning(
+                                f"  ➜ [重命名失败] {x['old_name']} -> {x['new_name']}, "
+                                f"原因: {_p115_error_text(fail_res)}"
+                            )
                             # ★ 核心修复：如果 115 API 重命名失败，强制退回原名，确保后续生成的 STRM 挂载路径 100% 准确！
-                            item['_new_filename'] = old_name
+                            x['item']['_new_filename'] = x['old_name']
+                        else:
+                            logger.debug(f"  ➜ [重命名] {x['old_name']} -> {x['new_name']}")
                 
                 # -----------------------------------------------------------
                 # ★ 5. 生成 STRM 和记录日志
@@ -5306,32 +5757,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         else:
             logger.debug("  ➜ [清理空目录] 批量任务模式，跳过单次垃圾回收检查，等待统一清理。")
 
-        # --- 整理记录 ---
-        if moved_count > 0:
-            try:
-                with get_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        if self.media_type == 'tv' and processed_episodes_for_flag:
-                            # ★ 核心修复：取交集，只核销真正拥有特权且本次处理成功的集数
-                            actually_washed_eps = processed_episodes_for_flag.intersection(active_washing_eps)
-                            if actually_washed_eps:
-                                from psycopg2.extras import execute_batch
-                                update_data = [(str(self.tmdb_id), s, e) for s, e in actually_washed_eps]
-                                execute_batch(cursor, """
-                                    UPDATE media_metadata 
-                                    SET active_washing = FALSE 
-                                    WHERE parent_series_tmdb_id = %s 
-                                      AND item_type = 'Episode' 
-                                      AND season_number = %s 
-                                      AND episode_number = %s
-                                """, update_data)
-                                logger.info(f"  ➜ [洗版特权] 已精准核销 {len(actually_washed_eps)} 个分集的洗版特权状态。")
-                        elif self.media_type == 'movie' and movie_active_washing:
-                            cursor.execute("UPDATE media_metadata SET active_washing = FALSE WHERE tmdb_id = %s AND item_type = 'Movie'", (str(self.tmdb_id),))
-                            logger.info(f"  ➜ [洗版特权] 已核销电影的洗版特权状态。")
-                        conn.commit()
-            except Exception as e:
-                logger.error(f"  ➜ 解除洗版状态失败: {e}")
+        # --- active_washing 状态收口 ---
+        # 整理模块只读取 active_washing 来获得洗版替换特权，不再在单集入库后核销它。
+        # 完结洗版可能分多批入库；如果这里按单集清理，会导致追剧模块误以为洗版事务已结束，
+        # 进而在 Completed -> Completed 刷新中失去事务锁。active_washing 的开启/清理统一由
+        # watchlist_processor 的完结质量门禁决定：一致性通过后整季清理，超时维护再兜底清理。
+        if moved_count > 0 and (active_washing_eps or movie_active_washing):
+            logger.debug("  ➜ [洗版特权] 本次整理使用了洗版特权。")
 
         return True
     
@@ -5662,15 +6094,20 @@ def _clean_rule_title(text):
     value = str(text).replace('\\', '/')
     value = os.path.basename(value.strip())
     value = os.path.splitext(value)[0]
+    value = re.sub(r'[？?！!：:；;，,、]+', ' ', value)
 
     for pattern in _NOISE_TOKEN_PATTERNS:
         value = re.sub(pattern, ' ', value)
 
-    value = re.sub(r'(?i)\b(?:s\d{1,4}[ .\-_]*e\d{1,4}|season[ .\-_]*\d{1,4}|ep(?:isode)?[ .\-_]*\d{1,4}|第[一二三四五六七八九十百零\d]+[季集话話回])\b', ' ', value)
+    value = re.sub(r'(?i)\b(?:s\d{1,4}[ .\-_]*e\d{1,4}|season[ .\-_]*\d{1,4}|ep(?:isode)?[ .\-_]*\d{1,4}|第\s*[一二三四五六七八九十百零\d]+\s*[季集话話回])\b', ' ', value)
     value = re.sub(r'(?i)\b(?:part|pt|cd)[ .\-_]*\d{1,2}\b', ' ', value)
     value = re.sub(r'(?i)\b(?:tmdb|tmdbid)[=\-_ ]*\d+\b', ' ', value)
     value = re.sub(r'(?<!\d)(?:19|20)\d{2}(?!\d)', ' ', value)
     value = re.sub(r'(?i)\b(?:specials?|ova|oad|sp|extra(?:s)?|collection|complete)\b', ' ', value)
+    value = re.sub(r'(?i)\b(?:h[ ._-]?26[45]|x26[45])\b', ' ', value)
+    value = re.sub(r'(?i)\b(?:flac|aac|ddp|dd|dts|truehd|atmos)[ ._-]*\d(?:\.\d)?\b', ' ', value)
+    value = re.sub(r'(?i)(?:[-_. ]+)?[A-Za-z0-9][A-Za-z0-9._-]{1,20}@[A-Za-z0-9][A-Za-z0-9._-]{1,20}$', ' ', value)
+    value = re.sub(r'(?<!\w)\d\.\d(?!\w)', ' ', value)
     value = re.sub(r'[\[\]\(\)\{\}]', ' ', value)
     value = re.sub(r'[._]+', ' ', value)
     value = re.sub(r'\s+', ' ', value).strip(' -_./')
@@ -5931,7 +6368,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
         else:
             # 将主目录名和文件名拼在一起，寻找剧集特征
             combined_text = f"{main_dir_name or ''} {filename}"
-            if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第[一二三四五六七八九十\d]+季|Season', combined_text, re.IGNORECASE):
+            if has_season_subdirs or re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|(?:^|[ \.\-\_\[\(])(?:ep|episode)[ \.\-]*\d{1,4}\b|(?:^|[ \.\-\_\[\(])e\d{1,4}\b|第\s*[一二三四五六七八九十\d]+\s*季|Season', combined_text, re.IGNORECASE):
                 media_type = 'tv'
 
     if rule_result.get('title'):
@@ -5972,34 +6409,34 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
     # ★ 优先级 0：共享媒体信息缓存身份命中
     # raw_ffprobe_json 顶层 _etk 来自 p115_mediainfo_cache，跨账号仍可复用。
     # =================================================================
-    probe_identity = _extract_raw_ffprobe_identity(raw_ffprobe_json)
-    if not probe_identity and sha1:
-        probe_identity = _get_raw_ffprobe_identity_by_sha1(sha1)
+    # probe_identity = _extract_raw_ffprobe_identity(raw_ffprobe_json)
+    # if not probe_identity and sha1:
+    #     probe_identity = _get_raw_ffprobe_identity_by_sha1(sha1)
 
-    if probe_identity:
-        tmdb_id = probe_identity.get("tmdb_id")
-        probe_type = probe_identity.get("media_type")
+    # if probe_identity:
+    #     tmdb_id = probe_identity.get("tmdb_id")
+    #     probe_type = probe_identity.get("media_type")
 
-        # forced_media_type 仍然拥有最终约束权，但不允许与缓存类型冲突时静默误判。
-        if forced_media_type and forced_media_type != probe_type:
-            logger.debug(
-                f"  ➜ [raw_ffprobe识别] 命中 TMDb:{tmdb_id} 类型:{probe_type}，"
-                f"但当前强制类型为 {forced_media_type}，跳过缓存身份。"
-            )
-        else:
-            media_type = probe_type
-            official_title = _fetch_title_by_id(tmdb_id, media_type)
-            se_text = ''
-            if probe_identity.get('season_number') not in (None, ''):
-                se_text += f", S{int(probe_identity.get('season_number')):02d}"
-            if probe_identity.get('episode_number') not in (None, ''):
-                se_text += f"E{int(probe_identity.get('episode_number')):02d}"
-            logger.info(
-                f"  ➜ [raw_ffprobe识别] 命中共享媒体信息缓存: "
-                f"TMDb:{tmdb_id}, type:{media_type}{se_text}"
-                f"{', lang:' + probe_identity.get('original_language') if probe_identity.get('original_language') else ''}"
-            )
-            return tmdb_id, media_type, official_title or filename
+    #     # forced_media_type 仍然拥有最终约束权，但不允许与缓存类型冲突时静默误判。
+    #     if forced_media_type and forced_media_type != probe_type:
+    #         logger.debug(
+    #             f"  ➜ [raw_ffprobe识别] 命中 TMDb:{tmdb_id} 类型:{probe_type}，"
+    #             f"但当前强制类型为 {forced_media_type}，跳过缓存身份。"
+    #         )
+    #     else:
+    #         media_type = probe_type
+    #         official_title = _fetch_title_by_id(tmdb_id, media_type)
+    #         se_text = ''
+    #         if probe_identity.get('season_number') not in (None, ''):
+    #             se_text += f", S{int(probe_identity.get('season_number')):02d}"
+    #         if probe_identity.get('episode_number') not in (None, ''):
+    #             se_text += f"E{int(probe_identity.get('episode_number')):02d}"
+    #         logger.info(
+    #             f"  ➜ [raw_ffprobe识别] 命中共享媒体信息缓存: "
+    #             f"TMDb:{tmdb_id}, type:{media_type}{se_text}"
+    #             f"{', lang:' + probe_identity.get('original_language') if probe_identity.get('original_language') else ''}"
+    #         )
+    #         return tmdb_id, media_type, official_title or filename
 
     if normalized_hints.get('tmdb_id') and normalized_hints.get('confidence') == 'high':
         hinted_type = normalized_hints.get('media_type') or media_type
@@ -6052,7 +6489,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
         clean_text = re.sub(r'(?i)[\.\s\-_]*s\d{1,4}(?:e\d{1,4})?\b.*$', '', text).strip()
         clean_text = re.sub(r'(?i)[\.\s\-_]*ep?\d{1,4}\b.*$', '', clean_text).strip()
         clean_text = re.sub(r'(?i)[\.\s\-_]*season\s*\d{1,4}\b.*$', '', clean_text).strip()
-        clean_text = re.sub(r'(?i)[\.\s\-_]*第[一二三四五六七八九十\d]+季.*$', '', clean_text).strip()
+        clean_text = re.sub(r'(?i)[\.\s\-_]*第\s*[一二三四五六七八九十\d]+\s*季.*$', '', clean_text).strip()
 
         # 尝试提取年份 (不再强制要求必须有年份)
         name_part = clean_text
@@ -6423,6 +6860,44 @@ def delete_115_files_by_webhook(item_path, pickcodes):
     WebhookDeleteBuffer.add(pickcodes)
 
 # ======================================================================
+# ★★★ 手动纠错后共享 RAW 覆盖上传触发器 ★★★
+# ======================================================================
+_SHARED_RAW_REUPLOAD_LOCK = threading.Lock()
+_LAST_SHARED_RAW_REUPLOAD_AT = 0
+
+def _kick_shared_raw_reupload_detached(reason: str = '', delay: float = 8.0):
+    """手动重组修复 RAW 后，异步触发一次共享高频同步。
+
+    这里只触发同步任务，不在整理链路里直接请求中心，避免重组接口被网络波动拖死。
+    高频同步会读取 mark_shared_raw_dirty_for_sha1 写下的 not_reported/dirty 标记，
+    调用 _upload_share_raw_ffprobe_to_center(..., force=True) 覆盖中心 RAW。
+    """
+    global _LAST_SHARED_RAW_REUPLOAD_AT
+
+    now = time.time()
+    with _SHARED_RAW_REUPLOAD_LOCK:
+        if now - _LAST_SHARED_RAW_REUPLOAD_AT < 20:
+            return {'started': False, 'message': '共享 RAW 重传同步刚触发过，本次不重复启动'}
+        _LAST_SHARED_RAW_REUPLOAD_AT = now
+
+    def _runner():
+        if delay and delay > 0:
+            time.sleep(delay)
+        try:
+            from tasks.shared_resource_tasks import task_shared_share_status_sync_high_freq
+            logger.info(f"  ➜ [批量重组] 异步触发共享 RAW 覆盖上传：{reason or 'manual-reorganize-raw-fix'}")
+            task_shared_share_status_sync_high_freq(maintenance_silent=True)
+        except Exception as e:
+            logger.warning(f"  ➜ [批量重组] 触发共享 RAW 覆盖上传失败: {e}", exc_info=True)
+
+    threading.Thread(
+        target=_runner,
+        name='shared-raw-reupload-after-manual-correct',
+        daemon=True,
+    ).start()
+    return {'started': True, 'message': '已异步触发共享 RAW 覆盖上传'}
+
+# ======================================================================
 # ★★★ 手动纠错缓冲队列 (实现批量重组与一次性刷新) ★★★
 # ======================================================================
 class ManualCorrectTaskQueue:
@@ -6586,6 +7061,25 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
         logger.error("执行批量重组失败。")
         return
 
+    # ★ 手动重组后，立即把已分享过的同 SHA1 RAW 标脏，并异步触发中心 RAW 覆盖上传。
+    try:
+        dirty_count = 0
+        for raw_sha1 in sorted({str(item.get('sha1') or '').strip().upper() for item in root_items if str(item.get('sha1') or '').strip()}):
+            dirty_count += P115CacheManager.mark_shared_raw_dirty_for_sha1(
+                raw_sha1,
+                reason='manual_reorganize_raw_etk_fixed',
+                tmdb_id=tmdb_id,
+                media_type=media_type,
+            )
+        if dirty_count > 0:
+            kick = _kick_shared_raw_reupload_detached(
+                reason=f'手动重组修复 RAW {dirty_count} 个共享记录',
+                delay=8.0,
+            )
+            logger.info(f"  ➜ [批量重组] 共享 RAW 覆盖上传触发结果: {kick}")
+    except Exception as e:
+        logger.debug(f"  ➜ [批量重组] 标记共享 RAW 重传失败: {e}")
+
     # ★ 查找并重组关联字幕 (批量)
     sub_items = []
     for old_pid in old_pids:
@@ -6600,14 +7094,50 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
                         # 检查是否匹配任何一个视频的基础名
                         for r_item in root_items:
                             v_name = r_item['_info_data'].get('file_name') or r_item['fn']
-                            v_base = v_name.rsplit('.', 1)[0] if '.' in v_name else v_name
-                            if sub_name.startswith(v_base):
+                            if _is_related_sidecar_name(v_name, sub_name):
                                 sub_items.append(item)
                                 break
         except Exception as e:
             logger.warning(f"  ➜ 查找关联字幕失败: {e}")
 
     if sub_items:
+        if root_items:
+            subtitle_video_names = {}
+            for r_item in root_items:
+                info_name = (
+                    r_item.get('_new_filename')
+                    or (r_item.get('_info_data') or {}).get('file_name')
+                    or r_item.get('fn')
+                    or r_item.get('file_name')
+                    or ''
+                )
+                if not info_name:
+                    continue
+                season_key = _extract_sidecar_season_number(info_name)
+                episode_key = _extract_sidecar_episode_number(info_name)
+                part_key = _extract_sidecar_part_number(info_name)
+                if episode_key is None:
+                    continue
+                if season_key is None:
+                    season_key = organizer.forced_season or 1
+                subtitle_video_names[(int(season_key), int(episode_key), part_key)] = info_name.rsplit('.', 1)[0]
+
+            for sub_item in sub_items:
+                sub_name = sub_item.get('fn') or sub_item.get('n') or sub_item.get('file_name', '')
+                season_key = _extract_sidecar_season_number(sub_name)
+                episode_key = _extract_sidecar_episode_number(sub_name)
+                part_key = _extract_sidecar_part_number(sub_name)
+                if episode_key is None:
+                    continue
+                if season_key is None:
+                    season_key = organizer.forced_season or 1
+                forced_base_name = subtitle_video_names.get((int(season_key), int(episode_key), part_key))
+                if not forced_base_name:
+                    forced_base_name = subtitle_video_names.get((int(season_key), int(episode_key), None))
+                if forced_base_name:
+                    sub_item['_forced_base_name'] = forced_base_name
+                    sub_item['_forced_season'] = int(season_key)
+                    sub_item['_forced_episode'] = int(episode_key)
         logger.info(f"  🔤 [批量重组] 发现 {len(sub_items)} 个关联字幕，跟随重组...")
         organizer.execute(sub_items, target_cid)
 

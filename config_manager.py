@@ -4,12 +4,84 @@ import configparser
 import logging
 from typing import Dict, Any, Tuple, Optional
 import json
+import time
 from database import settings_db
 # --- 核心模块导入 ---
 import constants # 你的常量定义
 
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_pending_system_update_result():
+    try:
+        from tasks.system_update import peek_post_update_status, clear_post_update_status
+        payload = peek_post_update_status()
+    except Exception as e:
+        logger.debug(f"读取待通知的系统更新结果失败: {e}")
+        return False
+
+    if not payload:
+        return False
+
+    logger.info("  ➜ 检测到待补发的系统更新结果，准备发送通知。")
+
+    try:
+        from database import user_db
+        from handler.telegram import send_telegram_message, escape_markdown
+    except Exception as e:
+        logger.warning(f"系统更新结果通知依赖未就绪，跳过发送: {e}")
+        return False
+
+    current_version = str(payload.get("current_version") or "").strip()
+    target_version = str(payload.get("target_version") or "").strip()
+    message = str(payload.get("message") or "").strip()
+    ok = bool(payload.get("ok"))
+
+    if ok:
+        lines = ["✅ 任务执行完毕：*系统自动更新*"]
+        if current_version and target_version:
+            lines.append(f"版本变化: `{current_version}` -> `{target_version}`")
+        elif target_version:
+            lines.append(f"当前版本: `{target_version}`")
+    else:
+        lines = ["❌ 任务执行失败：*系统自动更新*"]
+        if current_version:
+            lines.append(f"当前版本: `{current_version}`")
+        if target_version:
+            lines.append(f"目标版本: `{target_version}`")
+    if message:
+        lines.append(message)
+
+    text = escape_markdown("\n".join(lines))
+    try:
+        admin_chat_ids = set(user_db.get_admin_telegram_chat_ids() or [])
+        if not admin_chat_ids:
+            logger.warning("  ➜ 系统更新结果通知未发送：当前没有可用的管理员 Telegram Chat ID。")
+            return False
+
+        for chat_id in admin_chat_ids:
+            send_telegram_message(str(chat_id), text)
+    except Exception as e:
+        logger.warning(f"  ➜ 发送系统更新结果 TG 通知失败: {e}")
+        return False
+
+    if clear_post_update_status():
+        logger.info("  ➜ 系统更新结果通知发送成功，已清理待通知结果文件。")
+    else:
+        logger.warning("  ➜ 系统更新结果通知已发送，但清理结果文件失败。")
+    return True
+
+
+def retry_pending_system_update_result(max_attempts: int = 10, interval_seconds: float = 3.0):
+    """在启动后的短窗口内重试补发系统更新结果，避免依赖初始化时机导致漏发。"""
+    for attempt in range(1, max_attempts + 1):
+        if _notify_pending_system_update_result():
+            return True
+        if attempt < max_attempts:
+            time.sleep(interval_seconds)
+    logger.trace("  ➜ 系统更新结果通知重试结束，仍未成功发送。")
+    return False
 
 # --- 路径和配置定义 ---
 # 这部分逻辑与配置紧密相关，所以移到这里
@@ -82,6 +154,8 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_TMDB_INCLUDE_ADULT: (constants.CONFIG_SECTION_TMDB, 'boolean', False),
     constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE: (constants.CONFIG_SECTION_TMDB, 'string', 'zh'),
     constants.CONFIG_OPTION_GITHUB_TOKEN: (constants.CONFIG_SECTION_GITHUB, 'string', ""),
+    constants.CONFIG_OPTION_SYSTEM_UPDATE_STRATEGY: (constants.CONFIG_SECTION_GITHUB, 'string', "docker_helper"),
+    constants.CONFIG_OPTION_SYSTEM_UPDATE_HELPER_IMAGE: (constants.CONFIG_SECTION_GITHUB, 'string', "hbq0405/emby-toolkit:latest"),
 
     # [DoubanAPI]
     constants.CONFIG_OPTION_DOUBAN_DEFAULT_COOLDOWN: (constants.CONFIG_SECTION_API_DOUBAN, 'float', 1.0),
@@ -285,6 +359,7 @@ def load_config():
         APP_CONFIG.update(default_dynamic_config)
 
     logger.info("  ➜ 所有配置已加载完成。")
+    _notify_pending_system_update_result()
     # 函数现在不再需要返回 is_first_run，因为这个状态只在函数内部使用
     # 但为了保持函数签名不变，我们暂时保留它
     return APP_CONFIG, is_first_run

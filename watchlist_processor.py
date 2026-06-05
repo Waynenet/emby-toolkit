@@ -202,17 +202,28 @@ class WatchlistProcessor:
                     'emby_item_ids_json': db_row['emby_item_ids_json']
                 }
                 # 3. 立即触发一次判定流
-                self._process_one_series(series_data)
+                self._process_one_series(series_data, allow_airing_episode_share=False)
                 
         except Exception as e:
             logger.error(f"自动添加剧集 '{item_name}' 时出错: {e}")
 
     # --- 核心任务启动器  ---
-    def run_regular_processing_task_concurrent(self, progress_callback: callable, tmdb_id: Optional[str] = None):
+    def run_regular_processing_task_concurrent(self, progress_callback: callable, tmdb_id: Optional[str] = None, new_episode_ids: Optional[List[str]] = None):
         """核心任务启动器，只处理活跃剧集。"""
         self.progress_callback = progress_callback
         task_name = "并发追剧更新"
         if tmdb_id: task_name = f"单项追剧更新 (TMDb ID: {tmdb_id})"
+
+        precise_new_episode_ids = []
+        for eid in new_episode_ids or []:
+            eid = str(eid or '').strip()
+            if eid and eid not in precise_new_episode_ids:
+                precise_new_episode_ids.append(eid)
+        if precise_new_episode_ids:
+            logger.info(
+                "  ➜ [智能追剧] 本次单项刷新携带新增分集 ID: %s 个，仅这些分集允许触发单集分享探测。",
+                len(precise_new_episode_ids),
+            )
         
         self.progress_callback(0, "准备检查待更新剧集...")
         try:
@@ -270,7 +281,11 @@ class WatchlistProcessor:
                     series_name = self._get_safe_series_name(series)
 
                     try:
-                        self._process_one_series(series)
+                        self._process_one_series(
+                            series,
+                            allow_airing_episode_share=bool(tmdb_id and precise_new_episode_ids),
+                            airing_episode_emby_ids=precise_new_episode_ids,
+                        )
                         return "处理成功"
                     except Exception as e:
                         logger.error(f"处理剧集 {series_name} 时发生错误: {e}", exc_info=False)
@@ -1124,6 +1139,78 @@ class WatchlistProcessor:
         )
         return bool(result.get('ok'))
 
+    def _trigger_airing_episode_share_detached(self, tmdb_id: str, emby_item_ids: List[str], series_name: str = '', year: str = ''):
+        """追更状态确认后，只对 webhook 明确传入的新增分集异步触发单集分享探测。
+
+        这里严禁再按季扫描 media_metadata。watchlist_processor 只能做最终追更/完结
+        状态裁决，不能猜测“本次新增了哪些集”。否则长篇动漫或历史存量剧会把整季、
+        甚至上千集都拿去探测分享。
+        """
+        parent_series_tmdb_id = str(tmdb_id or '').strip()
+        if not parent_series_tmdb_id:
+            return
+
+        precise_episode_ids = []
+        for eid in emby_item_ids or []:
+            eid = str(eid or '').strip()
+            if eid and eid not in precise_episode_ids:
+                precise_episode_ids.append(eid)
+
+        if not precise_episode_ids:
+            logger.debug(
+                "  ➜ [共享资源] 追更单集分享跳过：没有 webhook 精确新增分集 ID tmdb=%s",
+                parent_series_tmdb_id,
+            )
+            return
+
+        if not _shared_resource_auto_share_enabled():
+            logger.debug(
+                "  ➜ [共享资源] 共享资源未启用，跳过追更单集分享探测：%s episodes=%s",
+                series_name or parent_series_tmdb_id, len(precise_episode_ids),
+            )
+            return
+
+        def _runner():
+            try:
+                from tasks.shared_resource_tasks import trigger_shared_auto_share_for_library_item
+
+                created_total = 0
+                checked_total = 0
+                for emby_item_id in precise_episode_ids:
+                    checked_total += 1
+                    result = trigger_shared_auto_share_for_library_item(
+                        None,
+                        item_type='Episode',
+                        emby_item_id=emby_item_id,
+                        parent_series_tmdb_id=parent_series_tmdb_id,
+                        title=series_name or '',
+                        year=year or '',
+                    ) or {}
+                    try:
+                        created_total += int(result.get('created', 0) or 0)
+                    except Exception:
+                        pass
+
+                logger.debug(
+                    "  ➜ [共享资源] 追更单集分享探测完成：%s checked=%s created=%s",
+                    series_name or parent_series_tmdb_id, checked_total, created_total,
+                )
+            except Exception as e:
+                logger.warning(
+                    "  ➜ [共享资源] 追更单集分享探测异步任务失败：%s episodes=%s -> %s",
+                    series_name or parent_series_tmdb_id, len(precise_episode_ids), e, exc_info=True,
+                )
+
+        threading.Thread(
+            target=_runner,
+            name=f"shared-airing-episode-share-{parent_series_tmdb_id}",
+            daemon=True,
+        ).start()
+        logger.info(
+            "  ➜ [共享资源] 检查追更单集是否需要分享：%s episodes=%s",
+            series_name or parent_series_tmdb_id, len(precise_episode_ids),
+        )
+
     def _trigger_completed_season_pack_share_detached(self, tmdb_id: str, season_number: int, series_name: str = ''):
         """完结一致性通过后异步触发季包分享探测（命中缺口正常分享，count=1 补备份），避免阻塞单线程任务队列。
 
@@ -1181,7 +1268,169 @@ class WatchlistProcessor:
             series_name or parent_series_tmdb_id, season_no,
         )
 
-    def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
+    def _set_season_active_washing(self, tmdb_id: str, season_number: int, enabled: bool, reason: str = '') -> bool:
+        """按季设置/清理分集 active_washing 洗版特权标记。"""
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata
+                        SET active_washing = %s
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                        """,
+                        (bool(enabled), str(tmdb_id), season_number),
+                    )
+                    affected = cursor.rowcount
+                    conn.commit()
+
+            action = "开启" if enabled else "清理"
+            reason_msg = f"，原因：{reason}" if reason else ""
+            logger.debug(
+                f"  ➜ [完结洗版] 已为《{tmdb_id}》S{season_number} {action} active_washing 洗版特权标记 "
+                f"(影响 {affected} 集){reason_msg}。"
+            )
+            return True
+        except Exception as e:
+            action = "开启" if enabled else "清理"
+            logger.error(f"  ➜ [完结洗版] {action} S{season_number} active_washing 标记失败: {e}", exc_info=True)
+            return False
+
+    def _season_has_active_washing(self, tmdb_id: str, season_number: int) -> bool:
+        """判断指定季是否仍处于完结洗版事务中。
+
+        active_washing 只作为追剧模块发起/收口完结洗版的事务锁。
+        整理模块可以读取它来获得替换特权，但不应该在单集入库时核销它。
+        """
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                          AND active_washing = TRUE
+                        LIMIT 1
+                        """,
+                        (str(tmdb_id), season_number),
+                    )
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            logger.warning(
+                f"  ➜ [完结洗版] 查询《{tmdb_id}》S{season_number} active_washing 状态失败，"
+                f"为避免重复洗版，本轮按洗版进行中处理: {e}"
+            )
+            return True
+
+    def _handle_completed_season_quality_gate(
+        self,
+        tmdb_id: str,
+        series_name: str,
+        latest_series_data: Dict[str, Any],
+        emby_seasons: Dict,
+        old_status: str = None,
+        is_force_ended: bool = False,
+        allow_start_washing: bool = False,
+    ) -> Optional[bool]:
+        """已完结状态下统一执行最终季一致性门禁。
+
+        门禁可以在 Completed -> Completed 的 webhook/单项刷新中反复执行，
+        但只有首次从追更/暂停/待定流转到 Completed 时才允许发起新的洗版。
+        这样洗版资源分批入库时，只会持续校验并等待收口，不会反复提交 MP 洗版。
+        """
+        if is_force_ended:
+            logger.debug(f"  ➜ [完结校验] 《{series_name}》为手动强制完结，跳过自动一致性校验/洗版。")
+            return None
+
+        watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
+        if not watchlist_cfg.get('auto_resub_ended', False):
+            return None
+
+        seasons = latest_series_data.get('seasons', [])
+        valid_seasons = sorted(
+            [s for s in seasons if s.get('season_number', 0) > 0],
+            key=lambda x: x['season_number'],
+        )
+        if not valid_seasons:
+            logger.debug(f"  ➜ [完结校验] 《{series_name}》未找到有效季信息，跳过一致性校验。")
+            return None
+
+        target_season = valid_seasons[-1]
+        last_s_num = target_season.get('season_number')
+        last_ep_count = target_season.get('episode_count', 0) or 0
+        if not last_s_num:
+            logger.debug(f"  ➜ [完结校验] 《{series_name}》最终季号无效，跳过一致性校验。")
+            return None
+
+        local_target_count = len(emby_seasons.get(last_s_num, set()))
+        if local_target_count <= 0:
+            logger.info(f"  ➜ [完结校验跳过] 《{series_name}》S{last_s_num} 本地 0 集，视为未追本季，不触发洗版/等待完结包。")
+            return False
+
+        if last_ep_count <= 0:
+            logger.info(f"  ➜ [完结校验跳过] 《{series_name}》S{last_s_num} 总集数未知，暂不触发洗版/季包分享。")
+            return None
+
+        if old_status == STATUS_COMPLETED:
+            logger.info(f"  ➜ [完结校验] 《{series_name}》已处于完结状态，继续校验 S{last_s_num} 本地一致性。")
+        else:
+            logger.info(
+                f"  ➜ [完结校验] 《{series_name}》状态 {translate_internal_status(old_status)} -> 已完结，"
+                f"校验 S{last_s_num} 本地一致性。"
+            )
+
+        if self._check_season_consistency(tmdb_id, last_s_num, last_ep_count):
+            self._set_season_active_washing(
+                tmdb_id,
+                last_s_num,
+                False,
+                reason="一致性已通过，完结洗版事务收口。",
+            )
+            logger.info(f"  ➜ [完结校验] 《{series_name}》S{last_s_num} 本地文件一致性通过，异步触发季包分享探测。")
+            self._trigger_completed_season_pack_share_detached(tmdb_id, last_s_num, series_name)
+            return False
+
+        has_active_washing = self._season_has_active_washing(tmdb_id, last_s_num)
+        if has_active_washing:
+            logger.info(
+                f"  ➜ [完结洗版] 《{series_name}》S{last_s_num} 洗版进行中，本次一致性仍未通过，"
+                f"不重复提交洗版，等待后续分集入库。"
+            )
+            return True if watchlist_cfg.get('tg_channel_tracking', False) else None
+
+        if not allow_start_washing:
+            logger.info(
+                f"  ➜ [完结校验] 《{series_name}》S{last_s_num} 一致性不通过，但本轮不是首次完结流转，"
+                f"只保留校验结果，不重新提交洗版。"
+            )
+            return None
+
+        if watchlist_cfg.get('tg_channel_tracking', False):
+            self._set_season_active_washing(
+                tmdb_id,
+                last_s_num,
+                True,
+                reason="一致性不通过，等待 TG 完结包替换。",
+            )
+            logger.info(f"  ➜ [TG洗版拦截] 《{series_name}》S{last_s_num} 已完结但文件不一致。已开启 '等待完结包' 标志，静候 TG 频道发布。")
+            return True
+
+        logger.info(f"  ➜ [完结校验] 《{series_name}》S{last_s_num} 一致性不通过，首次完结流转允许提交 MP 完结洗版。")
+        self._handle_auto_resub_ended(
+            tmdb_id,
+            series_name,
+            last_s_num,
+            last_ep_count,
+            skip_consistency_check=True,
+        )
+        return False
+
+    def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int, *, skip_consistency_check: bool = False):
         """
         针对指定季进行完结洗版。
         参数直接传入季号和集数，不再需要在内部计算。
@@ -1193,9 +1442,16 @@ class WatchlistProcessor:
             if settings_db.get_subscription_quota() <= 0:
                 logger.warning(f"  ➜ 每日订阅配额已用尽，跳过《{series_name}》S{season_number} 的完结洗版。")
                 return
-            # 2. 直接使用传入的集数进行一致性检查
-            if self._check_season_consistency(tmdb_id, season_number, episode_count):
+            # 2. 直接使用传入的集数进行一致性检查。
+            #    当调用方已经执行过完结质量门禁时，可跳过这里，避免重复校验。
+            if not skip_consistency_check and self._check_season_consistency(tmdb_id, season_number, episode_count):
                 logger.info(f"  ➜ [完结洗版] 《{series_name}》S{season_number} 本地文件一致性完美，无需洗版，异步触发季包分享探测。")
+                self._set_season_active_washing(
+                    tmdb_id,
+                    season_number,
+                    False,
+                    reason="一致性已通过，不需要洗版。",
+                )
                 self._trigger_completed_season_pack_share_detached(tmdb_id, season_number, series_name)
                 return
             
@@ -1359,7 +1615,7 @@ class WatchlistProcessor:
             return None
     
     # ★★★ 核心处理逻辑：单个剧集的所有操作在此完成 ★★★
-    def _process_one_series(self, series_data: Dict[str, Any]):
+    def _process_one_series(self, series_data: Dict[str, Any], allow_airing_episode_share: bool = False, airing_episode_emby_ids: Optional[List[str]] = None):
         tmdb_id = series_data.get('tmdb_id')
         if not tmdb_id:
             logger.warning(f"  ➜ 追剧记录缺少 tmdb_id，跳过。数据: {series_data}")
@@ -1820,35 +2076,25 @@ class WatchlistProcessor:
         # 定义一个变量，用于控制是否更新等待标志
         set_waiting_flag = None
 
-        if final_status == STATUS_COMPLETED and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING] and not is_force_ended:
-            watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-            if watchlist_cfg.get('auto_resub_ended', False):
-                seasons = latest_series_data.get('seasons', [])
-                valid_seasons = sorted([s for s in seasons if s.get('season_number', 0) > 0], key=lambda x: x['season_number'])
-                
-                if valid_seasons:
-                    target_season = valid_seasons[-1]
-                    last_s_num = target_season.get('season_number')
-                    last_ep_count = target_season.get('episode_count', 0)
-                    local_target_count = len(emby_seasons.get(last_s_num, set()))
-                    
-                    if local_target_count <= 0:
-                        logger.info(f"  ➜ [完结洗版跳过] 《{item_name}》S{last_s_num} 本地 0 集，视为未追本季，不触发洗版/等待完结包。")
-                    else:
-                        tg_channel_tracking = watchlist_cfg.get('tg_channel_tracking', False)
-                        
-                        if tg_channel_tracking:
-                            if self._check_season_consistency(tmdb_id, last_s_num, last_ep_count):
-                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 本地文件一致性完美，无需洗版，异步触发季包分享探测。")
-                                self._trigger_completed_season_pack_share_detached(tmdb_id, last_s_num, item_name)
-                            else:
-                                # ★ 核心：不一致，开启等待标志！
-                                set_waiting_flag = True
-                                logger.info(f"  ➜ [TG洗版拦截] 《{item_name}》S{last_s_num} 完结但文件不一致。已开启 '等待完结包' 标志，静候 TG 频道发布。")
-                        else:
-                            # 未开启 TG 追更，走原来的 MP 洗版逻辑
-                            logger.info(f"  ➜ [完结洗版] 《{item_name}》由 {translate_internal_status(old_status)} 转为完结，立即提交 MP 洗版。")
-                            self._handle_auto_resub_ended(tmdb_id, item_name, last_s_num, last_ep_count)
+        # 完结季质量门禁：
+        # - Completed -> Completed 也允许重复校验，用于洗版分批入库后的最终收口分享；
+        # - 但只有首次从追更/暂停/待定流转到 Completed 时，才允许发起新的洗版；
+        # - active_washing 作为洗版事务锁，防止部分集入库时反复提交 MP 洗版。
+        allow_start_completed_washing = (
+            final_status == STATUS_COMPLETED
+            and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]
+            and not is_force_ended
+        )
+        if final_status == STATUS_COMPLETED and not is_force_ended:
+            set_waiting_flag = self._handle_completed_season_quality_gate(
+                tmdb_id=tmdb_id,
+                series_name=item_name,
+                latest_series_data=latest_series_data,
+                emby_seasons=emby_seasons,
+                old_status=old_status,
+                is_force_ended=is_force_ended,
+                allow_start_washing=allow_start_completed_washing,
+            )
 
         # 如果剧集恢复连载（出新季了），必须清除等待标志，防止误判
         if final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]:
@@ -2034,6 +2280,24 @@ class WatchlistProcessor:
         watchlist_db.sync_seasons_watching_status(tmdb_id, list(active_seasons), final_status)
 
         # ======================================================================
+        # ★★★ 共享资源单集追更分享 ★★★
+        # ======================================================================
+        if allow_airing_episode_share and final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]:
+            release_date = latest_series_data.get('first_air_date') or ''
+            release_year = release_date[:4] if release_date else ''
+            self._trigger_airing_episode_share_detached(
+                tmdb_id=tmdb_id,
+                emby_item_ids=airing_episode_emby_ids or [],
+                series_name=item_name,
+                year=release_year,
+            )
+        elif allow_airing_episode_share:
+            logger.debug(
+                "  ➜ [共享资源] 本次携带新增分集，但最终状态为 %s，跳过单集分享探测。",
+                translate_internal_status(final_status),
+            )
+
+        # ======================================================================
         # ★★★ MP 状态接管与同步 (自动待定 & 自动暂停) ★★★
         # ======================================================================
         self._sync_status_to_moviepilot(
@@ -2072,7 +2336,7 @@ class WatchlistProcessor:
                 progress = 10 + int(((i + 1) / total) * 90)
                 self.progress_callback(progress, f"正在处理: {series['item_name'][:20]}... ({i+1}/{total})")
 
-            self._process_one_series(series)
+            self._process_one_series(series, allow_airing_episode_share=False)
             time.sleep(1)
 
         logger.info("--- 追剧列表更新任务结束 ---")

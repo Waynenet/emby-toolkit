@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "10.2.2"  # 更新版本号
+APP_VERSION = "10.3.7"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -145,6 +145,8 @@ CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE = "tmdb_image_language_preference"
 # --- GitHub (用于版本检查) ---
 CONFIG_SECTION_GITHUB = "GitHub"
 CONFIG_OPTION_GITHUB_TOKEN = "github_token" # 用于提高API速率限制的个人访问令牌
+CONFIG_OPTION_SYSTEM_UPDATE_STRATEGY = "system_update_strategy"
+CONFIG_OPTION_SYSTEM_UPDATE_HELPER_IMAGE = "system_update_helper_image"
 
 # --- 豆瓣 API ---
 CONFIG_SECTION_API_DOUBAN = "DoubanAPI"

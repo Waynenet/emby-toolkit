@@ -27,9 +27,16 @@ except Exception:
 from handler.tg_media_candidate import build_channel_task_payload
 
 try:
-    from handler.shared_subscription_service import try_consume_shared_resource, report_shared_gap
+    from handler.shared_subscription_service import (
+        try_consume_shared_resource,
+        try_consume_preprobed_shared_resource,
+        batch_probe_shared_resources,
+        report_shared_gap,
+    )
 except Exception:
     try_consume_shared_resource = None
+    try_consume_preprobed_shared_resource = None
+    batch_probe_shared_resources = None
     report_shared_gap = None
 
 
@@ -755,6 +762,86 @@ def _apply_watchlist_mp_wash_flags(
         return '分集洗版'
 
     return '补缺模式'
+
+
+
+def _extract_item_year_for_subscription(item: Dict[str, Any]) -> str:
+    item = item or {}
+    for _year_key in ('release_date', 'first_air_date', 'air_date', 'year'):
+        _year_value = item.get(_year_key)
+        if _year_value:
+            _match = re.search(r'((?:19|20)\d{2})', str(_year_value))
+            if _match:
+                return _match.group(1)
+    _match = re.search(r'\(((?:19|20)\d{2})\)', str(item.get('title') or ''))
+    return _match.group(1) if _match else ''
+
+
+def _prepare_shared_subscription_context(item: Dict[str, Any], tmdb_api_key=None) -> Dict[str, Any]:
+    """把统一订阅 item 整理成共享中心批量探测/消费上下文。"""
+    item = item or {}
+    tmdb_id = item.get('tmdb_id')
+    item_type = item.get('item_type')
+    title = item.get('title')
+    season_number = item.get('season_number')
+    parent_tmdb_id = None
+
+    if item_type in ['Series', 'Season', 'Episode']:
+        if item_type == 'Season':
+            parent_tmdb_id = item.get('parent_series_tmdb_id') or item.get('series_tmdb_id')
+            if not parent_tmdb_id and '_' in str(tmdb_id):
+                parent_tmdb_id = str(tmdb_id).split('_')[0]
+            if not parent_tmdb_id:
+                parent_tmdb_id = tmdb_id
+        elif item_type == 'Episode':
+            parent_tmdb_id = item.get('parent_series_tmdb_id') or item.get('series_tmdb_id')
+            if not parent_tmdb_id and '_' in str(tmdb_id):
+                parent_tmdb_id = str(tmdb_id).split('_')[0]
+        else:
+            parent_tmdb_id = tmdb_id
+
+        series_name = media_db.get_series_title_by_tmdb_id(parent_tmdb_id) if parent_tmdb_id else None
+        if not series_name:
+            raw_title = item.get('title', '')
+            parsed_name, _ = parse_series_title_and_season(raw_title, tmdb_api_key)
+            series_name = parsed_name if parsed_name else raw_title
+        if series_name:
+            if item_type == 'Episode' and item.get('episode_number') is not None:
+                try:
+                    title = f"{series_name} S{int(season_number or item.get('season_number') or 0):02d}E{int(item.get('episode_number')):02d}"
+                except Exception:
+                    title = series_name
+            else:
+                title = series_name
+
+    return {
+        'item': item,
+        'tmdb_id': tmdb_id,
+        'item_type': item_type,
+        'title': title,
+        'season_number': season_number,
+        'parent_tmdb_id': parent_tmdb_id,
+        'year': _extract_item_year_for_subscription(item),
+    }
+
+
+def _shared_subscription_probe_key(prepared: Dict[str, Any]) -> str:
+    item = prepared.get('item') if isinstance(prepared.get('item'), dict) else {}
+    item_type = str(prepared.get('item_type') or item.get('item_type') or '').strip()
+    tmdb_id = str(prepared.get('tmdb_id') or item.get('tmdb_id') or '').strip()
+    season = prepared.get('season_number') if prepared.get('season_number') not in (None, '') else item.get('season_number')
+    episode = item.get('episode_number')
+    if item_type == 'Movie':
+        return f'Movie|{tmdb_id}||'
+    if item_type == 'Season':
+        sid = str(prepared.get('parent_tmdb_id') or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or tmdb_id or '').strip()
+        return f'Season|{sid}|{season if season is not None else ""}|'
+    if item_type == 'Series':
+        return f'Series|{tmdb_id}||'
+    if item_type == 'Episode':
+        sid = str(prepared.get('parent_tmdb_id') or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or tmdb_id or '').strip()
+        return f'Season|{sid}|{season if season is not None else ""}|'
+    return ''
 
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
@@ -1522,6 +1609,34 @@ def task_auto_subscribe(processor):
         failed_notifications_to_send = {}
         quota_exhausted = False
 
+        shared_probe_by_key = {}
+        if batch_probe_shared_resources and try_consume_preprobed_shared_resource:
+            shared_probe_contexts = []
+            quota_for_shared_probe = settings_db.get_subscription_quota()
+            for _item in wanted_items:
+                try:
+                    _item_type = _item.get('item_type')
+                    if _item_type == 'Episode':
+                        continue
+                    _status = str(_item.get('subscription_status') or 'NONE').strip().upper()
+                    # 只有真正待订阅(WANTED)的新请求才需要做发行日期保护；
+                    # SUBSCRIBED / NONE 等补库项只查询共享中心/云资源，不再触发电影发行日期检查日志。
+                    if _status == 'WANTED' and _item_type == 'Movie' and not is_movie_subscribable(int(_item.get('tmdb_id')), tmdb_api_key, config):
+                        continue
+                    # 只有真正待订阅(WANTED)的新请求才受订阅配额限制；
+                    # SUBSCRIBED / NONE 等追更补库项仍允许查询共享中心，但绝不应因此流入 MP。
+                    if _status == 'WANTED' and quota_for_shared_probe <= 0:
+                        continue
+                    if _item_type in ['Movie', 'Series', 'Season']:
+                        shared_probe_contexts.append(_prepare_shared_subscription_context(_item, tmdb_api_key))
+                except Exception as e:
+                    logger.debug(f"  ➜ [共享资源] 准备批量探测项失败，已跳过: {_item.get('title')} -> {e}")
+            if shared_probe_contexts:
+                task_manager.update_status_from_thread(10, f"正在批量查询共享中心：{len(shared_probe_contexts)} 个订阅...")
+                probe_batch = batch_probe_shared_resources(shared_probe_contexts, limit_per_item=200) or {}
+                if probe_batch.get('supported'):
+                    shared_probe_by_key = probe_batch.get('by_key') or {}
+
         # 2. 遍历待办列表，逐一处理
         for i, item in enumerate(wanted_items):
             if processor.is_stop_requested(): break
@@ -1531,21 +1646,9 @@ def task_auto_subscribe(processor):
                 f"({i+1}/{len(wanted_items)}) 正在处理: {item['title']}"
             )
 
-            # 2.1 检查发行日期 (只对电影检查，剧集由 smart_subscribe 处理)
-            if item['item_type'] == 'Movie' and not is_movie_subscribable(int(item['tmdb_id']), tmdb_api_key, config):
-                logger.info(f"  ➜ 电影《{item['title']}》未到发行日期，本次跳过。")
-                rejected_details.append({'item': f"电影《{item['title']}》", 'reason': '未发行'})
-                # ★★★ 新增：解析来源并记录失败通知 ★★★
-                sources = item.get('subscription_sources_json', [])
-                for source in sources:
-                    if source.get('type') == 'user_request' and (user_id := source.get('user_id')):
-                        if user_id not in failed_notifications_to_send:
-                            failed_notifications_to_send[user_id] = []
-                        failed_notifications_to_send[user_id].append(f"《{item['title']}》(原因: 不满足发行日期延迟订阅)")
-                continue
-
             # ★★★ 1. 准备基础信息 (提前获取剧集标题，用于日志和搜索) ★★★
-            subscription_status = str(item.get('subscription_status') or 'WANTED').strip().upper()
+            subscription_status = str(item.get('subscription_status') or 'NONE').strip().upper()
+            is_wanted_subscription = subscription_status == 'WANTED'
             is_subscribed_recheck = subscription_status == 'SUBSCRIBED'
             missing_episode_numbers = _normalize_missing_episode_numbers(item.get('missing_episode_numbers'))
 
@@ -1553,6 +1656,20 @@ def task_auto_subscribe(processor):
             item_type = item['item_type']
             title = item['title'] # 默认为 item 标题
             season_number = item.get('season_number')
+
+            # 2.1 发行日期保护只属于 WANTED 新订阅。
+            # 非 WANTED 的电影/追更补库项不再做发行日期检查，避免统一订阅日志被补库项刷屏。
+            if is_wanted_subscription and item_type == 'Movie' and not is_movie_subscribable(int(tmdb_id), tmdb_api_key, config):
+                logger.info(f"  ➜ 电影《{title}》未到发行日期，本次跳过。")
+                rejected_details.append({'item': f"电影《{title}》", 'reason': '未发行'})
+                # ★★★ 新增：解析来源并记录失败通知 ★★★
+                sources = item.get('subscription_sources_json', [])
+                for source in sources:
+                    if source.get('type') == 'user_request' and (user_id := source.get('user_id')):
+                        if user_id not in failed_notifications_to_send:
+                            failed_notifications_to_send[user_id] = []
+                        failed_notifications_to_send[user_id].append(f"《{title}》(原因: 不满足发行日期延迟订阅)")
+                continue
 
             # 统一订阅任务不再处理 Episode 队列项。
             # 单集只作为 Season.missing_episode_numbers 参与本地精确过滤；
@@ -1564,12 +1681,6 @@ def task_auto_subscribe(processor):
                 )
                 continue
 
-            if is_subscribed_recheck and item_type == 'Season':
-                logger.info(
-                    f"  ➜ [补库模式] 《{title}》S{int(season_number or 0):02d} 已是 SUBSCRIBED，"
-                    f"本轮只走共享池/影巢/频道补库，禁止再次下滑 MoviePilot；"
-                    f"缺失集: {missing_episode_numbers or '未知/按季处理'}"
-                )
             item_year = ''
             for _year_key in ('release_date', 'first_air_date', 'air_date', 'year'):
                 _year_value = item.get(_year_key)
@@ -1621,11 +1732,19 @@ def task_auto_subscribe(processor):
                     else:
                         title = series_name
 
-            # --- MoviePilot 订阅 ---
-            # SUBSCRIBED 是补库模式，不消耗 MP 订阅配额，也不能因为配额耗尽而跳过共享池/云资源补库。
-            if (not is_subscribed_recheck) and settings_db.get_subscription_quota() <= 0:
+            if (not is_wanted_subscription) and item_type == 'Season':
+                logger.info(
+                    f"  ➜ [追更模式] 《{title}》 第 {int(season_number or 0):02d} 季 "
+                    f"缺失集: {missing_episode_numbers or '未知/按季处理'}"
+                )
+
+            # --- MoviePilot 订阅保护 ---
+            # 只有 subscription_status=WANTED 的新请求才允许进入 MP 订阅链路。
+            # SUBSCRIBED / NONE / PAUSED 等由追更或补库带进队列的项目，只能走共享池/云资源补库，
+            # 不能因为不等于 SUBSCRIBED 就被误判为新订阅。
+            if is_wanted_subscription and settings_db.get_subscription_quota() <= 0:
                 quota_exhausted = True
-                logger.warning(f"  ➜ 每日订阅配额已用尽，跳过待订阅项目《{item['title']}》，继续处理已订阅补库项。")
+                logger.warning(f"  ➜ 每日订阅配额已用尽，跳过待订阅项目《{title}》，继续处理非 MP 补库项。")
                 continue
 
             # 提交 MP 订阅
@@ -1635,20 +1754,47 @@ def task_auto_subscribe(processor):
             tg_channel_tracking = watchlist_config.get('tg_channel_tracking', False)
 
             # ==========================================
-            # 共享资源优先：启用共享资源后，先查中心共享池；命中后按配置执行永久转存/虚拟入库。
-            # 未命中才登记缺口，并继续走影巢 / TG / MP 原有兜底链路。
+            # 共享资源优先：本轮统一订阅已提前批量向中心 probe；这里只消费批量结果。
+            # 旧中心不支持批量接口时，自动回退原逐条查询。
             # ==========================================
-            if try_consume_shared_resource and item_type in ['Movie', 'Series', 'Season', 'Episode']:
+            if item_type in ['Movie', 'Series', 'Season', 'Episode']:
                 try:
-                    shared_result = try_consume_shared_resource(
-                        item=item,
-                        title=title,
-                        tmdb_id=tmdb_id,
-                        item_type=item_type,
-                        parent_tmdb_id=parent_tmdb_id,
-                        season_number=season_number,
-                        year=item_year,
-                    )
+                    shared_result = None
+                    prepared_ctx = {
+                        'item': item,
+                        'tmdb_id': tmdb_id,
+                        'item_type': item_type,
+                        'title': title,
+                        'season_number': season_number,
+                        'parent_tmdb_id': parent_tmdb_id,
+                        'year': item_year,
+                    }
+                    probe_key = _shared_subscription_probe_key(prepared_ctx)
+                    probe_row = shared_probe_by_key.get(probe_key) if probe_key else None
+                    if probe_row and try_consume_preprobed_shared_resource:
+                        shared_result = try_consume_preprobed_shared_resource(
+                            probe_row=probe_row,
+                            item=item,
+                            title=title,
+                            tmdb_id=tmdb_id,
+                            item_type=item_type,
+                            parent_tmdb_id=parent_tmdb_id,
+                            season_number=season_number,
+                            year=item_year,
+                        )
+                    elif try_consume_shared_resource:
+                        shared_result = try_consume_shared_resource(
+                            item=item,
+                            title=title,
+                            tmdb_id=tmdb_id,
+                            item_type=item_type,
+                            parent_tmdb_id=parent_tmdb_id,
+                            season_number=season_number,
+                            year=item_year,
+                        )
+                    else:
+                        shared_result = {}
+
                     if shared_result.get('success'):
                         success = True
                         action_type = shared_result.get('action_type') or '共享资源'
@@ -1679,11 +1825,14 @@ def task_auto_subscribe(processor):
                 # 必须 copy 一份，防止后续 remove 操作污染全局配置缓存
                 subscription_sources = list(raw_sources)
 
-            if is_subscribed_recheck:
-                # 补库模式下，绝对不能再投递给 MP，直接移除
+            if not is_wanted_subscription:
+                # 只有 WANTED 能进入 MP；其他任何状态都只允许共享池/云资源补库，避免追更季/已订阅项重复投递 MP。
                 if 'mp' in subscription_sources:
                     subscription_sources.remove('mp')
-                # 移除强制添加 hdhive 的逻辑，完全尊重前端用户的勾选；如果用户勾选了 hdhive 就走，没勾选就算补库也不走。
+                    logger.debug(
+                            f"  ➜ [MP保护] 跳过《{title}》的 MoviePilot 订阅："
+                        )
+                # 移除强制添加 hdhive 的逻辑，完全尊重前端用户的勾选；如果用户勾选了 hdhive 就走，没勾选就算追更也不走。
 
             for source_type in subscription_sources:
                 if success:
@@ -1709,16 +1858,23 @@ def task_auto_subscribe(processor):
                                     f"仅使用父剧集 TMDb ID {hdhive_tmdb_id} 检索；返回后本地按季号排序。"
                                 )
 
-                            try:
-                                hdhive_require_complete = check_series_completion(
-                                    int(hdhive_tmdb_id),
-                                    tmdb_api_key,
-                                    season_number=hdhive_target_season,
-                                    series_name=title
-                                )
-                            except Exception as e:
+                            if is_wanted_subscription:
+                                try:
+                                    hdhive_require_complete = check_series_completion(
+                                        int(hdhive_tmdb_id),
+                                        tmdb_api_key,
+                                        season_number=hdhive_target_season,
+                                        series_name=title
+                                    )
+                                except Exception as e:
+                                    hdhive_require_complete = False
+                                    logger.warning(f"  ➜ [策略] 检查剧集《{title}》完结状态失败，影巢不强制完结包: {e}")
+                            else:
                                 hdhive_require_complete = False
-                                logger.warning(f"  ➜ [策略] 检查剧集《{title}》完结状态失败，影巢不强制完结包: {e}")
+                                logger.info(
+                                    f"  ➜ [追更模式] 剧集《{title}》{f'第 {int(hdhive_target_season):02d} 季' if hdhive_target_season is not None else ''} "
+                                    f"subscription_status={subscription_status or 'NONE'}，跳过完结状态检查。"
+                                )
 
                             if hdhive_require_complete:
                                 first_season_note = ""
@@ -1729,7 +1885,7 @@ def task_auto_subscribe(processor):
                                     first_season_note = ""
 
                                 logger.info(
-                                    f"  ➜ [策略] 剧集《{title}》{f'S{int(hdhive_target_season):02d}' if hdhive_target_season is not None else ''} 已判定完结，"
+                                    f"  ➜ [策略] 剧集《{title}》{f'第 {int(hdhive_target_season):02d} 季' if hdhive_target_season is not None else ''} 已判定完结，"
                                     f"影巢仅允许转存全集/全结/完结包，分段资源不转存；{first_season_note}明确错季仍排除。"
                                 )
                             else:
@@ -1753,6 +1909,13 @@ def task_auto_subscribe(processor):
                                 action_type = cloud_source
 
                 elif source_type == 'mp':
+                    # 双保险：即使上面的订阅源列表未来被改坏，这里也只允许 WANTED 进入 MP。
+                    if not is_wanted_subscription:
+                        logger.debug(
+                            f"  ➜ [追更模式] 跳过《{title}》的 MoviePilot 订阅："
+                        )
+                        continue
+
                     if item_type == 'Movie':
                         logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
                         mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
@@ -1796,22 +1959,22 @@ def task_auto_subscribe(processor):
 
             # 处理订阅结果
             if success:
-                if is_subscribed_recheck:
-                    logger.info(f"  ➜ 《{item['title']}》补库处理成功！")
+                if is_wanted_subscription:
+                    logger.info(f"  ➜ 《{title}》订阅成功！")
                 else:
-                    logger.info(f"  ➜ 《{item['title']}》订阅成功！")
+                    logger.info(f"  ➜ 《{title}》补库处理成功！")
 
                 # WANTED 成功后更新为 SUBSCRIBED；SUBSCRIBED 补库成功只保持原状态，不能重复消耗订阅配额。
                 # Series 走 MP 整剧逻辑时仍由 _subscribe_full_series_with_logic 内部逐季处理；
                 # Series 走云资源时没有逐季订阅流程，需要直接更新当前 Series，避免下次任务重复处理。
-                if (not is_subscribed_recheck) and (item_type != 'Series' or action_type in ["影巢", "频道", "云资源", "共享资源", "共享虚拟", "共享永久转存"]):
+                if is_wanted_subscription and (item_type != 'Series' or action_type in ["影巢", "频道", "云资源", "共享资源", "共享虚拟", "共享永久转存"]):
                     request_db.set_media_status_subscribed(
                         tmdb_ids=item['tmdb_id'],
                         item_type=item_type,
                     )
 
                 # 只有真正从 WANTED 发起的新订阅才扣除配额；SUBSCRIBED 补库不扣。
-                if not is_subscribed_recheck:
+                if is_wanted_subscription:
                     settings_db.decrement_subscription_quota()
 
                 # 准备通知 (智能拼接通知标题)
@@ -1868,10 +2031,10 @@ def task_auto_subscribe(processor):
                 subscription_details.append({'source': source_display, 'item': item_display_name, 'action': action_type})
 
             else:
-                if is_subscribed_recheck:
-                    logger.info(f"  ➜ [补库模式] 《{item['title']}》本轮未补到资源，不视为订阅失败。")
+                if is_wanted_subscription:
+                    logger.error(f"  ➜ 订阅《{title}》失败，请检查 MoviePilot 连接或日志。")
                 else:
-                    logger.error(f"  ➜ 订阅《{item['title']}》失败，请检查 MoviePilot 连接或日志。")
+                    logger.info(f"  ➜ [追更模式] 《{title}》 本轮未补到资源。")
 
             # 如果配置了延时，且不是列表中的最后一个项目，则进行休眠
             if request_delay > 0 and i < len(wanted_items) - 1:

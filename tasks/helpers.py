@@ -1085,6 +1085,29 @@ def _season_consistency_effect_key(asset: Dict[str, Any]) -> str:
         return 'SDR'
     return 'Unknown'
 
+# tasks/helpers.py
+
+def _get_local_strm_root_for_consistency(processor=None) -> str:
+    local_root = ''
+
+    if processor is not None:
+        try:
+            local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, '') or ''
+        except Exception:
+            local_root = ''
+
+    if not local_root:
+        try:
+            import config_manager
+            local_root = (
+                config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, '')
+                or config_manager.APP_CONFIG.get('local_strm_root', '')
+                or ''
+            )
+        except Exception:
+            local_root = ''
+
+    return str(local_root or '').strip()
 
 def check_season_consistency(
     tmdb_id: str,
@@ -1094,6 +1117,8 @@ def check_season_consistency(
     series_name: str = '',
     rows: Optional[List[Dict[str, Any]]] = None,
     log_result: bool = True,
+    processor=None,
+    repair_missing_fingerprints: bool = True,
 ) -> Dict[str, Any]:
     """统一检查指定季本地文件是否满足“无需洗版/可分享季包”的一致性条件。
 
@@ -1101,13 +1126,31 @@ def check_season_consistency(
     1. 本地在库集数必须不少于 expected_episode_count（传 0 则不检查集数）。
     2. 每集主资产的分辨率、制作组、编码、HDR/杜比版本必须完全统一。
 
+    repair_missing_fingerprints=True 时，会在当前季范围内尝试补齐缺失的 115 PC/SHA1，
+    不调用 media.task_repair_p115_fingerprints，也不会扫描全库。调用方传入 processor 时，
+    会复用 processor._extract_115_fingerprints；未传 processor 时，也会尽量通过本地缓存/
+    STRM 路径反查补齐。
+
     返回结构化结果，调用方可直接使用 result['ok'] 作为布尔结果，也可把 message
     透传给前端/维护任务日志。
     """
     tmdb_id = str(tmdb_id or '').strip()
     season_number_int = _season_consistency_safe_int(season_number, None)
     expected_episode_count = _season_consistency_safe_int(expected_episode_count, 0)
+    series_name = str(series_name or '').strip()
     label = f"《{series_name}》" if series_name else ''
+
+    def _update_series_label(candidate: Any = '') -> None:
+        nonlocal series_name, label
+        candidate = str(candidate or '').strip()
+        if candidate and not series_name:
+            series_name = candidate
+            label = f"《{series_name}》"
+
+    def _season_label_text() -> str:
+        if season_number_int is None:
+            return label or '未知季'
+        return f"{label}第 {season_number_int} 季" if label else f"第 {season_number_int} 季"
 
     if not tmdb_id or season_number_int is None:
         return {
@@ -1116,37 +1159,69 @@ def check_season_consistency(
             'message': '季包一致性校验失败：缺少父剧 TMDb ID 或季号',
             'tmdb_id': tmdb_id,
             'season_number': season_number,
+            'series_name': series_name,
         }
+
+    rows_were_provided = rows is not None
+    fingerprint_repair_stats = None
 
     try:
         if rows is None:
             with connection.get_db_connection() as conn:
                 with conn.cursor() as cursor:
+                    # 顺手取父剧标题，避免调用方没有传 series_name 时日志只能显示“第 X 季”。
                     cursor.execute(
                         """
-                        SELECT tmdb_id, title, season_number, episode_number, asset_details_json
+                        SELECT title
                         FROM media_metadata
-                        WHERE parent_series_tmdb_id = %s
-                          AND season_number = %s
-                          AND item_type = 'Episode'
-                          AND in_library = TRUE
-                        ORDER BY episode_number NULLS LAST, tmdb_id
+                        WHERE tmdb_id = %s
+                          AND item_type = 'Series'
+                        LIMIT 1
+                        """,
+                        (tmdb_id,),
+                    )
+                    series_row = cursor.fetchone()
+                    if series_row:
+                        _update_series_label(series_row.get('title'))
+
+                    cursor.execute(
+                        """
+                        SELECT e.tmdb_id, e.item_type, e.title, e.season_number, e.episode_number,
+                               e.asset_details_json, e.file_sha1_json, e.file_pickcode_json,
+                               s.title AS series_title
+                        FROM media_metadata e
+                        LEFT JOIN media_metadata s
+                          ON s.tmdb_id = e.parent_series_tmdb_id
+                         AND s.item_type = 'Series'
+                        WHERE e.parent_series_tmdb_id = %s
+                          AND e.season_number = %s
+                          AND e.item_type = 'Episode'
+                          AND e.in_library = TRUE
+                        ORDER BY e.episode_number NULLS LAST, e.tmdb_id
                         """,
                         (tmdb_id, season_number_int),
                     )
                     rows = [dict(r) for r in cursor.fetchall()]
         else:
             rows = [dict(r) for r in rows]
+            for row in rows:
+                if isinstance(row, dict):
+                    _update_series_label(row.get('series_title') or row.get('parent_title'))
+
+        if not series_name:
+            for row in rows or []:
+                if isinstance(row, dict):
+                    _update_series_label(row.get('series_title') or row.get('parent_title'))
 
         local_episode_count = len(rows or [])
         if expected_episode_count and local_episode_count < expected_episode_count:
             message = (
-                f"季包一致性校验失败：{label}第 {season_number_int} 季本地集数不足 "
+                f"季包一致性校验失败：{_season_label_text()}本地集数不足 "
                 f"{local_episode_count}/{expected_episode_count}，不能视为完结达标。"
             )
             if log_result:
                 logger.info(
-                    f"  ➜ [一致性检查] 第 {season_number_int} 季 本地集数不足: "
+                    f"  ➜ [一致性检查] {_season_label_text()} 本地集数不足: "
                     f"{local_episode_count}/{expected_episode_count}，不能视为完结达标。"
                 )
             return {
@@ -1157,7 +1232,51 @@ def check_season_consistency(
                 'season_number': season_number_int,
                 'expected_episode_count': expected_episode_count,
                 'local_episode_count': local_episode_count,
+                'series_name': series_name,
             }
+
+        # 只针对当前季做轻量 PC/SHA1 补齐。
+        # 如果 rows 是调用方传入的旧结构且没有 file_sha1_json/file_pickcode_json，
+        # 不主动回写，避免把未知旧值覆盖成空数组。
+        has_fingerprint_columns = any(
+            ('file_sha1_json' in row or 'file_pickcode_json' in row)
+            for row in (rows or [])
+            if isinstance(row, dict)
+        )
+        if repair_missing_fingerprints and rows and (not rows_were_provided or has_fingerprint_columns):
+            try:
+                from .p115_fingerprint_helpers import repair_p115_fingerprints_for_rows
+
+                local_root = _get_local_strm_root_for_consistency(processor)
+
+                fingerprint_repair_stats = repair_p115_fingerprints_for_rows(
+                    processor,
+                    rows,
+                    local_root=local_root,
+                    update_db=True,
+                    allow_api_fetch=True,
+                    log_prefix=(
+                        f"一致性检查补齐指纹 {series_name} S{season_number_int:02d}"
+                        if series_name else f"一致性检查补齐指纹 S{season_number_int:02d}"
+                    ),
+                    should_stop=getattr(processor, 'is_stop_requested', None) if processor is not None else None,
+                    progress_callback=None,
+                    progress_interval=0,
+                )
+                if log_result and fingerprint_repair_stats.get('fixed_assets'):
+                    logger.info(
+                        f"  ➜ [一致性检查] {_season_label_text()} 已实时补齐 "
+                        f"{fingerprint_repair_stats.get('fixed_assets')} 个缺失 PC/SHA1。"
+                    )
+            except Exception as e:
+                fingerprint_repair_stats = {
+                    'error': str(e),
+                    'fixed_assets': 0,
+                }
+                logger.warning(
+                    f"  ➜ [一致性检查] {_season_label_text()} 实时补齐 115 指纹失败，继续执行一致性检查: {e}",
+                    exc_info=True
+                )
 
         resolutions = set()
         groups = set()
@@ -1213,7 +1332,7 @@ def check_season_consistency(
             })
 
         if invalid:
-            message = '季包一致性校验失败：存在缺少媒体资产信息的分集；' + '；'.join(
+            message = f'季包一致性校验失败：{_season_label_text()}存在缺少媒体资产信息的分集；' + '；'.join(
                 f"S{_season_consistency_safe_int(x.get('season_number'), season_number_int):02d}"
                 f"E{_season_consistency_safe_int(x.get('episode_number'), 0):02d} {x.get('title') or ''}（{x.get('reason')}）"
                 for x in invalid[:6]
@@ -1221,7 +1340,7 @@ def check_season_consistency(
             if len(invalid) > 6:
                 message += f" 等 {len(invalid)} 集"
             if log_result:
-                logger.info(f"  ➜ [一致性检查] 第 {season_number_int} 季 媒体资产信息不完整，需要洗版/禁止季包分享。")
+                logger.info(f"  ➜ [一致性检查] {_season_label_text()} 媒体资产信息不完整，需要洗版/禁止季包分享。")
             return {
                 'ok': False,
                 'reason': 'asset_details_missing',
@@ -1232,6 +1351,8 @@ def check_season_consistency(
                 'local_episode_count': local_episode_count,
                 'invalid': invalid,
                 'signatures': signatures,
+                'fingerprint_repair': fingerprint_repair_stats,
+                'series_name': series_name,
             }
 
         is_consistent = bool(signatures) and len(resolutions) == 1 and len(groups) == 1 and len(codecs) == 1 and len(effects) == 1
@@ -1247,6 +1368,8 @@ def check_season_consistency(
             'codecs': sorted(codecs),
             'effects': sorted(effects),
             'signatures': signatures,
+            'fingerprint_repair': fingerprint_repair_stats,
+            'series_name': series_name,
         }
 
         if is_consistent:
@@ -1254,24 +1377,24 @@ def check_season_consistency(
             grp = next(iter(groups))
             codec = next(iter(codecs))
             effect = next(iter(effects))
-            result['message'] = f"季包一致性校验通过：第 {season_number_int} 季 [{res} / {grp} / {codec} / {effect}]。"
+            result['message'] = f"季包一致性校验通过：{_season_label_text()} [{res} / {grp} / {codec} / {effect}]。"
             if log_result:
-                logger.info(f"  ➜ [一致性检查] 第 {season_number_int} 季 完美达标: [{res} / {grp} / {codec} / {effect}]，跳过洗版/允许季包分享。")
+                logger.info(f"  ➜ [一致性检查] {_season_label_text()} 完美达标: [{res} / {grp} / {codec} / {effect}]，跳过洗版/允许季包分享。")
             return result
 
         result['message'] = (
-            f"季包一致性校验失败：第 {season_number_int} 季版本混杂；"
+            f"季包一致性校验失败：{_season_label_text()}版本混杂；"
             f"分辨率{sorted(resolutions)}，制作组{sorted(groups)}，编码{sorted(codecs)}，HDR/杜比{sorted(effects)}"
         )
         if log_result:
             logger.info(
-                f"  ➜ [一致性检查] 第 {season_number_int} 季 版本混杂，需要洗版/禁止季包分享。"
+                f"  ➜ [一致性检查] {_season_label_text()} 版本混杂，需要洗版/禁止季包分享。"
                 f"分布: 分辨率{resolutions}, 制作组{groups}, 编码{codecs}, HDR/杜比{effects}"
             )
         return result
 
     except Exception as e:
-        logger.error(f"  ➜ 检查 第 {season_number_int} 季 一致性时出错: {e}", exc_info=True)
+        logger.error(f"  ➜ 检查 {_season_label_text()} 一致性时出错: {e}", exc_info=True)
         return {
             'ok': False,
             'reason': 'error',
@@ -1279,6 +1402,7 @@ def check_season_consistency(
             'tmdb_id': tmdb_id,
             'season_number': season_number_int,
             'expected_episode_count': expected_episode_count,
+            'series_name': series_name,
         }
 
 # --- 剧集/季状态检查（统一逻辑） ---

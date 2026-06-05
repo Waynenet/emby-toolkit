@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 VIDEO_EXTS = {'.mkv', '.mp4', '.ts', '.m2ts', '.avi', '.mov', '.wmv', '.flv', '.rmvb', '.webm', '.iso'}
 _ORGANIZE_KICK_LOCK = threading.Lock()
 _LAST_ORGANIZE_KICK_AT = 0
-
-
 def _kick_115_organize_detached(reason: str = '', delay: float = 3.0) -> Dict[str, Any]:
     """共享资源永久转存成功后，绕过单线程 task_manager，异步踢 115 待整理扫描。"""
     global _LAST_ORGANIZE_KICK_AT
@@ -57,20 +55,11 @@ def _kick_115_organize_detached(reason: str = '', delay: float = 3.0) -> Dict[st
         'message': '已异步触发 115 待整理扫描',
     }
 
-
 class _MediainfoBuilder(P115MediaAnalyzerMixin):
     pass
-
-
 def _cfg(name: str, fallback: str, default=None):
     key = getattr(constants, name, fallback)
     return (config_manager.APP_CONFIG or {}).get(key, default)
-
-
-def _shared_cfg(key: str, default=None):
-    return settings_db.get_shared_resource_config().get(key, default)
-
-
 def _safe_int(value, default=0):
     try:
         if value in (None, ''):
@@ -78,8 +67,6 @@ def _safe_int(value, default=0):
         return int(float(value))
     except Exception:
         return default
-
-
 def _normalize_episode_number_list(value) -> List[int]:
     """共享池按季查询后，本地用缺集号列表做精确过滤。"""
     if value in (None, ''):
@@ -101,42 +88,6 @@ def _normalize_episode_number_list(value) -> List[int]:
         except Exception:
             pass
     return sorted(out)
-
-
-def _extract_episode_number_fallback(source: Dict[str, Any] | None = None, context: Dict[str, Any] | None = None):
-    source = source or {}
-    context = context or {}
-    for value in (
-        source.get('episode_number'),
-        context.get('episode_number'),
-    ):
-        episode = _safe_int(value, None)
-        if episode is not None:
-            return episode
-
-    text = ' '.join(
-        str(v or '').strip()
-        for v in (
-            source.get('file_name'),
-            source.get('title'),
-            context.get('file_name'),
-            context.get('title'),
-        )
-        if str(v or '').strip()
-    )
-    if not text:
-        return None
-
-    for pattern in (
-        r'(?i)\bS\d{1,2}\s*[._ -]*E(\d{1,4})\b',
-        r'第\s*(\d{1,4})\s*[集话話]',
-    ):
-        match = re.search(pattern, text)
-        if match:
-            return _safe_int(match.group(1), None)
-    return None
-
-
 def _tv_parent_tmdb_id(context: Dict[str, Any] | None = None, source: Dict[str, Any] | None = None) -> str:
     """统一提取父剧 TMDb ID。
 
@@ -172,19 +123,13 @@ def _tv_parent_tmdb_id(context: Dict[str, Any] | None = None, source: Dict[str, 
                 return value
 
     return ''
-
-
 def _norm_sha1(value: str) -> str:
     return str(value or '').strip().upper()
-
-
 def _share_import_resp_text(resp: Any) -> str:
     try:
         return json.dumps(resp, ensure_ascii=False)
     except Exception:
         return str(resp or '')
-
-
 def _share_import_resp_code(resp: Any) -> str:
     if isinstance(resp, dict):
         for key in ('errno', 'code', 'errNo'):
@@ -192,14 +137,10 @@ def _share_import_resp_code(resp: Any) -> str:
             if value not in (None, ''):
                 return str(value)
     return ''
-
-
 def _source_identity_code(src: Dict[str, Any]) -> str:
     if not isinstance(src, dict):
         return ''
     return str(src.get('share_code') or src.get('source_id') or '').strip()
-
-
 def _is_share_import_already_saved(resp: Any) -> bool:
     """115 返回“你已经转存过该文件”时，只代表本账号幂等限制，不代表中心共享源失效。"""
     code = _share_import_resp_code(resp)
@@ -217,8 +158,6 @@ def _is_share_import_already_saved(resp: Any) -> bool:
         or 'already received' in text
         or 'already saved' in text
     )
-
-
 def _share_import_success(resp: Any) -> bool:
     text = _share_import_resp_text(resp).lower()
     if _is_share_import_already_saved(resp):
@@ -230,8 +169,6 @@ def _share_import_success(resp: Any) -> bool:
         if code in ('0', '200'):
             return True
     return any(k in text for k in ('已存在', '已经转存', '转存过', 'already', 'exist'))
-
-
 def _is_share_import_local_account_issue(resp: Any) -> bool:
     """本机账号/频率/空间/幂等问题，不应上报中心 failed。"""
     if _is_share_import_already_saved(resp):
@@ -242,8 +179,6 @@ def _is_share_import_local_account_issue(resp: Any) -> bool:
         '770004', '990001', '4100010', '4100025',
         'quota', 'limit', 'too many', 'rate',
     ))
-
-
 def _is_share_import_source_dead(resp: Any) -> bool:
     """只有明确死链/提取码错误/源文件删除，才允许向中心上报 failed。"""
     if _is_share_import_local_account_issue(resp):
@@ -258,8 +193,6 @@ def _is_share_import_source_dead(resp: Any) -> bool:
         '文件(夹)已被移动或删除', '已被移动或删除', '源文件不存在',
         'share not found', 'expired', 'cancelled', 'canceled', 'not found', 'deleted',
     ))
-
-
 def _find_local_p115_file_by_sha1(sha1: str) -> Dict[str, Any]:
     """按 SHA1 兜底判断本账号是否已经有这个文件。
 
@@ -292,8 +225,6 @@ def _find_local_p115_file_by_sha1(sha1: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 按 SHA1 查询 p115_filesystem_cache 失败: sha1={sha1}, err={e}")
     return {}
-
-
 def _source_relevant_to_context(src: Dict[str, Any], context: Dict[str, Any]) -> bool:
     """判断中心源是否和本次消费目标相关，用于按 SHA1 跳过重复转存。"""
     if not src or not context:
@@ -328,8 +259,6 @@ def _source_relevant_to_context(src: Dict[str, Any], context: Dict[str, Any]) ->
         src_type = str(src.get('item_type') or '').strip()
         return src_type in ('', 'Movie')
     return True
-
-
 def _local_existing_hit_for_import_group(src: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     """同一 share_code 可能聚合多条中心源；优先用本次目标相关源的 SHA1 查本地。
 
@@ -378,8 +307,6 @@ def _local_existing_hit_for_import_group(src: Dict[str, Any], context: Dict[str,
         if local:
             return {'source': src, 'local': local}
     return {}
-
-
 def _episode_guard_key(parent_tmdb_id, season_number, episode_number) -> str:
     parent = str(parent_tmdb_id or '').strip()
     season = _safe_int(season_number, -1)
@@ -387,8 +314,6 @@ def _episode_guard_key(parent_tmdb_id, season_number, episode_number) -> str:
     if not parent or season < 0 or episode < 0:
         return ''
     return f'{parent}|{season}|{episode}'
-
-
 def _collect_episode_guard_keys(sources: List[Dict[str, Any]], context: Dict[str, Any]) -> List[str]:
     keys = set()
     context_parent = _tv_parent_tmdb_id(context, None)
@@ -412,15 +337,6 @@ def _collect_episode_guard_keys(sources: List[Dict[str, Any]], context: Dict[str
         if key:
             keys.add(key)
     return sorted(keys)
-
-
-def _sanitize_filename(name: str) -> str:
-    name = str(name or '').strip()
-    name = re.sub(r'[\\/:*?"<>|]+', ' ', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    return name or 'Unknown'
-
-
 def _build_gap_item(*, tmdb_id, item_type, title='', season_number=None, episode_number=None, year='') -> Dict[str, Any]:
     item_type = str(item_type or '').strip()
     return {
@@ -431,8 +347,6 @@ def _build_gap_item(*, tmdb_id, item_type, title='', season_number=None, episode
         'title': title or None,
         'release_year': int(year) if str(year or '').isdigit() else None,
     }
-
-
 def _build_center_queries(item: Dict[str, Any], title: str, tmdb_id, item_type: str, parent_tmdb_id=None, season_number=None, year='') -> List[Dict[str, Any]]:
     """把本地待订阅项转换成中心查询。
 
@@ -456,8 +370,6 @@ def _build_center_queries(item: Dict[str, Any], title: str, tmdb_id, item_type: 
         if sid and s_num not in (None, ''):
             queries.append(_build_gap_item(tmdb_id=sid, item_type='Season', title=title, season_number=s_num, year=year))
     return [q for q in queries if q.get('tmdb_id')]
-
-
 def report_shared_gap(item: Dict[str, Any], title: str = '', tmdb_id=None, item_type: str = '', parent_tmdb_id=None, season_number=None, year='') -> bool:
     if not shared_center_enabled():
         return False
@@ -472,8 +384,6 @@ def report_shared_gap(item: Dict[str, Any], title: str = '', tmdb_id=None, item_
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 登记缺口失败: {e}")
         return False
-
-
 def _flatten_search_results(search_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     sources = []
     for block in (search_data or {}).get('results') or []:
@@ -490,12 +400,8 @@ def _flatten_search_results(search_data: Dict[str, Any]) -> List[Dict[str, Any]]
         seen.add(key)
         unique.append(src)
     return unique
-
-
 def _episode_transfer_disabled() -> bool:
     return bool(settings_db.get_shared_resource_config().get('p115_shared_disable_episode_transfer', False))
-
-
 def _filter_sources_by_episode_transfer_policy(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not _episode_transfer_disabled():
         return list(sources or [])
@@ -510,11 +416,6 @@ def _filter_sources_by_episode_transfer_policy(sources: List[Dict[str, Any]]) ->
     if blocked:
         logger.info(f"  ➜ [共享资源] 已按配置过滤中心单集资源 {blocked} 条。")
     return filtered
-
-
-
-# 虚拟入库已移除：不再生成本地 STRM 投影/sidecar，也不再写 shared_virtual_items。
-
 def _guess_se_from_source(src: Dict[str, Any], context: Dict[str, Any]):
     s_num = src.get('season_number') if src.get('season_number') not in (None, '') else context.get('season_number')
     # ★ 核心修复：补充从 context 兜底获取 episode_number
@@ -539,8 +440,6 @@ def _guess_se_from_source(src: Dict[str, Any], context: Dict[str, Any]):
                 e_num = int(m.group(2))
 
     return s_num, e_num
-
-
 def _load_center_raw_map(client: SharedCenterClient, sources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     raw_map = {}
 
@@ -566,25 +465,12 @@ def _load_center_raw_map(client: SharedCenterClient, sources: List[Dict[str, Any
                 raw_map[sha1] = raw
 
     return raw_map
-
-
-def _backup_instruction_from_report(report_resp: Dict[str, Any] | None) -> Dict[str, Any]:
-    if not isinstance(report_resp, dict):
-        return {}
-    info = report_resp.get('backup_share') or report_resp.get('backup_instruction') or {}
-    if isinstance(info, dict) and info.get('should_create'):
-        return info
-    return {}
-
-
 def _share_source_rows(src: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = (src or {}).get('_group_sources') if isinstance(src, dict) else None
     rows = [x for x in (rows or []) if isinstance(x, dict)]
     if rows:
         return rows
     return [src] if isinstance(src, dict) else []
-
-
 def _source_status_rank_for_retry(value: str) -> int:
     value = str(value or '').strip().lower()
     if value == 'alive':
@@ -592,36 +478,21 @@ def _source_status_rank_for_retry(value: str) -> int:
     if value == 'pending':
         return 1
     return 2
-
-
 def _source_backup_rank(src: Dict[str, Any]) -> int:
     try:
         return int(float((src or {}).get('_backup_rank') or 999999))
     except Exception:
         return 999999
-
-
-def _source_backup_count(src: Dict[str, Any]) -> int:
-    try:
-        return int(float((src or {}).get('_backup_count') or 1))
-    except Exception:
-        return 1
-
-
 def _source_success_count(src: Dict[str, Any]) -> int:
     try:
         return int(float((src or {}).get('success_count') or (src or {}).get('_package_success_count') or 0))
     except Exception:
         return 0
-
-
 def _source_fail_count(src: Dict[str, Any]) -> int:
     try:
         return int(float((src or {}).get('fail_count') or (src or {}).get('_package_fail_count') or 0))
     except Exception:
         return 0
-
-
 def _source_retry_sort_key(src: Dict[str, Any]):
     rows = _share_source_rows(src)
     best_rank = min([_source_backup_rank(r) for r in rows] + [_source_backup_rank(src)])
@@ -631,8 +502,6 @@ def _source_retry_sort_key(src: Dict[str, Any]):
     first_time = min([str((r or {}).get('last_verified_at') or (r or {}).get('created_at') or '') for r in rows] or [''])
     created = min([str((r or {}).get('created_at') or '') for r in rows] or [''])
     return (best_rank, status_rank, success, fail, first_time, created, str((src or {}).get('source_id') or ''))
-
-
 def _season_pack_retry_fingerprint(rows: List[Dict[str, Any]], context: Dict[str, Any] = None) -> str:
     rows = [dict(r or {}) for r in (rows or []) if r]
     if not rows:
@@ -650,8 +519,6 @@ def _season_pack_retry_fingerprint(rows: List[Dict[str, Any]], context: Dict[str
     if not tmdb_id or season is None or not sha1s:
         return ''
     return f"season_pack:{tmdb_id}:S{int(season):02d}:{'|'.join(sha1s)}"
-
-
 def _permanent_resource_key_for_rows(rows: List[Dict[str, Any]], context: Dict[str, Any] = None) -> str:
     """永久转存冗余组 key：同 SHA1 / 同季包完整指纹归为一组。"""
     rows = [dict(r or {}) for r in (rows or []) if r]
@@ -675,12 +542,8 @@ def _permanent_resource_key_for_rows(rows: List[Dict[str, Any]], context: Dict[s
         str(first.get('episode_number') if first.get('episode_number') is not None else (context or {}).get('episode_number') or ''),
         sha1,
     ])
-
-
 def _permanent_resource_key(src: Dict[str, Any], context: Dict[str, Any] = None) -> str:
     return _permanent_resource_key_for_rows(_share_source_rows(src), context=context)
-
-
 def _build_permanent_import_plan(sources: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
     """把中心源整理为“资源版本 -> 多个备份分享码”的重试计划。"""
     package_map: Dict[str, Dict[str, Any]] = {}
@@ -722,40 +585,6 @@ def _build_permanent_import_plan(sources: List[Dict[str, Any]], context: Dict[st
         alts = sorted(group['alternatives'], key=_source_retry_sort_key)
         plan.append({'resource_key': resource_key, 'alternatives': alts})
     return plan
-
-
-def _source_season_number(src: Dict[str, Any], context: Dict[str, Any] = None):
-    context = context or {}
-    for value in (
-        (src or {}).get('season_number'),
-        context.get('season_number'),
-    ):
-        season = _safe_int(value, None)
-        if season is not None:
-            return season
-    for row in _share_source_rows(src):
-        season = _safe_int((row or {}).get('season_number'), None)
-        if season is not None:
-            return season
-    return None
-
-def _extract_created_cid(resp: Dict[str, Any]) -> str:
-    if not isinstance(resp, dict):
-        return ''
-    data = resp.get('data') if isinstance(resp.get('data'), dict) else {}
-    return str(
-        resp.get('cid')
-        or resp.get('file_id')
-        or resp.get('id')
-        or data.get('cid')
-        or data.get('file_id')
-        or data.get('id')
-        or ''
-    ).strip()
-
-
-
-# 被动备份分享创建链路已移除：共享池消费只负责转存与上报；主动备份由 webhook / watchlist 触发。
 def _cache_center_raw_as_local_mediainfo(src: Dict[str, Any], raw: Dict[str, Any]) -> bool:
     """中心 RAW -> 本地 p115_mediainfo_cache.mediainfo_json，供 WashingService 读取。"""
     sha1 = _norm_sha1(src.get('sha1'))
@@ -780,8 +609,6 @@ def _cache_center_raw_as_local_mediainfo(src: Dict[str, Any], raw: Dict[str, Any
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 中心 RAW 转本地 MediaInfo 失败: {src.get('file_name')} -> {e}")
         return False
-
-
 def _washing_new_level(sha1: str, file_name: str, file_size: int, target_cid: str,
                        media_type: str, original_lang: str = '', has_external_subtitle: bool = False):
     """读取 WashingService 的真实规则优先级。level 越小优先级越高。"""
@@ -808,8 +635,6 @@ def _washing_new_level(sha1: str, file_name: str, file_size: int, target_cid: st
         return 999, '未配置优先级规则'
 
     return WashingService.get_level(norm_new, priorities)
-
-
 def _raw_quality_score(src: Dict[str, Any], raw: Dict[str, Any]) -> int:
     """同一洗版优先级下的兜底排序。主裁判仍是 WashingService。"""
     text = f"{src.get('file_name') or ''} {json.dumps(raw or {}, ensure_ascii=False)[:4000]}".upper()
@@ -842,8 +667,6 @@ def _raw_quality_score(src: Dict[str, Any], raw: Dict[str, Any]) -> int:
     size_gb = (_safe_int(src.get('size'), 0) or 0) / 1024 / 1024 / 1024
     score += min(int(size_gb), 30)
     return score
-
-
 def _select_sources_by_washing_before_import(
     client: SharedCenterClient,
     p115,
@@ -1091,7 +914,6 @@ def _select_sources_by_washing_before_import(
     )
 
     return selected_rows, errors
-
 def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
     p115 = P115Service.get_client()
     if not p115:
@@ -1191,10 +1013,6 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
             import_container = {}
 
             resp = p115.share_import(share_code, receive_code, import_target_cid)
-            logger.info(
-                f"  ➜ [共享资源] 115分享转存返回：share={share_code}, cid={import_target_cid}, "
-                f"backup={alt_index}/{len(alternatives)}, resp={str(resp)[:300]}"
-            )
             text = _share_import_resp_text(resp)
             is_already_saved = _is_share_import_already_saved(resp)
             success = _share_import_success(resp)
@@ -1209,9 +1027,12 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
                         f"  ➜ [共享资源] 115 提示本账号已转存过，视为本地幂等命中，跳过中心 failed 上报：share={share_code}"
                     )
                 else:
-                    report_resp = None
+                    logger.info(
+                        f"  ➜ [共享资源] 已成功转存：share={share_code}, cid={import_target_cid}, "
+                        f"backup={alt_index}/{len(alternatives)}"
+                    )
                     try:
-                        report_resp = client.report_transfer(
+                        client.report_transfer(
                             src.get('source_id'),
                             'success',
                             expected_sha1=_norm_sha1(src.get('sha1')),
@@ -1220,16 +1041,12 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
                         )
                     except Exception as e:
                         logger.debug(f"  ➜ [共享资源] 上报转存成功失败：share={share_code}, err={e}")
-
-                    if report_resp:
-                        # 备份分享改为供给侧主动创建：电影由 webhook 入库后探测，季包由智能追剧完结汇总触发。
-                        # 共享池消费路径只负责转存结果上报，不再根据中心返回的 backup_instruction 被动创建备份分享。
-                        if _backup_instruction_from_report(report_resp):
-                            logger.debug(
-                                "  ➜ [共享资源] 已忽略中心返回的被动备份指令：share=%s，备份分享将由入库/完结流程主动探测创建",
-                                share_code,
-                            )
                 break
+            else:
+                logger.warning(
+                    f"  ➜ [共享资源] 115分享转存失败：share={share_code}, cid={import_target_cid}, "
+                    f"backup={alt_index}/{len(alternatives)}, resp={str(resp)[:300]}"
+                )
 
             errors.append(f"{src.get('file_name')}: {text[:120]}")
 
@@ -1284,47 +1101,28 @@ def _consume_permanent(client: SharedCenterClient, sources: List[Dict[str, Any]]
         'errors': errors,
     }
 
+def _subscription_probe_request_key(query: Dict[str, Any]) -> str:
+    return '|'.join([
+        str((query or {}).get('item_type') or '').strip(),
+        str((query or {}).get('tmdb_id') or '').strip(),
+        str((query or {}).get('season_number') if (query or {}).get('season_number') is not None else ''),
+        str((query or {}).get('episode_number') if (query or {}).get('episode_number') is not None else ''),
+    ])
 
-def try_consume_shared_resource(
+
+def _filter_sources_for_request(
+    sources: List[Dict[str, Any]],
     item: Dict[str, Any],
-    title: str,
-    tmdb_id,
     item_type: str,
-    parent_tmdb_id=None,
     season_number=None,
-    year='',
     exclude_share_codes: List[str] | None = None,
-    force_mode: str | None = None,
-) -> Dict[str, Any]:
-    if not shared_center_enabled():
-        return {'enabled': False, 'success': False, 'reported_gap': False}
+) -> tuple[List[Dict[str, Any]], int, List[int]]:
+    """统一订阅消费前的本地精确过滤。中心按季返回，客户端按缺集/单集再裁剪。"""
+    sources = list(sources or [])
+    req_s_num = season_number if season_number not in (None, '') else (item or {}).get('season_number')
+    req_e_num = (item or {}).get('episode_number')
+    req_missing_eps = _normalize_episode_number_list((item or {}).get('missing_episode_numbers'))
 
-    client = SharedCenterClient()
-    if not client.ready:
-        logger.warning('  ➜ [共享资源] 已启用但中心地址/token 未配置，跳过共享池。')
-        return {'enabled': True, 'success': False, 'reported_gap': False}
-
-    queries = _build_center_queries(item, title, tmdb_id, item_type, parent_tmdb_id, season_number, year)
-    if not queries:
-        return {'enabled': True, 'success': False, 'reported_gap': False}
-
-    sources = []
-    try:
-        data = client.search_sources(queries, limit_per_item=200)
-        sources = _flatten_search_results(data)
-        sources = _filter_sources_by_episode_transfer_policy(sources)
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 查询中心共享池失败: {e}")
-
-    # =================================================================
-    # 中心查询按季返回后，本地仍然必须精确过滤到当前缺失集。
-    # - 单集源：必须同季同集；
-    # - SUBSCRIBED Season 会带 missing_episode_numbers，只消费缺失单集；
-    # - 季包/旧数据没有 episode_number：保留，后续按 SHA1/包内文件消费。
-    # =================================================================
-    req_s_num = season_number if season_number not in (None, '') else item.get('season_number')
-    req_e_num = item.get('episode_number')
-    req_missing_eps = _normalize_episode_number_list(item.get('missing_episode_numbers'))
     if req_e_num is not None and str(req_e_num).strip() != '':
         filtered_sources = []
         for src in sources:
@@ -1346,7 +1144,7 @@ def try_consume_shared_resource(
             if src_s_num is not None and str(src_s_num).strip() != '' and req_s_num not in (None, ''):
                 if int(src_s_num) != int(req_s_num):
                     continue
-            # 单集源必须在缺失列表内；季包/旧数据没有集号，保留。
+            # 单集源必须在缺失列表内；季包没有集号，保留，因为它可能覆盖整季。
             if src_e_num is not None and str(src_e_num).strip() != '':
                 if int(src_e_num) not in req_missing_eps:
                     continue
@@ -1376,6 +1174,32 @@ def try_consume_shared_resource(
             logger.info(f"  ➜ [共享资源] 已过滤 {excluded_hits} 个本轮已消费的 share_code，避免重复转存同一季包。")
         sources = filtered_sources
 
+    return sources, excluded_hits, req_missing_eps
+
+
+def _consume_sources_for_subscription(
+    client: SharedCenterClient,
+    sources: List[Dict[str, Any]],
+    item: Dict[str, Any],
+    title: str,
+    tmdb_id,
+    item_type: str,
+    parent_tmdb_id=None,
+    season_number=None,
+    year='',
+    exclude_share_codes: List[str] | None = None,
+    force_mode: str | None = None,
+    reported_gap: bool = False,
+) -> Dict[str, Any]:
+    sources = _filter_sources_by_episode_transfer_policy(sources or [])
+    sources, excluded_hits, req_missing_eps = _filter_sources_for_request(
+        sources,
+        item,
+        item_type,
+        season_number=season_number,
+        exclude_share_codes=exclude_share_codes,
+    )
+
     if not sources:
         if excluded_hits:
             return {
@@ -1386,23 +1210,16 @@ def try_consume_shared_resource(
                 'matched_share_codes': [],
                 'covered_episode_keys': [],
             }
-        reported = False
-        try:
-            client.report_gaps(queries)
-            reported = True
-        except Exception as e:
-            logger.warning(f"  ➜ [共享资源] 中心未命中，登记缺口失败: {e}")
-        return {'enabled': True, 'success': False, 'reported_gap': reported}
+        return {'enabled': True, 'success': False, 'reported_gap': bool(reported_gap)}
 
     context = {
         'title': title,
         'tmdb_id': str(tmdb_id or ''),
         'item_type': item_type,
-        # parent_tmdb_id 保留给旧调用方；parent_series_tmdb_id 是新链路唯一推荐字段。
         'parent_tmdb_id': str(parent_tmdb_id or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or ''),
         'parent_series_tmdb_id': str(parent_tmdb_id or item.get('parent_series_tmdb_id') or item.get('series_tmdb_id') or ''),
         'season_number': season_number,
-        'episode_number': item.get('episode_number'), # ★ 确保 context 里有 episode_number
+        'episode_number': item.get('episode_number'),
         'missing_episode_numbers': req_missing_eps,
         'year': year,
     }
@@ -1420,90 +1237,171 @@ def try_consume_shared_resource(
     return result
 
 
+def batch_probe_shared_resources(prepared_items: List[Dict[str, Any]], limit_per_item: int = 200) -> Dict[str, Any]:
+    """统一订阅批量探测中心共享池。
 
-def _build_backup_search_query_from_source(src: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-    """前端手动选中一个中心源时，反查同资源备份分享。"""
-    src = src or {}
-    context = context or {}
-    item_type = str(src.get('item_type') or context.get('item_type') or '').strip()
-    item_type_l = item_type.lower()
-    tmdb_id = str(src.get('tmdb_id') or context.get('tmdb_id') or context.get('parent_series_tmdb_id') or context.get('parent_tmdb_id') or '').strip()
-    season = src.get('season_number') if src.get('season_number') not in (None, '') else context.get('season_number')
-    episode = src.get('episode_number') if src.get('episode_number') not in (None, '') else context.get('episode_number')
-    title = src.get('title') or context.get('title') or src.get('file_name') or ''
-    year = src.get('release_year') or context.get('year')
+    prepared_items 由 subscriptions.py 提前整理，包含原始 item 与父剧/季号/年份等上下文。
+    返回 by_key，后续逐条处理时直接取中心本轮批量结果，避免 N 次中心查询/登记缺口。
+    """
+    if not shared_center_enabled():
+        return {'enabled': False, 'supported': False, 'by_key': {}}
 
-    if item_type_l == 'movie':
-        return _build_gap_item(tmdb_id=tmdb_id, item_type='Movie', title=title, year=year)
-    if item_type_l == 'season':
-        return _build_gap_item(tmdb_id=tmdb_id, item_type='Season', title=title, season_number=season, year=year)
-    if item_type_l == 'episode':
-        return _build_gap_item(tmdb_id=tmdb_id, item_type='Episode', title=title, season_number=season, episode_number=episode, year=year)
-    if season not in (None, '') and episode in (None, ''):
-        return _build_gap_item(tmdb_id=tmdb_id, item_type='Season', title=title, season_number=season, year=year)
-    return _build_gap_item(tmdb_id=tmdb_id, item_type=item_type or 'Movie', title=title, season_number=season, episode_number=episode, year=year)
+    client = SharedCenterClient()
+    if not client.ready:
+        logger.warning('  ➜ [共享资源] 已启用但中心地址/token 未配置，跳过共享池批量探测。')
+        return {'enabled': True, 'supported': False, 'by_key': {}}
 
+    request_items = []
+    context_by_key: Dict[str, Dict[str, Any]] = {}
+    for prepared in prepared_items or []:
+        if not isinstance(prepared, dict):
+            continue
+        item = prepared.get('item') if isinstance(prepared.get('item'), dict) else {}
+        queries = _build_center_queries(
+            item,
+            prepared.get('title') or item.get('title'),
+            prepared.get('tmdb_id') or item.get('tmdb_id'),
+            prepared.get('item_type') or item.get('item_type'),
+            prepared.get('parent_tmdb_id'),
+            prepared.get('season_number'),
+            prepared.get('year'),
+        )
+        for query in queries:
+            key = _subscription_probe_request_key(query)
+            if not key or key in context_by_key:
+                continue
+            query = dict(query)
+            query['request_key'] = key
+            missing_eps = _normalize_episode_number_list(item.get('missing_episode_numbers'))
+            if missing_eps:
+                query['missing_episode_numbers'] = missing_eps
+            request_items.append(query)
+            context_by_key[key] = prepared
 
-def _expand_sources_with_permanent_backups(client: SharedCenterClient, sources: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """手动永久转存也补齐同 SHA1 / 同季包指纹的所有备份候选。"""
-    sources = [dict(s) for s in (sources or []) if isinstance(s, dict)]
-    if not sources or not hasattr(client, 'search_sources'):
-        return sources
-
-    queries = []
-    for src in sources:
-        q = _build_backup_search_query_from_source(src, context or {})
-        if q and q.get('tmdb_id'):
-            queries.append(q)
-    if not queries:
-        return sources
+    if not request_items:
+        return {'enabled': True, 'supported': True, 'by_key': {}}
 
     try:
-        data = client.search_sources(queries, limit_per_item=200)
-        candidates = _filter_sources_by_episode_transfer_policy(_flatten_search_results(data))
+        if hasattr(client, 'probe_subscriptions_batch'):
+            data = client.probe_subscriptions_batch(request_items, limit_per_item=limit_per_item)
+        else:
+            data = {'supported': False, 'items': [], 'message': 'client_missing_probe_subscriptions_batch'}
     except Exception as e:
-        logger.debug(f"  ➜ [共享资源] 拉取手动转存备份候选失败，沿用已选源: {e}")
-        return sources
-    if not candidates:
-        return sources
+        logger.warning(f"  ➜ [共享资源] 统一订阅批量探测失败，将回退逐条查询: {e}")
+        return {'enabled': True, 'supported': False, 'by_key': {}, 'message': str(e)}
 
-    selected_ids = {str(s.get('source_id') or '').strip() for s in sources if str(s.get('source_id') or '').strip()}
-    selected_share_codes = {str(s.get('share_code') or '').strip() for s in sources if str(s.get('share_code') or '').strip()}
-    wanted_keys = set()
-    for src in candidates:
-        sid = str(src.get('source_id') or '').strip()
-        share_code = str(src.get('share_code') or '').strip()
-        if (sid and sid in selected_ids) or (share_code and share_code in selected_share_codes):
-            key = str(src.get('_resource_key') or '').strip() or _permanent_resource_key_for_rows([src], context)
-            if key:
-                wanted_keys.add(key)
+    if data.get('supported') is False:
+        logger.info('  ➜ [共享资源] 中心暂不支持统一订阅批量探测，将回退逐条查询。')
+        return {'enabled': True, 'supported': False, 'by_key': {}, 'message': data.get('message')}
 
-    if not wanted_keys:
-        for src in sources:
-            key = _permanent_resource_key_for_rows([src], context)
-            if key:
-                wanted_keys.add(key)
-
-    expanded = []
-    seen = set()
-    for src in candidates:
-        key = str(src.get('_resource_key') or '').strip() or _permanent_resource_key_for_rows([src], context)
-        if wanted_keys and key not in wanted_keys:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    hit_count = gap_count = 0
+    for row in data.get('items') or []:
+        if not isinstance(row, dict):
             continue
-        dedupe_key = (str(src.get('source_id') or ''), _norm_sha1(src.get('sha1')))
-        if dedupe_key in seen:
+        key = str(row.get('request_key') or _subscription_probe_request_key(row.get('query') or {})).strip()
+        if not key:
             continue
-        seen.add(dedupe_key)
-        expanded.append(src)
+        row['prepared'] = context_by_key.get(key) or {}
+        by_key[key] = row
+        if row.get('sources'):
+            hit_count += 1
+        if row.get('reported_gap') or row.get('status') == 'gap_registered':
+            gap_count += 1
 
-    if expanded:
-        logger.info(
-            "  ➜ [共享资源] 手动永久转存已补齐备份候选：selected=%s, expanded=%s, resources=%s",
-            len(sources), len(expanded), len(wanted_keys) or '-'
-        )
-        return expanded
-    return sources
+    logger.info(
+        f"  ➜ [共享资源] 统一订阅批量探测完成：提交 {len(request_items)} 个，"
+        f"命中 {hit_count} 个，登记缺口 {gap_count} 个。"
+    )
+    return {'enabled': True, 'supported': True, 'by_key': by_key, 'raw': data}
 
+
+def try_consume_preprobed_shared_resource(
+    probe_row: Dict[str, Any],
+    item: Dict[str, Any],
+    title: str,
+    tmdb_id,
+    item_type: str,
+    parent_tmdb_id=None,
+    season_number=None,
+    year='',
+    exclude_share_codes: List[str] | None = None,
+    force_mode: str | None = None,
+) -> Dict[str, Any]:
+    if not shared_center_enabled():
+        return {'enabled': False, 'success': False, 'reported_gap': False}
+    client = SharedCenterClient()
+    if not client.ready:
+        return {'enabled': True, 'success': False, 'reported_gap': False}
+    probe_row = dict(probe_row or {})
+    sources = [x for x in (probe_row.get('sources') or []) if isinstance(x, dict)]
+    return _consume_sources_for_subscription(
+        client,
+        sources,
+        item,
+        title,
+        tmdb_id,
+        item_type,
+        parent_tmdb_id=parent_tmdb_id,
+        season_number=season_number,
+        year=year,
+        exclude_share_codes=exclude_share_codes,
+        force_mode=force_mode,
+        reported_gap=bool(probe_row.get('reported_gap') or probe_row.get('status') == 'gap_registered'),
+    )
+def try_consume_shared_resource(
+    item: Dict[str, Any],
+    title: str,
+    tmdb_id,
+    item_type: str,
+    parent_tmdb_id=None,
+    season_number=None,
+    year='',
+    exclude_share_codes: List[str] | None = None,
+    force_mode: str | None = None,
+) -> Dict[str, Any]:
+    '''尝试查询并消费中心共享资源。返回结果包含是否启用共享池、是否成功消费、是否命中缺口、以及其他相关信息。'''
+    if not shared_center_enabled():
+        return {'enabled': False, 'success': False, 'reported_gap': False}
+
+    client = SharedCenterClient()
+    if not client.ready:
+        logger.warning('  ➜ [共享资源] 已启用但中心地址/token 未配置，跳过共享池。')
+        return {'enabled': True, 'success': False, 'reported_gap': False}
+
+    queries = _build_center_queries(item, title, tmdb_id, item_type, parent_tmdb_id, season_number, year)
+    if not queries:
+        return {'enabled': True, 'success': False, 'reported_gap': False}
+
+    sources = []
+    reported = False
+    try:
+        data = client.search_sources(queries, limit_per_item=200)
+        sources = _flatten_search_results(data)
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源] 查询中心共享池失败: {e}")
+
+    if not sources:
+        try:
+            client.report_gaps(queries)
+            reported = True
+        except Exception as e:
+            logger.warning(f"  ➜ [共享资源] 中心未命中，登记缺口失败: {e}")
+
+    return _consume_sources_for_subscription(
+        client,
+        sources,
+        item,
+        title,
+        tmdb_id,
+        item_type,
+        parent_tmdb_id=parent_tmdb_id,
+        season_number=season_number,
+        year=year,
+        exclude_share_codes=exclude_share_codes,
+        force_mode=force_mode,
+        reported_gap=reported,
+    )
 def consume_center_sources(source_ids: List[str], mode: str = 'permanent', context: Dict[str, Any] = None) -> Dict[str, Any]:
     """按中心 source_id 手动消费共享资源。
 
@@ -1544,5 +1442,4 @@ def consume_center_sources(source_ids: List[str], mode: str = 'permanent', conte
     if selected_mode == 'virtual':
         return {'enabled': True, 'success': False, 'message': '虚拟入库已移除，请使用“转存”。'}
 
-    sources = _expand_sources_with_permanent_backups(client, sources, ctx)
     return _consume_permanent(client, sources, ctx)

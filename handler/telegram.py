@@ -4,6 +4,7 @@ import threading
 import extensions
 import requests
 import logging
+import re
 from datetime import datetime
 from config_manager import APP_CONFIG, get_proxies_for_requests
 from handler.emby import get_emby_item_details
@@ -13,6 +14,8 @@ import constants
 from handler.tg_media_candidate import build_channel_task_payload
 
 logger = logging.getLogger(__name__)
+
+_EPISODE_REF_PATTERN = re.compile(r'(?i)S(\d{1,3})\s*E(\d{1,4})(?:\s*-\s*E?(\d{1,4}))?')
 
 def _format_episode_ranges(episode_list: list) -> str:
     """
@@ -64,6 +67,79 @@ def _format_episode_ranges(episode_list: list) -> str:
             
     return ", ".join(final_parts)
 
+
+def _extract_episode_refs_from_text(text: str) -> list:
+    """从待复核原因等文本里提取季集引用，支持 S1E1 / S01E01-E03。"""
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    matches = []
+    for season_str, start_str, end_str in _EPISODE_REF_PATTERN.findall(text):
+        try:
+            season = int(season_str)
+            start_ep = int(start_str)
+            end_ep = int(end_str) if end_str else start_ep
+        except Exception:
+            continue
+
+        if season <= 0 or start_ep <= 0 or end_ep <= 0:
+            continue
+        if end_ep < start_ep:
+            start_ep, end_ep = end_ep, start_ep
+
+        # 防御性限制，避免异常文本把通知撑爆。
+        if end_ep - start_ep > 500:
+            end_ep = start_ep
+
+        for episode in range(start_ep, end_ep + 1):
+            matches.append((season, episode))
+
+    # 保持原始顺序去重，方便后续格式化为连续区间。
+    seen = set()
+    result = []
+    for item in matches:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _build_episode_notice_text(episode_list: list, label: str = "🎞️ *集数*") -> str:
+    """格式化通知中的季集文本，并在过长时压缩为摘要，避免 Telegram caption 过长。"""
+    normalized = []
+    seen = set()
+    for season, episode in episode_list or []:
+        try:
+            season = int(season)
+            episode = int(episode)
+        except Exception:
+            continue
+        if season <= 0 or episode <= 0:
+            continue
+        key = (season, episode)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+
+    if not normalized:
+        return ""
+
+    formatted = _format_episode_ranges(normalized)
+    if not formatted:
+        return ""
+
+    if len(formatted) > 72:
+        season_count = len({season for season, _ in normalized})
+        episode_count = len(normalized)
+        parts = formatted.split(", ")
+        head = ", ".join(parts[:3])
+        suffix = f"等{season_count}季{episode_count}集"
+        formatted = f"{head} ... {suffix}" if head else suffix
+
+    return f"{label}: `{_markdown_code_text(formatted)}`\n"
+
 def escape_markdown(text: str) -> str:
     """
     Helper function to escape characters for Telegram's MarkdownV2.
@@ -112,6 +188,101 @@ def _notice_asset_list(value) -> list:
         return [value]
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _load_episode_refs_by_emby_ids(emby_item_ids: list) -> list:
+    """从数据库回退查询分集季号/集号，避免通知强依赖 Emby 实时详情。"""
+    refs = []
+    seen = set()
+    normalized_ids = []
+    for value in emby_item_ids or []:
+        value = str(value or '').strip()
+        if value and value not in seen:
+            seen.add(value)
+            normalized_ids.append(value)
+
+    if not normalized_ids:
+        return refs
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for emby_item_id in normalized_ids:
+                    cursor.execute(
+                        """
+                        SELECT season_number, episode_number
+                        FROM media_metadata
+                        WHERE item_type = 'Episode'
+                          AND emby_item_ids_json @> %s::jsonb
+                        ORDER BY in_library DESC, date_added DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (json.dumps([emby_item_id], ensure_ascii=False),),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        continue
+                    season = row.get('season_number')
+                    episode = row.get('episode_number')
+                    try:
+                        season = int(season)
+                        episode = int(episode)
+                    except Exception:
+                        continue
+                    if season > 0 and episode > 0:
+                        refs.append((season, episode))
+    except Exception as e:
+        logger.debug(f"  ➜ [通知] 数据库回退查询剧集季集失败: {e}")
+
+    return refs
+
+
+def _load_series_inventory_episode_refs(parent_series_tmdb_id: str, limit: int = 2000) -> list:
+    """读取整部剧当前在库的分集，用于普通入库通知回退展示季集范围。"""
+    parent_series_tmdb_id = str(parent_series_tmdb_id or '').strip()
+    if not parent_series_tmdb_id:
+        return []
+
+    refs = []
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT season_number, episode_number
+                    FROM media_metadata
+                    WHERE parent_series_tmdb_id = %s
+                      AND item_type = 'Episode'
+                      AND in_library = TRUE
+                      AND season_number IS NOT NULL
+                      AND episode_number IS NOT NULL
+                    ORDER BY season_number ASC, episode_number ASC
+                    LIMIT %s
+                    """,
+                    (parent_series_tmdb_id, limit),
+                )
+                for row in cursor.fetchall():
+                    season = row.get('season_number')
+                    episode = row.get('episode_number')
+                    try:
+                        season = int(season)
+                        episode = int(episode)
+                    except Exception:
+                        continue
+                    if season > 0 and episode > 0:
+                        refs.append((season, episode))
+    except Exception as e:
+        logger.debug(f"  ➜ [通知] 读取整剧季集库存失败: series={parent_series_tmdb_id}, err={e}")
+
+    return refs
+
+
+def _extract_episode_refs_from_values(*values) -> list:
+    for value in values:
+        refs = _extract_episode_refs_from_text(value)
+        if refs:
+            return refs
     return []
 
 
@@ -361,6 +532,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         # 媒体参数不再临时查 Emby MediaSources，直接读取 process_single_item 已写入的
         # media_metadata.asset_details_json，避免重复请求和字段口径不一致。
         episode_info_text = ""
+        raw_episodes = []
         notice_emby_item_ids = []
         if item_type == "Series" and new_episode_ids:
             emby_url = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
@@ -368,7 +540,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             user_id = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID)
 
             # 收集原始数据而不是直接格式化字符串，这样我们可以在格式化字符串时使用
-            raw_episodes = [] 
             for ep_id in new_episode_ids:
                 detail = get_emby_item_details(ep_id, emby_url, api_key, user_id, fields="IndexNumber,ParentIndexNumber")
                 if detail:
@@ -377,11 +548,6 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                     # 收集元组 (季号, 集号)
                     raw_episodes.append((season_num, episode_num))
                 notice_emby_item_ids.append(str(ep_id))
-            
-            # 调用辅助函数生成合并后的字符串
-            if raw_episodes:
-                formatted_episodes = _format_episode_ranges(raw_episodes)
-                episode_info_text = f"🎞️ *集数*: `{formatted_episodes}`\n"
         elif item_id:
             notice_emby_item_ids.append(str(item_id))
 
@@ -440,6 +606,15 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                 f"🔍 *原因*: {escaped_reason}\n"
                 f"💡 _请前往 WebUI 手动介入处理_"
             )
+
+        if item_type == "Series" and not raw_episodes and new_episode_ids:
+            raw_episodes = _load_episode_refs_by_emby_ids(new_episode_ids)
+        if item_type == "Series" and not raw_episodes and review_reason:
+            raw_episodes = _extract_episode_refs_from_text(review_reason)
+        if item_type == "Series" and not raw_episodes and tmdb_id:
+            raw_episodes = _load_series_inventory_episode_refs(tmdb_id)
+        if raw_episodes:
+            episode_info_text = _build_episode_notice_text(raw_episodes, label="🎞️ *集数*")
 
         # ★★★ 修改：将 review_warning 追加到 caption 尾部 ★★★
         caption = (
@@ -528,14 +703,24 @@ def send_transfer_success_notification(task: dict):
         
         season_info = ""
         if item_type == 'tv':
-            if season_number is not None:
+            candidate = task.get('candidate') if isinstance(task.get('candidate'), dict) else {}
+            parsed_refs = _extract_episode_refs_from_values(
+                candidate.get('raw_text'),
+                candidate.get('title'),
+                candidate.get('identify_title'),
+                candidate.get('clean_title'),
+                title,
+            )
+            if parsed_refs:
+                season_info = _build_episode_notice_text(parsed_refs, label="🎞️ *集数*")
+            elif season_number is not None:
                 if episode_number is not None:
                     if is_pack:
-                        season_info = f"📦 *季集*: `S{season_number:02d} 包含 {episode_number} 集`\n"
+                        season_info = f"🎞️ *季集*: `S{int(season_number):02d} 共{int(episode_number)}集`\n"
                     else:
-                        season_info = f"📦 *季集*: `S{season_number:02d}E{episode_number:02d}`\n"
+                        season_info = f"🎞️ *季集*: `S{int(season_number):02d}E{int(episode_number):02d}`\n"
                 else:
-                    season_info = f"📦 *季集*: `S{season_number:02d}`\n"
+                    season_info = f"🎞️ *季集*: `S{int(season_number):02d}`\n"
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -1726,18 +1911,86 @@ def _execute_task_from_tg(chat_id: str, task_key: str):
         send_telegram_message(chat_id, escape_markdown(f"❌ 无法获取 {processor_type} 处理器实例。"))
         return
 
-    send_telegram_message(chat_id, escape_markdown(f"🚀 任务已启动：*{task_description}*\n请在系统日志或任务中心查看进度。"))
+    current_version = ""
+    target_version = ""
+    update_container_name = ""
+    update_image_name = ""
+    update_strategy = ""
+    if task_key == 'system-auto-update':
+        try:
+            from tasks.system_update import get_system_update_version_info, resolve_update_target, resolve_update_strategy
+            version_info = get_system_update_version_info() or {}
+            current_version = str(version_info.get('current_version') or '').strip()
+            target_version = str(version_info.get('target_version') or '').strip()
+            update_target = resolve_update_target(getattr(target_processor, 'config', {}) or {})
+            update_container_name = str(update_target.get('container_name') or '').strip()
+            update_image_name = str(update_target.get('docker_image_name') or '').strip()
+            strategy_info = resolve_update_strategy(getattr(target_processor, 'config', {}) or {})
+            update_strategy = str(strategy_info.get('strategy') or '').strip()
+        except Exception as e:
+            logger.debug(f"  ➜ [TG交互] 获取系统更新版本信息失败: {e}")
+
+    start_lines = [f"🚀 任务已启动：*{task_description}*"]
+    if task_key == 'system-auto-update':
+        if current_version:
+            start_lines.append(f"当前版本: `{current_version}`")
+        if target_version:
+            start_lines.append(f"目标版本: `{target_version}`")
+        if update_container_name:
+            start_lines.append(f"目标容器: `{update_container_name}`")
+        if update_image_name:
+            start_lines.append(f"目标镜像: `{update_image_name}`")
+        if update_strategy:
+            start_lines.append(f"更新策略: `{update_strategy}`")
+    start_lines.append("请在系统日志或任务中心查看进度。")
+    send_telegram_message(chat_id, escape_markdown("\n".join(start_lines)))
     logger.info(f"  ➜ [TG交互] 管理员 {chat_id} 触发了任务: {task_description}")
 
     # 包装执行逻辑，处理特殊参数
     def run_wrapper():
         try:
+            task_result = None
             tasks_requiring_force_flag = ['role-translation', 'enrich-aliases', 'populate-metadata']
             if task_key in tasks_requiring_force_flag:
-                task_function(target_processor, force_full_update=False)
+                task_result = task_function(target_processor, force_full_update=False)
             else:
-                task_function(target_processor)
-            
+                task_result = task_function(target_processor)
+
+            if task_key == 'system-auto-update':
+                result = task_result if isinstance(task_result, dict) else {}
+                ok = bool(result.get('ok'))
+                updated = bool(result.get('updated'))
+                message = str(result.get('message') or '').strip()
+                before_version = str(result.get('current_version') or current_version or '').strip()
+                after_version = str(result.get('target_version') or target_version or '').strip()
+
+                if not ok:
+                    fail_lines = [f"❌ 任务执行失败：*{task_description}*"]
+                    if before_version:
+                        fail_lines.append(f"当前版本: `{before_version}`")
+                    if after_version:
+                        fail_lines.append(f"目标版本: `{after_version}`")
+                    if message:
+                        fail_lines.append(f"错误信息: {message}")
+                    send_telegram_message(chat_id, escape_markdown("\n".join(fail_lines)))
+                    return
+
+                success_lines = [f"✅ 任务执行完毕：*{task_description}*"]
+                if updated:
+                    if before_version and after_version:
+                        success_lines.append(f"版本变化: `{before_version}` -> `{after_version}`")
+                    elif after_version:
+                        success_lines.append(f"更新目标版本: `{after_version}`")
+                else:
+                    if before_version:
+                        success_lines.append(f"当前版本: `{before_version}`")
+                    if after_version:
+                        success_lines.append(f"最新版本: `{after_version}`")
+                if message:
+                    success_lines.append(message)
+                send_telegram_message(chat_id, escape_markdown("\n".join(success_lines)))
+                return
+
             send_telegram_message(chat_id, escape_markdown(f"✅ 任务执行完毕：*{task_description}*"))
         except Exception as e:
             logger.error(f"  ➜ TG触发任务 '{task_description}' 失败: {e}", exc_info=True)
@@ -2128,6 +2381,17 @@ def start_telegram_bot():
     _tg_polling_active = True
     _tg_polling_thread = threading.Thread(target=_telegram_polling_worker, daemon=True, name="TG_Polling_Thread")
     _tg_polling_thread.start()
+
+    try:
+        from config_manager import retry_pending_system_update_result
+        threading.Thread(
+            target=retry_pending_system_update_result,
+            kwargs={"max_attempts": 10, "interval_seconds": 3.0},
+            daemon=True,
+            name="SystemUpdateNotifyRetry",
+        ).start()
+    except Exception as e:
+        logger.debug(f"  ➜ 启动系统更新结果通知重试线程失败: {e}")
 
 def stop_telegram_bot():
     """停止 Telegram 机器人监听"""
