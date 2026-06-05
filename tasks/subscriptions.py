@@ -2,10 +2,11 @@
 # 智能订阅模块
 import time
 import re
+import json
 from datetime import datetime, timedelta
 import logging
 from typing import Any, List, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 导入需要的底层模块和共享实例
 import config_manager
@@ -40,6 +41,28 @@ AUDIO_SUBTITLE_KEYWORD_MAP = {
     "sub_kor": ["KOR", "韩字", "韩文", "Korean"],   
     "sub_yue": ["CHT", "繁中", "繁体", "Cantonese"], 
 }
+
+def _normalize_missing_episode_numbers(value) -> List[int]:
+    """统一订阅 SUBSCRIBED 补库用：把数据库 JSONB/字符串里的缺集号整理成 int 列表。"""
+    if value in (None, ''):
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = re.split(r'[，,\s]+', value.strip()) if value.strip() else []
+    if not isinstance(value, (list, tuple, set)):
+        value = [value]
+
+    out = []
+    for v in value:
+        try:
+            n = int(float(v))
+            if n > 0 and n not in out:
+                out.append(n)
+        except Exception:
+            pass
+    return sorted(out)
 
 def _apply_watchlist_mp_wash_flags(
     mp_payload: Dict[str, Any],
@@ -407,8 +430,11 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                         source=source
                     )
                     if success:
-                        request_db.set_media_status_none(str(tmdb_id), 'Series')
-                
+                        # 整剧订阅成功只代表订阅任务已提交，不代表整剧已完成。
+                        # Series/Season/Episode 的订阅状态由统一订阅与智能追剧接管；
+                        # 只有本地完美完结后才清 NONE。
+                        logger.info(f"  ➜ [订阅状态] 整剧订阅已提交，保留《{item_title_for_log}》的订阅状态，等待智能追剧完美完结后清理。")
+
                 else:
                     logger.error(f"  ➜ 订阅失败：季《{item_title_for_log}》缺少季号信息。")
                     continue
@@ -835,59 +861,95 @@ def task_auto_subscribe(processor):
                 f"({i+1}/{len(wanted_items)}) 正在处理: {item['title']}"
             )
 
-            # 2.1 检查发行日期 (只对电影检查，剧集由 smart_subscribe 处理)
-            if item['item_type'] == 'Movie' and not is_movie_subscribable(int(item['tmdb_id']), tmdb_api_key, config):
-                logger.info(f"  ➜ 电影《{item['title']}》未到发行日期，本次跳过。")
-                rejected_details.append({'item': f"电影《{item['title']}》", 'reason': '未发行'})
+            # ★★★ 1. 准备基础信息 (提前获取剧集标题，用于日志和搜索) ★★★
+            subscription_status = str(item.get('subscription_status') or 'NONE').strip().upper()
+            is_wanted_subscription = subscription_status == 'WANTED'
+            is_subscribed_recheck = subscription_status == 'SUBSCRIBED'
+            missing_episode_numbers = _normalize_missing_episode_numbers(item.get('missing_episode_numbers'))
+
+            tmdb_id = item['tmdb_id']
+            item_type = item['item_type']
+            title = item['title'] # 默认为 item 标题
+            season_number = item.get('season_number')
+
+            # 2.1 发行日期保护只属于 WANTED 新订阅。
+            # 非 WANTED 的电影/追更补库项不再做发行日期检查，避免统一订阅日志被补库项刷屏。
+            if is_wanted_subscription and item_type == 'Movie' and not is_movie_subscribable(int(tmdb_id), tmdb_api_key, config):
+                logger.info(f"  ➜ 电影《{title}》未到发行日期，本次跳过。")
+                rejected_details.append({'item': f"电影《{title}》", 'reason': '未发行'})
                 # ★★★ 新增：解析来源并记录失败通知 ★★★
                 sources = item.get('subscription_sources_json', [])
                 for source in sources:
                     if source.get('type') == 'user_request' and (user_id := source.get('user_id')):
                         if user_id not in failed_notifications_to_send:
                             failed_notifications_to_send[user_id] = []
-                        failed_notifications_to_send[user_id].append(f"《{item['title']}》(原因: 不满足发行日期延迟订阅)")
+                        failed_notifications_to_send[user_id].append(f"《{title}》(原因: 不满足发行日期延迟订阅)")
                 continue
 
-            # ★★★ 1. 准备基础信息 (提前获取剧集标题，用于日志和搜索) ★★★
-            tmdb_id = item['tmdb_id']
-            item_type = item['item_type']
-            title = item['title'] # 默认为 item 标题
-            season_number = item.get('season_number')
+            # 统一订阅任务不再处理 Episode 队列项。
+            if item_type == 'Episode':
+                logger.warning(
+                    f"  ➜ [队列保护] 《{title}》仍以 Episode 进入统一订阅队列，已跳过；"
+                    f"请检查 database.media_db.get_all_wanted_media 是否已应用季粒度补丁。"
+                )
+                continue
             parent_tmdb_id = None
 
-            # 如果是季/集，修正标题为剧集标题
-            if item_type in ['Series', 'Season']:
+            # 如果是剧/季/集，统一修正父剧 ID 与标题。
+            # Episode 也必须走这里：共享中心的单集消费以“父剧 TMDb + SxxEyy”为主键。
+            if item_type in ['Series', 'Season', 'Episode']:
                 if item_type == 'Season':
-                    parent_tmdb_id = item.get('parent_series_tmdb_id')
+                    parent_tmdb_id = item.get('parent_series_tmdb_id') or item.get('series_tmdb_id')
                     # 尝试解析 ID
                     if not parent_tmdb_id and '_' in str(tmdb_id):
                         parent_tmdb_id = str(tmdb_id).split('_')[0]
                     if not parent_tmdb_id:
                         parent_tmdb_id = tmdb_id
+                elif item_type == 'Episode':
+                    parent_tmdb_id = item.get('parent_series_tmdb_id') or item.get('series_tmdb_id')
+                    # 极少数历史占位 ID 可能是 124364_S4E6 / 124364_E6 这类，兜底拆出父剧 ID。
+                    if not parent_tmdb_id and '_' in str(tmdb_id):
+                        parent_tmdb_id = str(tmdb_id).split('_')[0]
+                    # Episode 的 tmdb_id 可能是“集自身 ID”，不能盲目当父剧 ID。
                 else:
                     parent_tmdb_id = tmdb_id
 
                 # 获取剧集名称
-                series_name = media_db.get_series_title_by_tmdb_id(parent_tmdb_id)
+                series_name = media_db.get_series_title_by_tmdb_id(parent_tmdb_id) if parent_tmdb_id else None
                 if not series_name:
                      # 尝试从 item title 解析 (例如 "Breaking Bad - S1")
                      raw_title = item.get('title', '')
                      parsed_name, _ = parse_series_title_and_season(raw_title, tmdb_api_key)
                      series_name = parsed_name if parsed_name else raw_title
-                
-                # 更新 title 变量为剧集标题
-                if series_name:
-                    title = series_name
 
-            # --- MoviePilot 订阅 ---
-            #  检查配额
-            if settings_db.get_subscription_quota() <= 0:
+                # 更新 title 变量为剧集标题；Episode 日志补上 SxxEyy，避免只显示剧名看不出目标集。
+                if series_name:
+                    if item_type == 'Episode' and item.get('episode_number') is not None:
+                        try:
+                            title = f"{series_name} S{int(season_number or item.get('season_number') or 0):02d}E{int(item.get('episode_number')):02d}"
+                        except Exception:
+                            title = series_name
+                    else:
+                        title = series_name
+
+            if (not is_wanted_subscription) and item_type == 'Season':
+                logger.info(
+                    f"  ➜ [追更模式] 《{title}》 第 {int(season_number or 0):02d} 季 "
+                    f"缺失集: {missing_episode_numbers or '未知/按季处理'}"
+                )
+
+            # --- MoviePilot 订阅保护 ---
+            # 只有 subscription_status=WANTED 的新请求才允许进入 MP 订阅链路。
+            # SUBSCRIBED / NONE / PAUSED 等由追更或补库带进队列的项目，只能走共享池/云资源补库，
+            # 不能因为不等于 SUBSCRIBED 就被误判为新订阅。
+            if is_wanted_subscription and settings_db.get_subscription_quota() <= 0:
                 quota_exhausted = True
-                break
+                logger.warning(f"  ➜ 每日订阅配额已用尽，跳过待订阅项目《{title}》，继续处理非 MP 补库项。")
+                continue
 
             # 提交 MP 订阅
             success = False
-            action_type = "MP" 
+            action_type = "MP"
 
             if item_type == 'Movie':
                 logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
@@ -930,14 +992,15 @@ def task_auto_subscribe(processor):
                 logger.info(f"  ➜ 《{item['title']}》订阅成功！")
                 
                 # 将状态从 WANTED 更新为 SUBSCRIBED
-                if item_type != 'Series':
+                if is_wanted_subscription and item_type != 'Series':
                     request_db.set_media_status_subscribed(
-                        tmdb_ids=item['tmdb_id'], 
+                        tmdb_ids=item['tmdb_id'],
                         item_type=item_type,
                     )
 
-                # 扣除配额
-                settings_db.decrement_subscription_quota()
+                # 只有真正从 WANTED 发起的新订阅才扣除配额；SUBSCRIBED 补库不扣。
+                if is_wanted_subscription:
+                    settings_db.decrement_subscription_quota()
 
                 # 准备通知 (智能拼接通知标题)
                 item_display_name = ""
@@ -947,9 +1010,14 @@ def task_auto_subscribe(processor):
                         item_display_name = f"剧集《{series_name} 第 {season_num} 季》"
                     else:
                         item_display_name = f"剧集《{series_name}》"
+                elif item_type == 'Episode':
+                    try:
+                        item_display_name = f"剧集《{series_name or title} S{int(item.get('season_number') or 0):02d}E{int(item.get('episode_number') or 0):02d}》"
+                    except Exception:
+                        item_display_name = f"单集《{item['title']}》"
                 else:
                     item_display_name = f"{item_type}《{item['title']}》"
-                
+
                 # 解析订阅来源，找出需要通知的用户
                 sources = item.get('subscription_sources_json', [])
                 source_display_parts = []
@@ -957,38 +1025,41 @@ def task_auto_subscribe(processor):
                     source_type = source.get('type')
                     if source_type == 'resubscribe':
                         rule_name = telegram.escape_markdown(source.get('rule_name', '未知规则'))
-                        source_display_parts.append(f"`[自动洗版]` ({rule_name})")
+                        source_display_parts.append(f"`[自动洗版]` \\({rule_name}\\)")
                     elif source_type == 'user_request' and (user_id := source.get('user_id')):
                         if user_id not in notifications_to_send:
                             notifications_to_send[user_id] = []
-                        
+
                         # 为用户通知构建完整的标题
                         user_notify_title = item['title']
                         if item_type == 'Season':
                             season_num = item.get('season_number')
                             if season_num is not None:
                                 user_notify_title = f"{series_name} 第 {season_num} 季"
-                        
+
                         notifications_to_send[user_id].append(user_notify_title)
                         user_name = telegram.escape_markdown(user_db.get_username_by_id(user_id) or user_id)
-                        source_display_parts.append(f"`[用户请求]` ({user_name})")
+                        source_display_parts.append(f"`[用户请求]` \\({user_name}\\)")
                     elif source_type == 'actor_subscription':
                         actor_name = telegram.escape_markdown(source.get('name', '未知'))
-                        source_display_parts.append(f"`[演员订阅]` ({actor_name})")
+                        source_display_parts.append(f"`[演员订阅]` \\({actor_name}\\)")
                     elif source_type in ['custom_collection', 'native_collection']:
                         coll_name = telegram.escape_markdown(source.get('name', '未知'))
-                        source_display_parts.append(f"`[合集]` ({coll_name})")
+                        source_display_parts.append(f"`[合集]` \\({coll_name}\\)")
                     elif source_type == 'telegram_search':
                         tg_name = telegram.escape_markdown(source.get('name', '未知'))
-                        source_display_parts.append(f"`[TG搜索]` ({tg_name})")
+                        source_display_parts.append(f"`[TG搜索]` \\({tg_name}\\)")
                     elif source_type == 'watchlist':
                         source_display_parts.append("`[追剧补全]`")
-                
+
                 source_display = " ".join(set(source_display_parts)) or "`[未知来源]`"
                 subscription_details.append({'source': source_display, 'item': item_display_name, 'action': action_type})
 
             else:
-                logger.error(f"  ➜ 订阅《{item['title']}》失败，请检查 MoviePilot 连接或日志。")
+                if is_wanted_subscription:
+                    logger.error(f"  ➜ 订阅《{title}》失败，请检查 MoviePilot 连接或日志。")
+                else:
+                    logger.info(f"  ➜ [追更模式] 《{title}》 本轮未补到资源。")
 
             # 如果配置了延时，且不是列表中的最后一个项目，则进行休眠
             if request_delay > 0 and i < len(wanted_items) - 1:
@@ -1001,7 +1072,7 @@ def task_auto_subscribe(processor):
             try:
                 user_chat_id = user_db.get_user_telegram_chat_id(user_id)
                 if user_chat_id:
-                    items_list_str = "\n".join([f"· `{item}`" for item in subscribed_items])
+                    items_list_str = "\n".join([f"· `{telegram._markdown_code_text(item)}`" for item in subscribed_items])
                     message_text = (f"🎉 *您的 {len(subscribed_items)} 个订阅已成功处理*\n\n您之前想看的下列内容现已加入下载队列：\n{items_list_str}")
                     telegram.send_telegram_message(user_chat_id, message_text)
             except Exception as e:
@@ -1013,7 +1084,7 @@ def task_auto_subscribe(processor):
             try:
                 user_chat_id = user_db.get_user_telegram_chat_id(user_id)
                 if user_chat_id:
-                    items_list_str = "\n".join([f"· `{item}`" for item in failed_items])
+                    items_list_str = "\n".join([f"· `{telegram._markdown_code_text(item)}`" for item in failed_items])
                     message_text = (f"➜ *您的部分订阅请求未被处理*\n\n下列内容因不满足条件而被跳过：\n{items_list_str}")
                     telegram.send_telegram_message(user_chat_id, message_text)
             except Exception as e:
