@@ -100,6 +100,7 @@ def get_all_wanted_media() -> List[Dict[str, Any]]:
     """
     获取所有状态为 'WANTED' 的媒体项。
     为 Season 类型的项目额外提供 parent_series_tmdb_id。
+    限制仅处理 Movie 和 Season，避免 Episode 污染队列导致 MP 报错。
     """
     sql = """
         SELECT 
@@ -109,6 +110,8 @@ def get_all_wanted_media() -> List[Dict[str, Any]]:
             subscription_sources_json
         FROM media_metadata
         WHERE subscription_status = 'WANTED'
+          -- 加入安全限制，过滤掉不支持的 Series 和 Episode
+          AND item_type IN ('Movie', 'Season') 
         ORDER BY first_requested_at ASC;
     """
     try:
