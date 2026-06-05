@@ -1092,6 +1092,22 @@ class WatchlistProcessor:
             if moviepilot.subscribe_with_custom_payload(payload, self.config):
                 settings_db.decrement_subscription_quota()
                 logger.info(f"  ➜ [完结洗版] 《{series_name}》 第 {season_number} 季 已提交洗版订阅。")
+                
+                # ★★★ 核心修改：将 active_washing 标记下放到该季的每一集 ★★★
+                try:
+                    with connection.get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("""
+                                UPDATE media_metadata 
+                                SET active_washing = TRUE 
+                                WHERE parent_series_tmdb_id = %s 
+                                  AND season_number = %s 
+                                  AND item_type = 'Episode'
+                            """, (tmdb_id, season_number))
+                            conn.commit()
+                    logger.info(f"  ➜ [完结洗版] 已为 第 {season_number} 季的所有分集开启 'active_washing' 洗版锁，防止向 MP 重复提交。")
+                except Exception as e:
+                    logger.error(f"  ➜ 开启洗版状态失败: {e}")
             else:
                 logger.error(f"  ➜ [完结洗版] 《{series_name}》 第 {season_number} 季 提交失败。")
 
