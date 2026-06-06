@@ -1,4 +1,4 @@
-# /etc/nginx/conf.d/emby_proxy.conf (V5 - HTTPStrm 自动解包优化版)
+# /etc/nginx/conf.d/emby_proxy.conf (V5 - HTTPStrm 自动解包优化版 + 循环拦截修复)
 
 upstream emby_server {
     server {{ EMBY_UPSTREAM }};
@@ -111,8 +111,8 @@ server {
         proxy_pass http://emby_server;
     }
 
-    # 【新增】Nginx 内部重定向专用通道，用于接管 Python 甩回来的原生视频流
-    location /internal_emby_forward/ {
+    # 【修复点】Nginx 内部重定向专用通道 (必须加上 ^~ 强制前缀匹配，否则内部重定向会被上面的正则拦截导致无限死循环)
+    location ^~ /internal_emby_forward/ {
         internal; # 必须有，防止外部恶意调用
         rewrite ^/internal_emby_forward/(.*) /$1 break;
         proxy_pass http://emby_server;
@@ -121,7 +121,13 @@ server {
         proxy_buffering off;
         proxy_set_header Range $http_range;
         proxy_set_header If-Range $http_if_range;
+        
+        # 【修复点】补充客户端透传头，防止原生视频流因为缺失 IP、Token 或 Host 导致 Emby 拒绝播放
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass_request_headers on;
     }
 
     # 兜底规则：转发所有其他请求到真实 Emby
