@@ -388,7 +388,10 @@ class SharedCenterClient:
                         receive_code='', season_number=None, episode_number=None,
                         title='', release_year=None, size=None, quality='',
                         has_raw_ffprobe=True, source_provider='user_share',
-                        share_request_group_id: str = '') -> Dict[str, Any]:
+                        share_request_group_id: str = '',
+                        is_clean_version: bool = False,
+                        clean_version_confidence=None,
+                        clean_version_meta_json: Dict[str, Any] = None) -> Dict[str, Any]:
         """登记一个可被共享中心消费的 115 分享源。
 
         中心端按“当前设备 + SHA1”幂等计分：首次登记 +1，重复登记只更新分享码/元数据。
@@ -408,6 +411,9 @@ class SharedCenterClient:
             'share_code': str(share_code or '').strip(),
             'receive_code': str(receive_code or '').strip() or None,
             'has_raw_ffprobe': bool(has_raw_ffprobe),
+            'is_clean_version': bool(is_clean_version),
+            'clean_version_confidence': clean_version_confidence,
+            'clean_version_meta_json': clean_version_meta_json or None,
         }
         if str(share_request_group_id or '').strip():
             payload['share_request_group_id'] = str(share_request_group_id).strip()
@@ -437,6 +443,25 @@ class SharedCenterClient:
             'reason': reason or 'share_cancelled',
         }
         return self._post('/api/v1/sources/cancel', payload, timeout=25)
+
+    def get_me(self) -> Dict[str, Any]:
+        """实时读取中心端当前设备信息。贡献值以中心端为准，本地只做缓存。"""
+        return self._get('/api/v1/me', timeout=15)
+
+    def precheck_transfer(self, source_id: str) -> Dict[str, Any]:
+        """转存前余额预检；旧中心不支持时返回 supported=False，由中心 report 继续兜底。"""
+        source_id = str(source_id or '').strip()
+        if not source_id:
+            return {'supported': True, 'ok': False, 'allowed': False, 'message': 'missing source_id'}
+        try:
+            resp = self._post('/api/v1/transfers/precheck', {'source_id': source_id}, timeout=15)
+            resp['supported'] = True
+            return resp
+        except RuntimeError as e:
+            text = str(e)
+            if '404' in text or 'Not Found' in text:
+                return {'supported': False, 'ok': True, 'allowed': True, 'message': 'center_transfer_precheck_not_supported'}
+            raise
 
     def report_transfer(self, source_id: str, result: str, expected_sha1: str = '', actual_sha1: str = '', expected_size=None, actual_size=None, message: str = ''):
         if not source_id:
