@@ -1,4 +1,4 @@
-# reverse_proxy.py (终极融合版：HTTPStrm缓存流媒体 + Yamby全面兼容 + 灰块修复)
+# reverse_proxy.py (终极融合版：HTTPStrm缓存流媒体 + Yamby全面兼容 + 灰块修复 + Nginx内部重定向修复)
 
 import logging
 import requests
@@ -6,7 +6,7 @@ import re
 import os
 import json
 from flask import Flask, request, Response, redirect, send_file
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, quote # 【修复点】引入 quote 防止中文/空格路径导致 Header 解析崩溃
 from datetime import datetime, timedelta
 import time
 import uuid 
@@ -832,11 +832,16 @@ def proxy_all(path):
             # --- 流回退：交给 Nginx 处理，彻底解放 Python ---
             base_url, api_key = _get_real_emby_url_and_key()
             
-            # 重新拼装 Query 参数（合并原有的和 api_key）
+            # 【修复点】对带有中文名/空格的视频路径安全 URL 编码，并阻止 api_key 重叠追加
+            safe_path = quote(path)
             query_string = request.query_string.decode('utf-8')
-            forward_uri = f"/internal_emby_forward/{path.lstrip('/')}"
+            forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
+            
             if query_string:
-                forward_uri += f"?{query_string}&api_key={api_key}"
+                if "api_key=" not in query_string:
+                    forward_uri += f"?{query_string}&api_key={api_key}"
+                else:
+                    forward_uri += f"?{query_string}"
             else:
                 forward_uri += f"?api_key={api_key}"
 
@@ -928,11 +933,16 @@ def proxy_all(path):
         
         # 【分支 1】：GET / HEAD 请求（获取数据/图片/流），交给 Nginx 内部重定向，0 性能消耗
         if request.method in ['GET', 'HEAD']:
+            # 【修复点】同样对兜底路由做路径安全 URL 编码和去重复 api_key 保护
+            safe_path = quote(path)
             query_string = request.query_string.decode('utf-8')
-            forward_uri = f"/internal_emby_forward/{path.lstrip('/')}"
+            forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
             
             if query_string:
-                forward_uri += f"?{query_string}&api_key={api_key}"
+                if 'api_key=' not in query_string:
+                    forward_uri += f"?{query_string}&api_key={api_key}"
+                else:
+                    forward_uri += f"?{query_string}"
             else:
                 forward_uri += f"?api_key={api_key}"
 
