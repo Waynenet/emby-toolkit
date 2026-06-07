@@ -53,6 +53,188 @@ def get_115_ua(app_type):
     }
     return ua_map.get(str(app_type).lower() if app_type else 'web', ua_map['web'])
 
+
+def _p115_parse_sign_check_range(sign_check):
+    """解析 115 upload/init 返回的 sign_check，返回闭区间 start/end。"""
+    text = str(sign_check or '').strip()
+    m = re.fullmatch(r'\s*(\d+)\s*-\s*(\d+)\s*', text)
+    if not m:
+        raise ValueError(f'非法 sign_check: {text!r}')
+    start, end = int(m.group(1)), int(m.group(2))
+    if start < 0 or end < start:
+        raise ValueError(f'非法 sign_check 区间: {text!r}')
+    return start, end
+
+
+def _p115_extract_down_url(resp):
+    """兼容提取 115 OpenAPI/Cookie 返回的直链 URL。"""
+    if not resp:
+        return ''
+    if isinstance(resp, str):
+        return resp
+    # p115client 的 P115URL 等对象
+    try:
+        text = str(resp)
+        if text.startswith(('http://', 'https://')):
+            return text
+    except Exception:
+        pass
+    if not isinstance(resp, dict):
+        return ''
+    for key in ('url', 'download_url', 'downurl', 'direct_url'):
+        val = resp.get(key)
+        if isinstance(val, str) and val.startswith(('http://', 'https://')):
+            return val
+        if isinstance(val, dict):
+            nested = _p115_extract_down_url(val)
+            if nested:
+                return nested
+    data = resp.get('data')
+    if isinstance(data, dict):
+        # OpenAPI downurl: data = {fid: {url: {url: ...}}}
+        for val in data.values():
+            nested = _p115_extract_down_url(val)
+            if nested:
+                return nested
+        nested = _p115_extract_down_url(data)
+        if nested:
+            return nested
+    if isinstance(data, list):
+        for val in data:
+            nested = _p115_extract_down_url(val)
+            if nested:
+                return nested
+    return ''
+
+
+def _p115_range_sha1_from_url(down_url, sign_check, user_agent=None, label='115', timeout=45):
+    """按 sign_check 对直链执行 Range GET，返回 (sign_val, byte_len, start, end)。"""
+    start, end = _p115_parse_sign_check_range(sign_check)
+    expected_len = end - start + 1
+    headers = {
+        'Range': f'bytes={start}-{end}',
+        'Accept': '*/*',
+        'Connection': 'close',
+    }
+    if user_agent:
+        headers['User-Agent'] = user_agent
+    logger.debug(
+        f"  ➜ [负载均衡签名] {label} 开始读取 sign_check Range: "
+        f"{start}-{end}，expected={expected_len} bytes"
+    )
+    resp = requests.get(str(down_url), headers=headers, timeout=timeout, allow_redirects=True)
+    status_code = getattr(resp, 'status_code', None)
+    if status_code != 206:
+        raise RuntimeError(f'Range GET HTTP={status_code}，expected=206')
+    content = resp.content or b''
+    if not content:
+        raise RuntimeError('Range GET 返回空内容')
+    if len(content) != expected_len:
+        logger.warning(
+            f"  ➜ [负载均衡签名] {label} Range 长度与 sign_check 不一致："
+            f"got={len(content)}, expected={expected_len}，继续按实际内容计算 sign_val"
+        )
+    sign_val = hashlib.sha1(content).hexdigest().upper()
+    logger.debug(
+        f"  ➜ [负载均衡签名] {label} Range 读取完成："
+        f"got={len(content)} bytes, sign_val={sign_val[:12]}..."
+    )
+    return sign_val, len(content), start, end
+
+
+def _p115_try_local_holder_sign(*, pick_code, sign_check, downurl_getter, user_agent=None, label='本机Holder', sha1='', file_name=''):
+    """最小闭环：本机作为 holder，用自己的 CK/Token 取直链并计算 sign_val。"""
+    pc = str(pick_code or '').strip()
+    if not pc:
+        logger.warning(
+            f"  ➜ [负载均衡签名] {label} 无法计算 sign_val：缺少源文件 pick_code；"
+            f"sha1={str(sha1 or '')[:12]}..., file={file_name or '-'}"
+        )
+        return None
+    logger.debug(
+        f"  ➜ [负载均衡签名] {label} 收到二次校验任务："
+        f"sha1={str(sha1 or '')[:12]}..., pc={pc[:8]}..., sign_check={sign_check}, file={file_name or '-'}"
+    )
+    down_url = downurl_getter(pc, user_agent)
+    down_url = _p115_extract_down_url(down_url)
+    if not down_url:
+        raise RuntimeError(f'{label} 未能获取源文件直链')
+    logger.debug(f"  ➜ [负载均衡签名] {label} 已获取源文件直链，准备 Range 读取：pc={pc[:8]}...")
+    sign_val, byte_len, start, end = _p115_range_sha1_from_url(
+        down_url, sign_check, user_agent=user_agent, label=label
+    )
+    return {
+        'sign_val': sign_val,
+        'byte_len': byte_len,
+        'start': start,
+        'end': end,
+        'pick_code': pc,
+    }
+
+
+def _p115_lookup_local_holder_file_for_sign(*, sha1='', size=0, pick_code='', file_name=''):
+    """按 sha1/pc 在本地 p115_filesystem_cache 找 holder 文件，不向中心暴露 CK/PC。"""
+    sha1 = str(sha1 or '').strip().upper()
+    pc = str(pick_code or '').strip()
+    out = {'sha1': sha1, 'pick_code': pc, 'file_name': str(file_name or '').strip(), 'size': size or 0}
+    cache_mgr = globals().get('P115CacheManager')
+    try:
+        row = None
+        if pc and cache_mgr and hasattr(cache_mgr, 'get_file_cache_by_pickcode'):
+            row = cache_mgr.get_file_cache_by_pickcode(pc)
+        if not row and sha1 and cache_mgr and hasattr(cache_mgr, 'get_file_cache_by_sha1'):
+            row = cache_mgr.get_file_cache_by_sha1(sha1)
+        if row:
+            row = dict(row)
+            out['fid'] = str(row.get('id') or row.get('fid') or '')
+            out['pick_code'] = out.get('pick_code') or str(row.get('pick_code') or '').strip()
+            out['file_name'] = out.get('file_name') or str(row.get('name') or row.get('file_name') or '').strip()
+            out['sha1'] = out.get('sha1') or str(row.get('sha1') or '').strip().upper()
+            try:
+                out['size'] = int(row.get('size') or out.get('size') or 0)
+            except Exception:
+                pass
+            return out
+    except Exception as e:
+        logger.debug(f"  ➜ [负载均衡签名] 查询 P115CacheManager holder 文件失败: {e}")
+
+    try:
+        clauses, args = [], []
+        if pc:
+            clauses.append('pick_code=%s')
+            args.append(pc)
+        if sha1:
+            clauses.append('UPPER(sha1)=%s')
+            args.append(sha1)
+        if not clauses:
+            return out
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                    FROM p115_filesystem_cache
+                    WHERE {' OR '.join(clauses)}
+                    ORDER BY updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    args,
+                )
+                row = cur.fetchone()
+                if row:
+                    row = dict(row)
+                    out['fid'] = str(row.get('id') or '')
+                    out['pick_code'] = out.get('pick_code') or str(row.get('pick_code') or '').strip()
+                    out['file_name'] = out.get('file_name') or str(row.get('name') or '').strip()
+                    out['sha1'] = out.get('sha1') or str(row.get('sha1') or '').strip().upper()
+                    try:
+                        out['size'] = int(row.get('size') or out.get('size') or 0)
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug(f"  ➜ [负载均衡签名] 直接查询 p115_filesystem_cache holder 文件失败: {e}")
+    return out
+
 class LimitedCache(OrderedDict):
     """带容量限制的内存缓存，防止内存泄漏撑爆服务器"""
     def __init__(self, maxsize=1000, *args, **kwds):
@@ -550,6 +732,298 @@ class P115OpenAPIClient:
             data["sign_val"] = sign_val
         return self._do_request("POST", url, data=data)
 
+
+    def rapid_upload(self, payload=None, **kwargs):
+        """按 SHA1/size 在目标目录执行 115 秒传。
+
+        Rapid v2 只在本机使用 CK/Token，不把账号凭据上传中心。
+        这里允许调用方只传 SHA1 + 目标目录；缺失 size/file_name/preid 时，
+        会优先从 p115_filesystem_cache 按 sha1 / pick_code / fid 反查补齐。
+        """
+        payload = dict(payload or {})
+        payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    try:
+                        parsed = json.loads(text)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
+            return {}
+
+        rapid_meta = _as_dict(payload.get('rapid_meta_json') or payload.get('rapid_meta') or payload.get('meta'))
+        source_meta = _as_dict(payload.get('source') or payload.get('source_json'))
+
+        def _first(*values):
+            for value in values:
+                if value not in (None, '', [], {}):
+                    return value
+            return None
+
+        def _safe_size(value):
+            try:
+                if value in (None, '', [], {}):
+                    return 0
+                if isinstance(value, (int, float)):
+                    return int(value)
+                text = str(value).strip().replace(',', '')
+                if not text:
+                    return 0
+                if re.fullmatch(r'\d+(?:\.\d+)?', text):
+                    return int(float(text))
+                upper = text.upper()
+                multiplier = 1
+                if 'TB' in upper:
+                    multiplier = 1024 ** 4
+                elif 'GB' in upper:
+                    multiplier = 1024 ** 3
+                elif 'MB' in upper:
+                    multiplier = 1024 ** 2
+                elif 'KB' in upper:
+                    multiplier = 1024
+                match = re.search(r'([0-9]+(?:\.[0-9]+)?)', upper)
+                return int(float(match.group(1)) * multiplier) if match else 0
+            except Exception:
+                return 0
+
+        target_cid = str(_first(
+            payload.get('cid'), payload.get('target_cid'), payload.get('target'), payload.get('to_cid'),
+            rapid_meta.get('cid'), rapid_meta.get('target_cid'), rapid_meta.get('target'), rapid_meta.get('to_cid'),
+        ) or '').strip()
+
+        sha1 = str(_first(
+            payload.get('sha1'), payload.get('fileid'), payload.get('file_sha1'),
+            rapid_meta.get('sha1'), rapid_meta.get('fileid'), rapid_meta.get('file_sha1'),
+            source_meta.get('sha1'), source_meta.get('file_sha1'),
+        ) or '').strip().upper()
+
+        pick_code = str(_first(
+            payload.get('pick_code'), payload.get('pickcode'), payload.get('pc'),
+            rapid_meta.get('pick_code'), rapid_meta.get('pickcode'), rapid_meta.get('pc'),
+            source_meta.get('pick_code'), source_meta.get('pickcode'), source_meta.get('pc'),
+        ) or '').strip()
+
+        fid = str(_first(
+            payload.get('fid'), payload.get('file_id'), payload.get('id'),
+            rapid_meta.get('fid'), rapid_meta.get('file_id'), rapid_meta.get('id'),
+            source_meta.get('fid'), source_meta.get('file_id'), source_meta.get('id'),
+        ) or '').strip()
+
+        file_name = str(_first(
+            payload.get('file_name'), payload.get('filename'), payload.get('name'),
+            rapid_meta.get('file_name'), rapid_meta.get('filename'), rapid_meta.get('name'),
+            source_meta.get('file_name'), source_meta.get('filename'), source_meta.get('name'),
+        ) or '').strip()
+
+        size = _safe_size(_first(
+            payload.get('size'), payload.get('file_size'), payload.get('filesize'), payload.get('size_bytes'),
+            rapid_meta.get('size'), rapid_meta.get('file_size'), rapid_meta.get('filesize'), rapid_meta.get('size_bytes'),
+            source_meta.get('size'), source_meta.get('file_size'), source_meta.get('filesize'), source_meta.get('size_bytes'),
+        ))
+
+        preid = str(_first(
+            payload.get('preid'), payload.get('pre_sha1'), payload.get('pre_sha1_128k'),
+            rapid_meta.get('preid'), rapid_meta.get('pre_sha1'), rapid_meta.get('pre_sha1_128k'),
+            source_meta.get('preid'), source_meta.get('pre_sha1'), source_meta.get('pre_sha1_128k'),
+        ) or '').strip().upper()
+        sign_key = _first(payload.get('sign_key'), rapid_meta.get('sign_key'), source_meta.get('sign_key'))
+        sign_val = _first(
+            payload.get('sign_val'), payload.get('sign_check_value'),
+            rapid_meta.get('sign_val'), rapid_meta.get('sign_check_value'),
+            source_meta.get('sign_val'), source_meta.get('sign_check_value'),
+        )
+
+        cache_row = None
+        cache_mgr = globals().get('P115CacheManager')
+        if cache_mgr:
+            try:
+                if sha1 and hasattr(cache_mgr, 'get_file_cache_by_sha1'):
+                    cache_row = cache_mgr.get_file_cache_by_sha1(sha1)
+                if not cache_row and pick_code and hasattr(cache_mgr, 'get_file_cache_by_pickcode'):
+                    cache_row = cache_mgr.get_file_cache_by_pickcode(pick_code)
+                if not cache_row and fid and hasattr(cache_mgr, 'get_file_cache_by_id'):
+                    cache_row = cache_mgr.get_file_cache_by_id(fid)
+            except Exception as e:
+                logger.debug(f"  ➜ [共享秒传] 查询 p115_filesystem_cache 失败: {e}")
+
+        if cache_row:
+            try:
+                if not fid:
+                    fid = str(cache_row.get('id') or cache_row.get('fid') or '').strip()
+                if not pick_code:
+                    pick_code = str(cache_row.get('pick_code') or cache_row.get('pc') or '').strip()
+                if not sha1:
+                    sha1 = str(cache_row.get('sha1') or '').strip().upper()
+                if not file_name:
+                    file_name = str(cache_row.get('name') or cache_row.get('file_name') or '').strip()
+                if size <= 0:
+                    size = _safe_size(cache_row.get('size') or cache_row.get('file_size') or cache_row.get('size_bytes'))
+                if not preid:
+                    preid = str(cache_row.get('preid') or '').strip().upper()
+            except Exception:
+                pass
+
+        # 缓存仍缺 size 时，只要能定位 fid，就实时查 115 详情补齐。
+        if (size <= 0 or not file_name or not pick_code) and not fid and pick_code:
+            if cache_mgr and hasattr(cache_mgr, 'get_fid_by_pickcode'):
+                try:
+                    fid = str(cache_mgr.get_fid_by_pickcode(pick_code) or '').strip()
+                except Exception:
+                    fid = ''
+
+        if (size <= 0 or not file_name or not pick_code or not sha1) and fid:
+            try:
+                info_res = self.fs_get_info(fid)
+                data = info_res.get('data') if isinstance(info_res, dict) else {}
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                if isinstance(data, dict):
+                    if not sha1:
+                        sha1 = str(data.get('sha1') or data.get('sha') or data.get('file_sha1') or '').strip().upper()
+                    if not pick_code:
+                        pick_code = str(data.get('pc') or data.get('pick_code') or data.get('pickcode') or '').strip()
+                    if not file_name:
+                        file_name = str(data.get('fn') or data.get('n') or data.get('file_name') or data.get('name') or '').strip()
+                    if size <= 0:
+                        size = _safe_size(data.get('size_byte') or data.get('fs') or data.get('size') or data.get('file_size'))
+
+                    parent_id = data.get('parent_id') or data.get('pid') or data.get('cid')
+                    if cache_mgr and fid and parent_id and file_name and hasattr(cache_mgr, 'save_file_cache'):
+                        try:
+                            cache_mgr.save_file_cache(
+                                fid=fid,
+                                parent_id=parent_id,
+                                name=file_name,
+                                sha1=sha1 or None,
+                                pick_code=pick_code or None,
+                                local_path=None,
+                                size=size or 0,
+                            )
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"  ➜ [共享秒传] 实时查询 115 文件详情失败 fid={fid}: {e}")
+
+        if not target_cid:
+            return {'state': False, 'error_msg': '缺少目标目录 cid，无法秒传'}
+        if not file_name:
+            file_name = f'{sha1}.mkv' if sha1 else 'rapid-file.mkv'
+        if not re.fullmatch(r'[A-F0-9]{40}', sha1 or ''):
+            return {'state': False, 'error_msg': '缺少合法 SHA1，无法秒传'}
+        if size <= 0:
+            return {
+                'state': False,
+                'error_msg': '缺少文件大小，无法秒传：source 未携带 size，且本地 p115_filesystem_cache / 115 文件详情均未能补齐',
+                'debug': {
+                    'sha1': sha1,
+                    'fid': fid,
+                    'pick_code': pick_code,
+                    'file_name': file_name,
+                    'has_cache_row': bool(cache_row),
+                }
+            }
+
+        if not re.fullmatch(r'[A-F0-9]{40}', preid or '') and pick_code:
+            try:
+                preid = P115CacheManager.ensure_file_preid({
+                    'fid': fid, 'pick_code': pick_code, 'sha1': sha1, 'file_name': file_name, 'size': size,
+                }) or preid
+            except Exception as e:
+                logger.debug(f"  ➜ [共享秒传] 秒传前补齐 preid 失败: sha1={sha1[:12]}..., err={e}")
+
+        logger.info(
+            f"  ➜ [共享秒传] 准备秒传到 CID={target_cid}: "
+            f"{file_name} | sha1={sha1[:12]}... | preid={(preid[:12] + '...') if preid else '-'} | size={size}"
+        )
+
+        # 115 upload/init 要求 preid 字段；无 preid 时用 SHA1 兜底尝试。
+        # 如果 115 要求二次校验，会返回 status=7，此时无法凭空计算 sign_val。
+        init_res = self.fs_upload_init(file_name, size, target_cid, sha1, preid or sha1, sign_key=sign_key, sign_val=sign_val)
+        if not isinstance(init_res, dict):
+            return {'state': False, 'error_msg': str(init_res)}
+
+        data = init_res.get('data') if isinstance(init_res.get('data'), dict) else {}
+        status = str(data.get('status') if data.get('status') is not None else init_res.get('status') if init_res.get('status') is not None else '')
+
+        if status in ('2', '1') and (init_res.get('state') or status == '2'):
+            if status == '2':
+                out = dict(init_res)
+                out['state'] = True
+                out['success'] = True
+                out['message'] = out.get('message') or '115 秒传成功'
+                out.setdefault('rapid_upload', True)
+                out.setdefault('sha1', sha1)
+                out.setdefault('file_name', file_name)
+                out.setdefault('target_cid', target_cid)
+                out.setdefault('size', size)
+                return out
+            return {
+                'state': False,
+                'error_msg': '115 返回需要普通上传(status=1)，Rapid v2 不上传明文文件',
+                'response': init_res,
+            }
+
+        if status == '7':
+            sign_key_text = str(data.get('sign_key') or init_res.get('sign_key') or '')
+            sign_check_text = str(data.get('sign_check') or init_res.get('sign_check') or '')
+            logger.warning(
+                f"  ➜ [共享秒传] OpenAPI 返回 status=7，需要 holder 二次校验；"
+                f"交给中心调度签名客户端："
+                f"sha1={sha1[:12]}..., preid={(preid or sha1)[:12]}..., "
+                f"pc={(pick_code or '-')[:8]}..., sign_check={sign_check_text or '-'}, "
+                f"sign_key_prefix={sign_key_text[:12]}..., sign_key_len={len(sign_key_text)}"
+            )
+
+            stage = 'need_center_holder_sign' if sign_key_text and sign_check_text else 'missing_sign_key_or_check'
+            message = (
+                '115 要求二次校验(status=7)，等待中心调度 holder 签名'
+                if stage == 'need_center_holder_sign'
+                else '115 要求二次校验(status=7)，但返回缺少 sign_key/sign_check，无法调度 holder 签名'
+            )
+            return {
+                'state': False,
+                'error_msg': message,
+                'response': init_res,
+                '_rapid_sign_closed_loop': False,
+                '_rapid_sign_backend': 'openapi',
+                '_rapid_sign_stage': stage,
+                '_rapid_sign_required': True,
+                '_rapid_sign_key': sign_key_text,
+                '_rapid_sign_check': sign_check_text,
+                '_rapid_sign_sha1': sha1,
+                '_rapid_sign_size': size,
+                '_rapid_sign_file_name': file_name,
+            }
+
+        return init_res
+
+    def fs_rapid_upload(self, target_cid, sha1, size, file_name, preid=None, **kwargs):
+        payload = {'cid': target_cid, 'sha1': sha1, 'size': size, 'file_name': file_name}
+        if preid:
+            payload['preid'] = preid
+        payload.update(kwargs)
+        return self.rapid_upload(payload)
+
+    def upload_file_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+        return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+    def fs_upload_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+        return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+    def upload_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+        return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+    def add_file_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+        return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+    def rapid_save(self, target_cid, sha1, size, file_name, **kwargs):
+        return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
     def fs_upload_get_token(self):
         """获取上传凭证"""
         url = f"{self.base_url}/open/upload/get_token"
@@ -978,6 +1452,233 @@ class P115CookieClient:
             url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
             if url_obj: return str(url_obj)
         return None
+
+
+    def rapid_upload(self, payload=None, **kwargs):
+        """Cookie 侧上传初始化探测入口。
+
+        这条链路直接调用 p115client.P115Client.upload_init，对应
+        https://uplb.115.com/4.0/initupload.php。
+
+        注意：Cookie 版 initupload 和 OpenAPI /open/upload/init 不是同一套字段：
+        - Cookie: filename / filesize / fileid / target / userid / userkey / sign_key / sign_val
+        - OpenAPI: file_name / file_size / fileid / preid / target
+
+        这里只做“是否可直接秒传/复用”的探测；如果返回普通上传(status=1)，立刻停止，
+        绝不继续上传明文文件。
+        """
+        payload = dict(payload or {})
+        payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str) and value.strip():
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+        def _first(*values):
+            for value in values:
+                if value not in (None, '', [], {}):
+                    return value
+            return None
+
+        def _safe_size(value):
+            try:
+                if value in (None, '', [], {}):
+                    return 0
+                if isinstance(value, (int, float)):
+                    return int(value)
+                text = str(value).strip().replace(',', '')
+                if not text:
+                    return 0
+                if re.fullmatch(r'\d+(?:\.\d+)?', text):
+                    return int(float(text))
+                upper = text.upper()
+                multiplier = 1
+                if 'TB' in upper:
+                    multiplier = 1024 ** 4
+                elif 'GB' in upper:
+                    multiplier = 1024 ** 3
+                elif 'MB' in upper:
+                    multiplier = 1024 ** 2
+                elif 'KB' in upper:
+                    multiplier = 1024
+                match = re.search(r'([0-9]+(?:\.[0-9]+)?)', upper)
+                return int(float(match.group(1)) * multiplier) if match else 0
+            except Exception:
+                return 0
+
+        def _status_from_cookie_init(resp):
+            if not isinstance(resp, dict):
+                return '', {}
+            data = resp.get('data') if isinstance(resp.get('data'), dict) else {}
+            status = resp.get('status') if resp.get('status') is not None else data.get('status')
+            return str(status) if status is not None else '', data
+
+        rapid_meta = _as_dict(payload.get('rapid_meta_json') or payload.get('rapid_meta') or payload.get('meta'))
+        source_meta = _as_dict(payload.get('source') or payload.get('source_json'))
+
+        target_cid = str(_first(
+            payload.get('cid'), payload.get('target_cid'), payload.get('target'), payload.get('to_cid'),
+            rapid_meta.get('cid'), rapid_meta.get('target_cid'), rapid_meta.get('target'), rapid_meta.get('to_cid'),
+        ) or '').strip()
+        sha1 = str(_first(
+            payload.get('sha1'), payload.get('fileid'), payload.get('file_sha1'),
+            rapid_meta.get('sha1'), rapid_meta.get('fileid'), rapid_meta.get('file_sha1'),
+            source_meta.get('sha1'), source_meta.get('file_sha1'),
+        ) or '').strip().upper()
+        pick_code = str(_first(
+            payload.get('pick_code'), payload.get('pickcode'), payload.get('pc'),
+            rapid_meta.get('pick_code'), rapid_meta.get('pickcode'), rapid_meta.get('pc'),
+            source_meta.get('pick_code'), source_meta.get('pickcode'), source_meta.get('pc'),
+        ) or '').strip()
+        file_name = str(_first(
+            payload.get('file_name'), payload.get('filename'), payload.get('name'),
+            rapid_meta.get('file_name'), rapid_meta.get('filename'), rapid_meta.get('name'),
+            source_meta.get('file_name'), source_meta.get('filename'), source_meta.get('name'),
+        ) or '').strip()
+        size = _safe_size(_first(
+            payload.get('size'), payload.get('file_size'), payload.get('filesize'), payload.get('size_bytes'),
+            rapid_meta.get('size'), rapid_meta.get('file_size'), rapid_meta.get('filesize'), rapid_meta.get('size_bytes'),
+            source_meta.get('size'), source_meta.get('file_size'), source_meta.get('filesize'), source_meta.get('size_bytes'),
+        ))
+        sign_key = _first(payload.get('sign_key'), rapid_meta.get('sign_key'), source_meta.get('sign_key'))
+        sign_val = _first(
+            payload.get('sign_val'), payload.get('sign_check_value'),
+            rapid_meta.get('sign_val'), rapid_meta.get('sign_check_value'),
+            source_meta.get('sign_val'), source_meta.get('sign_check_value'),
+        )
+
+        cache_mgr = globals().get('P115CacheManager')
+        if cache_mgr and (not pick_code or not file_name or size <= 0):
+            try:
+                row = None
+                if sha1 and hasattr(cache_mgr, 'get_file_cache_by_sha1'):
+                    row = cache_mgr.get_file_cache_by_sha1(sha1)
+                if not row and pick_code and hasattr(cache_mgr, 'get_file_cache_by_pickcode'):
+                    row = cache_mgr.get_file_cache_by_pickcode(pick_code)
+                if row:
+                    row = dict(row)
+                    pick_code = pick_code or str(row.get('pick_code') or '').strip()
+                    file_name = file_name or str(row.get('name') or '').strip()
+                    if size <= 0:
+                        size = _safe_size(row.get('size'))
+            except Exception as e:
+                logger.debug(f"  ➜ [Cookie秒传] 查询 p115_filesystem_cache 失败: {e}")
+
+        if not target_cid:
+            return {'state': False, 'error_msg': 'Cookie 秒传缺少目标目录 cid', '_rapid_upload_backend': 'cookie'}
+        if not re.fullmatch(r'[A-F0-9]{40}', sha1 or ''):
+            return {'state': False, 'error_msg': 'Cookie 秒传缺少合法 SHA1', '_rapid_upload_backend': 'cookie'}
+        if size <= 0:
+            return {'state': False, 'error_msg': 'Cookie 秒传缺少文件大小', '_rapid_upload_backend': 'cookie'}
+        if not file_name:
+            file_name = f'{sha1}.mkv'
+        if not self.webapi:
+            return {'state': False, 'error_msg': 'Cookie 客户端未初始化 p115client，无法调用 Cookie 上传初始化', '_rapid_upload_backend': 'cookie'}
+        if not hasattr(self.webapi, 'upload_init'):
+            return {
+                'state': False,
+                'error_msg': '当前 p115client 不支持 P115Client.upload_init，无法测试 Cookie 上传初始化',
+                '_rapid_upload_backend': 'cookie',
+                '_rapid_cookie_unsupported': True,
+            }
+
+        target = target_cid if str(target_cid).startswith('U_') else f'U_1_{target_cid}'
+        init_payload = {
+            'filename': file_name,
+            'filesize': int(size),
+            'fileid': sha1,
+            'target': target,
+            'topupload': 'true',
+        }
+        if sign_key and sign_val:
+            init_payload['sign_key'] = str(sign_key)
+            init_payload['sign_val'] = str(sign_val).upper()
+
+        logger.info(
+            f"  ➜ [Cookie秒传] 初始化上传: {file_name} | "
+            f"sha1={sha1[:12]}... | size={size} | target={target}"
+        )
+
+        try:
+            resp = self.webapi.upload_init(init_payload)
+        except Exception as e:
+            return {
+                'state': False,
+                'error_msg': f'Cookie initupload 异常: {e}',
+                '_rapid_upload_backend': 'cookie',
+                '_rapid_cookie_payload': {'target': target, 'sha1': sha1[:12] + '...', 'size': size},
+            }
+
+        if not isinstance(resp, dict):
+            return {
+                'state': False,
+                'error_msg': f'Cookie initupload 返回非 dict: {type(resp).__name__}',
+                '_rapid_upload_backend': 'cookie',
+                'response': str(resp)[:500],
+            }
+
+        out = dict(resp)
+        out['_rapid_upload_backend'] = 'cookie'
+        out.setdefault('sha1', sha1)
+        out.setdefault('file_name', file_name)
+        out.setdefault('target_cid', target_cid)
+        out.setdefault('size', size)
+        status, data = _status_from_cookie_init(out)
+        reuse = out.get('reuse') is True or str(out.get('reuse')).lower() == 'true'
+
+        if reuse or status in ('2', 'success', 'done'):
+            out['state'] = True
+            out['success'] = True
+            out.setdefault('message', '115 Cookie initupload 秒传成功')
+            out.setdefault('rapid_upload', True)
+            logger.info(f"  ➜ [Cookie秒传] Cookie initupload 秒传成功: {file_name}")
+            return out
+
+        if status == '1':
+            out['state'] = False
+            out.setdefault('error_msg', 'Cookie initupload 返回普通上传(status=1)，Rapid v2 不上传明文文件')
+            out['_rapid_cookie_need_plain_upload'] = True
+            return out
+
+        if status == '7':
+            sign_key_text = str(out.get('sign_key') or data.get('sign_key') or '')
+            sign_check_text = str(out.get('sign_check') or data.get('sign_check') or '')
+            logger.warning(
+                f"  ➜ [Cookie秒传] Cookie initupload 返回 status=7，需要 holder 二次校验；"
+                f"交给中心调度签名客户端："
+                f"sha1={sha1[:12]}..., pc={(pick_code or '-')[:8]}..., "
+                f"sign_check={sign_check_text or '-'}, sign_key_prefix={sign_key_text[:12]}..., "
+                f"sign_key_len={len(sign_key_text)}"
+            )
+
+            stage = 'need_center_holder_sign' if sign_key_text and sign_check_text else 'missing_sign_key_or_check'
+            out['state'] = False
+            out['error_msg'] = (
+                'Cookie initupload 要求二次校验(status=7)，等待中心调度 holder 签名'
+                if stage == 'need_center_holder_sign'
+                else 'Cookie initupload 要求二次校验(status=7)，但返回缺少 sign_key/sign_check，无法调度 holder 签名'
+            )
+            out['_rapid_sign_closed_loop'] = False
+            out['_rapid_sign_backend'] = 'cookie'
+            out['_rapid_sign_stage'] = stage
+            out['_rapid_sign_required'] = True
+            out['_rapid_sign_key'] = sign_key_text
+            out['_rapid_sign_check'] = sign_check_text
+            out['_rapid_sign_sha1'] = sha1
+            out['_rapid_sign_size'] = size
+            out['_rapid_sign_file_name'] = file_name
+            return out
+
+        out['state'] = False
+        out.setdefault('error_msg', f'Cookie initupload 未直接秒传，status={status or "unknown"}')
+        return out
 
     def get_user_info(self):
         """获取用户信息 (仅用于验证)"""
@@ -1529,6 +2230,16 @@ class P115Service:
                             if len(attempted) > 1:
                                 logger.info(f"  ➜ [115] {method_name} 已自动切换到 {label} 接口成功。")
                             return resp
+                        # 115 秒传返回 status=7 不是接口故障，而是需要供给方 holder 按 sign_check
+                        # 读取源文件片段生成 sign_val。消费端本机通常没有源文件，切换 Cookie/OpenAPI
+                        # 或尝试“本机 Holder”只会浪费请求；直接把签名需求返回给共享资源消费层，
+                        # 由中心端调度真正持有该 SHA1 的客户端友情签名。
+                        if method_name == 'rapid_upload' and isinstance(resp, dict) and resp.get('_rapid_sign_required'):
+                            logger.warning(
+                                f"  ➜ [115] {label} 接口 rapid_upload 返回 status=7，"
+                                "交给中心调度签名。"
+                            )
+                            return resp
                         logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
                     except Exception as e:
                         last_err = e
@@ -1885,6 +2596,102 @@ class P115Service:
                 # 上传初始化/OSS 调度走 OpenAPI。
                 self._check_openapi()
                 return self._call_api('upload_file_stream', file_stream, file_name, target_cid, force_openapi=True)
+
+
+            def rapid_upload(self, payload=None, **kwargs):
+                """Rapid v2 秒传入口：按用户配置的 115 API 优先级尝试。
+
+                - cookie 优先：先走 Cookie/p115client 的上传初始化探测；普通失败再退 OpenAPI。
+                - openapi 优先：维持原 OpenAPI /open/upload/init 优先。
+                - 任一接口返回 status=7 时直接上抛签名需求，不再切备用接口、不再做消费端本机 Holder。
+                注意：这里只使用本机 CK/Token，不把账号凭据上传中心，也不恢复旧分享表。
+                """
+                payload = dict(payload or {})
+                payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
+                return self._call_api('rapid_upload', payload, normalizer=_p115_normalize_common_response)
+
+            def rapid_sign_value(self, payload=None, **kwargs):
+                """Holder 端签名任务：本机按 sha1 找 pick_code，读取 sign_check Range 计算 sign_val。
+
+                只返回 sign_val，不上传 CK/pick_code 到中心。
+                """
+                payload = dict(payload or {})
+                payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
+
+                def _first(*values):
+                    for value in values:
+                        if value not in (None, '', [], {}):
+                            return value
+                    return None
+
+                sha1 = str(_first(payload.get('sha1'), payload.get('file_sha1'), payload.get('fileid')) or '').strip().upper()
+                sign_check = str(_first(payload.get('sign_check'), payload.get('range')) or '').strip()
+                pick_code = str(_first(payload.get('pick_code'), payload.get('pickcode'), payload.get('pc')) or '').strip()
+                file_name = str(_first(payload.get('file_name'), payload.get('filename'), payload.get('name')) or '').strip()
+                try:
+                    size = int(float(_first(payload.get('size'), payload.get('file_size'), payload.get('filesize')) or 0))
+                except Exception:
+                    size = 0
+
+                local = _p115_lookup_local_holder_file_for_sign(sha1=sha1, size=size, pick_code=pick_code, file_name=file_name)
+                pc = str(local.get('pick_code') or pick_code or '').strip()
+                if not pc:
+                    raise RuntimeError(f'本机不是可签名 holder：未找到 sha1={sha1[:12]}... 对应 pick_code')
+                if not file_name:
+                    file_name = local.get('file_name') or sha1
+
+                try:
+                    _, _, _, app_type = get_115_tokens()
+                except Exception:
+                    app_type = 'web'
+                sign_ua = str(_first(payload.get('sign_user_agent'), payload.get('user_agent'), payload.get('ua'), get_115_ua(app_type)) or get_115_ua('web'))
+                priority = get_115_api_priority()
+                order = [('download_url', 'Cookie蜂群Holder'), ('openapi_downurl', 'OpenAPI蜂群Holder')] if priority == 'cookie' else [('openapi_downurl', 'OpenAPI蜂群Holder'), ('download_url', 'Cookie蜂群Holder')]
+                last_error = None
+                for method_name, label in order:
+                    method = getattr(self, method_name, None)
+                    if not callable(method):
+                        continue
+                    try:
+                        sign_result = _p115_try_local_holder_sign(
+                            pick_code=pc,
+                            sign_check=sign_check,
+                            downurl_getter=lambda _pc, _ua, _m=method: _m(_pc, user_agent=_ua),
+                            user_agent=sign_ua,
+                            label=label,
+                            sha1=sha1,
+                            file_name=file_name,
+                        )
+                        if sign_result and sign_result.get('sign_val'):
+                            out = dict(sign_result)
+                            out.update({'state': True, 'success': True, 'sha1': sha1, 'file_name': file_name, 'backend': label})
+                            return out
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(f"  ➜ [负载均衡签名] {label} 计算 sign_val 失败，尝试备用接口: {e}")
+                raise RuntimeError(f'本机 holder 计算 sign_val 失败: {last_error}')
+
+            def fs_rapid_upload(self, target_cid, sha1, size, file_name, preid=None, **kwargs):
+                payload = {'cid': target_cid, 'sha1': sha1, 'size': size, 'file_name': file_name}
+                if preid:
+                    payload['preid'] = preid
+                payload.update(kwargs)
+                return self.rapid_upload(payload)
+
+            def upload_file_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+                return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+            def fs_upload_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+                return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+            def upload_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+                return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+            def add_file_by_sha1(self, target_cid, sha1, size, file_name, **kwargs):
+                return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
+
+            def rapid_save(self, target_cid, sha1, size, file_name, **kwargs):
+                return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
 
             def download_url(self, pick_code, user_agent=None):
                 if not self._cookie:
@@ -2250,35 +3057,59 @@ class P115CacheManager:
             logger.error(f"  ➜ 清理 115 DB 缓存失败: {e}")
 
     @staticmethod
-    def save_file_cache(fid, parent_id, name, sha1=None, pick_code=None, local_path=None, size=0):
-        """专门将文件(fc=1)的 SHA1、PC码、本地相对路径和大小存入本地数据库缓存"""
+    def save_file_cache(fid, parent_id, name, sha1=None, pick_code=None, local_path=None, size=0, preid=None):
+        """专门将文件(fc=1)的 SHA1、PC码、本地相对路径、大小和 preid 存入本地数据库缓存"""
         if not fid or not parent_id or not name: return
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
+                    P115CacheManager._ensure_preid_column()
+                    preid = P115CacheManager._norm_preid(preid)
+                    if not preid:
+                        cursor.execute(
+                            """
+                            SELECT preid
+                            FROM p115_filesystem_cache
+                            WHERE id = %s
+                               OR (parent_id = %s AND name = %s)
+                               OR (%s IS NOT NULL AND pick_code = %s)
+                               OR (%s IS NOT NULL AND UPPER(sha1) = UPPER(%s))
+                            ORDER BY CASE WHEN preid IS NOT NULL AND preid <> '' THEN 0 ELSE 1 END,
+                                     updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (str(fid), str(parent_id), str(name), pick_code, pick_code, sha1, sha1),
+                        )
+                        old_row = cursor.fetchone()
+                        if old_row:
+                            preid = P115CacheManager._norm_preid(old_row.get('preid'))
                     cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = %s", (str(fid),))
-                    
+
                     cursor.execute("""
-                        INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1, pick_code, local_path, size)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1, pick_code, local_path, size, preid)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (parent_id, name)
-                        DO UPDATE SET 
-                            sha1 = CASE 
-                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.sha1 
-                                ELSE COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1) 
+                        DO UPDATE SET
+                            sha1 = CASE
+                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.sha1
+                                ELSE COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1)
                             END,
-                            pick_code = CASE 
-                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.pick_code 
-                                ELSE COALESCE(EXCLUDED.pick_code, p115_filesystem_cache.pick_code) 
+                            pick_code = CASE
+                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.pick_code
+                                ELSE COALESCE(EXCLUDED.pick_code, p115_filesystem_cache.pick_code)
                             END,
                             local_path = COALESCE(EXCLUDED.local_path, p115_filesystem_cache.local_path),
-                            size = CASE 
-                                WHEN EXCLUDED.size > 0 THEN EXCLUDED.size 
-                                ELSE p115_filesystem_cache.size 
+                            size = CASE
+                                WHEN EXCLUDED.size > 0 THEN EXCLUDED.size
+                                ELSE p115_filesystem_cache.size
+                            END,
+                            preid = CASE
+                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid)
+                                ELSE COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid)
                             END,
                             id = EXCLUDED.id,
                             updated_at = NOW()
-                    """, (str(fid), str(parent_id), str(name), sha1, pick_code, local_path, size))
+                    """, (str(fid), str(parent_id), str(name), sha1, pick_code, local_path, size, preid or None))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 文件缓存失败: {e}")
@@ -2303,7 +3134,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
                         FROM p115_filesystem_cache
                         WHERE id = %s
                         LIMIT 1
@@ -2322,7 +3153,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
                         FROM p115_filesystem_cache
                         WHERE pick_code = %s
                         LIMIT 1
@@ -2341,7 +3172,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
                         FROM p115_filesystem_cache
                         WHERE UPPER(sha1) = UPPER(%s)
                         ORDER BY updated_at DESC NULLS LAST
@@ -2367,7 +3198,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
                         FROM p115_filesystem_cache
                         WHERE local_path = %s
                         LIMIT 1
@@ -2572,6 +3403,210 @@ class P115CacheManager:
         return raw_ffprobe_json
 
     @staticmethod
+    def _norm_preid(value):
+        text = str(value or '').strip().upper()
+        return text if re.fullmatch(r'[A-F0-9]{40}', text) else ''
+
+    @staticmethod
+    def _ensure_preid_column():
+        """兼容旧库：确保 p115_filesystem_cache 有 preid 字段。"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("ALTER TABLE p115_filesystem_cache ADD COLUMN IF NOT EXISTS preid TEXT")
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 确认 preid 字段失败: {e}")
+
+    @staticmethod
+    def _extract_preid_range_bytes(pick_code, start=0, end=131071):
+        """只读取文件前 128KB，用于计算 115 upload/init 的 preid。"""
+        pick_code = str(pick_code or '').strip()
+        if not pick_code:
+            return b''
+        try:
+            client = P115Service.get_client()
+            if not client:
+                return b''
+            try:
+                _, _, _, app_type = get_115_tokens()
+            except Exception:
+                app_type = 'web'
+            ua_candidates = []
+            # 优先复用刚刚 ffprobe / STRM 生成阶段已经取过的直链 UA，避免同一个文件连续请求两次直链。
+            try:
+                for cache_key, cached in list(_DIRECT_URL_CACHE.items()):
+                    if not isinstance(cache_key, tuple) or len(cache_key) < 2:
+                        continue
+                    if str(cache_key[0] or '').strip() != pick_code:
+                        continue
+                    if not isinstance(cached, dict) or not cached.get('url'):
+                        continue
+                    cached_ua = cache_key[1]
+                    if cached_ua is None:
+                        if None not in ua_candidates:
+                            ua_candidates.append(None)
+                    else:
+                        cached_ua = str(cached_ua or '').strip()
+                        if cached_ua and cached_ua not in ua_candidates:
+                            ua_candidates.append(cached_ua)
+            except Exception:
+                pass
+            for ua in ('Mozilla/5.0', get_115_ua(app_type or 'web'), get_115_ua('web'), get_115_ua('mac')):
+                ua = str(ua or '').strip()
+                if ua and ua not in ua_candidates:
+                    ua_candidates.append(ua)
+            if not ua_candidates:
+                ua_candidates.append('Mozilla/5.0')
+
+            priority = get_115_api_priority()
+            method_order = [('download_url', 'Cookie'), ('openapi_downurl', 'OpenAPI')] if priority == 'cookie' else [('openapi_downurl', 'OpenAPI'), ('download_url', 'Cookie')]
+            range_header = f'bytes={int(start)}-{int(end)}'
+            expected_len = int(end) - int(start) + 1
+            last_status = None
+
+            for method_name, label in method_order:
+                method = getattr(client, method_name, None)
+                if not callable(method):
+                    continue
+                for ua in ua_candidates:
+                    try:
+                        down_url = _p115_extract_down_url(method(pick_code, user_agent=ua))
+                    except TypeError:
+                        try:
+                            down_url = _p115_extract_down_url(method(pick_code, ua))
+                        except Exception as e:
+                            logger.debug(f"  ➜ [115缓存] 获取 preid 直链失败({label}, positional-ua): {e}")
+                            down_url = ''
+                    except Exception as e:
+                        logger.debug(f"  ➜ [115缓存] 获取 preid 直链失败({label}): {e}")
+                        down_url = ''
+                    if not down_url:
+                        continue
+                    try:
+                        headers = {
+                            'Range': range_header,
+                            'Accept': '*/*',
+                            'Connection': 'close',
+                        }
+                        if ua:
+                            headers['User-Agent'] = ua
+                        with requests.get(down_url, headers=headers, timeout=45, allow_redirects=True, stream=True) as resp:
+                            last_status = resp.status_code
+                            if resp.status_code != 206:
+                                logger.warning(
+                                    f"  ➜ [115缓存] 读取 preid Range 失败: api={label}, "
+                                    f"HTTP={resp.status_code}, range={range_header}, pc={pick_code[:8]}..."
+                                )
+                                continue
+                            content = resp.raw.read(expected_len) or b''
+                            if content:
+                                logger.debug(
+                                    f"  ➜ [115缓存] preid Range 读取成功: api={label}, "
+                                    f"range={range_header}, bytes={len(content)}, pc={pick_code[:8]}..."
+                                )
+                                return content
+                    except Exception as e:
+                        logger.debug(
+                            f"  ➜ [115缓存] Range GET 异常: api={label}, "
+                            f"range={range_header}, pc={pick_code[:8]}..., err={e}"
+                        )
+            if last_status:
+                logger.warning(f"  ➜ [115缓存] 已尝试读取 preid Range 仍失败，最后 HTTP={last_status}: pc={pick_code[:8]}...")
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 计算 preid 前置读取失败: pc={pick_code[:8]}..., err={e}")
+        return b''
+
+    @staticmethod
+    def ensure_file_preid(file_info=None, *, sha1=None, fid=None, pick_code=None, file_name=None):
+        """确保 p115_filesystem_cache 中对应文件有 preid，并返回 preid。
+
+        调用场景：整理/MP直出提取媒体信息后，已经拿到 SHA1/PC/FID，顺手读取前 128KB
+        计算 preid，避免后续共享登记/秒传时再单独补齐。
+        """
+        item = dict(file_info or {}) if isinstance(file_info, dict) else {}
+        sha1 = str(sha1 or item.get('sha1') or item.get('sha') or item.get('file_sha1') or '').strip().upper()
+        fid = str(fid or item.get('fid') or item.get('file_id') or item.get('id') or '').strip()
+        pick_code = str(pick_code or item.get('pick_code') or item.get('pc') or item.get('pickcode') or '').strip()
+        file_name = str(file_name or item.get('file_name') or item.get('fn') or item.get('name') or '').strip()
+        existing = P115CacheManager._norm_preid(item.get('preid') or item.get('pre_sha1') or item.get('pre_sha1_128k'))
+        if existing:
+            return existing
+
+        P115CacheManager._ensure_preid_column()
+        clauses, args = [], []
+        if fid:
+            clauses.append('id=%s')
+            args.append(fid)
+        if pick_code:
+            clauses.append('pick_code=%s')
+            args.append(pick_code)
+        if sha1 and re.fullmatch(r'[A-F0-9]{40}', sha1):
+            clauses.append('UPPER(sha1)=%s')
+            args.append(sha1)
+        if clauses:
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            f"""
+                            SELECT id, name, sha1, pick_code, preid
+                            FROM p115_filesystem_cache
+                            WHERE {' OR '.join(clauses)}
+                            ORDER BY CASE WHEN preid IS NOT NULL AND preid <> '' THEN 0 ELSE 1 END,
+                                     updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            args,
+                        )
+                        row = cursor.fetchone()
+                if row:
+                    row = dict(row)
+                    found_preid = P115CacheManager._norm_preid(row.get('preid'))
+                    if found_preid:
+                        return found_preid
+                    fid = fid or str(row.get('id') or '').strip()
+                    pick_code = pick_code or str(row.get('pick_code') or '').strip()
+                    sha1 = sha1 or str(row.get('sha1') or '').strip().upper()
+                    file_name = file_name or str(row.get('name') or '').strip()
+            except Exception as e:
+                logger.debug(f"  ➜ [115缓存] 查询已有 preid 失败: {e}")
+
+        if not pick_code:
+            return ''
+        chunk = P115CacheManager._extract_preid_range_bytes(pick_code, 0, 131071)
+        if not chunk:
+            return ''
+        preid = hashlib.sha1(chunk).hexdigest().upper()
+        update_clauses, update_args = [], []
+        if fid:
+            update_clauses.append('id=%s')
+            update_args.append(fid)
+        if pick_code:
+            update_clauses.append('pick_code=%s')
+            update_args.append(pick_code)
+        if sha1 and re.fullmatch(r'[A-F0-9]{40}', sha1):
+            update_clauses.append('UPPER(sha1)=%s')
+            update_args.append(sha1)
+        if update_clauses:
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            f"""
+                            UPDATE p115_filesystem_cache
+                            SET preid=%s, updated_at=NOW()
+                            WHERE {' OR '.join(update_clauses)}
+                            """,
+                            [preid, *update_args],
+                        )
+                    conn.commit()
+                logger.info(f"  ➜ [115缓存] 已计算并缓存 preid: {file_name or sha1 or pick_code} -> {preid[:12]}...")
+            except Exception as e:
+                logger.debug(f"  ➜ [115缓存] 回写 p115_filesystem_cache.preid 失败: {e}")
+        return preid
+
+    @staticmethod
     def save_mediainfo_cache(sha1, mediainfo_json, raw_ffprobe_json=None):
         """写入本地 p115_mediainfo_cache，结构保持 Emby MediaSourceInfo 标准格式"""
         if not sha1 or not mediainfo_json:
@@ -2599,6 +3634,13 @@ class P115CacheManager:
                         Json(raw_ffprobe_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if raw_ffprobe_json else None
                     ))
                     conn.commit()
+
+            # 整理/MP直出提取媒体信息时顺手补齐 preid：
+            # 只读取前 128KB，写入 p115_filesystem_cache，供后续 Rapid v2 登记/秒传直接复用。
+            try:
+                P115CacheManager.ensure_file_preid({'sha1': sha1})
+            except Exception as e_preid:
+                logger.debug(f"  ➜ [媒体信息缓存] 顺手计算 preid 失败: sha1={sha1[:12]}..., err={e_preid}")
 
             logger.info(f"  ➜ [媒体信息缓存] 已写入本地 p115_mediainfo_cache -> {sha1[:12]}...")
             return True
@@ -3008,13 +4050,7 @@ class P115CacheManager:
 
     @staticmethod
     def mark_shared_raw_dirty_for_sha1(sha1, *, reason='raw_ffprobe_etk_context_fixed', tmdb_id=None, media_type=None):
-        """本地 RAW 被修正后，标记已分享到中心的同 SHA1 资源需要重新上传 RAW。
-
-        手动重组通常就是为了纠正识别错误；如果旧 RAW 已经登记到中心，中心对象存储
-        会继续保存污染的 _etk。这里不直接依赖路由层上传逻辑，只把本地分享项置为
-        raw_ffprobe_uploaded=FALSE / center_reported=FALSE，并把分享记录改成 not_reported，
-        交给共享高频同步任务强制重传并重新登记中心。
-        """
+        """本地 RAW 被修正后，标记 Rapid v2 本地共享索引需要重新上传 RAW。"""
         sha1 = str(sha1 or '').strip().upper()
         if not sha1:
             return 0
@@ -3022,57 +4058,56 @@ class P115CacheManager:
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
+                    dirty_payload = {
+                        'raw_etk_dirty': {
+                            'pending': True,
+                            'reason': reason,
+                            'sha1': sha1,
+                            'tmdb_id': str(tmdb_id or '').strip() or None,
+                            'type': str(media_type or '').strip() or None,
+                            'marked_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        }
+                    }
                     cursor.execute(
                         """
-                        UPDATE shared_share_items
+                        UPDATE shared_rapid_source_files
                         SET raw_ffprobe_uploaded = FALSE,
-                            center_reported = FALSE,
+                            raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
                             updated_at = NOW()
                         WHERE UPPER(COALESCE(sha1, '')) = %s
-                        RETURNING share_record_id
+                        RETURNING local_source_id
                         """,
-                        (sha1,)
+                        (json.dumps(dirty_payload, ensure_ascii=False), sha1),
                     )
-                    record_ids = sorted({r.get('share_record_id') for r in cursor.fetchall() if r.get('share_record_id') is not None})
+                    local_source_ids = sorted({r.get('local_source_id') for r in cursor.fetchall() if r.get('local_source_id') is not None})
 
-                    if record_ids:
-                        dirty_payload = {
-                            'raw_etk_dirty': {
-                                'pending': True,
-                                'reason': reason,
-                                'sha1': sha1,
-                                'tmdb_id': str(tmdb_id or '').strip() or None,
-                                'type': str(media_type or '').strip() or None,
-                                'marked_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                            }
-                        }
+                    if local_source_ids:
                         cursor.execute(
                             """
-                            UPDATE shared_share_records
-                            SET center_status = 'not_reported',
+                            UPDATE shared_rapid_sources
+                            SET center_status = 'dirty_raw',
                                 last_error = %s,
                                 raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb,
                                 updated_at = NOW()
                             WHERE id = ANY(%s)
-                              AND COALESCE(status, '') NOT IN ('cancelled', 'deleted', 'dead', 'blocked', 'violation')
+                              AND COALESCE(status, '') NOT IN ('disabled', 'deleted')
                             """,
                             (
                                 f'本地 RAW _etk 已修复，等待覆盖中心 RAW：{sha1[:12]}...',
                                 json.dumps(dirty_payload, ensure_ascii=False),
-                                record_ids,
-                            )
+                                local_source_ids,
+                            ),
                         )
                     conn.commit()
 
-            if record_ids:
+            if local_source_ids:
                 logger.info(
-                    f"  ➜ [raw_ffprobe缓存] 已标记 {len(record_ids)} 个共享记录重新上传 RAW："
+                    f"  ➜ [raw_ffprobe缓存] 已标记 {len(local_source_ids)} 个 Rapid 共享源重新上传 RAW："
                     f"sha1={sha1[:12]}..., reason={reason}"
                 )
-            return len(record_ids)
+            return len(local_source_ids)
         except Exception as e:
-            # 没启用共享资源或旧库缺表时不能影响 115 整理主流程。
-            logger.debug(f"  ➜ 标记共享 RAW 重传失败: sha1={sha1[:12]}... -> {e}")
+            logger.debug(f"  ➜ 标记 Rapid 共享 RAW 重传失败: sha1={sha1[:12]}... -> {e}")
             return 0
 
 # ======================================================================
@@ -6250,6 +7285,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 if probe_sha1:
                                     probe_sha1 = str(probe_sha1).upper()
                                     P115CacheManager.save_mediainfo_cache(probe_sha1, emby_obj, raw_ffprobe)
+                                    try:
+                                        cached_preid = P115CacheManager.ensure_file_preid(file_item, sha1=probe_sha1, fid=fid, pick_code=pick_code, file_name=original_name)
+                                        if cached_preid:
+                                            file_item['preid'] = cached_preid
+                                    except Exception as e_preid:
+                                        logger.debug(f"  ➜ [MP直出] 媒体信息提取后计算 preid 失败: {original_name} -> {e_preid}")
                                     sha1 = probe_sha1
                                     file_item['sha1'] = probe_sha1
                                 mediainfo_text = json.dumps(emby_obj, ensure_ascii=False, indent=2)
@@ -6297,7 +7338,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     sha1=sha1,
                     pick_code=pick_code,
                     local_path=file_local_path,
-                    size=file_size
+                    size=file_size,
+                    preid=file_item.get('preid')
                 )
 
                 P115RecordManager.add_or_update_record(
@@ -7241,11 +8283,10 @@ _SHARED_RAW_REUPLOAD_LOCK = threading.Lock()
 _LAST_SHARED_RAW_REUPLOAD_AT = 0
 
 def _kick_shared_raw_reupload_detached(reason: str = '', delay: float = 8.0):
-    """手动重组修复 RAW 后，异步触发一次共享高频同步。
+    """手动重组修复 RAW 后，异步触发一次 Rapid 共享维护。
 
-    这里只触发同步任务，不在整理链路里直接请求中心，避免重组接口被网络波动拖死。
-    高频同步会读取 mark_shared_raw_dirty_for_sha1 写下的 not_reported/dirty 标记，
-    调用 _upload_share_raw_ffprobe_to_center(..., force=True) 覆盖中心 RAW。
+    Rapid v2 已废弃 115 分享状态同步；这里只唤醒共享维护线程，避免重组接口
+    被中心网络波动拖死。后续需要强制重登记时，由共享资源维护任务扫描 dirty_raw。
     """
     global _LAST_SHARED_RAW_REUPLOAD_AT
 
@@ -7259,18 +8300,18 @@ def _kick_shared_raw_reupload_detached(reason: str = '', delay: float = 8.0):
         if delay and delay > 0:
             time.sleep(delay)
         try:
-            from tasks.shared_resource_tasks import task_shared_share_status_sync_high_freq
-            logger.info(f"  ➜ [批量重组] 异步触发共享 RAW 覆盖上传：{reason or 'manual-reorganize-raw-fix'}")
-            task_shared_share_status_sync_high_freq(maintenance_silent=True)
+            from tasks.shared_resource_tasks import task_shared_resource_maintenance
+            logger.info(f"  ➜ [批量重组] 异步触发 Rapid 共享维护：{reason or 'manual-reorganize-raw-fix'}")
+            task_shared_resource_maintenance(maintenance_silent=True)
         except Exception as e:
-            logger.warning(f"  ➜ [批量重组] 触发共享 RAW 覆盖上传失败: {e}", exc_info=True)
+            logger.warning(f"  ➜ [批量重组] 触发 Rapid 共享维护失败: {e}", exc_info=True)
 
     threading.Thread(
         target=_runner,
-        name='shared-raw-reupload-after-manual-correct',
+        name='shared-rapid-maintenance-after-manual-correct',
         daemon=True,
     ).start()
-    return {'started': True, 'message': '已异步触发共享 RAW 覆盖上传'}
+    return {'started': True, 'message': '已异步触发 Rapid 共享维护'}
 
 # ======================================================================
 # ★★★ 手动纠错缓冲队列 (实现批量重组与一次性刷新) ★★★

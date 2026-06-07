@@ -1,8 +1,8 @@
-<!-- src/components/ShareRequestCreateModal.vue -->
+<!-- emby-actor-ui/src/components/ShareRequestCreateModal.vue -->
 <template>
-  <n-modal v-model:show="visible" preset="card" title="共享池求分享" style="width: 980px; max-width: 96vw;" class="custom-modal glass-modal">
+  <n-modal v-model:show="visible" preset="card" title="共享池求共享" style="width: 980px; max-width: 96vw;" class="custom-modal glass-modal">
     <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
-      先搜索并确认 TMDb 目标，再选择电影 / 全剧 / 单季 / 单集和可自动校验的媒体参数。中心端会按参数自动计算需要冻结的贡献值。
+      先搜索并确认 TMDb 目标，再选择电影 / 全剧 / 单季和媒体参数。Rapid v2 会由中心调度在线设备秒传供给，中心不保存 115 CK 或分享链接。
     </n-alert>
 
     <n-space class="toolbar" :vertical="isMobile" :size="12">
@@ -35,7 +35,7 @@
     </div>
 
     <n-form :model="form" label-placement="left" label-width="105" style="margin-top: 12px;">
-      <n-divider title-placement="left">求分享目标</n-divider>
+      <n-divider title-placement="left">求共享目标</n-divider>
       <n-form-item label="目标类型">
         <n-radio-group v-model:value="form.target_type">
           <n-space>
@@ -44,14 +44,9 @@
         </n-radio-group>
       </n-form-item>
       <n-grid v-if="form.media_type === 'tv'" :cols="isMobile ? 1 : 3" :x-gap="12">
-        <n-gi v-if="['season','episode'].includes(form.target_type)">
+        <n-gi v-if="form.target_type === 'season'">
           <n-form-item label="季号">
             <n-input-number v-model:value="form.season_number" :min="1" :max="999" style="width: 100%;" />
-          </n-form-item>
-        </n-gi>
-        <n-gi v-if="form.target_type === 'episode'">
-          <n-form-item label="集号">
-            <n-input-number v-model:value="form.episode_number" :min="1" :max="9999" style="width: 100%;" />
           </n-form-item>
         </n-gi>
       </n-grid>
@@ -90,10 +85,10 @@
 
     <template #footer>
       <n-space justify="space-between" align="center">
-        <n-text depth="3">最高冻结由中心自动计算；关闭超时加倍时只冻结当前悬赏。</n-text>
+        <n-text depth="3">最高冻结由中心自动计算；资源被秒传成功后悬赏支付给供给设备。</n-text>
         <n-space>
           <n-button @click="visible = false">取消</n-button>
-          <n-button type="primary" :disabled="!selectedMedia" :loading="submitting" @click="submit">发布求分享</n-button>
+          <n-button type="primary" :disabled="!selectedMedia" :loading="submitting" @click="submit">发布求共享</n-button>
         </n-space>
       </n-space>
     </template>
@@ -193,7 +188,6 @@ const targetOptions = computed(() => {
   return [
     { label: '全剧', value: 'series' },
     { label: '单季', value: 'season' },
-    { label: '单集', value: 'episode' },
   ];
 });
 
@@ -216,7 +210,6 @@ const compactParams = () => {
 };
 
 const buildPayload = () => {
-  const episodeNumbers = form.target_type === 'episode' && form.episode_number ? [Number(form.episode_number)] : [];
   return {
     tmdb_id: form.tmdb_id,
     media_type: form.media_type,
@@ -225,9 +218,7 @@ const buildPayload = () => {
     release_year: form.release_year,
     poster_path: form.poster_path,
     overview: form.overview,
-    season_number: ['season','episode'].includes(form.target_type) ? form.season_number : null,
-    episode_number: form.target_type === 'episode' ? form.episode_number : null,
-    episode_numbers: episodeNumbers,
+    season_number: form.target_type === 'season' ? form.season_number : null,
     params_json: compactParams(),
     expires_days: form.expires_days || 7,
     auto_escalation: Boolean(form.auto_escalation),
@@ -283,18 +274,13 @@ const applyMedia = async (row) => {
   });
   if (props.initialTarget && typeof props.initialTarget === 'object') {
     Object.assign(form, {
-      target_type: props.initialTarget.target_type || form.target_type,
+      target_type: props.initialTarget.target_type === 'episode' ? 'season' : (props.initialTarget.target_type || form.target_type),
       season_number: props.initialTarget.season_number || form.season_number,
-      episode_number: props.initialTarget.episode_number || form.episode_number,
+      episode_number: 1,
     });
     if (Array.isArray(props.initialTarget.episode_numbers) && props.initialTarget.episode_numbers.length) {
-      if (props.initialTarget.episode_numbers.length === 1) {
-        form.target_type = 'episode';
-        form.episode_number = Number(props.initialTarget.episode_numbers[0]) || form.episode_number;
-      } else {
-        // 115 分享没有“指定集数范围”的能力，多集缺口统一按季包求分享。
-        form.target_type = 'season';
-      }
+      // Rapid v2 求共享不再支持单集，旧 episode 参数统一提升为单季。
+      form.target_type = 'season';
     }
   }
   if (props.initialParams && typeof props.initialParams === 'object') {
@@ -343,19 +329,18 @@ const loadParamOptions = async () => {
 
 const submit = async () => {
   if (!selectedMedia.value) return message.warning('请先搜索并选择 TMDb 目标');
-  if (form.media_type === 'tv' && ['season','episode'].includes(form.target_type) && !form.season_number) {
+  if (form.media_type === 'tv' && form.target_type === 'season' && !form.season_number) {
     return message.warning('请填写季号');
   }
-  if (form.target_type === 'episode' && !form.episode_number) return message.warning('请填写集号');
   submitting.value = true;
   try {
     const payload = buildPayload();
     const res = await axios.post('/api/shared/resources/share-requests', payload);
-    message.success(res.data?.message || '求分享已发布');
+    message.success(res.data?.message || '求共享已发布');
     visible.value = false;
     emit('created', res.data?.data || payload);
   } catch (e) {
-    message.error(e.response?.data?.message || '发布求分享失败');
+    message.error(e.response?.data?.message || '发布求共享失败');
   } finally {
     submitting.value = false;
   }

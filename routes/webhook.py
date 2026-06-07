@@ -368,63 +368,111 @@ def _shared_resource_auto_share_enabled() -> bool:
             return value.strip().lower() in ('1', 'true', 'yes', 'on', '启用', '开启')
         return bool(value)
     except Exception as e:
-        logger.debug(f"  ➜ [共享资源] 读取共享资源总开关失败，跳过自动分享探测: {e}")
+        logger.debug(f"  ➜ [共享资源] 读取共享资源总开关失败，跳过自动登记: {e}")
         return False
 
 
-def _run_shared_auto_share_detached(task_name: str, **kwargs):
-    """共享供给侧探测/创建分享必须脱离 task_manager 单线程队列。
+def _run_shared_auto_share_batch_detached(task_name: str, register_items: List[dict]):
+    """共享供给侧登记必须脱离 task_manager 单线程队列。
 
     Webhook 本身已经运行在 task_manager 的单 worker + task_lock 中。
     如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致 Webhook 任务假死。
+
+    Rapid v2 不再判断“是否有人需要”。只要共享资源开关已启用，
+    媒体入库完成并补齐指纹后，就立即把本机秒传源登记到中心。
     """
+    items = [dict(x or {}) for x in (register_items or []) if isinstance(x, dict)]
+    if not items:
+        return
+
     if not _shared_resource_auto_share_enabled():
-        logger.debug(f"  ➜ [共享资源] 共享资源未启用，跳过自动分享探测: {task_name}")
+        logger.debug(f"  ➜ [共享资源] 共享资源未启用，跳过自动登记: {task_name}")
         return
 
     def _runner():
+        created_total = 0
+        failed_total = 0
         try:
-            from tasks.shared_resource_tasks import trigger_shared_auto_share_for_library_item
-            logger.debug(f"  ➜ [共享资源] 检查是否需要分享: {task_name}")
-            result = trigger_shared_auto_share_for_library_item(None, **kwargs)
-            logger.debug(
-                "  ➜ [共享资源] 检查完成: %s，created=%s，message=%s",
+            from tasks.shared_resource_tasks import trigger_shared_rapid_register_for_library_item
+
+            logger.info(f"  ➜ [共享资源] 入库即登记共享源: {task_name}，items={len(items)}")
+            for item in items:
+                try:
+                    result = trigger_shared_rapid_register_for_library_item(None, **item) or {}
+                    try:
+                        created_total += int(result.get('created', 0) or result.get('registered_count', 0) or 0)
+                    except Exception:
+                        pass
+                    if not result.get('ok'):
+                        failed_total += 1
+                        logger.debug(
+                            "  ➜ [共享资源] 入库登记未成功: %s，message=%s",
+                            item.get('emby_item_id') or item.get('tmdb_id') or '-',
+                            result.get('message', '') if isinstance(result, dict) else '',
+                        )
+                except Exception as item_err:
+                    failed_total += 1
+                    logger.warning(
+                        "  ➜ [共享资源] 入库登记单项失败: %s -> %s",
+                        item.get('emby_item_id') or item.get('tmdb_id') or '-',
+                        item_err,
+                        exc_info=True,
+                    )
+
+            logger.info(
+                "  ➜ [共享资源] 入库共享源登记完成: %s，items=%s，created=%s，failed=%s",
                 task_name,
-                result.get('created', 0) if isinstance(result, dict) else '-',
-                result.get('message', '') if isinstance(result, dict) else '',
+                len(items),
+                created_total,
+                failed_total,
             )
         except Exception as e:
-            logger.warning(f"  ➜ [共享资源] 自动分享探测失败: {task_name} -> {e}", exc_info=True)
+            logger.warning(f"  ➜ [共享资源] 自动登记失败: {task_name} -> {e}", exc_info=True)
 
     threading.Thread(
         target=_runner,
-        name=f"shared-auto-share-{str(task_name)[:40]}",
+        name=f"shared-rapid-register-{str(task_name)[:40]}",
         daemon=True,
     ).start()
 
 
-def _submit_shared_auto_share_after_library_ready(item_details: dict, item_id: str, item_type: str, tmdb_id: str):
-    """Movie 入库完成后，异步询问共享中心是否需要本机创建分享。
+def _run_shared_auto_share_detached(task_name: str, **kwargs):
+    _run_shared_auto_share_batch_detached(task_name, [kwargs])
 
-    Webhook 只保留电影分享入口。剧集不管是单集追更还是完结季包，
-    都交给 watchlist_processor 在完成最终追更/完结判定后处理，避免整季入库时
-    webhook 只看到 new_episode_ids 就误把整季拆成单集分享。
-    Movie 的备份分享由任务内部在“正常分享不需要创建且中心可用分享数=1”时额外补充。
+
+def _submit_shared_auto_share_after_library_ready(
+    item_details: dict,
+    item_id: str,
+    item_type: str,
+    tmdb_id: str,
+    *,
+    new_episode_ids: Optional[List[str]] = None,
+):
+    """媒体入库完成后，异步登记 Rapid v2 共享源。
+
+    职责边界：
+    - Movie：入库完成即可登记电影源；
+    - Episode / Series：Webhook 只负责入库、指纹体检和把 new_episode_ids 透传给 watchlist_processor；
+      由 watchlist_processor 先判定连载/完结，再决定登记单集源或完结季包。
     """
     try:
         if item_type != 'Movie' or not tmdb_id:
             return
 
-        _run_shared_auto_share_detached(
-            f"共享电影入库探测: {item_details.get('Name') or tmdb_id}",
-            item_type='Movie',
-            tmdb_id=str(tmdb_id),
-            emby_item_id=str(item_id),
-            title=item_details.get('Name') or '',
-            year=item_details.get('ProductionYear') or '',
+        title = item_details.get('Name') or ''
+        year = item_details.get('ProductionYear') or ''
+        _run_shared_auto_share_batch_detached(
+            f"Rapid电影共享源登记: {title or tmdb_id}",
+            [{
+                'item_type': 'Movie',
+                'tmdb_id': str(tmdb_id),
+                'emby_item_id': str(item_id),
+                'title': title,
+                'year': year,
+            }],
         )
     except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 提交 webhook 电影自动分享探测失败: {e}", exc_info=True)
+        logger.warning(f"  ➜ [共享资源] 提交 webhook Rapid 电影共享源登记失败: {e}", exc_info=True)
 
 def _get_processor_local_strm_root(processor) -> str:
     """从 MediaProcessor / 配置中提取本地 STRM 根目录，用于补齐 p115_filesystem_cache.local_path。"""
@@ -599,8 +647,9 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         logger.warning(f"  ➜ 项目 '{item_name_for_log}' 的元数据处理未成功完成，跳过后续步骤。")
         return
 
-    # 2. 电影入库后先做 115 指纹体检，再进入共享资源探测。
-    # 共享电影创建分享依赖 PC/SHA1/FID/缓存字段，体检要放在分享探测前。
+    # 2. 媒体入库后先做 115 指纹体检，再登记 Rapid 共享源。
+    # Rapid 登记依赖 PC/SHA1/FID/缓存字段，体检要放在登记前。
+    precise_new_episode_ids = [str(x).strip() for x in (new_episode_ids or []) if str(x or '').strip()]
     if item_type == "Movie":
         _repair_webhook_p115_fingerprints_for_emby_ids(
             processor,
@@ -609,9 +658,23 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             expected_item_type="Movie",
             log_prefix="Webhook电影指纹补齐",
         )
+    elif item_type == "Series" and precise_new_episode_ids:
+        _repair_webhook_p115_fingerprints_for_emby_ids(
+            processor,
+            item_name_for_log,
+            precise_new_episode_ids,
+            expected_item_type="Episode",
+            log_prefix="Webhook新集指纹补齐",
+        )
 
-    # 3. 共享资源供给侧实时触发：Webhook 只负责 Movie；剧集单集/季包由智能追剧最终判定后触发。
-    _submit_shared_auto_share_after_library_ready(item_details, item_id, item_type, tmdb_id)
+    # 3. 共享资源供给侧实时触发：电影仍入库即登记；剧集分集交由 watchlist_processor 状态判定后登记。
+    _submit_shared_auto_share_after_library_ready(
+        item_details,
+        item_id,
+        item_type,
+        tmdb_id,
+        new_episode_ids=precise_new_episode_ids,
+    )
 
     # 3. 智能追剧判断 - 初始入库
     if is_new_item and item_type == "Series":
@@ -785,16 +848,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
 
                 precise_new_episode_ids = [str(x).strip() for x in (new_episode_ids or []) if str(x or '').strip()]
 
-                # 在触发追剧刷新前，先对新入库的集进行体检补齐缺失的数据
-                if precise_new_episode_ids:
-                    _repair_webhook_p115_fingerprints_for_emby_ids(
-                        processor,
-                        item_name_for_log,
-                        precise_new_episode_ids,
-                        expected_item_type="Episode",
-                        log_prefix="Webhook新集指纹补齐",
-                    )
-
+                # 新集指纹体检已在 Webhook 中完成；watchlist_processor 后续可直接登记分集/季包共享源。
                 logger.info(
                     f"  ➜ [智能追剧] 触发单项刷新..."
                     f"{' (透传新增分集: ' + str(len(precise_new_episode_ids)) + ' 个)' if precise_new_episode_ids else ''}"

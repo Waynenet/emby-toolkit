@@ -1,4 +1,4 @@
-<!-- src/components/SharedResourceManagerPage.vue -->
+<!-- emby-actor-ui/src/components/SharedResourceManagerPage.vue -->
 <template>
   <div class="shared-page">
     <n-space vertical :size="18">
@@ -7,7 +7,7 @@
           <div class="page-header">
             <div>
               <div class="page-title">共享资源管理</div>
-              <n-text depth="3">集中管理共享资源：本机分享、中心资源转存和贡献值流水。</n-text>
+              <n-text depth="3">集中管理共享资源：本机秒传源、中心资源秒传和贡献点流水。</n-text>
             </div>
             <n-space>
               <n-button secondary @click="openSharedConfigModal">
@@ -20,7 +20,7 @@
               </n-button>
               <n-button :loading="refreshingCredit" @click="refreshCredit">
                 <template #icon><n-icon :component="RefreshIcon" /></template>
-                刷新贡献值
+                刷新贡献点
               </n-button>
               <n-button type="primary" ghost :loading="loading" @click="loadAll">
                 <template #icon><n-icon :component="SyncIcon" /></template>
@@ -31,7 +31,7 @@
         </template>
 
         <n-alert v-if="!hasCenterDevice" class="center-register-alert" type="warning" :bordered="false" style="margin-bottom: 12px;">
-          共享资源中心尚未注册设备。点击右上角“注册设备”后，系统会向中心申请 device_token，并保存到共享资源独立配置；之后才能同步贡献值、登记分享、转存中心资源。
+          共享资源中心尚未注册设备。点击右上角“注册设备”后，系统会向中心申请 device_token，并保存到共享资源独立配置；之后才能同步贡献点、登记共享、秒传中心资源。
         </n-alert>
 
         <n-grid class="stat-grid" :cols="isMobile ? 2 : 4" :x-gap="12" :y-gap="12">
@@ -47,20 +47,23 @@
 
       <n-card :bordered="false" class="dashboard-card shared-list-card">
         <n-tabs v-model:value="activeTab" animated type="line" @update:value="handleTabChange">
-          <n-tab-pane name="shares" tab="我的分享">
+          <n-tab-pane name="shares" tab="我的共享源">
             <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
-              管理本机分享出去的资源。
-“检查”用于同步 115 分享是否可用；“登记”用于把已通过的分享登记到共享中心，登记成功后可获得贡献值；“取消”会撤销 115 分享并同步清理中心记录。
+              管理本机登记到共享中心的秒传资源。Rapid v2 不再创建 115 共享，中心不保存 CK，只保存 SHA1/大小/媒体信息等索引；“登记”会把本地资源索引上传中心，“停用”会让该资源不再参与共享。
             </n-alert>
             <n-space class="toolbar" :vertical="isMobile" :size="12">
-              <n-input v-model:value="shareFilters.keyword" placeholder="搜索标题 / 目录名 / 分享码 / TMDb ID" clearable @keyup.enter="loadShares">
+              <n-input v-model:value="shareFilters.keyword" placeholder="搜索标题 / 文件名 / TMDb ID / SHA1" clearable @keyup.enter="loadShares">
                 <template #prefix><n-icon :component="SearchIcon" /></template>
               </n-input>
               <n-select v-model:value="shareFilters.status" :options="shareStatusOptions" style="width: 170px" />
               <n-button type="primary" :loading="sharesLoading" @click="loadShares">查询</n-button>
               <n-button type="primary" @click="openManualShareModal">
                 <template #icon><n-icon :component="ShareIcon" /></template>
-                手动分享
+                手动登记
+              </n-button>
+              <n-button type="warning" secondary :loading="shareAllLoading" @click="confirmShareAllLibrary">
+                <template #icon><n-icon :component="ShareIcon" /></template>
+                一键登记媒体库
               </n-button>
             </n-space>
             <n-data-table
@@ -80,7 +83,7 @@
           <n-tab-pane name="center" tab="中心资源库">
             <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
               这里展示共享中心已收录的资源版本。
-“转存”会把资源转存到你的 115 网盘。
+“秒传”会把资源秒传到你的 115 网盘。
             </n-alert>
             <n-space class="toolbar" :vertical="isMobile" :size="12">
               <n-input v-model:value="centerFilters.keyword" placeholder="搜索标题 / 文件名 / TMDb ID / SHA1" clearable @keyup.enter="loadCenterSources">
@@ -99,15 +102,15 @@
               :data="groupedCenterSources"
               :pagination="centerPagination"
               :row-key="row => row.group_key || row.source_id"
-              :scroll-x="1740"
+              :scroll-x="1680"
               @update:page="p => { centerPagination.page = p; loadCenterSources(); }"
               @update:page-size="s => { centerPagination.pageSize = s; centerPagination.page = 1; loadCenterSources(); }"
             />
           </n-tab-pane>
 
-          <n-tab-pane name="requests" tab="求分享">
+          <n-tab-pane name="requests" tab="求共享">
             <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
-              求分享是共享池悬赏需求：发起时冻结贡献值，参数越精确悬赏越高；其他用户可“同求”助力，也可以点“我有资源”从本地媒体库创建分享。
+              求共享是共享池悬赏需求：发起时冻结贡献点，参数越精确悬赏越高；其他用户可“同求”助力，也可以点“我有资源”从本地媒体库登记共享源。
             </n-alert>
             <n-space class="toolbar" :vertical="isMobile" :size="12">
               <n-input v-model:value="requestFilters.keyword" placeholder="搜索片名 / TMDb ID" clearable @keyup.enter="loadShareRequests">
@@ -119,7 +122,7 @@
               <n-button type="primary" :loading="requestLoading" @click="loadShareRequests">查询</n-button>
               <n-button type="primary" @click="openShareRequestModal">
                 <template #icon><n-icon :component="ShareIcon" /></template>
-                求资源
+                求共享
               </n-button>
             </n-space>
 
@@ -151,12 +154,12 @@
                 </n-card>
               </div>
               <n-card v-else :bordered="false" class="empty-request-card">
-                <n-text depth="3">暂无求分享。可以点击“求资源”发布一个悬赏需求。</n-text>
+                <n-text depth="3">暂无求共享。可以点击“求共享”发布一个悬赏需求。</n-text>
               </n-card>
             </n-spin>
           </n-tab-pane>
 
-          <n-tab-pane name="ledger" tab="贡献值明细">
+          <n-tab-pane name="ledger" tab="贡献点明细">
             <n-data-table
               :loading="ledgerLoading"
               :columns="ledgerColumns"
@@ -189,39 +192,40 @@
           <n-form-item label="设备 Token">
             <n-input v-model:value="sharedConfigForm.p115_shared_device_token" type="password" show-password-on="click" placeholder="注册设备后自动写入，也可手动粘贴" />
           </n-form-item>
-          <n-form-item label="共享池单集转存">
+          <n-form-item label="共享池单集秒传">
             <n-switch v-model:value="sharedConfigForm.p115_shared_disable_episode_transfer">
-              <template #checked>禁止单集</template>
-              <template #unchecked>允许单集</template>
+              <template #checked>不秒传单集</template>
+              <template #unchecked>允许秒传</template>
             </n-switch>
             <template #feedback>仅影响共享池中心源消费；开启后会过滤 `Episode` 单集资源，电影和季包不受影响。</template>
           </n-form-item>
-          <n-form-item label="共享池纯净版">
+          <n-form-item label="共享池纯净版秒传">
             <n-switch v-model:value="sharedConfigForm.p115_shared_block_clean_version_transfer">
-              <template #checked>不转存纯净版</template>
-              <template #unchecked>允许转存</template>
+              <template #checked>不秒传纯净版</template>
+              <template #unchecked>允许秒传</template>
             </n-switch>
-            <template #feedback>仅检测季包资源：当包内多数集实际视频时长比 TMDb 官方单集时长短约 3 分钟时，自动/手动转存都会跳过该季包；单集资源不做纯净版检测。</template>
+            <template #feedback>仅检测季包资源：普通剧多数集实际时长比 TMDb 官方时长短约 3 分钟会识别为纯净版；短剧片头更短，阈值改为约 1 分钟。自动/手动秒传都会按该开关拦截。</template>
           </n-form-item>
-          <n-form-item label="最大活跃分享数">
-            <n-input-number v-model:value="sharedConfigForm.p115_shared_max_active_shares" :min="0" :max="10000" :step="10" style="width: 180px;">
-              <template #suffix>条</template>
-            </n-input-number>
-            <template #feedback>0 表示不限制；维护任务超过上限时清理到约 80% 水位。</template>
+          <n-form-item label="共享池短剧秒传">
+            <n-switch v-model:value="sharedConfigForm.p115_shared_block_short_drama_transfer">
+              <template #checked>不秒传短剧</template>
+              <template #unchecked>允许秒传</template>
+            </n-switch>
+            <template #feedback>中心资源被标记为短剧时跳过秒传；短剧按单个视频实际时长低于 25 分钟识别，季包按包内多数集统计。</template>
           </n-form-item>
-          <n-form-item label="自动响应求分享">
+          <n-form-item label="自动响应求共享">
             <n-switch v-model:value="sharedConfigForm.p115_shared_auto_share_requests_enabled">
-              <template #checked>自动分享别人所求</template>
+              <template #checked>自动共享别人所求</template>
               <template #unchecked>关闭</template>
             </n-switch>
-            <template #feedback>维护任务会拉取中心“求分享”列表，跳过自己发起/同求的需求，按参数匹配本地媒体库，命中后自动创建 115 分享并等待审核登记。</template>
+            <template #feedback>维护任务会拉取中心“求共享”列表，跳过自己发起/同求的需求，按参数匹配本地媒体库，命中后直接登记本机秒传索引到中心。</template>
           </n-form-item>
 
         </n-form>
       </n-spin>
       <template #footer>
         <n-space justify="space-between" align="center">
-          <n-text depth="3">共享池命中后统一执行永久转存。</n-text>
+          <n-text depth="3">共享池命中后使用本机 115 CK 秒传入库，中心不保存 CK。</n-text>
           <n-space>
             <n-button @click="showSharedConfigModal = false">取消</n-button>
             <n-button type="primary" :loading="sharedConfigSaving" @click="saveSharedConfig">保存配置</n-button>
@@ -232,13 +236,13 @@
 
     <n-modal v-model:show="showManualShareModal" preset="card" :title="manualShareModalTitle" style="width: 920px; max-width: 96vw;" class="custom-modal glass-modal">
       <n-alert v-if="activeCenterReplenishSource" type="success" :bordered="false" style="margin-bottom: 12px;">
-        正在补充中心待补充资源：{{ appendYear(centerTitleText(activeCenterReplenishSource), activeCenterReplenishSource.release_year) }}。系统已按中心 SHA1 精确匹配本机完全相同资源，并自动填入下方手动分享表单；确认无误后点击“创建永久分享”。
+        正在补充中心待补充资源：{{ appendYear(centerTitleText(activeCenterReplenishSource), activeCenterReplenishSource.release_year) }}。系统已按中心 SHA1 精确匹配本机完全相同资源，并自动填入下方手动共享表单；确认无误后点击“登记共享源”。
       </n-alert>
       <n-alert v-else-if="!activeLocalShareRequest" type="info" :bordered="false" style="margin-bottom: 12px;">
-        直接输入片名搜索本地 media_metadata，系统会用已记录的 PC/SHA1 反查 p115_filesystem_cache，自动定位可分享的 115 目录或文件。剧集会优先按季目录分享，不创建单集分享。
+        直接输入片名搜索本地 media_metadata，系统只返回电影和季候选。选择季时会把该季下所有集登记到中心公共连载包；只有 watching_status=Completed 的季才做一致性校验并登记为客户端完结季包。
       </n-alert>
       <n-alert v-if="activeLocalShareRequest" type="warning" :bordered="false" style="margin-bottom: 12px;">
-        正在响应求分享：{{ appendYear(activeLocalShareRequest.title, activeLocalShareRequest.release_year) }} · {{ requestTargetText(activeLocalShareRequest) }}。系统会自动检索本地库并按求分享参数硬过滤，不符合画质/编码/HDR/帧率/音轨/字幕/体积的资源不会显示。没有候选就是本地没有符合条件的资源。
+        正在响应求共享：{{ appendYear(activeLocalShareRequest.title, activeLocalShareRequest.release_year) }} · {{ requestTargetText(activeLocalShareRequest) }}。系统会自动检索本地库并按求共享参数硬过滤，不符合画质/编码/HDR/帧率/音轨/字幕/体积的资源不会显示。没有候选就是本地没有符合条件的资源。
       </n-alert>
 
       <n-space v-if="!activeLocalShareRequest && !activeCenterReplenishSource" class="toolbar" :vertical="isMobile" :size="12">
@@ -262,7 +266,7 @@
       <div v-if="selectedMedia" class="selected-share-box">
         <div class="selected-title">已选择：{{ selectedMedia.display_title || selectedMedia.title }}</div>
         <div class="selected-desc">
-          TMDb {{ manualShareForm.tmdb_id || '-' }} · {{ manualShareForm.item_type }} · {{ manualShareForm.share_type }} ·
+          TMDb {{ manualShareForm.tmdb_id || '-' }} · {{ manualShareForm.item_type }} · {{ rapidShareTypeText(manualShareForm.share_type) }} ·
           115 {{ manualShareForm.root_is_dir ? '目录' : '文件' }}：{{ manualShareForm.root_name || manualShareForm.root_fid }}
         </div>
         <div class="selected-desc" v-if="selectedMedia.message">{{ selectedMedia.message }}</div>
@@ -277,18 +281,12 @@
         </n-alert>
       </div>
 
-      <n-form :model="manualShareForm" label-placement="left" label-width="90" style="margin-top: 12px;">
-        <n-form-item label="提取码">
-          <n-input v-model:value="manualShareForm.receive_code" placeholder="留空则使用 115 自动生成；分享有效期固定永久" />
-        </n-form-item>
-      </n-form>
-
       <template #footer>
         <n-space justify="space-between" align="center">
-          <n-text depth="3">{{ activeCenterReplenishSource ? '补充会复用手动分享流程：先创建 115 永久分享，审核通过后在“我的分享”里登记中心。' : '找不到候选时，先确认该媒体已入库且 media_metadata 中已有 PC/SHA1。' }}</n-text>
+          <n-text depth="3">{{ activeCenterReplenishSource ? '补充会复用手动登记流程：直接上传秒传索引到中心；不会创建 115 分享/共享码，也不等待审核。' : '找不到候选时，先确认该媒体已入库且 media_metadata 中已有 PC/SHA1。' }}</n-text>
           <n-space>
             <n-button @click="showManualShareModal = false">取消</n-button>
-            <n-button type="primary" :disabled="manualCreateDisabled" :loading="manualCreating" @click="manualCreateShare">创建永久分享</n-button>
+            <n-button type="primary" :disabled="manualCreateDisabled" :loading="manualCreating" @click="manualCreateShare">登记共享源</n-button>
           </n-space>
         </n-space>
       </template>
@@ -319,8 +317,6 @@ import {
   TrashOutline as TrashIcon,
   CloudUploadOutline as PromoteIcon,
   ShareSocialOutline as ShareIcon,
-  CheckmarkCircleOutline as CheckIcon,
-  CloudDoneOutline as ReportIcon,
   CloseCircleOutline as CancelIcon
 } from '@vicons/ionicons5';
 import ShareRequestCreateModal from './ShareRequestCreateModal.vue';
@@ -343,6 +339,7 @@ const shareRequestSubmitting = ref(false);
 const maintenanceSubmitting = ref(false);
 const refreshingCredit = ref(false);
 const registeringDevice = ref(false);
+const shareAllLoading = ref(false);
 const manualCreating = ref(false);
 const showSharedConfigModal = ref(false);
 const sharedConfigLoading = ref(false);
@@ -351,10 +348,10 @@ const sharedConfigForm = reactive({
   p115_shared_resource_enabled: false,
   p115_shared_center_url: 'https://shared.55565576.xyz',
   p115_shared_device_token: '',
-  p115_shared_resource_mode: 'permanent',
+  p115_shared_resource_mode: 'rapid',
   p115_shared_disable_episode_transfer: false,
   p115_shared_block_clean_version_transfer: false,
-  p115_shared_max_active_shares: 0,
+  p115_shared_block_short_drama_transfer: false,
   p115_shared_auto_share_requests_enabled: false,
 });
 const showManualShareModal = ref(false);
@@ -379,10 +376,10 @@ const shareRequestQuote = ref(null);
 const shareRequestEpisodeText = ref('');
 const groupedCenterSources = computed(() => groupCenterSources(centerSources.value || [], centerFilters.order_by));
 const shareFilters = reactive({ keyword: '', status: 'active', order_by: 'created_desc' });
-const centerFilters = reactive({ keyword: '', status: 'alive,pending,replenish', item_type: 'all', order_by: 'latest' });
+const centerFilters = reactive({ keyword: '', status: 'alive,available', item_type: 'all', order_by: 'latest' });
 const requestFilters = reactive({ keyword: '', status: 'open', media_type: 'all', target_type: 'all' });
 const requestStatusOptions = [
-  { label: '求分享中', value: 'open' },
+  { label: '求共享中', value: 'open' },
   { label: '全部状态', value: 'all' },
   { label: '已完成', value: 'fulfilled' },
   { label: '已过期', value: 'expired' },
@@ -398,14 +395,13 @@ const requestTargetTypeFilterOptions = [
   { label: '电影', value: 'movie' },
   { label: '全剧', value: 'series' },
   { label: '单季', value: 'season' },
-  { label: '单集', value: 'episode' },
 ];
 const sharePagination = reactive({ page: 1, pageSize: 30, itemCount: 0, showSizePicker: true, pageSizes: [20, 30, 50, 100] });
 const centerPagination = reactive({ page: 1, pageSize: 30, itemCount: 0, showSizePicker: true, pageSizes: [20, 30, 50, 100] });
 
 const centerOrderOptions = [
-  { label: '最新分享', value: 'latest' },
-  { label: '热门分享', value: 'popular' },
+  { label: '最新共享', value: 'latest' },
+  { label: '热门共享', value: 'popular' },
   { label: '文件大小', value: 'size' },
   { label: '名称排序', value: 'name' },
 ];
@@ -413,26 +409,35 @@ const centerOrderOptions = [
 const manualShareForm = reactive({
   root_fid: '', root_name: '', root_is_dir: true, title: '', tmdb_id: '', parent_series_tmdb_id: '',
   share_type: 'season_pack', item_type: 'Season', season_number: 1, release_year: null, receive_code: '',
+  season_status: '', watching_status: '', expected_episode_count: null, total_episodes: null, is_completed: false,
   center_replenish_source_id: '', center_replenish_payload: null
 });
-const manualShareModalTitle = computed(() => activeCenterReplenishSource.value ? '补充中心待补充资源' : (activeLocalShareRequest.value ? '响应求分享' : '手动创建共享资源'));
+const manualShareModalTitle = computed(() => activeCenterReplenishSource.value ? '补充中心待补充资源' : (activeLocalShareRequest.value ? '响应求共享' : '手动登记共享源'));
 const manualShareValidation = ref(null);
 const manualShareValidationLoading = ref(false);
 let manualShareValidationSeq = 0;
 const isManualShareSeasonPack = computed(() => String(manualShareForm.share_type || '').toLowerCase() === 'season_pack');
+const rapidShareTypeText = (value) => {
+  const text = String(value || '').toLowerCase();
+  if (text === 'movie_file' || text === 'movie_folder') return '电影源';
+  if (text === 'season_pack') return '季源';
+  if (text === 'series_pack') return '全剧源';
+  if (text === 'episode_file') return '历史单集源';
+  return value || '-';
+};
 const manualShareValidationAlertType = computed(() => {
   if (manualShareValidationLoading.value) return 'info';
   if (!manualShareValidation.value) return 'info';
   return manualShareValidation.value.valid ? 'success' : 'error';
 });
 const manualShareValidationTitle = computed(() => {
-  if (manualShareValidationLoading.value) return isManualShareSeasonPack.value ? '正在校验季包一致性' : '正在预校验分享文件';
+  if (manualShareValidationLoading.value) return isManualShareSeasonPack.value ? '正在预校验季源' : '正在预校验共享源';
   if (!manualShareValidation.value) return '';
-  if (isManualShareSeasonPack.value) return manualShareValidation.value.valid ? '季包一致性校验通过' : '季包一致性校验未通过';
-  return manualShareValidation.value.valid ? '分享文件预校验通过' : '分享文件预校验未通过';
+  if (isManualShareSeasonPack.value) return manualShareValidation.value.valid ? '季源预校验通过' : '季源预校验未通过';
+  return manualShareValidation.value.valid ? '共享源预校验通过' : '共享源预校验未通过';
 });
 const manualShareValidationMessage = computed(() => {
-  if (manualShareValidationLoading.value) return '正在读取 115 文件列表、检查 RAW 媒体信息，并对季包执行集数/分辨率/编码/杜比版本一致性校验……';
+  if (manualShareValidationLoading.value) return '正在读取 115 文件列表、检查 RAW 媒体信息；完结季会执行一致性校验，连载季只按目录登记。';
   if (!manualShareValidation.value) return '';
   const fileCount = manualShareValidation.value.file_count;
   const prefix = fileCount ? `已定位 ${fileCount} 个视频文件。` : '';
@@ -471,10 +476,8 @@ const shareRequestForm = reactive({
 });
 
 const shareStatusOptions = [
-  { label: '有效分享', value: 'active' }, 
+  { label: '有效共享', value: 'active' }, 
   { label: '全部状态', value: 'all' }, 
-  { label: '审核中', value: 'pending_review' },
-  { label: '已通过', value: 'alive' }, 
   { label: '已登记', value: 'reported' },
   { label: '部分登记', value: 'partial' }, 
   { label: '失败/异常', value: 'failed' },
@@ -482,10 +485,10 @@ const shareStatusOptions = [
 ];
 
 const centerStatusOptions = [
-  { label: '全部', value: 'alive,pending,replenish' },
+  { label: '全部', value: 'alive,available' },
   { label: '仅可用', value: 'alive' },
-  { label: '仅待验证', value: 'pending' },
-  { label: '仅待补充', value: 'replenish' },
+  { label: '纯净版', value: 'clean_version' },
+  { label: '短剧', value: 'short_drama' },
 ];
 const typeOptions = [
   { label: '全部类型', value: 'all' }, { label: '电影', value: 'Movie' },
@@ -494,29 +497,25 @@ const typeOptions = [
 const centerTypeOptions = [
   { label: '全部类型', value: 'all' },
   { label: '电影', value: 'Movie' },
-  { label: '剧集包', value: 'Pack' },
-  { label: '单集', value: 'Episode' },
+  { label: '剧集', value: 'Pack' },
 ];
 const manualItemTypeOptions = [
   { label: '电影', value: 'Movie' }, { label: '季', value: 'Season' }, { label: '剧集', value: 'Series' },
 ];
 const shareTypeOptions = [
-  { label: '电影', value: 'movie_folder' },
-  { label: '电影', value: 'movie_file' },
-  { label: '剧集包', value: 'season_pack' },
-  { label: '全剧包', value: 'series_pack' },
-  { label: '单集', value: 'episode_file' },
+  { label: '电影目录', value: 'movie_folder' },
+  { label: '季', value: 'season_pack' },
 ];
 const resourceTypeLabel = (value) => ({
   movie_file: '电影', movie_folder: '电影', Movie: '电影', movie: '电影', movies: '电影',
-  season_pack: '剧集包', series_pack: '全剧包', Season: '剧集包', Series: '全剧包', season: '剧集包', series: '全剧包', Pack: '剧集包', pack: '剧集包',
+  season_pack: '季', series_pack: '全剧包', Season: '季', Series: '全剧包', season: '季', series: '全剧包', Pack: '季', pack: '季',
   episode_file: '单集', Episode: '单集', episode: '单集', episodes: '单集',
 }[value] || value || '-');
 const shareTypeLabel = (value) => resourceTypeLabel(value) || shareTypeOptions.find(opt => opt.value === value)?.label || value || '-';
 const isSuccessShareMessage = (value) => {
   const text = String(value || '').trim();
   if (!text) return true;
-  return /^(分享可用|分享可访问|分享正常|可访问|正常|ok)$/i.test(text);
+  return /^(共享可用|共享可访问|共享正常|可访问|正常|ok)$/i.test(text);
 };
 const pickShareMetaText = (value) => {
   if (value == null) return '';
@@ -544,8 +543,8 @@ const shareFailureReasonText = (row) => {
       .map(v => String(v || '').trim()).find(v => v && !isSuccessShareMessage(v));
     if (rawReasonText) return rawReasonText;
 
-    const label = statusMap[failedStatus]?.text || row?.status_label || row?.review_status_label || '分享失败';
-    return label === '分享失败' ? label : `分享失败：${label}`;
+    const label = statusMap[failedStatus]?.text || row?.status_label || row?.review_status_label || '共享失败';
+    return label === '共享失败' ? label : `共享失败：${label}`;
   }
 
   return '';
@@ -570,17 +569,17 @@ const shareSourceText = (row) => {
   const rawBackup = Boolean(raw?.auto_backup_share || raw?.backup_share || raw?.backup_instruction || raw?.backup_mirror || raw?.backup_fingerprint);
   const rawManual = Boolean(raw?.manual_payload || raw?.manual_share || raw?.manual_create || raw?.manual_created || raw?.manual_context);
   const rawAuto = Boolean(raw?.auto_gap || raw?.auto_payload || raw?.auto_task || raw?.maintenance_payload || raw?.maintenance_task || raw?.auto_share_payload || raw?.auto_context);
-  const providerBackup = /(backup_mirror|backup_share|auto_backup_share|backup)/i.test(providerText) || /(备份分享|备份源|镜像分享)/.test(labelText);
-  const providerManual = /(user_share|manual_share|manual|local_manual|manual_create|manual_created)/i.test(providerText) || /手动分享/.test(labelText);
-  const providerAuto = /(auto_gap_share|auto_share|auto_task|maintenance_task|maintenance_share|scheduler|scheduled_share|gap_share|watching_gap_share)/i.test(providerText) || /自动分享/.test(labelText);
+  const providerBackup = /(backup_mirror|backup_share|auto_backup_share|backup)/i.test(providerText) || /(备份共享|备份源|镜像共享)/.test(labelText);
+  const providerAuto = /(rapid_auto_library|rapid_all_library|rapid_completed_season|auto_gap_share|auto_share|auto_task|maintenance_task|maintenance_share|scheduler|scheduled_share|gap_share|watching_gap_share)/i.test(providerText) || /(自动共享|自动登记|入库自动|一键全库|完结季收藏)/.test(labelText);
+  const providerManual = /(user_share|manual_share|manual|local_manual|manual_create|manual_created)/i.test(providerText) || /手动共享/.test(labelText);
 
-  // 备份分享是中心下发的特殊来源，必须优先于 user_share/manual 兜底判断。
-  if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || rawBackup || providerBackup) return '备份分享';
-  // 手动标记优先。手动创建的分享即使后续由维护任务自动检查/登记中心，也仍然叫“手动分享”。
-  if (row?.is_manual_share || row?.manual_created || row?.created_by_user || rawManual || providerManual) return '手动分享';
-  if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance || rawAuto || providerAuto) return '自动分享';
+  // 备份共享是中心下发的特殊来源，必须优先于自动/手动兜底判断。
+  if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || rawBackup || providerBackup) return '备份共享';
+  // Rapid v2 入库自动登记/一键全库/完结季收藏必须优先于 manual 兜底，避免 auto 记录被误标成手动共享。
+  if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance || rawAuto || providerAuto) return '自动共享';
+  if (row?.is_manual_share || row?.manual_created || row?.created_by_user || rawManual || providerManual) return '手动共享';
 
-  return '手动分享';
+  return '本机共享';
 };
 const shareRemarkNode = (row) => {
   const reason = shareFailureReasonText(row);
@@ -588,18 +587,20 @@ const shareRemarkNode = (row) => {
     return h('span', { class: 'share-remark-text share-remark-error', title: reason }, reason);
   }
   const source = shareSourceText(row);
-  const type = source === '自动分享' ? 'warning' : (source === '备份分享' ? 'info' : 'default');
+  const type = source === '自动共享' ? 'warning' : (source === '备份共享' ? 'info' : 'default');
   return h(NTag, { type, size: 'small', round: true }, { default: () => source });
 };
+const isAutoShareRow = (row) => shareSourceText(row) === '自动共享';
 
 const statusMap = {
-  transferring: { text: '转存中', type: 'warning' }, deleted: { text: '已删除', type: 'default' }, error: { text: '异常', type: 'error' },
-  pending_review: { text: '审核中', type: 'warning' }, alive: { text: '可用', type: 'success' },
+  transferring: { text: '秒传中', type: 'warning' }, deleted: { text: '已删除', type: 'default' }, error: { text: '异常', type: 'error' },
+  active: { text: '本地可用', type: 'success' }, available: { text: '可用', type: 'success' }, alive: { text: '可用', type: 'success' },
   pending: { text: '待验证', type: 'warning' }, replenish: { text: '待补充', type: 'error' }, dead: { text: '失效', type: 'error' }, expired: { text: '已过期', type: 'default' },
-  reported: { text: '已登记', type: 'success' }, partial: { text: '部分登记', type: 'warning' },
+  reported: { text: '已登记', type: 'success' }, local: { text: '本地未登记', type: 'default' }, partial: { text: '部分登记', type: 'warning' },
+  inconsistent: { text: '不一致', type: 'error' }, incomplete: { text: '不完整', type: 'warning' }, disabled: { text: '已停用', type: 'default' },
   failed: { text: '失败', type: 'error' }, rejected: { text: '未通过', type: 'error' }, cancelled: { text: '已取消', type: 'default' },
   not_reported: { text: '未登记', type: 'default' },
-  open: { text: '求分享中', type: 'success' }, fulfilled: { text: '已完成', type: 'success' },
+  open: { text: '求共享中', type: 'success' }, fulfilled: { text: '已完成', type: 'success' },
 };
 
 const fmtBytes = (value) => {
@@ -626,7 +627,7 @@ const tmdbMediaKind = (row) => {
   if (type.includes('movie') || type === 'film' || type === '电影') return 'movie';
   return 'tv';
 };
-const centerRowTypeSafe = (row) => row?.display_type || (row?.is_collapsed_pack || row?.pack_item_count ? 'Pack' : row?.item_type);
+const centerRowTypeSafe = (row) => row?.display_type || (row?.source_kind === 'season_hub' ? 'Pack' : (row?.is_collapsed_pack || row?.pack_item_count ? 'Pack' : row?.item_type));
 const tmdbHref = (row) => {
   const id = tmdbIdForRow(row);
   if (!id) return '';
@@ -676,26 +677,24 @@ const statCards = computed(() => {
   const shares = summary.value.shares || {};
   const credit = summary.value.credit || {};
   return [
-    { key: 'credit', label: '贡献值', value: credit.credit ?? 0, desc: credit.device_id ? `设备 ${credit.device_id}` : '未同步' },
-    { key: 'shares', label: '我的共享', value: shares.total ?? 0, desc: `${shares.alive ?? 0} 个有效分享` },
+    { key: 'credit', label: '贡献点', value: credit.credit ?? 0, desc: `${credit.remote_devices ?? 0} 个设备` },
+    { key: 'shares', label: '我的共享', value: shares.total ?? 0, desc: `${shares.alive ?? 0} 个有效共享` },
     { key: 'remote_sources', label: '中心资源', value: credit.shared_sources ?? 0, desc: `${credit.raw_ffprobe ?? 0} 条媒体信息` },
-    { key: 'remote_gaps', label: '待补资源', value: credit.wanted_gaps ?? 0, desc: `${credit.remote_devices ?? 0} 个设备` },
+    { key: 'share_requests', label: '求共享', value: credit.share_requests ?? credit.wanted_gaps ?? 0, desc: '活跃求共享需求' },
   ];
 });
 
 const shareColumns = [
-  { title: '标题', key: 'title', minWidth: 240, render: row => {
+  { title: '标题', key: 'title', minWidth: 280, render: row => {
     const seasonText = row.season_number ? ` · S${String(row.season_number).padStart(2, '0')}` : '';
     const episodeText = row.episode_number ? `E${String(row.episode_number).padStart(2, '0')}` : '';
+    const aggregateText = Number(row.aggregated_source_count || 0) > 1 ? ` · ${row.aggregated_source_count} 个源` : '';
     return h('div', [
-      h('div', { class: 'main-title' }, standardTitleText(row, row.root_name || row.share_code)),
-      metaLine(row, [` · ${shareTypeLabel(row.share_type)}`, seasonText, episodeText])
+      h('div', { class: 'main-title' }, standardTitleText(row, row.root_name || row.file_name || row.title)),
+      metaLine(row, [` · ${shareTypeLabel(row.share_type)}`, seasonText, episodeText, aggregateText])
     ]);
   } },
-  { title: '审核', key: 'review_status', width: 110, render: row => tag(row.review_status || row.status) },
   { title: '中心', key: 'center_status', width: 110, render: row => tag(row.center_status) },
-  { title: '分享码', key: 'share_code', width: 140, ellipsis: { tooltip: true } },
-  { title: '提取码', key: 'receive_code', width: 90 },
   { title: '文件数', key: 'item_count', width: 90, render: row => `${row.reported_count || 0}/${row.item_count || 0}` },
   { title: '媒体信息', key: 'raw_uploaded_count', width: 110, render: row => {
     const missingSize = Number(row.size_missing_count || 0);
@@ -706,12 +705,16 @@ const shareColumns = [
     ]);
   } },
   { title: '创建时间', key: 'created_at', width: 170, render: row => fmtDate(row.created_at) },
-  { title: '检查时间', key: 'last_checked_at', width: 170, render: row => fmtDate(row.last_checked_at) },
   { title: '备注', key: 'share_remark', minWidth: 220, ellipsis: { tooltip: true }, render: row => shareRemarkNode(row) },
-  { title: '操作', key: 'actions', width: 300, fixed: 'right', render: row => h(NSpace, { size: 8 }, { default: () => [
-    h(NButton, { size: 'small', type: 'info', ghost: true, onClick: () => checkShare(row) }, { icon: () => h(NIcon, null, { default: () => h(CheckIcon) }), default: () => '检查' }),
-    h(NButton, { size: 'small', type: 'primary', ghost: true, disabled: !['alive','reported'].includes(row.status) && row.review_status !== 'alive', onClick: () => reportShare(row) }, { icon: () => h(NIcon, null, { default: () => h(ReportIcon) }), default: () => '登记' }),
-    h(NButton, { size: 'small', type: 'error', ghost: true, disabled: row.status === 'cancelled', onClick: () => cancelShare(row) }, { icon: () => h(NIcon, null, { default: () => h(CancelIcon) }), default: () => '取消' }),
+  { title: '操作', key: 'actions', width: 110, fixed: 'right', render: row => h(NSpace, { size: 8 }, { default: () => [
+    h(NButton, {
+      size: 'small',
+      type: 'error',
+      ghost: true,
+      disabled: row.status === 'cancelled' || row.status === 'disabled' || isAutoShareRow(row),
+      title: isAutoShareRow(row) ? '自动共享源由入库自动维护，不能手动停用' : '',
+      onClick: () => cancelShare(row),
+    }, { icon: () => h(NIcon, null, { default: () => h(CancelIcon) }), default: () => '停用' }),
   ]}) },
 ];
 
@@ -721,12 +724,12 @@ const mediaSearchColumns = [
     metaLine(row, [` · ${resourceTypeLabel(row.item_type)}`])
   ]) },
   { title: '入库', key: 'in_library', width: 80, render: row => h(NTag, { size: 'small', type: row.in_library ? 'success' : 'default' }, { default: () => row.in_library ? '已入库' : '未入库' }) },
-  { title: '可分享根目录/文件', key: 'root_name', minWidth: 260, render: row => h('div', [
+  { title: '可共享根目录/文件', key: 'root_name', minWidth: 260, render: row => h('div', [
     h('div', { class: 'main-title' }, row.root_name || '-'),
     h('div', { class: 'sub-title' }, row.root_fid ? `FID/CID: ${row.root_fid}` : (row.message || '未定位'))
   ]) },
   { title: '文件', key: 'file_count', width: 100, render: row => `${row.file_count || 0} 个` },
-  { title: '分享粒度', key: 'share_type', width: 120, render: row => shareTypeLabel(row.share_type) },
+  { title: '源类型', key: 'share_type', width: 120, render: row => shareTypeLabel(row.share_type) },
   { title: '说明', key: 'message', minWidth: 220, ellipsis: { tooltip: true } },
   { title: '操作', key: 'actions', width: 100, fixed: 'right', render: row => h(NButton, {
     size: 'small', type: 'primary', ghost: true, disabled: !row.resolvable || !row.root_fid, onClick: () => chooseMediaCandidate(row)
@@ -739,19 +742,18 @@ const shareRequestTargetOptions = computed(() => {
   return [
     { label: '全剧', value: 'series' },
     { label: '单季', value: 'season' },
-    { label: '单集', value: 'episode' },
-  ];
+    ];
 });
 
 const requestStatusLabel = (status) => statusMap[status]?.text || status || '未知';
 const requestParticipationText = (row = {}) => {
-  if (row.my_role === 'owner') return '我发起的求分享';
+  if (row.my_role === 'owner') return '我发起的求共享';
   if (row.joined_by_me) return '我已同求';
-  return '别人发布的求分享';
+  return '别人发布的求共享';
 };
 const canProvideShareRequest = (row = {}) => row.status === 'open' && row.my_role !== 'owner';
 const requestTargetTypeLabel = (value) => ({
-  movie: '电影', series: '全剧', season: '单季', episode: '单集', episode_batch: '单季',
+  movie: '电影', series: '全剧', season: '单季', episode: '单季', episode_batch: '单季',
 }[String(value || '').toLowerCase()] || value || '-');
 const requestTargetText = (row) => {
   const target = String(row?.target_type || '').toLowerCase();
@@ -821,33 +823,59 @@ const shareRequestSearchColumns = [
 ];
 
 const ledgerEventLabel = (eventType) => {
+  const text = String(eventType || '').trim();
   const map = {
-    center_initial_credit: '基础贡献值',
+    center_initial_credit: '基础贡献点',
     center_source_registered: '中心登记共享源',
     center_source_registered_group: '中心登记共享源',
-    center_backup_source_registered: '备份分享入池',
-    center_backup_source_registered_group: '备份分享入池',
+    center_backup_source_registered: '备份共享入池',
+    center_backup_source_registered_group: '备份共享入池',
     center_deleted_shared_source_summary: '已删除共享源',
-    center_shared_source_served: '共享被转存',
-    center_shared_source_served_group: '共享被转存',
-    center_shared_source_consumed: '转存共享资源',
-    center_shared_source_consumed_group: '转存共享资源',
-    share_created: '创建分享',
-    share_reported_center: '登记',
-    share_raw_uploaded: '媒体信息',
-    share_cancelled: '取消分享',
-    share_request_escrow: '求分享冻结',
-    share_request_refund: '求分享退款',
-    share_request_bounty_paid: '求分享悬赏支付',
-    share_request_bounty_received: '求分享悬赏收入',
-    share_request_service_fee: '求分享服务费',
-    center_share_request_escrow: '求分享冻结',
-    center_share_request_refund: '求分享退款',
-    center_share_request_bounty_paid: '求分享悬赏支付',
-    center_share_request_bounty_received: '求分享悬赏收入',
-    center_share_request_service_fee: '求分享服务费',
+    center_shared_source_served: '共享被秒传',
+    center_shared_source_served_group: '共享被秒传',
+    rapid_source_served: '共享视频被秒传',
+    center_shared_source_consumed: '秒传共享资源',
+    center_shared_source_consumed_group: '秒传共享资源',
+    rapid_source_consumed: '秒传共享视频',
+    center_rapid_source_registered: '中心登记秒传源',
+    center_rapid_source_registered_group: '中心登记秒传源',
+    center_rapid_source_served: '共享资源被秒传',
+    center_rapid_source_served_group: '共享资源被秒传',
+    center_rapid_source_consumed: '秒传共享资源',
+    center_rapid_source_consumed_group: '秒传共享资源',
+    center_rapid_sign_success: '秒传签名成功',
+    center_rapid_sign_failed: '秒传签名失败',
+    center_rapid_sign_timeout: '秒传签名超时',
+    center_rapid_sign_job_success: '秒传签名成功',
+    center_rapid_sign_job_failed: '秒传签名失败',
+    center_rapid_raw_uploaded: '上传媒体信息',
+    center_rapid_raw_ffprobe_uploaded: '上传媒体信息',
+    share_created: '登记共享源',
+    share_reported_center: '登记中心',
+    share_raw_uploaded: '上传媒体信息',
+    share_cancelled: '取消共享',
+    share_request_escrow: '求共享冻结',
+    share_request_refund: '求共享退款',
+    share_request_bounty_paid: '求共享悬赏支付',
+    share_request_bounty_received: '求共享悬赏收入',
+    share_request_service_fee: '求共享服务费',
+    center_share_request_escrow: '求共享冻结',
+    center_share_request_refund: '求共享退款',
+    center_share_request_bounty_paid: '求共享悬赏支付',
+    center_share_request_bounty_received: '求共享悬赏收入',
+    center_share_request_service_fee: '求共享服务费',
   };
-  return map[eventType] || eventType || '-';
+  if (map[text]) return map[text];
+  const low = text.toLowerCase();
+  if (low.includes('rapid') && low.includes('sign')) {
+    if (low.includes('fail') || low.includes('error')) return '秒传签名失败';
+    if (low.includes('timeout')) return '秒传签名超时';
+    return '秒传签名';
+  }
+  if (low.includes('rapid') && low.includes('consume')) return '秒传共享资源';
+  if (low.includes('rapid') && low.includes('serv')) return '共享资源被秒传';
+  if (low.includes('source') && low.includes('register')) return '登记共享源';
+  return text || '-';
 };
 
 const formatDelta = (value) => {
@@ -855,42 +883,95 @@ const formatDelta = (value) => {
   return n > 0 ? `+${n}` : String(n);
 };
 
+const ledgerReasonCodeLabel = (value) => ({
+  rapid_sign_success: '响应中心秒传签名成功',
+  rapid_sign_failed: '响应中心秒传签名失败',
+  rapid_sign_timeout: '响应中心秒传签名超时',
+  rapid_source_consumed: '从共享中心秒传资源',
+  rapid_source_served: '本机共享资源被他人秒传',
+  source_registered: '共享资源登记入池',
+  backup_source_registered: '备份共享入池',
+  shared_source_served: '共享资源被他人秒传',
+  shared_source_consumed: '从共享中心秒传资源',
+  share_request_escrow: '求共享冻结贡献点',
+  share_request_refund: '求共享退回贡献点',
+  share_request_bounty_paid: '求共享悬赏支付',
+  share_request_bounty_received: '求共享悬赏收入',
+  share_request_service_fee: '求共享服务费',
+}[value] || '');
+
+const shortLedgerHash = (value, length = 12) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length > length ? `${text.slice(0, length)}...` : text;
+};
+
 const looksLikeShareRequestId = (value) => /^srq_[0-9a-f]/i.test(String(value || '').trim());
 const ledgerDisplayTitle = (row) => {
+  if (row?.title_display) return row.title_display;
   const raw = ledgerRawJson(row);
   const media = raw.media && typeof raw.media === 'object' ? raw.media : {};
   const request = raw.request && typeof raw.request === 'object' ? raw.request : {};
+  const source = raw.source && typeof raw.source === 'object' ? raw.source : {};
+  const sharedSource = raw.shared_source && typeof raw.shared_source === 'object' ? raw.shared_source : {};
+  const job = raw.job && typeof raw.job === 'object' ? raw.job : {};
   const candidates = [
     row?.title, row?.file_name, media.title, media.name, request.title, request.name,
-    raw.title, raw.name, raw.file_name, row?.ref_id, row?.id,
+    source.title, source.name, source.file_name, sharedSource.title, sharedSource.name, sharedSource.file_name,
+    job.title, job.name, job.file_name, raw.title, raw.name, raw.file_name, row?.ref_id, row?.id,
   ];
   for (const item of candidates) {
     const text = String(item || '').trim();
-    if (text && !looksLikeShareRequestId(text)) return text;
+    if (!text || looksLikeShareRequestId(text)) continue;
+    if (text.toLowerCase().startsWith('rapid_sign:')) {
+      const sha = text.split(':').find(x => /^[A-Fa-f0-9]{40}$/.test(x));
+      return sha ? `秒传签名：${shortLedgerHash(sha)}` : '秒传签名任务';
+    }
+    return text;
   }
-  if (String(row?.event_type || '').includes('share_request')) return '求分享';
+  const event = String(row?.event_type || '').toLowerCase();
+  if (event.includes('share_request')) return '求共享';
+  if (event.includes('rapid') && event.includes('sign')) {
+    const sha = raw.sha1 || raw.file_sha1 || raw.sign_check || '';
+    return sha ? `秒传签名：${shortLedgerHash(sha)}` : '秒传签名任务';
+  }
   return row?.title || '-';
 };
 
 const ledgerReasonDisplay = (row) => {
+  if (row?.reason_display) return row.reason_display;
   const event = String(row?.event_type || '');
-  const deltaText = `贡献值 ${formatDelta(row?.delta || 0)}`;
+  const reason = String(row?.reason || '').trim();
+  const deltaText = `贡献点 ${formatDelta(row?.delta || 0)}`;
   const title = ledgerDisplayTitle(row);
   const reasonMap = {
-    share_request_escrow: `求分享冻结：${title}，${deltaText}`,
-    center_share_request_escrow: `求分享冻结：${title}，${deltaText}`,
-    share_request_refund: `求分享退款：${title}，${deltaText}`,
-    center_share_request_refund: `求分享退款：${title}，${deltaText}`,
-    share_request_bounty_paid: `求分享悬赏支付：${title}，${deltaText}`,
-    center_share_request_bounty_paid: `求分享悬赏支付：${title}，${deltaText}`,
-    share_request_bounty_received: `求分享悬赏收入：${title}，${deltaText}`,
-    center_share_request_bounty_received: `求分享悬赏收入：${title}，${deltaText}`,
-    share_request_service_fee: `求分享服务费：${title}，${deltaText}`,
-    center_share_request_service_fee: `求分享服务费：${title}，${deltaText}`,
-    center_backup_source_registered: `备份分享入池：${title}，${deltaText}`,
-    center_backup_source_registered_group: `备份分享入池：${title}，${deltaText}`,
+    share_request_escrow: `求共享冻结：${title}，${deltaText}`,
+    center_share_request_escrow: `求共享冻结：${title}，${deltaText}`,
+    share_request_refund: `求共享退款：${title}，${deltaText}`,
+    center_share_request_refund: `求共享退款：${title}，${deltaText}`,
+    share_request_bounty_paid: `求共享悬赏支付：${title}，${deltaText}`,
+    center_share_request_bounty_paid: `求共享悬赏支付：${title}，${deltaText}`,
+    share_request_bounty_received: `求共享悬赏收入：${title}，${deltaText}`,
+    center_share_request_bounty_received: `求共享悬赏收入：${title}，${deltaText}`,
+    share_request_service_fee: `求共享服务费：${title}，${deltaText}`,
+    center_share_request_service_fee: `求共享服务费：${title}，${deltaText}`,
+    center_backup_source_registered: `备份共享入池：${title}，${deltaText}`,
+    center_backup_source_registered_group: `备份共享入池：${title}，${deltaText}`,
+    center_rapid_sign_success: `响应中心秒传签名成功：${title}，${deltaText}`,
+    center_rapid_sign_job_success: `响应中心秒传签名成功：${title}，${deltaText}`,
+    center_rapid_sign_failed: `响应中心秒传签名失败：${title}，${deltaText}`,
+    center_rapid_sign_job_failed: `响应中心秒传签名失败：${title}，${deltaText}`,
+    center_rapid_source_consumed: `从共享中心秒传资源：${title}，${deltaText}`,
+    center_rapid_source_consumed_group: `从共享中心秒传资源：${title}，${deltaText}`,
+    center_rapid_source_served: `本机共享资源被他人秒传：${title}，${deltaText}`,
+    center_rapid_source_served_group: `本机共享资源被他人秒传：${title}，${deltaText}`,
+    center_rapid_source_registered: `共享资源登记入池：${title}，${deltaText}`,
+    center_rapid_source_registered_group: `共享资源登记入池：${title}，${deltaText}`,
   };
-  return reasonMap[event] || row?.reason || '-';
+  if (reasonMap[event]) return reasonMap[event];
+  const reasonLabel = ledgerReasonCodeLabel(reason) || ledgerReasonCodeLabel(event.replace(/^center_/, ''));
+  if (reasonLabel) return `${reasonLabel}：${title}，${deltaText}`;
+  return reason || `${ledgerEventLabel(event)}：${title}，${deltaText}`;
 };
 
 const isDeletedCenterSourceLedgerRow = (row) => {
@@ -915,7 +996,7 @@ const buildDeletedCenterSourceSummaryRow = (rows) => {
     event_type: 'center_deleted_shared_source_summary',
     title: `已删除共享源（汇总 ${rows.length} 条）`,
     delta,
-    reason: `已汇总展示 ${rows.length} 条历史共享源积分变化；共享被转存 ${servedCount} 条，转存共享资源 ${consumedCount} 条。`,
+    reason: `已汇总展示 ${rows.length} 条历史共享源积分变化；共享被秒传 ${servedCount} 条，秒传共享资源 ${consumedCount} 条。`,
     raw_json: {
       ...(latest.raw_json || {}),
       deleted_source_summary: {
@@ -968,10 +1049,10 @@ const ledgerAggregateKey = (row) => `${normalizeLedgerKeyPart(row?.event_type)}:
 const buildAggregatedLedgerReason = (latest, rows, totalDelta) => {
   const unitDelta = Number(latest?.delta || 0);
   const sameDelta = rows.every(row => Number(row?.delta || 0) === unitDelta);
-  const creditText = sameDelta ? `贡献值 ${formatDelta(unitDelta)}*${rows.length}` : `贡献值合计 ${formatDelta(totalDelta)}（${rows.length} 条）`;
-  const reason = String(latest?.reason || '').trim();
+  const creditText = sameDelta ? `贡献点 ${formatDelta(unitDelta)}*${rows.length}` : `贡献点合计 ${formatDelta(totalDelta)}（${rows.length} 条）`;
+  const reason = String(latest?.reason_display || latest?.reason || '').trim();
   if (reason) {
-    const replaced = reason.replace(/贡献值\s*[+-]?\d+(?:\.\d+)?(?=\s*[，,。；;、]?$)/, creditText);
+    const replaced = reason.replace(/贡献点\s*[+-]?\d+(?:\.\d+)?(?:\*\d+)?(?=\s*[，,。；;、]?$)/, creditText);
     if (replaced !== reason) return replaced;
     return `${reason}，${creditText}`;
   }
@@ -981,12 +1062,14 @@ const buildAggregatedLedgerRow = (rows, index) => {
   const sorted = [...rows].sort((a, b) => ledgerTimeValue(b) - ledgerTimeValue(a));
   const latest = sorted[0] || {};
   const delta = rows.reduce((sum, row) => sum + Number(row?.delta || 0), 0);
+  const aggregateReason = buildAggregatedLedgerReason(latest, rows, delta);
   return {
     ...latest,
     id: `ledger-aggregate:${ledgerAggregateKey(latest)}:${index}`,
     created_at: latest.created_at,
     delta,
-    reason: buildAggregatedLedgerReason(latest, rows, delta),
+    reason: aggregateReason,
+    reason_display: aggregateReason,
     __ledger_aggregated: true,
     __ledger_count: rows.length,
     __ledger_records: sorted,
@@ -1031,7 +1114,7 @@ const ledgerDisplayItems = computed(() => {
 const ledgerTooltipContent = (row) => h('div', { class: 'ledger-detail-tooltip' }, [
   h('div', { class: 'ledger-detail-title' }, `已聚合 ${row.__ledger_count || 0} 条详细记录`),
   ...(row.__ledger_records || []).map((item, index) => h('div', { class: 'ledger-detail-item' }, [
-    h('div', { class: 'ledger-detail-meta' }, `${index + 1}. ${fmtDate(item.created_at)} ｜ ${ledgerEventLabel(item.event_type)} ｜ ${formatDelta(item.delta)}`),
+    h('div', { class: 'ledger-detail-meta' }, `${index + 1}. ${fmtDate(item.created_at)} ｜ ${item.event_label || ledgerEventLabel(item.event_type)} ｜ ${formatDelta(item.delta)}`),
     h('div', { class: 'ledger-detail-reason' }, ledgerReasonDisplay(item)),
   ])),
 ]);
@@ -1046,35 +1129,65 @@ const withLedgerTooltip = (row, node, extraClass = '') => {
 
 const centerTypeLabel = (value) => ({
   Movie: '电影', movie: '电影', movies: '电影', movie_file: '电影', movie_folder: '电影',
-  Pack: '剧集包', pack: '剧集包', Season: '剧集包', season: '剧集包', Series: '剧集包', series: '剧集包', tv: '剧集包', season_pack: '剧集包', series_pack: '剧集包',
+  Pack: '季', pack: '季', Season: '季', season: '季', Series: '季', series: '季', tv: '季', season_pack: '季', series_pack: '季',
   Episode: '单集', episode: '单集', episodes: '单集', episode_file: '单集',
 }[value] || value || '-');
 const centerRowType = centerRowTypeSafe;
-const centerTitleText = (row) => standardTitleText(row);
+const stripCenterSeasonFromTitle = (title, row = {}) => {
+  let text = String(title || '').trim();
+  if (!text) return '';
+  const season = Number(row?.season_number || 0);
+  if (season > 0) {
+    const seasonText = String(season);
+    const season02 = seasonText.padStart(2, '0');
+    const patterns = [
+      new RegExp(`\\s*(?:[-·—–_]+\\s*)?(?:S0?${seasonText}|S${season02})\\s*$`, 'i'),
+      new RegExp(`\\s*(?:[-·—–_]+\\s*)?Season\\s*0?${seasonText}\\s*$`, 'i'),
+      new RegExp(`\\s*(?:[-·—–_]+\\s*)?第\\s*0?${seasonText}\\s*季\\s*$`, 'i'),
+    ];
+    for (const pattern of patterns) text = text.replace(pattern, '').trim();
+  }
+  // 兜底清理中心端历史标题里混入的季号；季号统一放到“类型”列显示。
+  text = text
+    .replace(/\s*(?:[-·—–_]+\s*)?S\d{1,3}\s*$/i, '')
+    .replace(/\s*(?:[-·—–_]+\s*)?Season\s*\d{1,3}\s*$/i, '')
+    .replace(/\s*(?:[-·—–_]+\s*)?第\s*\d{1,3}\s*季\s*$/i, '')
+    .trim();
+  return text || String(title || '').trim();
+};
+const centerTitleText = (row) => {
+  const rawTitle = row?.title || row?.standard_title || row?.media_title || row?.root_name || row?.file_name || row?.tmdb_id || '';
+  return appendYear(stripCenterSeasonFromTitle(rawTitle, row), row?.release_year);
+};
+const centerTitleNode = (row) => {
+  const text = centerTitleText(row);
+  return h('div', { class: 'main-title center-title-ellipsis', title: text }, text);
+};
+const centerIsOngoingHub = (row) => Boolean(row?.is_ongoing_hub || row?.source_kind === 'season_hub' || row?.season_status === 'ongoing');
+const centerIsCompletedPack = (row) => Boolean(row?.source_kind === 'completed_season' || row?.season_status === 'completed');
+const centerProgressText = (row) => {
+  if (row?.progress_text) return String(row.progress_text);
+  const current = Number(row?.progress_current || row?.pack_item_count || row?.file_count || 0);
+  const total = Number(row?.progress_total || row?.expected_episode_count || current || 0);
+  if (current > 0 && total > 0) return `${current}/${total}`;
+  return current > 0 ? String(current) : '';
+};
 const centerSeasonText = (row) => {
   const displayType = centerRowType(row);
+  const label = centerTypeLabel(displayType);
   const s = row.season_number ? `S${String(row.season_number).padStart(2, '0')}` : '';
   const e = row.episode_number ? `E${String(row.episode_number).padStart(2, '0')}` : '';
 
-  if (centerTypeLabel(displayType) === '电影') return '电影';
+  if (label === '电影') return '电影';
 
-  if (centerTypeLabel(displayType) === '剧集包') {
-    const count = row.pack_item_count ? `${row.pack_item_count}集` : '';
-    let range = '';
-    // 如果有具体的集数列表，提取出范围 (例如 E01-E20)
-    if (row.pack_episode_numbers && row.pack_episode_numbers.length > 1) {
-      const nums = row.pack_episode_numbers;
-      range = `E${String(nums[0]).padStart(2, '0')}-E${String(nums[nums.length - 1]).padStart(2, '0')}`;
-    } else if (row.pack_episode_numbers && row.pack_episode_numbers.length === 1) {
-      range = `E${String(row.pack_episode_numbers[0]).padStart(2, '0')}`;
-    }
-    const packDesc = [count, range ? `(${range})` : ''].filter(Boolean).join(' ');
-    return [s, packDesc || '剧集包'].filter(Boolean).join(' · ');
+  if (label === '季') {
+    const progress = centerProgressText(row);
+    return [s, progress].filter(Boolean).join(' · ') || '-';
   }
 
-  if (centerTypeLabel(displayType) === '单集') return ['单集', s && e ? `${s}${e}` : (s || e)].filter(Boolean).join(' · ');
+  if (label === '单集') return ['单集', s && e ? `${s}${e}` : (s || e)].filter(Boolean).join(' · ');
 
-  return [centerTypeLabel(displayType), s ? `${s}${e}` : '', row.pack_item_count ? `${row.pack_item_count}集包` : ''].filter(Boolean).join(' · ') || '-';
+  return [label, s ? `${s}${e}` : '', centerProgressText(row)].filter(Boolean).join(' · ') || '-';
 };
 const centerCleanVersionMeta = (row) => {
   const meta = row?.clean_version_meta_json || row?.clean_version_meta || row?.version_summary?.clean_version_meta_json || {};
@@ -1087,20 +1200,78 @@ const centerCleanVersionTooltip = (row) => {
   const comparable = meta.comparable_count;
   const avgDelta = meta.avg_delta_minutes;
   const confidence = row?.clean_version_confidence ?? meta.clean_version_confidence;
+  const minDelta = meta.min_delta_minutes;
   const parts = ['疑似纯净版'];
   if (hit != null && comparable != null) parts.push(`命中 ${hit}/${comparable} 集`);
   if (avgDelta != null) parts.push(`平均短 ${avgDelta} 分钟`);
+  if (minDelta != null) parts.push(`阈值 ${minDelta} 分钟`);
   if (confidence != null && confidence !== '') parts.push(`置信度 ${Math.round(Number(confidence) * 100)}%`);
+  return parts.join(' · ');
+};
+const centerNestedParts = (row) => {
+  const parts = [];
+  if (row && typeof row === 'object') parts.push(row);
+  for (const key of ['version_summary', 'summary_json', 'media_signature_json']) {
+    const v = row?.[key];
+    if (v && typeof v === 'object') parts.push(v);
+  }
+  for (const key of ['children', 'pack_items', 'versions']) {
+    if (Array.isArray(row?.[key])) {
+      row[key].forEach(x => {
+        if (x && typeof x === 'object') {
+          parts.push(x);
+          if (x.version_summary && typeof x.version_summary === 'object') parts.push(x.version_summary);
+          if (x.summary_json && typeof x.summary_json === 'object') parts.push(x.summary_json);
+          if (x.media_signature_json && typeof x.media_signature_json === 'object') parts.push(x.media_signature_json);
+        }
+      });
+    }
+  }
+  return parts;
+};
+const centerShortDramaMeta = (row) => {
+  for (const part of centerNestedParts(row)) {
+    const meta = part?.short_drama_meta_json || part?.short_drama_meta || {};
+    if (part?.is_short_drama || meta?.is_short_drama) return meta && typeof meta === 'object' ? meta : { is_short_drama: true };
+  }
+  return {};
+};
+const isCenterShortDrama = (row) => Boolean(centerShortDramaMeta(row).is_short_drama || row?.is_short_drama);
+const centerShortDramaTooltip = (row) => {
+  const meta = centerShortDramaMeta(row);
+  const parts = ['短剧'];
+  const runtime = meta.runtime_minutes ?? meta.avg_runtime_minutes;
+  if (runtime != null) parts.push(`时长 ${runtime} 分钟`);
+  if (meta.hit_count != null && meta.comparable_count != null) parts.push(`命中 ${meta.hit_count}/${meta.comparable_count} 集`);
+  if (meta.max_runtime_minutes != null) parts.push(`阈值 < ${meta.max_runtime_minutes} 分钟`);
   return parts.join(' · ');
 };
 const centerTypeCell = (row) => {
   const textNode = h('span', centerSeasonText(row));
-  if (!isCenterCleanVersion(row)) return textNode;
-  const tagNode = h(NTag, { size: 'small', round: true, type: 'warning', class: 'center-clean-version-tag' }, { default: () => '纯净版' });
-  return h(NTooltip, { trigger: 'hover' }, {
-    trigger: () => h('span', { class: 'center-type-with-flags' }, [textNode, tagNode]),
-    default: () => centerCleanVersionTooltip(row),
-  });
+  const tags = [];
+
+  if (centerIsOngoingHub(row)) {
+    tags.push(h(NTag, { size: 'small', round: true, type: 'info', class: 'center-flag-tag' }, { default: () => '连载中' }));
+  }
+
+  if (isCenterCleanVersion(row)) {
+    const cleanTagNode = h(NTooltip, { trigger: 'hover' }, {
+      trigger: () => h(NTag, { size: 'small', round: true, type: 'warning', class: 'center-flag-tag' }, { default: () => '纯净版' }),
+      default: () => centerCleanVersionTooltip(row),
+    });
+    tags.push(cleanTagNode);
+  }
+
+  if (isCenterShortDrama(row)) {
+    const shortDramaTagNode = h(NTooltip, { trigger: 'hover' }, {
+      trigger: () => h(NTag, { size: 'small', round: true, type: 'success', class: 'center-flag-tag' }, { default: () => '短剧' }),
+      default: () => centerShortDramaTooltip(row),
+    });
+    tags.push(shortDramaTagNode);
+  }
+
+  if (!tags.length) return textNode;
+  return h('span', { class: 'center-type-with-flags' }, [textNode, ...tags]);
 };
 const centerStatusTag = (row) => {
   const text = row.status_label || statusMap[row.status]?.text || row.status || '未知';
@@ -1109,8 +1280,8 @@ const centerStatusTag = (row) => {
 };
 const centerSourceText = (row) => {
   // 中心端历史字段不完全统一：自动维护创建、手动创建、频道/影巢外部源可能分别落在
-  // source_provider / source_label / provider / origin / create_mode 等字段里。这里不要缺省成“手动分享”，
-  // 否则自动分享只要字段名换了就会被误判。
+  // source_provider / source_label / provider / origin / create_mode 等字段里。这里不要缺省成“手动共享”，
+  // 否则自动共享只要字段名换了就会被误判。
   const pickText = (value) => {
     if (value == null) return '';
     if (typeof value === 'object') {
@@ -1131,23 +1302,23 @@ const centerSourceText = (row) => {
   const labelText = labelParts.join(' ').toLowerCase();
   const allText = `${rawText} ${labelText}`;
 
-  if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || /(backup_mirror|backup_share|auto_backup_share|backup|备份分享|备份源|镜像分享)/i.test(allText)) return '备份分享';
-  if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance) return '自动分享';
+  if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || /(backup_mirror|backup_share|auto_backup_share|backup|备份共享|备份源|镜像共享)/i.test(allText)) return '备份共享';
+  if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance) return '自动共享';
+  if (/(rapid_auto_library|rapid_all_library|rapid_completed_season|auto|自动|入库自动|一键全库|完结季收藏|maintenance|scheduler|schedule|task|gap)/i.test(allText)) return '自动共享';
   if (/(hdhive|影巢)/i.test(allText)) return '影巢';
   if (/(tg_channel|telegram|频道)/i.test(allText)) return '频道';
-  if (/(auto|自动|maintenance|scheduler|schedule|task|gap)/i.test(allText)) return '自动分享';
-  if (/(manual|user_share|手动|人工)/i.test(allText) || row?.is_manual_share) return '手动分享';
+  if (/(manual|user_share|手动|人工)/i.test(allText) || row?.is_manual_share) return '手动共享';
 
   const label = labelParts.join(' ').trim();
-  return label || '本机分享';
+  return label || '本机共享';
 };
 const centerSourceTag = (row) => {
   const text = centerSourceText(row);
-  const type = text === '自动分享' ? 'warning' : (text === '手动分享' ? 'default' : 'info');
+  const type = text === '自动共享' ? 'warning' : (text === '手动共享' ? 'default' : 'info');
   return h(NTag, { type, size: 'small', round: true }, { default: () => text });
 };
 const versionSummaryText = (row) => {
-  const v = row.version_summary || {};
+  const v = centerVersionSummary(row) || {};
   const parts = [v.resolution, v.effect, v.video_codec || v.codec, v.bit_depth ? `${v.bit_depth}bit` : '', v.fps].filter(Boolean);
   return parts.length ? parts.join(' · ') : (row.quality || '未知版本');
 };
@@ -1157,7 +1328,7 @@ const formatCenterSize = (row) => {
   if (size > 0) return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
   
   // 兜底：如果外层没有，再尝试使用媒体信息里的单集大小
-  const gb = Number(row.version_summary?.size_gb || 0);
+  const gb = Number(centerVersionSummary(row)?.size_gb || row.version_summary?.size_gb || 0);
   if (gb > 0) return `${gb.toFixed(gb >= 10 ? 1 : 2)} GB`;
   
   return '-';
@@ -1175,8 +1346,18 @@ const listCell = (items, limit = 3) => {
 const isCenterReplenishRow = (row) => String(row?.status || '').trim().toLowerCase() === 'replenish';
 const centerUsableResourceCount = (row) => {
   if (isCenterReplenishRow(row)) return 0;
-  const count = Number(row?.version_count);
-  return Number.isFinite(count) && count > 0 ? count : 1;
+  // 资源数显示的是可签名 holder 数，不是版本数。
+  // version_count 只表示同一标题/同一集下有几个画质版本，不能反映秒传后新增的资源副本。
+  for (const key of ['resource_count', 'usable_resource_count', 'available_holder_count', 'holder_count']) {
+    const value = Number(row?.[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const parts = [...(Array.isArray(row?.pack_items) ? row.pack_items : []), ...(Array.isArray(row?.children) ? row.children : [])];
+  const childCounts = parts
+    .map(item => Number(item?.resource_count || item?.usable_resource_count || item?.available_holder_count || item?.holder_count || 0))
+    .filter(value => Number.isFinite(value) && value > 0);
+  if (childCounts.length) return Math.min(...childCounts);
+  return 1;
 };
 const canCenterReplenishRow = (row) => {
   if (!isCenterReplenishRow(row)) return false;
@@ -1190,46 +1371,84 @@ const centerReplenishActionNode = () => h(NTooltip, { trigger: 'hover', placemen
   trigger: () => h(NTag, { type: 'error', size: 'small', round: true }, { default: () => '等待补充' }),
   default: () => '该资源处于待补充状态：中心仅保留 SHA1/媒体信息用于精准补源；本机没有完整相同资源时不能补充。'
 });
+
+const inferRapidSourceKind = (row) => {
+  const direct = String(row?.source_kind || row?.kind || '').trim();
+  if (direct) return direct;
+  const typeText = centerTypeLabel(centerRowType(row));
+  if (typeText === '电影') return 'movie';
+  if (typeText === '单集') return 'episode';
+  if (typeText === '季') return row?.source_kind === 'season_hub' ? 'season_hub' : 'completed_season';
+  return '';
+};
+
+const centerRapidSourceId = (row) => String(
+  row?.source_id || row?.source_ref_id || row?.episode_source_id || row?.center_source_id || ''
+).trim();
+
+const buildCenterImportSourcePayload = (row) => {
+  const sourceId = centerRapidSourceId(row);
+  const sourceKind = inferRapidSourceKind(row);
+  const childSourceIds = (row?.children || row?.pack_items || [])
+    .map(x => centerRapidSourceId(x) || x?.source_id || x?.source_ref_id)
+    .filter(Boolean);
+  return {
+    ...row,
+    source_kind: sourceKind,
+    source_id: sourceId,
+    source_ids: sourceKind === 'season_hub' ? childSourceIds : undefined,
+    source_ref_id: row?.source_ref_id || sourceId,
+    title: row?.title || '',
+    tmdb_id: row?.tmdb_id || row?.share_tmdb_id || '',
+    parent_series_tmdb_id: row?.parent_series_tmdb_id || row?.series_tmdb_id || '',
+    item_type: row?.item_type || row?.share_item_type || centerRowType(row) || '',
+    display_type: centerRowType(row) || '',
+    season_number: row?.season_number ?? null,
+    episode_number: row?.episode_number ?? null,
+    year: row?.release_year || '',
+    share_type: row?.share_type || '',
+    status: row?.status || '',
+  };
+};
+
 const executeImport = async (row, mode) => {
-  const modeText = '转存';
+  const modeText = '秒传';
   if (isCenterReplenishRow(row)) {
-    message.warning('该资源处于待补充状态，不能转存');
+    message.warning('该资源处于待补充状态，不能秒传');
     return;
   }
-  // 标记该行正在 loading
-  importingMap[row.source_id] = mode;
+  const sourcePayload = buildCenterImportSourcePayload(row);
+  if (!sourcePayload.source_kind || !sourcePayload.source_id) {
+    message.error('中心源缺少 source_kind/source_id，刷新中心资源库后重试。');
+    return;
+  }
+  const loadingKey = sourcePayload.source_id || row?.group_key;
+  importingMap[loadingKey] = mode;
   try {
-    const sourceIds = Array.isArray(row.pack_source_ids) && row.pack_source_ids.length ? row.pack_source_ids : [row.source_id];
-    const res = await axios.post('/api/shared/resources/center/import', {
-      source_ids: sourceIds,
+    const requestBody = {
       mode,
-      context: {
-        title: row.title || '',
-        tmdb_id: row.tmdb_id || row.share_tmdb_id || '',
-        parent_series_tmdb_id: row.parent_series_tmdb_id || row.series_tmdb_id || '',
-        item_type: row.item_type || row.share_item_type || centerRowType(row) || '',
-        display_type: centerRowType(row) || '',
-        season_number: row.season_number ?? null,
-        episode_number: row.episode_number ?? null,
-        year: row.release_year || '',
-        share_type: row.share_type || '',
-        status: row.status || '',
-      }
-    });
+      source: sourcePayload,
+      context: sourcePayload,
+    };
+    if (Array.isArray(sourcePayload.source_ids) && sourcePayload.source_ids.length) {
+      requestBody.source_ids = sourcePayload.source_ids;
+    } else {
+      requestBody.source_id = sourcePayload.source_id;
+    }
+    const res = await axios.post('/api/shared/resources/center/import', requestBody);
     message.success(res.data?.message || '已提交');
     await Promise.allSettled([loadCenterSources(), loadSummary(), loadLedger()]);
   } catch (e) {
     message.error(e.response?.data?.message || `${modeText}失败`);
   } finally {
-    // 请求结束，移除 loading 状态
-    delete importingMap[row.source_id];
+    delete importingMap[loadingKey];
   }
 };
 
 const importCenterSource = (row, mode) => {
-  const modeText = '转存';
+  const modeText = '秒传';
   if (isCenterReplenishRow(row)) {
-    message.warning('该资源处于待补充状态，不能转存');
+    message.warning('该资源处于待补充状态，不能秒传');
     return;
   }
   dialog.info({
@@ -1267,7 +1486,7 @@ const openManualShareForCenterReplenish = async (row) => {
     mediaCandidates.value = [candidate];
     showManualShareModal.value = true;
     chooseMediaCandidate(candidate);
-    message.success(res.data?.message || '已自动填入补充资源，请确认后创建永久分享');
+    message.success(res.data?.message || '已自动填入补充资源，请确认后登记共享源');
   } catch (e) {
     message.error(e.response?.data?.message || '准备补充资源失败');
   } finally {
@@ -1284,41 +1503,104 @@ const centerGroupKey = (row) => {
   const episode = row.episode_number || '';
   const baseType = centerTypeLabel(type);
   if (baseType === '电影') return `movie:${tmdb || title}`;
-  if (baseType === '剧集包') return `pack:${tmdb || title}:S${season || ''}`;
+  if (baseType === '季') return `pack:${tmdb || title}:S${season || ''}`;
   if (baseType === '单集') return `ep:${tmdb || title}:S${season || ''}:E${episode || ''}`;
   return `${baseType}:${tmdb || title}:${season}:${episode}`;
 };
 
 const groupCenterSources = (items, orderBy = 'latest') => {
-  const groups = [];
-  const byKey = new Map();
-  for (const item of (items || [])) {
-    const key = centerGroupKey(item);
-    let group = byKey.get(key);
-    if (!group) {
-      group = {
-        group_key: key,
-        title: item.title || item.standard_title,
-        media_title: item.media_title,
-        tmdb_id: item.tmdb_id,
-        share_tmdb_id: item.share_tmdb_id,
-        parent_series_tmdb_id: item.parent_series_tmdb_id,
-        release_year: item.release_year,
-        season_number: item.season_number,
-        episode_number: item.episode_number,
-        display_type: centerRowType(item),
-        pack_item_count: item.pack_item_count,
-        pack_episode_numbers: item.pack_episode_numbers,
-        is_collapsed_pack: item.is_collapsed_pack,
-        versions: [],
-      };
-      byKey.set(key, group);
-      groups.push(group);
+  // 辅助函数 1：合并相同 SHA1 的版本，累加热度
+  const mergeVersions = (versions) => {
+    const merged = [];
+    const sha1Map = new Map();
+    for (const v of (versions || [])) {
+      const sha1 = v.sha1;
+      if (sha1 && sha1Map.has(sha1)) {
+        // 相同 SHA1，合并热度
+        const existing = sha1Map.get(sha1);
+        existing.success_count = (existing.success_count || 0) + (v.success_count || 0);
+        // 保留最新的更新时间
+        if (new Date(v.updated_at || 0) > new Date(existing.updated_at || 0)) {
+          existing.updated_at = v.updated_at;
+        }
+      } else {
+        const newV = { ...v };
+        if (sha1) sha1Map.set(sha1, newV);
+        merged.push(newV);
+      }
     }
-    group.versions.push(item);
+    return merged;
+  };
+
+  // 辅助函数 2：对展开后的子集 (children) 按集号进行严格聚合
+  const groupChildren = (children) => {
+    if (!children || !children.length) return undefined;
+    const groups = new Map();
+    
+    for (const child of children) {
+      const epNum = child.episode_number || 0;
+      if (!groups.has(epNum)) {
+        groups.set(epNum, {
+          ...child,
+          group_key: child.group_key || `ep_${epNum}`,
+          versions: [] // 初始化子节点的 versions 数组
+        });
+      }
+      // 收集该集的所有版本
+      const childVersions = Array.isArray(child.versions) && child.versions.length ? child.versions : [child];
+      groups.get(epNum).versions.push(...childVersions);
+    }
+
+    const result = [];
+    for (const group of groups.values()) {
+      // 对同一集内的版本进行 SHA1 去重合并
+      group.versions = mergeVersions(group.versions);
+      result.push(group);
+    }
+    // 按集号排序
+    result.sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
+    return result;
+  };
+
+  let processedGroups = [];
+
+  // 新中心端数据处理 (带有 versions 数组)
+  if ((items || []).some(item => Array.isArray(item?.versions))) {
+    processedGroups = (items || []).map(item => {
+      const topVersions = Array.isArray(item.versions) && item.versions.length ? item.versions : [item];
+      return {
+        ...item,
+        group_key: item.group_key || item.display_group_key || centerGroupKey(item),
+        versions: mergeVersions(topVersions), // 处理顶层 SHA1 合并
+        children: groupChildren(item.children) // 递归处理展开后的子集
+      };
+    });
+  } else {
+    // 兼容旧中心端散行数据处理
+    const byKey = new Map();
+    for (const item of (items || [])) {
+      const key = centerGroupKey(item);
+      let group = byKey.get(key);
+      if (!group) {
+        group = {
+          ...item,
+          group_key: key,
+          children: item.children, // 稍后统一处理
+          versions: [],
+        };
+        byKey.set(key, group);
+        processedGroups.push(group);
+      }
+      group.versions.push(item);
+    }
+    for (const group of processedGroups) {
+      group.versions = mergeVersions(group.versions);
+      group.children = groupChildren(group.children);
+    }
   }
-  for (const group of groups) {
-    // 👇 根据不同排序规则，对组内版本排序，并提取组的排序基准值
+
+  // 排序逻辑
+  for (const group of processedGroups) {
     if (orderBy === 'popular') {
       group.versions.sort((a, b) => (b.success_count || 0) - (a.success_count || 0));
       group.sort_val = Math.max(...group.versions.map(v => v.success_count || 0));
@@ -1334,14 +1616,14 @@ const groupCenterSources = (items, orderBy = 'latest') => {
     }
     group.created_at = group.versions[0]?.created_at || group.created_at;
   }
-  
-  // 👇 对所有组进行排序
-  groups.sort((a, b) => {
+
+  processedGroups.sort((a, b) => {
     if (orderBy === 'popular' || orderBy === 'size') return b.sort_val - a.sort_val;
     if (orderBy === 'name') return String(a.sort_val).localeCompare(String(b.sort_val));
     return b.sort_val - a.sort_val; // latest
   });
-  return groups;
+
+  return processedGroups;
 };
 
 const renderLineTooltipContent = (value) => {
@@ -1458,8 +1740,20 @@ const compactEffectText = (value) => {
   return text || '-';
 };
 
-const versionAudioTracks = (it) => it?.version_summary?.audio_list || it?.version_summary?.audios || it?.version_summary?.audio_tracks || it?.version_summary?.audio || [];
-const versionSubtitleTracks = (it) => it?.version_summary?.subtitle_list || it?.version_summary?.subtitles || it?.version_summary?.subtitle_tracks || it?.version_summary?.subtitle || [];
+const centerVersionSummary = (it) => {
+  const sig = it?.media_signature_json || it?.media_signature || {};
+  const raw = it?.summary_json || it?.raw_summary_json || {};
+  const v = { ...(raw || {}), ...(sig || {}), ...(it?.version_summary || {}) };
+  if (!v.resolution) v.resolution = sig.resolution_display || sig.resolution || raw.resolution || '';
+  if (!v.effect) v.effect = sig.effect_display || sig.effect_key || sig.effect || raw.effect || '';
+  if (!v.video_codec && !v.codec) v.video_codec = sig.video_codec || sig.codec_display || sig.codec || raw.video_codec || raw.codec || '';
+  if (!v.fps) v.fps = sig.fps || sig.frame_rate || raw.fps || raw.frame_rate || '';
+  if (!v.audio_list) v.audio_list = sig.audio_list || sig.audio_tracks || sig.audios || raw.audio_list || raw.audio_tracks || raw.audios || [];
+  if (!v.subtitle_list) v.subtitle_list = sig.subtitle_list || sig.subtitles || sig.subtitle_tracks || raw.subtitle_list || raw.subtitles || [];
+  return v;
+};
+const versionAudioTracks = (it) => centerVersionSummary(it).audio_list || centerVersionSummary(it).audios || centerVersionSummary(it).audio_tracks || centerVersionSummary(it).audio || [];
+const versionSubtitleTracks = (it) => centerVersionSummary(it).subtitle_list || centerVersionSummary(it).subtitles || centerVersionSummary(it).subtitle_tracks || centerVersionSummary(it).subtitle || [];
 const localLibraryInfo = (it) => it?.local_library || {};
 const localLibraryTag = (it) => {
   const info = localLibraryInfo(it);
@@ -1488,33 +1782,35 @@ const localLibraryTooltipLines = (it) => {
     if (rows.length > limit) lines.push(`  ……另有 ${rows.length - limit} 个`);
   };
   pushRows('已入库', inRows);
-  pushRows('未转存', outRows);
+  pushRows('未秒传', outRows);
   pushRows('无法判断 SHA1', unknownRows, 8);
-  if (!lines.length) lines.push('未返回本地转存状态');
+  if (!lines.length) lines.push('未返回本地秒传状态');
   return lines;
 };
 
+const hideCenterPackParams = (it) => centerIsOngoingHub(it);
+const centerParamText = (it, value = '') => hideCenterPackParams(it) ? '-' : (value || '-');
+
 const centerColumns = [
-  { title: '片名', key: 'title', minWidth: 190, fixed: 'left', render: row => h('div', null, [
-    h('div', { class: 'main-title' }, centerTitleText(row)),
+  { title: '片名', key: 'title', width: 240, fixed: 'left', render: row => h('div', { class: 'center-title-cell' }, [
+    centerTitleNode(row),
     metaLine(row)
   ]) },
-  // 👇 将类型列改为按版本拆分多行 (lineStack)，并加宽到 160
-  { title: '类型', key: 'item_type', width: 170, render: row => lineStack(row.versions, it => centerTypeCell(it), it => isCenterCleanVersion(it) ? centerCleanVersionTooltip(it) : '') },
-  { title: '分辨率', key: 'resolution', width: 90, render: row => lineStack(row.versions, it => h('span', it.version_summary?.resolution || '-')) },
+  // 主行只展示片名；从类型列开始按 versions 拆分多行展示多版本。
+  { title: '类型', key: 'item_type', width: 210, render: row => lineStack(row.versions, it => centerTypeCell(it), it => isCenterCleanVersion(it) ? centerCleanVersionTooltip(it) : '') },
+  { title: '分辨率', key: 'resolution', width: 90, render: row => lineStack(row.versions, it => h('span', centerParamText(it, centerVersionSummary(it).resolution))) },
   { title: '视频编码', key: 'video_codec', width: 120, render: row => lineStack(row.versions, it => {
-    const v = it.version_summary || {};
-    return h('span', [v.video_codec || v.codec, v.bit_depth ? `${v.bit_depth}bit` : ''].filter(Boolean).join(' · ') || '-');
+    const v = centerVersionSummary(it) || {};
+    return h('span', centerParamText(it, [v.video_codec || v.codec, v.bit_depth ? `${v.bit_depth}bit` : ''].filter(Boolean).join(' · ')));
   }) },
-  { title: 'HDR / 杜比', key: 'effect', width: 120, render: row => lineStack(row.versions, it => h('span', { class: 'center-effect-compact' }, compactEffectText(it.version_summary?.effect)), it => it.version_summary?.effect || '') },
-  { title: '帧率', key: 'fps', width: 110, render: row => lineStack(row.versions, it => h('span', it.version_summary?.fps || '-')) },
-  { title: '音轨', key: 'audios', width: 120, render: row => lineStack(row.versions, it => h('span', { class: 'center-track-compact' }, compactTrackText(versionAudioTracks(it))), it => fullTrackTooltipLines(versionAudioTracks(it))) },
-  { title: '字幕', key: 'subtitles', width: 150, render: row => lineStack(row.versions, it => h('span', { class: 'center-track-compact' }, compactTrackText(versionSubtitleTracks(it))), it => fullTrackTooltipLines(versionSubtitleTracks(it))) },
-  { title: '大小', key: 'size', width: 95, render: row => lineStack(row.versions, it => h('span', formatCenterSize(it))) },
+  { title: 'HDR / 杜比', key: 'effect', width: 120, render: row => lineStack(row.versions, it => h('span', { class: 'center-effect-compact' }, hideCenterPackParams(it) ? '-' : compactEffectText(centerVersionSummary(it).effect)), it => hideCenterPackParams(it) ? '' : (centerVersionSummary(it).effect || '')) },
+  { title: '帧率', key: 'fps', width: 110, render: row => lineStack(row.versions, it => h('span', centerParamText(it, centerVersionSummary(it).fps))) },
+  { title: '音轨', key: 'audios', width: 120, render: row => lineStack(row.versions, it => h('span', { class: 'center-track-compact' }, hideCenterPackParams(it) ? '-' : compactTrackText(versionAudioTracks(it))), it => hideCenterPackParams(it) ? '' : fullTrackTooltipLines(versionAudioTracks(it))) },
+  { title: '字幕', key: 'subtitles', width: 150, render: row => lineStack(row.versions, it => h('span', { class: 'center-track-compact' }, hideCenterPackParams(it) ? '-' : compactTrackText(versionSubtitleTracks(it))), it => hideCenterPackParams(it) ? '' : fullTrackTooltipLines(versionSubtitleTracks(it))) },
+  { title: '大小', key: 'size', width: 95, render: row => lineStack(row.versions, it => h('span', hideCenterPackParams(it) ? '-' : formatCenterSize(it))) },
   { title: '热度', key: 'success_count', width: 80, render: row => lineStack(row.versions, it => h('span', `${it.success_count || 0} 次`)) },
   { title: '资源数', key: 'version_count', width: 80, render: row => lineStack(row.versions, it => h('span', `${centerUsableResourceCount(it)} 个`)) },
   { title: '可用性', key: 'status', width: 105, render: row => lineStack(row.versions, it => centerStatusTag(it)) },
-  { title: '转存', key: 'local_library', width: 135, render: row => lineStack(row.versions, it => localLibraryTag(it), it => localLibraryTooltipLines(it)) },
   { title: '操作', key: 'actions', width: 120, fixed: 'right', render: row => lineStack(row.versions, it => {
     const isImportingPermanent = importingMap[it.source_id] === 'permanent';
     const isPreparingReplenish = importingMap[it.source_id] === 'replenish';
@@ -1538,13 +1834,13 @@ const centerColumns = [
       loading: isImportingPermanent,
       disabled: Boolean(importingMap[it.source_id]) && !isImportingPermanent,
       onClick: () => importCenterSource(it, 'permanent')
-    }, { default: () => '转存' });
+    }, { default: () => '秒传' });
   }) },
 ];
 
 const ledgerColumns = [
   { title: '时间', key: 'created_at', width: 180, render: row => withLedgerTooltip(row, fmtDate(row.created_at)) },
-  { title: '事件', key: 'event_type', width: 190, render: row => withLedgerTooltip(row, ledgerEventLabel(row.event_type)) },
+  { title: '事件', key: 'event_type', width: 190, render: row => withLedgerTooltip(row, row.event_label || ledgerEventLabel(row.event_type)) },
   { title: '变化', key: 'delta', width: 90, render: row => {
     const n = Number(row.delta || 0);
     const node = h(NTag, { type: n > 0 ? 'success' : (n < 0 ? 'error' : 'default'), size: 'small' }, { default: () => formatDelta(n) });
@@ -1560,10 +1856,10 @@ const applySharedConfig = (data = {}) => {
     p115_shared_resource_enabled: Boolean(data.p115_shared_resource_enabled),
     p115_shared_center_url: data.p115_shared_center_url || 'https://shared.55565576.xyz',
     p115_shared_device_token: data.p115_shared_device_token || '',
-    p115_shared_resource_mode: 'permanent',
+    p115_shared_resource_mode: 'rapid',
     p115_shared_disable_episode_transfer: Boolean(data.p115_shared_disable_episode_transfer),
     p115_shared_block_clean_version_transfer: Boolean(data.p115_shared_block_clean_version_transfer),
-    p115_shared_max_active_shares: Number(data.p115_shared_max_active_shares ?? 0),
+    p115_shared_block_short_drama_transfer: Boolean(data.p115_shared_block_short_drama_transfer),
     p115_shared_auto_share_requests_enabled: Boolean(data.p115_shared_auto_share_requests_enabled),
   });
 };
@@ -1588,8 +1884,7 @@ const openSharedConfigModal = async () => {
 const saveSharedConfig = async () => {
   sharedConfigSaving.value = true;
   try {
-    sharedConfigForm.p115_shared_resource_mode = 'permanent';
-    sharedConfigForm.p115_shared_max_active_shares = Math.max(0, Math.floor(Number(sharedConfigForm.p115_shared_max_active_shares || 0)));
+    sharedConfigForm.p115_shared_resource_mode = 'rapid';
     const res = await axios.post('/api/shared/resources/config', { ...sharedConfigForm });
     applySharedConfig(res.data?.data || sharedConfigForm);
     message.success(res.data?.message || '共享资源配置已保存');
@@ -1603,7 +1898,7 @@ const saveSharedConfig = async () => {
 };
 
 const loadSummary = async () => { const res = await axios.get('/api/shared/resources/summary'); summary.value = res.data?.data || { shares: {}, credit: {} }; };
-const loadShares = async () => { sharesLoading.value = true; try { const res = await axios.get('/api/shared/resources/shares', { params: { ...shareFilters, page: sharePagination.page, page_size: sharePagination.pageSize } }); shareItems.value = res.data?.items || []; sharePagination.itemCount = Number(res.data?.total || 0); } catch (e) { message.error(e.response?.data?.message || '加载我的分享失败'); } finally { sharesLoading.value = false; } };
+const loadShares = async () => { sharesLoading.value = true; try { const res = await axios.get('/api/shared/resources/shares', { params: { ...shareFilters, page: sharePagination.page, page_size: sharePagination.pageSize } }); shareItems.value = res.data?.items || []; sharePagination.itemCount = Number(res.data?.total || 0); } catch (e) { message.error(e.response?.data?.message || '加载我的共享源失败'); } finally { sharesLoading.value = false; } };
 
 const loadCenterSources = async () => {
   centerLoading.value = true;
@@ -1653,7 +1948,6 @@ const compactRequestParams = () => {
 };
 
 const buildShareRequestPayload = () => {
-  const episodeNumbers = shareRequestForm.target_type === 'episode' && shareRequestForm.episode_number ? [Number(shareRequestForm.episode_number)] : [];
   return {
     tmdb_id: shareRequestForm.tmdb_id,
     media_type: shareRequestForm.media_type,
@@ -1662,9 +1956,7 @@ const buildShareRequestPayload = () => {
     release_year: shareRequestForm.release_year,
     poster_path: shareRequestForm.poster_path,
     overview: shareRequestForm.overview,
-    season_number: ['season','episode'].includes(shareRequestForm.target_type) ? shareRequestForm.season_number : null,
-    episode_number: shareRequestForm.target_type === 'episode' ? shareRequestForm.episode_number : null,
-    episode_numbers: episodeNumbers,
+    season_number: shareRequestForm.target_type === 'season' ? shareRequestForm.season_number : null,
     params_json: compactRequestParams(),
     expires_days: shareRequestForm.expires_days || 7,
     auto_escalation: Boolean(shareRequestForm.auto_escalation),
@@ -1745,7 +2037,7 @@ const chooseShareRequestMedia = async (row) => {
   });
   shareRequestEpisodeText.value = '';
   await refreshShareRequestQuote();
-  message.success('已选择求分享目标');
+  message.success('已选择求共享目标');
 };
 
 const loadShareRequests = async () => {
@@ -1761,7 +2053,7 @@ const loadShareRequests = async () => {
     } });
     shareRequests.value = res.data?.items || [];
   } catch (e) {
-    message.error(e.response?.data?.message || '加载求分享失败');
+    message.error(e.response?.data?.message || '加载求共享失败');
   } finally {
     requestLoading.value = false;
   }
@@ -1769,20 +2061,19 @@ const loadShareRequests = async () => {
 
 const submitShareRequest = async () => {
   if (!selectedShareRequestMedia.value) return message.warning('请先搜索并选择 TMDb 目标');
-  if (shareRequestForm.media_type === 'tv' && ['season','episode'].includes(shareRequestForm.target_type) && !shareRequestForm.season_number) {
+  if (shareRequestForm.media_type === 'tv' && shareRequestForm.target_type === 'season' && !shareRequestForm.season_number) {
     return message.warning('请填写季号');
   }
-  if (shareRequestForm.target_type === 'episode' && !shareRequestForm.episode_number) return message.warning('请填写集号');
   shareRequestSubmitting.value = true;
   try {
     const payload = buildShareRequestPayload();
     const res = await axios.post('/api/shared/resources/share-requests', payload);
-    message.success(res.data?.message || '求分享已发布');
+    message.success(res.data?.message || '求共享已发布');
     showShareRequestModal.value = false;
     activeTab.value = 'requests';
     await Promise.allSettled([loadShareRequests(), loadSummary(), loadLedger()]);
   } catch (e) {
-    message.error(e.response?.data?.message || '发布求分享失败');
+    message.error(e.response?.data?.message || '发布求共享失败');
   } finally {
     shareRequestSubmitting.value = false;
   }
@@ -1792,7 +2083,7 @@ const confirmCoRequest = (row) => {
   const cost = Number(row.max_bounty || row.current_bounty || row.bounty_total || 0);
   dialog.warning({
     title: '同求助力',
-    content: `助力求分享将冻结 ${cost} 贡献值。资源成功分享并转存后，对应贡献值会支付给分享者；未成交取消/过期会退回。确定同求吗？`,
+    content: `助力求共享将冻结 ${cost} 贡献点。资源成功共享并秒传后，对应贡献点会支付给共享者；未成交取消/过期会退回。确定同求吗？`,
     positiveText: '确认同求',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -1809,17 +2100,17 @@ const confirmCoRequest = (row) => {
 
 const confirmCancelShareRequest = (row) => {
   dialog.warning({
-    title: '取消求分享',
-    content: row.my_role === 'owner' ? '发起人取消会关闭该求分享并退回所有参与者未使用贡献值，确定继续吗？' : '确定取消你的同求并退回未使用贡献值吗？',
-    positiveText: '取消求分享',
+    title: '取消求共享',
+    content: row.my_role === 'owner' ? '发起人取消会关闭该求共享并退回所有参与者未使用贡献点，确定继续吗？' : '确定取消你的同求并退回未使用贡献点吗？',
+    positiveText: '取消求共享',
     negativeText: '保留',
     onPositiveClick: async () => {
       try {
         const res = await axios.post(`/api/shared/resources/share-requests/${row.group_id}/cancel`, {});
-        message.success(res.data?.message || '已取消求分享');
+        message.success(res.data?.message || '已取消求共享');
         await Promise.allSettled([loadShareRequests(), loadSummary(), loadLedger()]);
       } catch (e) {
-        message.error(e.response?.data?.message || '取消求分享失败');
+        message.error(e.response?.data?.message || '取消求共享失败');
       }
     }
   });
@@ -1832,7 +2123,7 @@ const openLocalShareForRequest = async (row) => {
   activeLocalShareRequest.value = row || null;
   mediaSearchKeyword.value = '';
   showManualShareModal.value = true;
-  message.info('正在自动匹配本地符合条件的可分享资源。');
+  message.info('正在自动匹配本地符合条件的可共享资源。');
   await searchShareableMedia();
 };
 
@@ -1850,7 +2141,7 @@ const triggerSharedMaintenance = async () => {
   }
 };
 
-const loadLedger = async () => { ledgerLoading.value = true; try { const res = await axios.get('/api/shared/resources/credit/ledger', { params: { limit: 200, actual_only: 1, sync_center: 1 } }); ledgerItems.value = res.data?.items || []; } catch { message.error('加载贡献值流水失败'); } finally { ledgerLoading.value = false; } };
+const loadLedger = async () => { ledgerLoading.value = true; try { const res = await axios.get('/api/shared/resources/credit/ledger', { params: { limit: 200, actual_only: 1, sync_center: 1 } }); ledgerItems.value = res.data?.items || []; } catch { message.error('加载贡献点流水失败'); } finally { ledgerLoading.value = false; } };
 const loadAll = async () => { await Promise.allSettled([loadSummary(), loadShares(), loadCenterSources(), loadLedger()]); };
 const handleTabChange = (name) => { if (name === 'shares') loadShares(); if (name === 'center') loadCenterSources(); if (name === 'requests') loadShareRequests(); if (name === 'ledger') loadLedger(); };
 
@@ -1881,7 +2172,7 @@ const registerCenterDevice = async () => {
   await doRegister();
 };
 
-const refreshCredit = async () => { refreshingCredit.value = true; try { await axios.post('/api/shared/resources/credit/refresh'); message.success('贡献值已同步'); await Promise.allSettled([loadSummary(), loadLedger()]); } catch (e) { message.error(e.response?.data?.message || '刷新贡献值失败'); } finally { refreshingCredit.value = false; } };
+const refreshCredit = async () => { refreshingCredit.value = true; try { await axios.post('/api/shared/resources/credit/refresh'); message.success('贡献点已同步'); await Promise.allSettled([loadSummary(), loadLedger()]); } catch (e) { message.error(e.response?.data?.message || '刷新贡献点失败'); } finally { refreshingCredit.value = false; } };
 
 const resetManualShareForm = () => {
   manualShareValidationSeq += 1;
@@ -1890,6 +2181,7 @@ const resetManualShareForm = () => {
   Object.assign(manualShareForm, {
     root_fid: '', root_name: '', root_is_dir: true, title: '', tmdb_id: '', parent_series_tmdb_id: '',
     share_type: 'season_pack', item_type: 'Season', season_number: 1, release_year: null, receive_code: manualShareForm.receive_code || '',
+    season_status: '', watching_status: '', expected_episode_count: null, total_episodes: null, is_completed: false,
     center_replenish_source_id: '', center_replenish_payload: null
   });
   selectedMedia.value = null;
@@ -1909,18 +2201,22 @@ const searchShareableMedia = async () => {
   const keyword = requestRow
     ? String(requestRow.title || requestRow.tmdb_id || '').trim()
     : String(mediaSearchKeyword.value || '').trim();
-  if (!keyword) return message.warning(requestRow ? '求分享缺少片名或 TMDb ID，无法自动匹配本地资源' : '请输入片名或 TMDb ID');
+  if (!keyword) return message.warning(requestRow ? '求共享缺少片名或 TMDb ID，无法自动匹配本地资源' : '请输入片名或 TMDb ID');
   mediaSearchLoading.value = true;
   try {
     const params = { keyword, limit: requestRow ? 100 : 30 };
     if (requestRow) Object.assign(params, shareRequestSearchFilterParams(requestRow));
     const res = await axios.get('/api/shared/resources/media/search', { params });
-    mediaCandidates.value = res.data?.items || [];
+    mediaCandidates.value = (res.data?.items || []).filter(row => {
+      const itemType = String(row?.share_item_type || row?.item_type || '').toLowerCase();
+      const shareType = String(row?.share_type || '').toLowerCase();
+      return !row?.episode_number && itemType !== 'episode' && shareType !== 'episode_file';
+    });
     if (!mediaCandidates.value.length) {
-      message.info(requestRow ? '本地没有符合该求分享参数的可分享资源' : '没有搜索到本地媒体记录');
+      message.info(requestRow ? '本地没有符合该求共享参数的可共享资源' : '没有搜索到本地媒体记录');
     }
   } catch (e) {
-    message.error(e.response?.data?.message || '搜索可分享媒体失败');
+    message.error(e.response?.data?.message || '搜索可共享媒体失败');
   } finally {
     mediaSearchLoading.value = false;
   }
@@ -1993,40 +2289,92 @@ const chooseMediaCandidate = (row) => {
     item_type: row.share_item_type || row.item_type || 'Season',
     season_number: row.season_number || null,
     release_year: row.release_year || null,
+    season_status: row.watching_status || row.season_status || '',
+    watching_status: row.watching_status || '',
+    expected_episode_count: row.total_episodes || row.expected_episode_count || row.episode_count || null,
+    total_episodes: row.total_episodes || row.expected_episode_count || row.episode_count || null,
+    is_completed: String(row.watching_status || '').trim().toLowerCase() === 'completed',
     center_replenish_source_id: row.center_replenish_source_id || '',
     center_replenish_payload: row.center_replenish_payload || null,
   });
-  message.success('已自动填充分享信息，开始预校验');
+  message.success('已自动填充共享信息，开始预校验');
   validateManualShareSelection();
 };
 
+
+const confirmShareAllLibrary = () => {
+  dialog.warning({
+    title: '一键登记媒体库',
+    content: '将扫描当前本机媒体库并把可秒传资源索引登记到共享中心。不会创建 115 共享，也不会上传 CK；但会上传 SHA1、大小、文件名和媒体信息摘要。媒体库很大时会在后台运行较长时间，确认继续吗？',
+    positiveText: '开始共享全库',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      shareAllLoading.value = true;
+      try {
+        const res = await axios.post('/api/shared/resources/shares/share-library', {});
+        message.success(res.data?.message || '已启动一键登记媒体库任务');
+        await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]);
+      } catch (e) {
+        message.error(e.response?.data?.message || '启动一键登记媒体库失败');
+      } finally {
+        shareAllLoading.value = false;
+      }
+    }
+  });
+};
+
 const manualCreateShare = async () => {
-  if (!manualShareForm.root_fid) return message.warning('请先搜索并选择一个可分享媒体');
-  if (manualShareValidationLoading.value) return message.warning('正在预校验分享文件，请稍候');
+  if (!manualShareForm.root_fid) return message.warning('请先搜索并选择一个可共享媒体');
+  if (manualShareValidationLoading.value) return message.warning('正在预校验共享源，请稍候');
   if (!manualShareValidation.value || manualShareValidation.value.valid !== true) {
     const result = await validateManualShareSelection();
     if (!result || result.valid !== true) {
-      return message.error(result?.message || '预校验未通过，不能创建分享');
+      return message.error(result?.message || '预校验未通过，不能登记共享源');
     }
   }
   manualCreating.value = true;
   try {
     const payload = buildManualSharePayload();
     await axios.post('/api/shared/resources/shares/manual-create', payload);
-    message.success('分享已创建，等待审核');
+    message.success('资源索引已登记中心');
     showManualShareModal.value = false;
     activeLocalShareRequest.value = null;
     activeCenterReplenishSource.value = null;
     activeTab.value = 'shares';
     await Promise.allSettled([loadShares(), loadCenterSources(), loadSummary(), loadLedger()]);
   } catch (e) {
-    message.error(e.response?.data?.message || '创建分享失败');
+    message.error(e.response?.data?.message || '登记资源失败');
   } finally { manualCreating.value = false; }
 };
 
-const checkShare = async (row) => { try { const res = await axios.post(`/api/shared/resources/shares/${row.id}/check`); message.success(res.data?.message || '检查完成'); await Promise.allSettled([loadShares(), loadSummary()]); } catch (e) { message.error(e.response?.data?.message || '检查失败'); } };
-const reportShare = async (row) => { try { const res = await axios.post(`/api/shared/resources/shares/${row.id}/report-center`); message.success(res.data?.message || '已登记'); await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]); } catch (e) { message.error(e.response?.data?.message || '登记失败'); } };
-const cancelShare = (row) => { dialog.warning({ title: '取消分享', content: `确定取消《${row.title || row.root_name}》的 115 分享吗？`, positiveText: '取消分享', negativeText: '保留', onPositiveClick: async () => { try { await axios.post(`/api/shared/resources/shares/${row.id}/cancel`); message.success('已取消分享'); await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]); } catch (e) { message.error(e.response?.data?.message || '取消失败'); } } }); };
+const cancelShare = (row) => {
+  if (isAutoShareRow(row)) {
+    return message.warning('自动共享源由入库自动维护，不能手动停用');
+  }
+  const ids = Array.isArray(row.source_ids) ? row.source_ids.filter(Boolean) : [];
+  const isBatch = ids.length > 1;
+  const title = row.title || row.root_name || row.file_name || '该资源';
+  const countText = isBatch ? `该聚合项下 ${ids.length} 个本机源` : '该本机源';
+  dialog.warning({
+    title: '停用共享源',
+    content: `确定停用《${title}》的${countText}吗？停用后不会再向中心供给这些资源。`,
+    positiveText: '停用共享',
+    negativeText: '保留',
+    onPositiveClick: async () => {
+      try {
+        if (isBatch) {
+          await axios.post('/api/shared/resources/shares/cancel-batch', { ids });
+        } else {
+          await axios.post(`/api/shared/resources/shares/${row.id}/cancel`);
+        }
+        message.success('已停用共享源');
+        await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]);
+      } catch (e) {
+        message.error(e.response?.data?.message || '停用失败');
+      }
+    }
+  });
+};
 
 
 watch(
@@ -2073,6 +2421,18 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 .stat-desc { margin-top: 8px; font-size: 12px; opacity: .65; }
 .toolbar { margin-bottom: 14px; }
 .main-title { font-weight: 600; }
+.center-title-cell {
+  max-width: 220px;
+  min-width: 0;
+}
+.center-title-ellipsis {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .sub-title {
   display: flex;
   align-items: center;
@@ -2348,7 +2708,7 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
   gap: 6px;
   flex-wrap: wrap;
 }
-.center-clean-version-tag {
+.center-flag-tag {
   transform: scale(.92);
   transform-origin: left center;
 }
