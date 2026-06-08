@@ -609,26 +609,32 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   white-space: nowrap;
   position: relative;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  /* 定义默认箭头颜色 */
+  --arrow-color: var(--text-primary);
 }
 
 /* ★ 高频任务链高亮 (翠绿色/活力) */
 .flowchart-node.highlight-high-freq {
   background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(16, 185, 129, 0.25) 100%);
   border-color: rgba(16, 185, 129, 0.4);
+  --arrow-color: rgba(16, 185, 129, 0.8);
 }
 
 /* ★ 低频任务链高亮 (紫罗兰色/夜间静默) */
 .flowchart-node.highlight-low-freq {
   background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(139, 92, 246, 0.25) 100%);
   border-color: rgba(139, 92, 246, 0.4);
+  --arrow-color: rgba(139, 92, 246, 0.8);
 }
 
 /* ★ TG 菜单高亮 (经典蓝色) */
 .flowchart-node.highlight-tg {
   background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(54, 162, 235, 0.25) 100%);
   border-color: rgba(54, 162, 235, 0.4);
+  --arrow-color: rgba(54, 162, 235, 0.8);
 }
 
+/* 使用 mask 技术，使 SVG 图标可以直接继承 --arrow-color 颜色 */
 .flowchart-node:not(:last-child)::after {
   content: '';
   position: absolute;
@@ -637,10 +643,10 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
   transform: translateY(-50%);
   width: 24px;
   height: 24px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='currentColor'%3E%3Cpath d='M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: center;
-  opacity: 0.5;
+  background-color: var(--arrow-color);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z'/%3E%3C/svg%3E") no-repeat center;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z'/%3E%3C/svg%3E") no-repeat center;
+  opacity: 0.8;
 }
 
 @media (max-width: 1200px) {
@@ -657,7 +663,9 @@ watch([configModel, availableTasksForChain, availableTasksForManualRun], ([newCo
     left: 50%;
     top: 100%;
     transform: translateX(-50%) translateY(4px);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='currentColor'%3E%3Cpath d='M13 16.172l5.364-5.364 1.414 1.414L12 20l-7.778-7.778 1.414-1.414L11 16.172V4h2z'/%3E%3C/svg%3E");
+    /* 在响应式下变成向下的箭头遮罩 */
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 16.172l5.364-5.364 1.414 1.414L12 20l-7.778-7.778 1.414-1.414L11 16.172V4h2z'/%3E%3C/svg%3E") no-repeat center;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 16.172l5.364-5.364 1.414 1.414L12 20l-7.778-7.778 1.414-1.414L11 16.172V4h2z'/%3E%3C/svg%3E") no-repeat center;
   }
 }
 </style>
