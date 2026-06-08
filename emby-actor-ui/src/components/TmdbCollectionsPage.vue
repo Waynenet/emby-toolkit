@@ -620,4 +620,34 @@ const extractYear = (dateStr) => { if (!dateStr) return null; return dateStr.sub
 .movie-actions-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; opacity: 0; transition: opacity 0.2s ease-in-out; z-index: 20; }
 .movie-card:hover .movie-actions-overlay { opacity: 1; }
 .status-badge { position: absolute; top: 10px; left: -30px; width: 100px; height: 24px; background-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px); color: #fff; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 15; pointer-events: none; }
+
+/* ★★★ 修复弹窗内部：小标题（Tabs）和 电影卡片贴边的问题 ★★★ */
+
+/* 1. 让 Tab 标题栏（缺失影片等小标题）左右留出距离 */
+:deep(.n-tabs-nav) {
+  padding: 0 24px !important;
+  margin-top: 8px; /* 稍微离弹窗顶部主标题远一点点 */
+}
+
+/* 2. 让内部的电影卡片网格不要贴边，四周留出舒适的边距 */
+:deep(.n-tab-pane) {
+  padding: 16px 24px 24px 24px !important;
+  box-sizing: border-box;
+}
+
+/* 确保标签页内容超出时可以优雅滚动，滚动条贴边而卡片不贴边 */
+:deep(.n-tabs-pane-wrapper) {
+  flex-grow: 1;
+  overflow-y: auto;
+}
+
+/* 3. 移动端稍微减小间距，节约屏幕空间 */
+@media (max-width: 768px) {
+  :deep(.n-tabs-nav) {
+    padding: 0 16px !important;
+  }
+  :deep(.n-tab-pane) {
+    padding: 12px 16px 20px 16px !important;
+  }
+}
 </style>
