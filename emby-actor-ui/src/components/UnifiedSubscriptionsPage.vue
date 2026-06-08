@@ -193,7 +193,7 @@
                         <template #icon><n-icon :component="CloudDownloadIcon" /></template>
                       </n-button>
                     </template>
-                    影巢搜索
+                    云搜索
                   </n-tooltip>
 
                   <n-tooltip><template #trigger><n-button text tag="a" :href="getTMDbLink(item)" target="_blank"><template #icon><n-icon :component="TMDbIcon" size="18" /></template></n-button></template>TMDb</n-tooltip>
@@ -516,7 +516,8 @@ const SOURCE_TYPE_MAP = {
   'manual_admin_op': '手动处理',
   'auto_ignored': '自动忽略',
   'gap_scan': '缺集的季',
-  'scan_old_seasons_backfill': '补全旧季'
+  'scan_old_seasons_backfill': '补全旧季',
+  'revived_season': '新季上线'
 };
 
 const sourceFilterOptions = computed(() => {

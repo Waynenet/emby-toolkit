@@ -7,6 +7,7 @@ import math
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List
 
 import requests
@@ -434,6 +435,49 @@ def _center_nested_parts_for_gate(source: Dict[str, Any]) -> List[Dict[str, Any]
     return out
 
 
+def _source_is_tv_for_runtime_tags(source_info: Dict[str, Any]) -> bool:
+    """短剧/纯净版只对电视剧资源生效。
+
+    Movie 即使物理时长低于 25 分钟，也不能被打短剧/纯净版标签；
+    中心消费门禁同样只在明确是 Series/Season/Episode/season_hub 时拦截。
+    """
+    if not isinstance(source_info, dict):
+        return False
+
+    parts = _center_nested_parts_for_gate(source_info)
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+
+        raw = part.get('raw_ffprobe_json') if isinstance(part.get('raw_ffprobe_json'), dict) else part
+        etk = raw.get('_etk') if isinstance(raw, dict) and isinstance(raw.get('_etk'), dict) else {}
+
+        item_type = str(
+            part.get('item_type')
+            or part.get('share_item_type')
+            or part.get('media_type')
+            or part.get('type')
+            or etk.get('item_type')
+            or etk.get('type')
+            or ''
+        ).strip().lower()
+        source_kind = str(part.get('source_kind') or part.get('kind') or '').strip().lower()
+        source_id = str(part.get('source_id') or part.get('center_source_id') or '').strip().lower()
+
+        if item_type in {'series', 'season', 'episode', 'tv'}:
+            return True
+        if source_kind in {'season', 'episode', 'episode_group', 'completed_season', 'season_hub'}:
+            return True
+        if source_id.startswith(('season_hub:', 'episode:', 'completed_season:')):
+            return True
+        if part.get('season_number') not in (None, '') or part.get('episode_number') not in (None, ''):
+            return True
+        if part.get('parent_series_tmdb_id') or part.get('series_tmdb_id'):
+            return True
+
+    return False
+
+
 def _center_flag_meta_for_gate(source: Dict[str, Any], flag_key: str, meta_key: str) -> Dict[str, Any]:
     for part in _center_nested_parts_for_gate(source):
         meta = _json_obj(part.get(meta_key))
@@ -446,10 +490,11 @@ def _center_flag_meta_for_gate(source: Dict[str, Any], flag_key: str, meta_key: 
 def _shared_transfer_gate(source: Dict[str, Any]) -> Dict[str, Any]:
     cfg = settings_db.get_shared_resource_config() or {}
     title = str((source or {}).get('title') or (source or {}).get('file_name') or (source or {}).get('source_id') or '').strip() or '该资源'
-    if _cfg_bool(cfg.get('p115_shared_block_clean_version_transfer'), False):
+    is_tv_resource = _source_is_tv_for_runtime_tags(source or {})
+    if is_tv_resource and _cfg_bool(cfg.get('p115_shared_block_clean_version_transfer'), False):
         if _center_flag_meta_for_gate(source or {}, 'is_clean_version', 'clean_version_meta_json'):
             return {'ok': False, 'reason': 'blocked_clean_version', 'message': f'已开启“不秒传纯净版”，跳过《{title}》。'}
-    if _cfg_bool(cfg.get('p115_shared_block_short_drama_transfer'), False):
+    if is_tv_resource and _cfg_bool(cfg.get('p115_shared_block_short_drama_transfer'), False):
         if _center_flag_meta_for_gate(source or {}, 'is_short_drama', 'short_drama_meta_json'):
             return {'ok': False, 'reason': 'blocked_short_drama', 'message': f'已开启“不秒传短剧”，跳过《{title}》。'}
     return {'ok': True}
@@ -991,6 +1036,24 @@ def _build_raw_ffprobe_summary_for_center(raw: Dict[str, Any], item: Dict[str, A
         return {}
 
 
+
+
+def _summary_json_usable_for_center(summary: Dict[str, Any]) -> bool:
+    """中心资源库展示摘要必须非空且包含至少一个可展示字段。"""
+    if not isinstance(summary, dict) or not summary:
+        return False
+    for key in (
+        'resolution', 'width', 'height', 'video_codec', 'codec', 'video_display',
+        'fps', 'frame_rate', 'bitrate', 'audio_list', 'subtitle_list', 'audios', 'subtitles',
+    ):
+        value = summary.get(key)
+        if value in (None, '', [], {}):
+            continue
+        if isinstance(value, (int, float)) and float(value) <= 0:
+            continue
+        return True
+    return False
+
 def _prepare_raw_upload_entry(file_info: Dict[str, Any]) -> Dict[str, Any]:
     sha1 = _norm_sha1(file_info.get('sha1'))
     if not sha1:
@@ -1000,17 +1063,22 @@ def _prepare_raw_upload_entry(file_info: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     final_size = _file_size_from_cache(file_info) or _infer_size_from_raw(raw) or None
     summary_json = _build_raw_ffprobe_summary_for_center(raw, file_info, final_size or 0)
-    if summary_json:
-        logger.debug(
-            f"  ➜ [共享资源] 已生成中心格式化 MediaInfo 摘要: "
-            f"sha1={sha1[:8]}..., formatted_by={summary_json.get('formatted_by') or '-'}, "
-            f"audio={summary_json.get('audio_count')}, subtitle={summary_json.get('subtitle_count')}"
+    if not _summary_json_usable_for_center(summary_json):
+        logger.warning(
+            f"  ➜ [共享资源] RAW 存在但无法生成中心展示摘要，拒绝上传/登记: "
+            f"{file_info.get('file_name') or file_info.get('name') or sha1}"
         )
+        return {}
+    logger.debug(
+        f"  ➜ [共享资源] 已生成中心格式化 MediaInfo 摘要: "
+        f"sha1={sha1[:8]}..., formatted_by={summary_json.get('formatted_by') or '-'}, "
+        f"audio={summary_json.get('audio_count')}, subtitle={summary_json.get('subtitle_count')}"
+    )
     return {
         'sha1': sha1,
         'size': final_size,
         'raw_ffprobe_json': raw,
-        'summary_json': summary_json or None,
+        'summary_json': summary_json,
     }
 
 
@@ -1053,6 +1121,55 @@ def _upload_raw_batch(client: SharedCenterClient, files: List[Dict[str, Any]]) -
     return {'ok': not errors, 'uploaded': uploaded, 'count': len(uploaded), 'errors': errors}
 
 
+
+
+def _raw_batch_missing_for_files(files: List[Dict[str, Any]], uploaded_sha1s: Dict[str, bool]) -> List[Dict[str, Any]]:
+    missing = []
+    seen = set()
+    uploaded_sha1s = uploaded_sha1s or {}
+    for f in files or []:
+        sha1 = _norm_sha1((f or {}).get('sha1'))
+        if not sha1 or sha1 in seen:
+            continue
+        seen.add(sha1)
+        if not uploaded_sha1s.get(sha1):
+            missing.append({'sha1': sha1, 'file_name': (f or {}).get('file_name') or (f or {}).get('name') or sha1})
+    return missing
+
+
+def _center_raw_need_repair(client: SharedCenterClient, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sha1s = []
+    by_sha1 = {}
+    for f in files or []:
+        sha1 = _norm_sha1((f or {}).get('sha1'))
+        if sha1 and sha1 not in by_sha1:
+            by_sha1[sha1] = f
+            sha1s.append(sha1)
+    if not sha1s:
+        return []
+    try:
+        resp = client.raw_batch(sha1s)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源维护] 查询中心 RAW 状态失败: {e}")
+        return []
+    need = []
+    missing = set(_norm_sha1(x) for x in (resp.get('missing') or []) if _norm_sha1(x))
+    for sha1 in missing:
+        f = by_sha1.get(sha1) or {}
+        need.append({'sha1': sha1, 'file_name': f.get('file_name') or f.get('name') or sha1, 'reason': 'center_raw_missing'})
+    for item in resp.get('items') or []:
+        sha1 = _norm_sha1((item or {}).get('sha1'))
+        if not sha1:
+            continue
+        if item.get('raw_ready') is False:
+            f = by_sha1.get(sha1) or {}
+            need.append({'sha1': sha1, 'file_name': f.get('file_name') or f.get('name') or sha1, 'reason': item.get('raw_ready_reason') or 'center_raw_not_ready'})
+            continue
+        if not _summary_json_usable_for_center((item or {}).get('summary_json') or {}):
+            f = by_sha1.get(sha1) or {}
+            need.append({'sha1': sha1, 'file_name': f.get('file_name') or f.get('name') or sha1, 'reason': 'center_summary_missing'})
+    return need
+
 def _upload_raw_if_needed(client: SharedCenterClient, file_info: Dict[str, Any]) -> bool:
     entry = _prepare_raw_upload_entry(file_info)
     if not entry:
@@ -1061,24 +1178,33 @@ def _upload_raw_if_needed(client: SharedCenterClient, file_info: Dict[str, Any])
     return True
 
 
-def _file_payload_common(file_info: Dict[str, Any], raw_uploaded: bool = False) -> Dict[str, Any]:
+def _file_payload_common(file_info: Dict[str, Any], raw_uploaded: bool = False, animation_meta: Dict[str, Any] = None) -> Dict[str, Any]:
     raw = _raw_for_file(file_info) if raw_uploaded else {}
     sig = _media_signature(raw, file_info) if raw else {}
+    sig = _apply_animation_tag(sig, animation_meta)
     preid = _ensure_file_preid(file_info)
+    # size 不能只信 p115_filesystem_cache。第三方 STRM/旧库补齐 RAW 时，
+    # cache 可能缺 size，但 RAW 里通常有 MediaSourceInfo.Size / format.size。
+    # 如果这里写 None，中心端整季 total_size 会被 0 或单集大小污染。
+    final_size = _file_size_from_cache(file_info) or (_infer_size_from_raw(raw) if raw else 0) or 0
+    if final_size > 0:
+        file_info['size'] = final_size
+    rapid_meta = {
+        'fid': file_info.get('fid') or file_info.get('file_id') or '',
+        'pick_code': file_info.get('pick_code') or file_info.get('pc') or '',
+        'relative_path': file_info.get('relative_path') or '',
+        'preid': preid or '',
+    }
+    rapid_meta = _apply_animation_tag(rapid_meta, animation_meta)
     return {
         'sha1': _norm_sha1(file_info.get('sha1')),
         'preid': preid or None,
-        'size': _file_size_from_cache(file_info) or None,
+        'size': final_size or None,
         'file_name': file_info.get('file_name') or file_info.get('name') or '',
         'quality': sig.get('resolution') or '',
         'has_raw_ffprobe': bool(raw_uploaded),
         'media_signature_json': sig,
-        'rapid_meta_json': {
-            'fid': file_info.get('fid') or file_info.get('file_id') or '',
-            'pick_code': file_info.get('pick_code') or file_info.get('pc') or '',
-            'relative_path': file_info.get('relative_path') or '',
-            'preid': preid or '',
-        },
+        'rapid_meta_json': rapid_meta,
     }
 
 
@@ -1262,6 +1388,52 @@ def _short_drama_source_has_animation_genre(source_info: Dict[str, Any]) -> bool
         _SHORT_DRAMA_GENRE_CACHE[cache_key] = False
         return False
 
+
+def _animation_meta_for_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """生成中心资源库动漫标签。
+
+    复用短剧动画门禁的 TMDb genres_json 判断：只要媒体类型包含 TMDb 动画类型
+    id=16 / Animation / 动画 / 动漫，就给中心源写入 is_animation。
+    标签写进 media_signature_json / rapid_meta_json，避免中心端额外建列。
+    """
+    hit = _short_drama_source_has_animation_genre(candidate or {})
+    return {
+        'is_animation': bool(hit),
+        'animation_checked': True,
+        'reason': 'tmdb_genres_animation' if hit else 'tmdb_genres_not_animation',
+        'source': 'local_media_metadata.genres_json',
+        'genres_json_contains_animation': bool(hit),
+    }
+
+
+def _apply_animation_tag(meta: Dict[str, Any], animation_meta: Dict[str, Any] = None) -> Dict[str, Any]:
+    out = dict(meta or {})
+    animation_meta = animation_meta if isinstance(animation_meta, dict) else {}
+    if animation_meta.get('animation_checked'):
+        out['is_animation'] = bool(animation_meta.get('is_animation'))
+        out['animation_meta_json'] = animation_meta
+    labels = list(out.get('tag_labels') or []) if isinstance(out.get('tag_labels'), list) else []
+    if animation_meta.get('is_animation') and '动漫' not in labels:
+        labels.append('动漫')
+    if labels:
+        out['tag_labels'] = labels
+    return out
+
+
+def _apply_completed_certified_tag(meta: Dict[str, Any], completed_meta: Dict[str, Any] = None) -> Dict[str, Any]:
+    out = dict(meta or {})
+    completed_meta = completed_meta if isinstance(completed_meta, dict) else {}
+    if completed_meta.get('is_completed_certified'):
+        out['is_completed_certified'] = True
+        out['is_completed'] = True
+        out['completed_certified_meta_json'] = completed_meta
+        labels = list(out.get('tag_labels') or []) if isinstance(out.get('tag_labels'), list) else []
+        if '已完结' not in labels:
+            labels.append('已完结')
+        out['tag_labels'] = labels
+    return out
+
+
 def _short_drama_meta_from_runtime(
     runtime_minutes: float,
     *,
@@ -1297,8 +1469,23 @@ def _short_drama_meta_from_runtime(
 
 
 def _short_drama_meta_from_raw(raw: Dict[str, Any], source_info: Dict[str, Any] = None) -> Dict[str, Any]:
+    runtime = _physical_runtime_minutes_from_raw(raw)
+    checked = runtime > 0
+    if not _source_is_tv_for_runtime_tags(source_info or {}):
+        return {
+            'is_short_drama': False,
+            'short_drama_checked': False,
+            'reason': 'non_tv_skipped',
+            'runtime_minutes': round(runtime, 2) if checked else None,
+            'max_runtime_minutes': _SHORT_DRAMA_MAX_RUNTIME_MINUTES,
+            'runtime_source': 'raw_ffprobe',
+            'tv_type_required': True,
+            'genre_gate_checked': False,
+            'genre_gate_passed': None,
+            'genres_json_contains_animation': False,
+        }
     return _short_drama_meta_from_runtime(
-        _physical_runtime_minutes_from_raw(raw),
+        runtime,
         source='raw_ffprobe',
         animation_genre=_short_drama_source_has_animation_genre(source_info or {}),
     )
@@ -1315,6 +1502,18 @@ def _apply_short_drama_meta(summary: Dict[str, Any], raw: Dict[str, Any], source
 
 
 def _detect_short_drama_for_completed_season(candidate: Dict[str, Any], completed_files: List[Dict[str, Any]], source_files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not _source_is_tv_for_runtime_tags(candidate or {}):
+        return {
+            'is_short_drama': False,
+            'short_drama_checked': False,
+            'reason': 'non_tv_skipped',
+            'comparable_count': 0,
+            'max_runtime_minutes': _SHORT_DRAMA_MAX_RUNTIME_MINUTES,
+            'tv_type_required': True,
+            'genre_gate_checked': False,
+            'genre_gate_passed': None,
+            'genres_json_contains_animation': False,
+        }
     if _short_drama_source_has_animation_genre(candidate or {}):
         return {
             'is_short_drama': False,
@@ -1492,6 +1691,13 @@ def _detect_clean_version_for_completed_season(
     - 只生成中心端标签，消费端不再二次兜底识别。
     """
     candidate = dict(candidate or {})
+    if not _source_is_tv_for_runtime_tags(candidate):
+        return {
+            'is_clean_version': False,
+            'clean_version_checked': False,
+            'reason': 'non_tv_skipped',
+            'tv_type_required': True,
+        }
     parent = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
     season = _safe_int_or_none(candidate.get('season_number'))
     if not parent or season is None:
@@ -1627,6 +1833,64 @@ def _completed_status_from_files(files: List[Dict[str, Any]], expected_count: in
     return {'status': 'available', 'message': '完结季一致性校验通过'}
 
 
+
+
+_COMPLETED_CONSISTENCY_TRANSIENT_REASONS = {'repair_error', 'check_error', 'exception'}
+
+
+def _completed_season_consistency_gate(candidate: Dict[str, Any], *, log_result: bool = True) -> Dict[str, Any]:
+    """完结季登记前的硬门禁。
+
+    连载季不进这个门禁；完结季必须通过 helpers.check_season_consistency，
+    未通过就禁止向中心登记 completed_season_source。维护任务可复用本结果，
+    对已经登记过但仍不合格的完结季源做中心下架 + 本地删除。
+    """
+    candidate = _normalize_series_candidate_identity(dict(candidate or {}))
+    item_type = str(candidate.get('item_type') or '').strip()
+    if item_type != 'Season' or not _candidate_is_completed_season(candidate, source_provider=candidate.get('source_provider') or ''):
+        return {'ok': True, 'skipped': True, 'reason': 'not_completed_season'}
+
+    try:
+        consistency = shared_share_db.repair_candidate_fingerprints(
+            {**candidate, '_require_expected_episode_count': True},
+            log_result=log_result,
+        )
+    except Exception as e:
+        consistency = {'ok': False, 'reason': 'check_error', 'message': str(e)}
+
+    if isinstance(consistency, dict) and consistency.get('ok'):
+        return {
+            'ok': True,
+            'reason': consistency.get('reason') or 'passed',
+            'message': consistency.get('message') or '完结季一致性校验通过',
+            'consistency': consistency,
+        }
+
+    reason = str((consistency or {}).get('reason') or 'consistency_failed')
+    message = str((consistency or {}).get('message') or reason).strip()
+    title = _maintenance_candidate_label(candidate)
+    return {
+        'ok': False,
+        'reason': reason,
+        'message': f'完结季一致性校验未通过，禁止登记中心：{title}，{message}',
+        'consistency': consistency or {},
+        'final_failure': reason not in _COMPLETED_CONSISTENCY_TRANSIENT_REASONS,
+    }
+
+
+def _completed_gate_status_from_consistency(consistency: Dict[str, Any]) -> Dict[str, Any]:
+    """把严格一致性结果映射成旧 completed_season_source status 口径。"""
+    consistency = consistency if isinstance(consistency, dict) else {}
+    if consistency.get('ok'):
+        return {'status': 'available', 'message': consistency.get('message') or '完结季一致性校验通过'}
+    reason = str(consistency.get('reason') or '')
+    if reason in ('episode_count_insufficient', 'expected_episode_count_missing'):
+        return {'status': 'incomplete', 'message': consistency.get('message') or '完结季本地集数不足/缺少官方总集数'}
+    if reason in ('season_asset_inconsistent', 'asset_details_missing'):
+        return {'status': 'inconsistent', 'message': consistency.get('message') or '完结季一致性校验失败'}
+    return {'status': 'inconsistent', 'message': consistency.get('message') or '完结季一致性校验异常'}
+
+
 def _disable_local_episode_sources_for_completed_season(parent_series_tmdb_id: str, season_number, *, center_client: SharedCenterClient = None) -> int:
     """完结季包可用后，停用本机同季单集源。
 
@@ -1720,6 +1984,8 @@ def _candidate_is_completed_season(candidate: Dict[str, Any], *, source_provider
     candidate = dict(candidate or {})
     if str(candidate.get('item_type') or '').strip() != 'Season':
         return False
+    if _cfg_bool(candidate.get('_force_completed_season'), False):
+        return True
     provider = str(source_provider or candidate.get('source_provider') or '').strip().lower()
     if provider == 'rapid_completed_season':
         return True
@@ -1806,23 +2072,22 @@ def _series_identity_from_db(parent_series_tmdb_id: str, season_number=None) -> 
                         if total and total > 0:
                             out['expected_episode_count'] = total
 
-                    if not out.get('expected_episode_count'):
-                        cur.execute(
-                            """
-                            SELECT COUNT(DISTINCT episode_number)::integer AS n
-                            FROM media_metadata
-                            WHERE parent_series_tmdb_id=%s
-                              AND item_type='Episode'
-                              AND season_number=%s
-                              AND in_library=TRUE
-                              AND episode_number IS NOT NULL
-                            """,
-                            (parent, season),
-                        )
-                        cnt = cur.fetchone()
-                        count = _safe_int((cnt or {}).get('n'), 0) if cnt else 0
-                        if count > 0:
-                            out['expected_episode_count'] = count
+                    cur.execute(
+                        """
+                        SELECT COUNT(DISTINCT episode_number)::integer AS n
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id=%s
+                          AND item_type='Episode'
+                          AND season_number=%s
+                          AND in_library=TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (parent, season),
+                    )
+                    cnt = cur.fetchone()
+                    count = _safe_int((cnt or {}).get('n'), 0) if cnt else 0
+                    if count > 0:
+                        out['local_episode_count'] = count
     except Exception as e:
         logger.debug(f"  ➜ [共享资源] 查询剧集公共标题失败: tmdb={parent}, season={season}, err={e}")
     return out
@@ -1873,12 +2138,22 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
         return {'ok': False, 'message': '共享资源未启用或中心未配置'}
     candidate = _normalize_series_candidate_identity(dict(candidate or {}))
     item_type = str(candidate.get('item_type') or '').strip()
+    raw_repair_only = bool(candidate.get('_raw_repair_only'))
+    should_register_completed = item_type == 'Season' and _candidate_is_completed_season(
+        candidate,
+        source_provider=source_provider,
+        files=None,
+    )
+    allow_consistency_check = bool(should_register_completed)
+
     files = shared_share_db.collect_files_for_candidate(candidate)
-    if not files and item_type in ('Season', 'Episode'):
+    repair_result = {}
+    if not files and allow_consistency_check:
+        # 只有真正登记完结季包时，才允许走一致性/指纹修复链路。
+        # RAW/summary 补齐、维护任务、手动重新登记只做已有本地文件的 RAW 上传，
+        # 不能在维护任务里对所有连载季刷一致性校验。
         repair_result = shared_share_db.repair_candidate_fingerprints(candidate, log_result=True)
         files = shared_share_db.collect_files_for_candidate(candidate)
-    else:
-        repair_result = {}
     if not files:
         return {
             'ok': False,
@@ -1886,16 +2161,61 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             'fingerprint_repair': repair_result or {},
         }
 
+    completed_consistency_gate = {}
+    if allow_consistency_check:
+        completed_consistency_gate = _completed_season_consistency_gate(candidate, log_result=True)
+        if not completed_consistency_gate.get('ok'):
+            return {
+                'ok': False,
+                'skipped': True,
+                'reason': 'completed_season_consistency_failed',
+                'message': completed_consistency_gate.get('message') or '完结季一致性校验未通过，禁止登记中心',
+                'consistency': completed_consistency_gate.get('consistency') or {},
+                'fingerprint_repair': repair_result or {},
+            }
+
+    # RAW 摘要生成发生在正式登记前，先把候选类型补进 file_info。
+    # 否则电影/剧集的时长标签门禁拿不到 item_type，容易把电影短片误判成短剧。
+    candidate_tmdb_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
+    if item_type == 'Movie':
+        candidate_tmdb_id = str(candidate.get('tmdb_id') or '').strip()
     for _f in files:
+        if item_type == 'Movie':
+            _f.setdefault('item_type', 'Movie')
+            _f.setdefault('tmdb_id', candidate_tmdb_id)
+        elif item_type in ('Season', 'Episode'):
+            _f.setdefault('item_type', 'Episode')
+            _f.setdefault('tmdb_id', candidate_tmdb_id)
+            _f.setdefault('parent_series_tmdb_id', candidate_tmdb_id)
+            _f.setdefault('series_tmdb_id', candidate_tmdb_id)
+            _f.setdefault('season_number', candidate.get('season_number'))
+            if item_type == 'Episode':
+                _f.setdefault('episode_number', candidate.get('episode_number'))
         _ensure_file_preid(_f)
     root = shared_share_db.candidate_root_from_files(files)
     client = SharedCenterClient()
     raw_batch_result = _upload_raw_batch(client, files)
     uploaded_sha1s = raw_batch_result.get('uploaded') or {}
-    results = []
     uploaded = int(raw_batch_result.get('count') or 0)
     errors = list(raw_batch_result.get('errors') or [])
-    should_register_completed = item_type == 'Season' and _candidate_is_completed_season(candidate, source_provider=source_provider, files=files)
+    raw_missing = _raw_batch_missing_for_files(files, uploaded_sha1s)
+    if raw_missing:
+        names = '、'.join([str(x.get('file_name') or x.get('sha1')) for x in raw_missing[:5]])
+        if len(raw_missing) > 5:
+            names += f" 等 {len(raw_missing)} 个"
+        return {
+            'ok': False,
+            'message': f'RAW/summary_json 缺失，已拒绝登记中心：{names}',
+            'raw_uploaded_count': uploaded,
+            'missing_raw': raw_missing,
+            'errors': errors,
+            'fingerprint_repair': repair_result or {},
+        }
+    animation_meta = _animation_meta_for_candidate(candidate)
+    results = []
+    if item_type == 'Season' and not should_register_completed:
+        should_register_completed = _candidate_is_completed_season(candidate, source_provider=source_provider, files=files)
+        allow_consistency_check = bool(should_register_completed)
     register_episode_pool = not (item_type == 'Season' and should_register_completed)
     tmdb_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
     if item_type == 'Movie':
@@ -1911,7 +2231,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
         try:
             sha_for_raw = _norm_sha1(f.get('sha1'))
             raw_ok = bool(uploaded_sha1s.get(sha_for_raw))
-            common = _file_payload_common(f, raw_uploaded=raw_ok)
+            common = _file_payload_common(f, raw_uploaded=raw_ok, animation_meta=animation_meta)
             if item_type == 'Movie':
                 payload = {
                     'tmdb_id': tmdb_id,
@@ -1980,14 +2300,18 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                 continue
             raw = _raw_for_file(f)
             sig = _media_signature(raw, f) if raw else {}
+            sig = _apply_animation_tag(sig, animation_meta)
             preid = _ensure_file_preid(f)
+            final_size = _file_size_from_cache(f) or _infer_size_from_raw(raw) or 0
+            if final_size > 0:
+                f['size'] = final_size
             completed_files.append({
-                'episode_number': _safe_int(f.get('episode_number'), 0), 'sha1': sha1, 'preid': preid or None, 'size': _file_size_from_cache(f) or None,
+                'episode_number': _safe_int(f.get('episode_number'), 0), 'sha1': sha1, 'preid': preid or None, 'size': final_size or None,
                 'file_name': f.get('file_name') or '', 'quality': sig.get('resolution') or '', 'media_signature_json': sig,
-                'rapid_meta_json': {'fid': f.get('fid'), 'pick_code': f.get('pick_code'), 'relative_path': f.get('relative_path'), 'preid': preid or ''},
+                'rapid_meta_json': _apply_animation_tag({'fid': f.get('fid'), 'pick_code': f.get('pick_code'), 'relative_path': f.get('relative_path'), 'preid': preid or ''}, animation_meta),
             })
         expected = _safe_int(candidate.get('expected_episode_count') or candidate.get('total_episodes'), 0)
-        consistency = shared_share_db.repair_candidate_fingerprints(candidate, log_result=True)
+        consistency = (completed_consistency_gate.get('consistency') if isinstance(completed_consistency_gate, dict) else {}) or {}
         status = _completed_status_from_files(completed_files, expected)
         common_signature = {}
         for _cf in completed_files:
@@ -1997,18 +2321,11 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                 break
         short_detection = _detect_short_drama_for_completed_season(candidate, completed_files, files)
         common_signature = dict(common_signature or {})
+        common_signature = _apply_animation_tag(common_signature, animation_meta)
         common_signature['is_short_drama'] = bool(short_detection.get('is_short_drama'))
         common_signature['short_drama_meta_json'] = short_detection
         if isinstance(consistency, dict) and consistency:
-            reason = consistency.get('reason')
-            if consistency.get('ok'):
-                status = {'status': 'available', 'message': consistency.get('message') or '完结季一致性校验通过'}
-            elif reason == 'episode_count_insufficient':
-                status = {'status': 'incomplete', 'message': consistency.get('message') or '完结季本地集数不足'}
-            elif reason in ('season_asset_inconsistent', 'asset_details_missing'):
-                status = {'status': 'inconsistent', 'message': consistency.get('message') or '完结季一致性校验失败'}
-            elif reason not in ('not_season', None):
-                status = {'status': 'inconsistent', 'message': consistency.get('message') or '完结季一致性校验异常'}
+            status = _completed_gate_status_from_consistency(consistency)
         clean_detection = {'is_clean_version': False, 'clean_version_checked': False, 'reason': 'status_not_available'}
         if status.get('status') == 'available':
             clean_detection = _detect_clean_version_for_completed_season(
@@ -2038,6 +2355,22 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             )
         is_clean_version = bool(clean_detection.get('is_clean_version'))
         clean_confidence = clean_detection.get('clean_version_confidence') if clean_detection.get('clean_version_checked') else None
+        is_completed_certified = status.get('status') == 'available'
+        completed_certified_meta = {
+            'is_completed_certified': bool(is_completed_certified),
+            'certified_by': 'season_consistency_check',
+            'status': status.get('status'),
+            'message': status.get('message') or '',
+            'expected_episode_count': expected or None,
+            'file_count': len(completed_files),
+            'consistency': consistency if isinstance(consistency, dict) else {},
+        } if is_completed_certified else {}
+        common_signature = _apply_completed_certified_tag(common_signature, completed_certified_meta)
+        season_rapid_meta = _apply_animation_tag({
+            'root_fid': root.get('root_fid'),
+            'root_name': root.get('root_name'),
+        }, animation_meta)
+        season_rapid_meta = _apply_completed_certified_tag(season_rapid_meta, completed_certified_meta)
         try:
             payload = {
                 'tmdb_id': tmdb_id,
@@ -2054,6 +2387,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                 'clean_version_confidence': clean_confidence,
                 'clean_version_meta_json': clean_detection,
                 'media_signature_json': common_signature,
+                'rapid_meta_json': season_rapid_meta,
                 'files': completed_files,
             }
             completed_resp = client.register_completed_season_source(payload)
@@ -2066,7 +2400,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                 'status': status['status'], 'center_status': 'reported', 'manifest_hash': payload['manifest_hash'],
                 'file_count': len(completed_files), 'total_size': sum(_safe_int(x.get('size'), 0) for x in completed_files),
                 'is_clean_version': payload['is_clean_version'], 'clean_version_confidence': payload['clean_version_confidence'],
-                'clean_version_meta_json': payload['clean_version_meta_json'], 'raw_json': {'candidate': candidate, 'center_response': completed_resp, 'status': status, 'consistency': consistency, 'clean_detection': clean_detection, 'short_detection': short_detection, 'root': root},
+                'clean_version_meta_json': payload['clean_version_meta_json'], 'raw_json': {'candidate': candidate, 'center_response': completed_resp, 'status': status, 'consistency': consistency, 'clean_detection': clean_detection, 'short_detection': short_detection, 'animation_meta': animation_meta, 'completed_certified_meta': completed_certified_meta, 'root': root},
             })
             shared_share_db.replace_source_files(local['id'], [{**f, 'raw_ffprobe_uploaded': bool(_raw_for_file(f))} for f in files])
             if status.get('status') == 'available':
@@ -2184,32 +2518,230 @@ def trigger_completed_season_pack_share_task(processor=None, *, parent_series_tm
     return result
 
 
-def share_all_library(max_items: int = 100000) -> Dict[str, Any]:
+def _task_status(progress: int, message: str) -> None:
+    try:
+        task_manager.update_status_from_thread(progress, message)
+    except Exception:
+        pass
+
+
+def share_all_library(processor=None, max_items: int = 100000) -> Dict[str, Any]:
+    """一键登记媒体库。
+
+    扫描阶段通过 progress_callback 持续更新顶部任务栏；登记阶段再逐个更新进度。
+    兼容旧调用 share_all_library(1000)，任务系统调用时第一个参数为 processor。
+    """
+    if isinstance(processor, (int, float)) and max_items == 100000:
+        max_items = int(processor)
+        processor = None
+
     if not _enabled():
+        _task_status(0, '共享资源未启用，跳过一键登记。')
         return {'ok': False, 'message': '共享资源未启用'}
     if not _FULL_SHARE_LOCK.acquire(blocking=False):
+        _task_status(0, '全库登记任务正在运行，本次跳过。')
         return {'ok': False, 'message': '全库登记任务正在运行'}
     try:
-        candidates = shared_share_db.all_library_share_candidates(limit=max_items)
+        _task_status(1, '正在扫描本地媒体库，并加载已有有效共享索引...')
+        logger.info('  ➜ [共享资源] 一键登记媒体库开始：扫描本地媒体库，增量排除已有有效共享。')
+
+        def _scan_progress(progress: int, message: str):
+            # 扫描阶段只占用 1%~10%；登记阶段从 10% 推到 95%。
+            mapped = max(1, min(10, int(progress or 1)))
+            _task_status(mapped, message)
+
+        candidate_stats = shared_share_db.all_library_share_candidates(
+            limit=max_items,
+            exclude_existing=True,
+            return_stats=True,
+            progress_callback=_scan_progress,
+        )
+        candidates = candidate_stats.get('items') or []
         total = len(candidates)
+        skipped_existing = int(candidate_stats.get('skipped_existing') or 0)
+        skipped_duplicate = int(candidate_stats.get('skipped_duplicate') or 0)
+        skipped_completed_episode = int(candidate_stats.get('skipped_completed_episode') or 0)
+        scanned = int(candidate_stats.get('scanned') or 0)
+        existing_summary = candidate_stats.get('existing_index') or {}
+        timings = candidate_stats.get('timings') or {}
+
+        _task_status(10, f'扫描完成：媒体候选 {scanned}，已排除有效共享 {skipped_existing}，已屏蔽完结季分集 {skipped_completed_episode}，待登记 {total}。')
+        logger.info(
+            '  ➜ [共享资源] 一键登记媒体库扫描完成：扫描 %s，跳过已有有效共享 %s，屏蔽完结季分集 %s，跳过重复候选 %s，待登记 %s，已有索引=%s，耗时=%s',
+            scanned, skipped_existing, skipped_completed_episode, skipped_duplicate, total, existing_summary, timings,
+        )
+
+        if total <= 0:
+            msg = f'无需登记：扫描 {scanned} 个候选，已排除有效共享 {skipped_existing} 个，已屏蔽完结季分集 {skipped_completed_episode} 个。'
+            _task_status(100, msg)
+            logger.info(f"  ➜ [共享资源] 一键登记媒体库完成：{msg}")
+            return {
+                'ok': True,
+                'total': 0,
+                'success': 0,
+                'failed': 0,
+                'skipped_existing': skipped_existing,
+                'skipped_duplicate': skipped_duplicate,
+                'skipped_completed_episode': skipped_completed_episode,
+                'scanned': scanned,
+                'timings': timings,
+                'message': msg,
+            }
+
         ok = failed = 0
+        skipped_bad_completed = 0
+        items = []
         for idx, cand in enumerate(candidates, 1):
+            if processor is not None and hasattr(processor, 'is_stop_requested') and processor.is_stop_requested():
+                msg = f'任务已中断：已处理 {idx - 1}/{total}，成功 {ok}，失败 {failed}，不合格跳过 {skipped_bad_completed}。'
+                _task_status(max(10, min(99, int(10 + ((idx - 1) / max(total, 1)) * 85))), msg)
+                logger.info(f"  ➜ [共享资源] 一键登记媒体库中断：{msg}")
+                return {
+                    'ok': False,
+                    'cancelled': True,
+                    'total': total,
+                    'success': ok,
+                    'failed': failed,
+                    'skipped_bad_completed': skipped_bad_completed,
+                    'skipped_existing': skipped_existing,
+                    'skipped_duplicate': skipped_duplicate,
+                    'skipped_completed_episode': skipped_completed_episode,
+                    'scanned': scanned,
+                    'items': items[:50],
+                    'timings': timings,
+                    'message': msg,
+                }
+
+            title = cand.get('title') or cand.get('display_title') or cand.get('tmdb_id') or f'候选 {idx}'
+            progress = max(10, min(95, int(10 + ((idx - 1) / max(total, 1)) * 85)))
+            _task_status(progress, f'正在登记 {idx}/{total}：{title}（成功 {ok}，失败 {failed}，不合格跳过 {skipped_bad_completed}，已跳过 {skipped_existing}）')
             try:
                 res = register_candidate_to_center(cand, source_provider='rapid_all_library')
+                is_bad_completed_skip = (
+                    not res.get('ok')
+                    and res.get('reason') == 'completed_season_consistency_failed'
+                )
+                item = {
+                    'title': title,
+                    'ok': bool(res.get('ok')),
+                    'skipped': bool(is_bad_completed_skip),
+                    'reason': res.get('reason') or '',
+                    'message': res.get('message') or '',
+                }
                 if res.get('ok'):
                     ok += 1
+                elif is_bad_completed_skip:
+                    skipped_bad_completed += 1
+                    logger.info(f"  ➜ [共享资源] 一键登记跳过不合格完结季: {title} -> {res.get('message') or ''}")
                 else:
                     failed += 1
-                if idx % 20 == 0:
-                    logger.info(f"  ➜ [共享资源] 一键登记媒体库进度：{idx}/{total}，成功 {ok}，失败 {failed}")
+                items.append(item)
+                if idx % 10 == 0 or idx == total:
+                    _task_status(
+                        max(10, min(95, int(10 + (idx / max(total, 1)) * 85))),
+                        f'一键登记进度：{idx}/{total}，成功 {ok}，失败 {failed}，不合格跳过 {skipped_bad_completed}，已跳过 {skipped_existing}。'
+                    )
+                    logger.info(f"  ➜ [共享资源] 一键登记媒体库进度：{idx}/{total}，成功 {ok}，失败 {failed}，不合格跳过 {skipped_bad_completed}，已跳过 {skipped_existing}")
             except Exception as e:
                 failed += 1
-                logger.warning(f"  ➜ [共享资源] 一键登记媒体库失败: {cand.get('title') or cand.get('tmdb_id')} -> {e}")
-        logger.info(f"  ➜ [共享资源] 一键登记媒体库完成：候选 {total}，成功 {ok}，失败 {failed}")
-        return {'ok': True, 'total': total, 'success': ok, 'failed': failed}
+                items.append({'title': title, 'ok': False, 'message': str(e)})
+                logger.warning(f"  ➜ [共享资源] 一键登记媒体库失败: {title} -> {e}")
+
+        msg = f'一键登记完成：扫描 {scanned}，跳过已有有效共享 {skipped_existing}，屏蔽完结季分集 {skipped_completed_episode}，完结季不合格跳过 {skipped_bad_completed}，登记成功 {ok}，失败 {failed}。'
+        _task_status(100, msg)
+        logger.info(f"  ➜ [共享资源] 一键登记媒体库完成：候选 {total}，成功 {ok}，失败 {failed}，屏蔽完结季分集 {skipped_completed_episode}，完结季不合格跳过 {skipped_bad_completed}，已跳过 {skipped_existing}")
+        return {
+            'ok': True,
+            'total': total,
+            'success': ok,
+            'failed': failed,
+            'skipped_bad_completed': skipped_bad_completed,
+            'skipped_existing': skipped_existing,
+            'skipped_duplicate': skipped_duplicate,
+            'skipped_completed_episode': skipped_completed_episode,
+            'scanned': scanned,
+            'items': items[:50],
+            'timings': timings,
+            'message': msg,
+        }
     finally:
         _FULL_SHARE_LOCK.release()
 
+
+
+def _human_title_from_sign_job(job: Dict[str, Any], fallback: str = '该资源') -> str:
+    """签名日志面向人展示：只保留片名，机器字段放 DEBUG。"""
+    job = job if isinstance(job, dict) else {}
+    for key in ('title', 'display_title', 'media_title', 'name', 'file_name'):
+        value = str(job.get(key) or '').strip()
+        if value:
+            text = value
+            break
+    else:
+        text = str(fallback or '').strip()
+
+    text = text.replace('\\', '/').split('/')[-1].strip()
+    text = re.sub(r'\.(?:mkv|mp4|ts|m2ts|avi|mov|wmv|flv|rmvb|webm|iso)$', '', text, flags=re.IGNORECASE).strip()
+
+    # 常见中心文件名：片名 (年份) · UHD BluRay · HDR10 ...
+    for sep in (' · ', '｜', ' | '):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+            break
+
+    # 兜底：没有“·”时，遇到明显质量标签也截断。避免误砍“片名 - 正片”这类合法标题。
+    quality_match = re.search(
+        r'\s[-–—]\s(?:UHD|BluRay|WEB[- ]?DL|WEBRip|HDTV|DVDRip|HDR10|DoVi|DV|2160p|1080p|720p)\b',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if quality_match:
+        text = text[:quality_match.start()].strip()
+
+    text = re.sub(r'\s*[（(](?:19|20)\d{2}[）)]\s*$', '', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip(' -–—·|｜_')
+    if not text:
+        text = str(fallback or '该资源').strip() or '该资源'
+    return text[:80] + ('…' if len(text) > 80 else '')
+
+
+class _SignNoiseFilter(logging.Filter):
+    """签名任务里压掉 115 客户端的直链成功明细，避免 INFO 日志刷机器字段。"""
+    _NOISE = (
+        '成功获取直链 ->',
+        '成功获取直链：',
+    )
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+            if any(x in msg for x in self._NOISE):
+                return False
+        except Exception:
+            pass
+        return True
+
+
+@contextmanager
+def _suppress_sign_noise_logs():
+    noise_filter = _SignNoiseFilter()
+    target_loggers = [
+        logging.getLogger('handler.p115_service'),
+        logging.getLogger('p115_service'),
+    ]
+    for target in target_loggers:
+        try:
+            target.addFilter(noise_filter)
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        for target in target_loggers:
+            try:
+                target.removeFilter(noise_filter)
+            except Exception:
+                pass
 
 
 def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> Dict[str, Any]:
@@ -2229,16 +2761,23 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
         sha1 = _norm_sha1(job.get('sha1'))
         sign_check = str(job.get('sign_check') or '').strip()
         file_name = str(job.get('file_name') or sha1 or '').strip()
-        logger.info(
-            f"  ➜ [负载均衡签名] 收到中心 sign_job：job_id={job_id}, "
-            f"sha1={sha1[:12]}..., sign_check={sign_check}, requester={job.get('requester_id') or '-'}, file={file_name}"
+        display_title = _human_title_from_sign_job(job, fallback=file_name or sha1 or '该资源')
+        logger.info(f"  ➜ [负载均衡签名] 收到中心派发的签名请求：《{display_title}》")
+        logger.debug(
+            "  ➜ [负载均衡签名] 签名请求详情：job_id=%s, sha1=%s, sign_check=%s, requester=%s, file=%s",
+            job_id or '-',
+            sha1[:12] + '...' if sha1 else '-',
+            sign_check or '-',
+            job.get('requester_id') or '-',
+            file_name or '-',
         )
         try:
             from handler.p115_service import P115Service
             p115 = P115Service.get_client()
             if not p115 or not hasattr(p115, 'rapid_sign_value'):
                 raise RuntimeError('当前 115 客户端不支持 rapid_sign_value')
-            sign_res = p115.rapid_sign_value(job)
+            with _suppress_sign_noise_logs():
+                sign_res = p115.rapid_sign_value(job)
             sign_val = _norm_sha1((sign_res or {}).get('sign_val'))
             if not sign_val:
                 raise RuntimeError(f'未计算出合法 sign_val: {sign_res}')
@@ -2255,13 +2794,23 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
                 },
             }
             submit = client.submit_rapid_sign_job(job_id, submit_payload)
-            logger.info(
-                f"  ➜ [负载均衡签名] sign_job 已回传 sign_val：job_id={job_id}, "
-                f"sign_val={sign_val[:12]}..., bytes={(sign_res or {}).get('byte_len')}"
+            logger.info(f"  ➜ [负载均衡签名] 《{display_title}》的签名已成功获取并回传")
+            logger.debug(
+                "  ➜ [负载均衡签名] 签名回传详情：job_id=%s, sign_val=%s, bytes=%s",
+                job_id or '-',
+                sign_val[:12] + '...' if sign_val else '-',
+                (sign_res or {}).get('byte_len') or '-',
             )
             results.append({'job_id': job_id, 'ok': True, 'submit': submit})
         except Exception as e:
-            logger.warning(f"  ➜ [负载均衡签名] 处理 sign_job 失败：job_id={job_id}, err={e}")
+            logger.warning(f"  ➜ [负载均衡签名] 《{display_title}》的签名获取或回传失败：{e}")
+            logger.debug(
+                "  ➜ [负载均衡签名] 签名失败详情：job_id=%s, sha1=%s, sign_check=%s",
+                job_id or '-',
+                sha1[:12] + '...' if sha1 else '-',
+                sign_check or '-',
+                exc_info=True,
+            )
             try:
                 submit = client.submit_rapid_sign_job(job_id, {'status': 'failed', 'message': str(e)[:1000]})
             except Exception as submit_err:
@@ -2276,7 +2825,7 @@ def _sign_listener_loop():
     而请求端正在同步等待 sign_val。签名任务必须独立长轮询，避免 pending
     阶段因为 holder 没及时领取而被中心误判超时。
     """
-    logger.info('  ➜ [共享签名监听] Rapid v2 sign_job 长轮询监听已启动。')
+    logger.debug('  ➜ [共享签名监听] Rapid v2 sign_job 长轮询监听已启动。')
     while not _LISTENER_STOP.is_set():
         try:
             if not _enabled():
@@ -2290,7 +2839,7 @@ def _sign_listener_loop():
 
 
 def _event_listener_loop():
-    logger.info('  ➜ [共享事件监听] Rapid v2 长轮询监听已启动。')
+    logger.debug('  ➜ [共享事件监听] Rapid v2 长轮询监听已启动。')
     while not _LISTENER_STOP.is_set():
         try:
             if not _enabled():
@@ -2376,6 +2925,457 @@ def _sync_center_credit() -> Dict[str, Any]:
     synced = shared_credit_db.sync_center_credit_ledger(ledger.get('items') or [], device_snapshot=me)
     return {'snapshot': saved, 'synced_ledger': synced}
 
+
+
+
+def _candidate_from_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(row or {})
+    source_kind = str(row.get('source_kind') or '').strip().lower()
+    item_type = str(row.get('item_type') or '').strip()
+    tmdb_id = str(row.get('tmdb_id') or row.get('parent_series_tmdb_id') or row.get('series_tmdb_id') or '').strip()
+    season = _safe_int_or_none(row.get('season_number'))
+    episode = _safe_int_or_none(row.get('episode_number'))
+    if source_kind == 'movie' or item_type == 'Movie':
+        final_type = 'Movie'
+    elif source_kind in ('completed_season', 'episode', 'episode_group') or item_type in ('Season', 'Episode') or season is not None:
+        # Rapid v2 手动补齐/重新登记按“季”粒度处理，避免单集源继续散铺。
+        final_type = 'Season' if season is not None else 'Episode'
+    else:
+        final_type = item_type or 'Movie'
+    candidate = {
+        'tmdb_id': tmdb_id,
+        'parent_series_tmdb_id': tmdb_id if final_type in ('Season', 'Episode') else row.get('parent_series_tmdb_id'),
+        'series_tmdb_id': tmdb_id if final_type in ('Season', 'Episode') else row.get('series_tmdb_id'),
+        'item_type': final_type,
+        'season_number': season,
+        'episode_number': episode if final_type == 'Episode' else None,
+        'title': row.get('title') or row.get('root_name') or row.get('file_name') or '',
+        'release_year': row.get('release_year'),
+        'expected_episode_count': row.get('expected_episode_count') or row.get('total_episodes') or row.get('file_count'),
+        'total_episodes': row.get('expected_episode_count') or row.get('total_episodes') or row.get('file_count'),
+        'sha1': row.get('sha1') if final_type == 'Movie' else None,
+        'file_name': row.get('file_name') if final_type == 'Movie' else None,
+        'root_fid': row.get('root_fid'),
+        'root_name': row.get('root_name'),
+        '_original_source_kind': source_kind,
+        '_original_source_provider': row.get('source_provider') or '',
+        '_original_center_source_id': row.get('center_source_id') or '',
+    }
+    # 完结季源重新登记必须继续走 completed_season_source，不能降级成连载分集池。
+    # 否则中心会出现同季公共 season_hub，甚至用单集版本摘要/大小污染整季展示。
+    if source_kind == 'completed_season':
+        candidate['watching_status'] = 'Completed'
+        candidate['_force_completed_season'] = True
+    return {k: v for k, v in candidate.items() if v not in (None, '')}
+
+
+def _reregister_provider_for_row(row: Dict[str, Any], requested: str = '') -> str:
+    """重新登记应保持原 provider，避免生成 manual_reregister 影子源。"""
+    row = dict(row or {})
+    source_kind = str(row.get('source_kind') or '').strip().lower()
+    if source_kind == 'completed_season':
+        return 'rapid_completed_season'
+    original = str(row.get('source_provider') or '').strip()
+    requested = str(requested or '').strip()
+    if requested and requested != 'manual_reregister':
+        return requested
+    return original or 'manual_rapid'
+
+
+def reregister_local_source(source_id: int, *, source_provider: str = '') -> Dict[str, Any]:
+    row = shared_share_db.get_local_source(int(source_id or 0))
+    if not row:
+        return {'ok': False, 'message': '本地共享源不存在', 'source_id': source_id}
+    candidate = _candidate_from_local_source(row)
+    # “重新登记”是原共享源的原地修复：重新上传 RAW/summary_json，
+    # provider 保持原值，完结季保持 completed_season_source，避免生成影子源或降级成连载分集池。
+    candidate['_raw_repair_only'] = True
+    provider = _reregister_provider_for_row(row, source_provider)
+    result = register_candidate_to_center(candidate, source_provider=provider)
+    if not result.get('ok'):
+        try:
+            shared_share_db.update_local_source(int(source_id), last_error=result.get('message') or '重新登记失败')
+        except Exception:
+            pass
+    return {'ok': bool(result.get('ok')), 'source_id': source_id, 'candidate': candidate, 'provider': provider, 'result': result, 'message': result.get('message') or ''}
+
+
+
+
+def _maintenance_candidate_label(candidate: Dict[str, Any], fallback: str = '') -> str:
+    """维护任务日志里显示可读片名 + SxxExx，避免只剩成功/失败数字。"""
+    candidate = candidate if isinstance(candidate, dict) else {}
+    title = str(
+        candidate.get('title')
+        or candidate.get('standard_title')
+        or candidate.get('display_title')
+        or candidate.get('series_title')
+        or fallback
+        or candidate.get('tmdb_id')
+        or candidate.get('parent_series_tmdb_id')
+        or '未知资源'
+    ).strip()
+    item_type = str(candidate.get('item_type') or candidate.get('share_item_type') or '').strip()
+    season = _safe_int_or_none(candidate.get('season_number'))
+    episode = _safe_int_or_none(candidate.get('episode_number'))
+    if item_type == 'Episode' and season is not None and episode is not None:
+        suffix = f"S{season:02d}E{episode:02d}"
+        if suffix.lower() not in title.lower():
+            title = f"{title} {suffix}"
+    elif item_type == 'Season' and season is not None:
+        suffix = f"S{season:02d}"
+        if suffix.lower() not in title.lower():
+            title = f"{title} {suffix}"
+    return title
+
+
+def _maintenance_result_reason(result: Dict[str, Any]) -> str:
+    """把登记失败结果压缩成一行日志原因。"""
+    result = result if isinstance(result, dict) else {}
+    parts = []
+    message = str(result.get('message') or '').strip()
+    if message:
+        parts.append(message)
+    missing_raw = result.get('missing_raw') if isinstance(result.get('missing_raw'), list) else []
+    if missing_raw:
+        names = []
+        for item in missing_raw[:3]:
+            if isinstance(item, dict):
+                names.append(str(item.get('file_name') or item.get('sha1') or '').strip())
+            else:
+                names.append(str(item or '').strip())
+        names = [x for x in names if x]
+        parts.append(f"RAW/摘要缺失 {len(missing_raw)} 个" + (f"：{'、'.join(names)}" if names else ''))
+    errors = result.get('errors') if isinstance(result.get('errors'), list) else []
+    if errors:
+        err_texts = []
+        for err in errors[:3]:
+            if isinstance(err, dict):
+                err_texts.append(str(err.get('error') or err.get('message') or err).strip())
+            else:
+                err_texts.append(str(err or '').strip())
+        err_texts = [x for x in err_texts if x]
+        if err_texts:
+            parts.append('错误：' + '；'.join(err_texts))
+    repair = result.get('fingerprint_repair') if isinstance(result.get('fingerprint_repair'), dict) else {}
+    if repair and repair.get('message'):
+        parts.append('指纹体检：' + str(repair.get('message')))
+    if not parts:
+        parts.append(str(result.get('error') or '未知原因'))
+    # 去重并截断，防止中心返回过长内容刷屏。
+    out = []
+    for part in parts:
+        part = str(part or '').strip()
+        if part and part not in out:
+            out.append(part)
+    text = '；'.join(out)
+    return text[:600] + ('...' if len(text) > 600 else '')
+
+def reregister_local_sources(source_ids: List[int], *, source_provider: str = '') -> Dict[str, Any]:
+    rows = []
+    for sid in source_ids or []:
+        try:
+            row = shared_share_db.get_local_source(int(sid))
+        except Exception:
+            row = None
+        if row:
+            rows.append(dict(row))
+    if not rows:
+        return {'ok': False, 'message': '没有找到可重新登记的本地共享源', 'items': []}
+    deduped = []
+    seen = set()
+    for row in rows:
+        cand = _candidate_from_local_source(row)
+        key = (cand.get('item_type'), cand.get('tmdb_id') or cand.get('parent_series_tmdb_id'), cand.get('season_number'), cand.get('episode_number') if cand.get('item_type') == 'Episode' else None, cand.get('sha1') if cand.get('item_type') == 'Movie' else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((row, cand))
+    items = []
+    ok_count = 0
+    failed = 0
+    for row, cand in deduped:
+        cand['_raw_repair_only'] = True
+        provider = _reregister_provider_for_row(row, source_provider)
+        res = register_candidate_to_center(cand, source_provider=provider)
+        if res.get('ok'):
+            ok_count += 1
+        else:
+            failed += 1
+            try:
+                shared_share_db.update_local_source(int(row.get('id') or 0), last_error=res.get('message') or '重新登记失败')
+            except Exception:
+                pass
+        items.append({'id': row.get('id'), 'candidate': cand, 'provider': provider, 'ok': bool(res.get('ok')), 'message': res.get('message') or '', 'result': res})
+    return {
+        'ok': ok_count > 0,
+        'success_count': ok_count,
+        'failed_count': failed,
+        'items': items,
+        'message': f'重新登记完成：成功 {ok_count}，失败 {failed}',
+    }
+
+
+
+def _delete_bad_completed_source_from_center_and_local(row: Dict[str, Any], gate: Dict[str, Any], *, client: SharedCenterClient = None) -> Dict[str, Any]:
+    """完结季复检仍不合格时：中心取消登记，本地彻底删除共享索引。"""
+    row = dict(row or {})
+    gate = gate if isinstance(gate, dict) else {}
+    local_id = int(row.get('id') or 0)
+    source_kind = str(row.get('source_kind') or 'completed_season').strip() or 'completed_season'
+    center_source_id = str(row.get('center_source_id') or '').strip()
+    candidate = _candidate_from_local_source(row)
+    label = _maintenance_candidate_label(candidate, fallback=row.get('title') or row.get('tmdb_id') or str(local_id))
+    reason = str(gate.get('message') or gate.get('reason') or '完结季一致性校验未通过').strip()
+    center_resp = {}
+
+    if center_source_id:
+        try:
+            client = client or SharedCenterClient()
+            delete_method = getattr(client, 'delete_source', None)
+            if callable(delete_method):
+                center_resp = delete_method(source_kind, center_source_id, message=reason) or {}
+            else:
+                center_resp = client.disable_source(source_kind, center_source_id, message=reason) or {}
+            if center_resp.get('ok') is False:
+                raise RuntimeError(center_resp.get('message') or center_resp.get('error') or center_resp)
+        except Exception as e:
+            try:
+                shared_share_db.update_local_source(local_id, last_error=f'不合格完结季中心取消登记失败: {e}')
+            except Exception:
+                pass
+            logger.warning(
+                "  ➜ [共享资源维护] 不合格完结季中心取消登记失败，保留本地记录等待下次重试：%s，id=%s，center=%s，err=%s",
+                label,
+                local_id,
+                center_source_id,
+                e,
+            )
+            return {
+                'ok': False,
+                'id': local_id,
+                'title': label,
+                'center_source_id': center_source_id,
+                'message': str(e),
+                'reason': reason,
+            }
+
+    deleted = shared_share_db.delete_local_source(local_id) if local_id else {}
+    logger.info(
+        "  ➜ [共享资源维护] 已删除不合格完结季共享源：%s，id=%s，center=%s，原因=%s",
+        label,
+        local_id or '-',
+        center_source_id or '-',
+        reason,
+    )
+    return {
+        'ok': True,
+        'id': local_id,
+        'title': label,
+        'center_source_id': center_source_id,
+        'reason': reason,
+        'center_response': center_resp,
+        'deleted': deleted,
+    }
+
+
+
+def _reregister_non_effective_local_sources(limit: int = 300) -> Dict[str, Any]:
+    """维护任务：处理本地非有效共享源。
+
+    - 完结季：先严格复检一致性；仍不通过就中心取消登记 + 本地删除，
+      不再反复重登同一个垃圾 completed_season_source。
+    - 电影/分集/其他：保留原来的重新登记修复流程。
+    """
+    rows = shared_share_db.list_non_effective_local_sources(limit=limit)
+    if not rows:
+        return {
+            'ok': True,
+            'checked': 0,
+            'need_reregister': 0,
+            'reregistered': 0,
+            'failed': 0,
+            'removed_bad_completed': 0,
+            'remove_failed': 0,
+            'items': [],
+            'removed_items': [],
+        }
+
+    client = SharedCenterClient()
+    reregister_rows = []
+    removed_items = []
+    remove_failed_items = []
+    consistency_checked = 0
+    consistency_failed = 0
+
+    for row in rows:
+        row = dict(row or {})
+        source_kind = str(row.get('source_kind') or '').strip().lower()
+        if source_kind != 'completed_season':
+            reregister_rows.append(row)
+            continue
+
+        candidate = _candidate_from_local_source(row)
+        consistency_checked += 1
+        gate = _completed_season_consistency_gate(candidate, log_result=True)
+        label = _maintenance_candidate_label(candidate, fallback=row.get('title') or row.get('tmdb_id') or str(row.get('id') or ''))
+        if gate.get('ok'):
+            reregister_rows.append(row)
+            logger.info(
+                "  ➜ [共享资源维护] 非有效完结季复检通过，准备重新登记：%s，id=%s",
+                label,
+                row.get('id'),
+            )
+            continue
+
+        consistency_failed += 1
+        if gate.get('final_failure', True):
+            removed = _delete_bad_completed_source_from_center_and_local(row, gate, client=client)
+            if removed.get('ok'):
+                removed_items.append(removed)
+            else:
+                remove_failed_items.append(removed)
+            continue
+
+        # 临时校验异常不直接删，保留到重登记/下次维护暴露错误。
+        try:
+            shared_share_db.update_local_source(int(row.get('id') or 0), last_error=gate.get('message') or '完结季一致性校验异常')
+        except Exception:
+            pass
+        reregister_rows.append(row)
+        logger.warning(
+            "  ➜ [共享资源维护] 非有效完结季复检异常，暂不删除：%s，id=%s，原因=%s",
+            label,
+            row.get('id'),
+            gate.get('message') or gate.get('reason'),
+        )
+
+    # reregister_local_sources 内部会按电影/季/集身份去重，并保持原 source_provider，
+    # 避免生成 maintenance_reregister 影子源。
+    source_ids = [int(r.get('id')) for r in reregister_rows if r.get('id')]
+    res = reregister_local_sources(source_ids, source_provider='') if source_ids else {
+        'items': [],
+        'success_count': 0,
+        'failed_count': 0,
+    }
+    items = res.get('items') or []
+    success = int(res.get('success_count') or 0)
+    failed = int(res.get('failed_count') or 0) + len(remove_failed_items)
+    if rows:
+        logger.info(
+            "  ➜ [共享资源维护] 非有效状态处理完成：候选=%s，完结季复检=%s，不合格=%s，已删除=%s，删除失败=%s，重登去重后=%s，重登成功=%s，重登失败=%s",
+            len(rows),
+            consistency_checked,
+            consistency_failed,
+            len(removed_items),
+            len(remove_failed_items),
+            len(items),
+            success,
+            int(res.get('failed_count') or 0),
+        )
+    return {
+        'ok': failed == 0,
+        'checked': len(rows),
+        'consistency_checked': consistency_checked,
+        'bad_completed': consistency_failed,
+        'removed_bad_completed': len(removed_items),
+        'remove_failed': len(remove_failed_items),
+        'need_reregister': len(items),
+        'reregistered': success,
+        'failed': failed,
+        'items': items[:50],
+        'removed_items': removed_items[:50],
+        'remove_failed_items': remove_failed_items[:20],
+    }
+
+def _backfill_airing_episode_sources(limit: int = 500) -> Dict[str, Any]:
+    """维护任务：为连载/追更季补登记新入库但尚未共享的分集。
+
+    只看本地 media_metadata + shared_rapid_sources 的差异，不触发季级一致性校验。
+    每个缺口按 Episode 粒度登记到中心公共 season_hub。
+    """
+    candidates = shared_share_db.list_unregistered_airing_episode_candidates(limit=limit)
+    if not candidates:
+        return {'ok': True, 'checked': 0, 'need_register': 0, 'registered': 0, 'failed': 0, 'items': []}
+
+    registered = 0
+    failed = 0
+    items = []
+    failed_items = []
+    for cand in candidates:
+        cand = dict(cand or {})
+        # 双保险：维护补齐不能借道 collect_files_for_candidate 触发 helpers.check_season_consistency。
+        cand['_skip_fingerprint_repair'] = True
+        cand['_raw_repair_only'] = True
+        label = _maintenance_candidate_label(cand)
+        try:
+            res = register_candidate_to_center(cand, source_provider='rapid_followup_backfill')
+        except Exception as e:
+            res = {'ok': False, 'message': f'登记异常: {e}', 'error': str(e)}
+            logger.warning(
+                "  ➜ [共享资源维护] 追更补齐异常：%s，tmdb=%s，season=%s，episode=%s，err=%s",
+                label,
+                cand.get('tmdb_id') or cand.get('parent_series_tmdb_id'),
+                cand.get('season_number'),
+                cand.get('episode_number'),
+                e,
+                exc_info=True,
+            )
+        ok = bool(res.get('ok'))
+        reason = '' if ok else _maintenance_result_reason(res)
+        if ok:
+            registered += 1
+            logger.info(
+                "  ➜ [共享资源维护] 追更补齐成功：%s，tmdb=%s，season=%s，episode=%s",
+                label,
+                cand.get('tmdb_id') or cand.get('parent_series_tmdb_id'),
+                cand.get('season_number'),
+                cand.get('episode_number'),
+            )
+        else:
+            failed += 1
+            fail_item = {
+                'title': label,
+                'tmdb_id': cand.get('tmdb_id') or cand.get('parent_series_tmdb_id'),
+                'season_number': cand.get('season_number'),
+                'episode_number': cand.get('episode_number'),
+                'message': reason,
+            }
+            failed_items.append(fail_item)
+            logger.warning(
+                "  ➜ [共享资源维护] 追更补齐失败：%s，tmdb=%s，season=%s，episode=%s，原因=%s",
+                label,
+                fail_item.get('tmdb_id'),
+                fail_item.get('season_number'),
+                fail_item.get('episode_number'),
+                reason,
+            )
+        items.append({
+            'candidate': cand,
+            'title': label,
+            'ok': ok,
+            'message': reason or res.get('message') or '',
+            'result': res,
+        })
+
+    if registered or failed:
+        sample = '；'.join([f"{x.get('title')}：{x.get('message')}" for x in failed_items[:5]])
+        logger.info(
+            "  ➜ [共享资源维护] 追更补齐完成：待补=%s，成功=%s，失败=%s%s",
+            len(candidates),
+            registered,
+            failed,
+            f"，失败明细={sample}" if sample else '',
+        )
+    return {
+        'ok': failed == 0,
+        'checked': len(candidates),
+        'need_register': len(candidates),
+        'registered': registered,
+        'failed': failed,
+        'failed_items': failed_items[:20],
+        'items': items[:50],
+    }
 
 def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
     """维护任务里的轻量离线清理。
@@ -2464,9 +3464,27 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
         parts.append(f"RAW={snapshot.get('raw_ffprobe', 0)}")
         parts.append(f"缺口={snapshot.get('wanted_gaps', 0)}")
         parts.append(f"设备={snapshot.get('remote_devices', 0)}")
+    reregister = result.get('non_effective_reregister') if isinstance(result.get('non_effective_reregister'), dict) else {}
+    if reregister:
+        parts.append(f"非有效重登记={reregister.get('reregistered', 0)}/{reregister.get('need_reregister', 0)}")
+        if reregister.get('removed_bad_completed'):
+            removed_items = reregister.get('removed_items') if isinstance(reregister.get('removed_items'), list) else []
+            names = '、'.join([str(x.get('title') or '').strip() for x in removed_items[:3] if isinstance(x, dict) and str(x.get('title') or '').strip()])
+            parts.append(f"不合格完结季删除={reregister.get('removed_bad_completed')}" + (f"（{names}）" if names else ''))
+        if reregister.get('remove_failed'):
+            parts.append(f"不合格删除失败={reregister.get('remove_failed')}")
+        if reregister.get('failed'):
+            parts.append(f"重登失败={reregister.get('failed')}")
+    followup = result.get('airing_episode_backfill') if isinstance(result.get('airing_episode_backfill'), dict) else {}
+    if followup:
+        parts.append(f"追更补齐={followup.get('registered', 0)}/{followup.get('need_register', 0)}")
+        if followup.get('failed'):
+            failed_items = followup.get('failed_items') if isinstance(followup.get('failed_items'), list) else []
+            names = '、'.join([str(x.get('title') or '').strip() for x in failed_items[:3] if isinstance(x, dict) and str(x.get('title') or '').strip()])
+            parts.append(f"补登失败={followup.get('failed')}" + (f"（{names}）" if names else ''))
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -2487,6 +3505,14 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
     except Exception as e:
         result['offline_cleanup_error'] = str(e)
     try:
+        result['non_effective_reregister'] = _reregister_non_effective_local_sources(limit=300)
+    except Exception as e:
+        result['non_effective_reregister_error'] = str(e)
+    try:
+        result['airing_episode_backfill'] = _backfill_airing_episode_sources(limit=500)
+    except Exception as e:
+        result['airing_episode_backfill_error'] = str(e)
+    try:
         result['credit'] = _sync_center_credit()
     except Exception as e:
         result['credit_error'] = str(e)
@@ -2505,7 +3531,7 @@ def trigger_shared_resource_maintenance_task() -> bool:
 
 def trigger_share_all_library_task() -> bool:
     try:
-        return bool(task_manager.submit_task(lambda processor=None: share_all_library(), task_name='一键登记媒体库', processor_type='media'))
+        return bool(task_manager.submit_task(share_all_library, task_name='一键登记媒体库', processor_type='media'))
     except Exception:
         threading.Thread(target=share_all_library, name='shared-rapid-share-all', daemon=True).start()
         return True

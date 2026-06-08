@@ -37,6 +37,9 @@
             <n-button :type="sourceFilter === 'all' ? 'primary' : 'default'" @click="sourceFilter = 'all'">
               全部 {{ resources.length }}
             </n-button>
+            <n-button :type="sourceFilter === 'shared_pool' ? 'primary' : 'default'" @click="sourceFilter = 'shared_pool'">
+              共享池 {{ sharedPoolCount }}
+            </n-button>
             <n-button :type="sourceFilter === 'hdhive' ? 'primary' : 'default'" @click="sourceFilter = 'hdhive'">
               影巢 {{ hdhiveCount }}
             </n-button>
@@ -64,10 +67,10 @@
                 <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;">
                   <n-tag
                     size="small"
-                    :type="isChannel(res) ? 'info' : 'warning'"
+                    :type="isSharedPool(res) ? 'success' : (isChannel(res) ? 'info' : 'warning')"
                     :bordered="false"
                   >
-                    {{ isChannel(res) ? '频道' : '影巢' }}
+                    {{ isSharedPool(res) ? '共享池' : (isChannel(res) ? '频道' : '影巢') }}
                   </n-tag>
                   <div style="font-weight: 700; font-size: 15px; line-height: 1.4; word-break: break-all;">
                     {{ res.title || res.name || '未命名资源' }}
@@ -99,8 +102,26 @@
                     {{ res._season_match_label }}
                   </n-tag>
 
+                  <n-tag size="small" type="default" :bordered="true" v-if="res._shared_pool_source_label">
+                    {{ res._shared_pool_source_label }}
+                  </n-tag>
+
+                  <n-tag size="small" type="default" :bordered="true" v-if="res._shared_pool_version_label">
+                    {{ res._shared_pool_version_label }}
+                  </n-tag>
+
                   <n-tag size="small" type="success" :bordered="false" v-if="res._completion_label">
                     {{ res._completion_label }}
+                  </n-tag>
+
+                  <n-tag
+                    v-for="tag in sharedPoolTags(res)"
+                    :key="tag.label"
+                    size="small"
+                    :type="tag.type || 'default'"
+                    :bordered="tag.bordered !== false"
+                  >
+                    {{ tag.label }}
                   </n-tag>
                 </n-space>
 
@@ -119,7 +140,8 @@
 
               <div style="flex-shrink: 0; min-width: 92px; text-align: right;">
                 <div style="font-size: 12px; color: #f0a020; margin-bottom: 6px;">
-                  <span v-if="isChannel(res)">可转存</span>
+                  <span v-if="isSharedPool(res)">可秒传</span>
+                  <span v-else-if="isChannel(res)">可转存</span>
                   <span v-else-if="res.already_owned">已解锁</span>
                   <span v-else-if="res.unlock_points === 0 || res.unlock_points === null">免费</span>
                   <span v-else>需 {{ res.unlock_points }} 积分</span>
@@ -127,12 +149,12 @@
 
                 <n-button
                   type="primary"
-                  :color="isChannel(res) ? '#2080f0' : '#f0a020'"
+                  :color="isSharedPool(res) ? '#18a058' : (isChannel(res) ? '#2080f0' : '#f0a020')"
                   size="small"
                   @click="download(res)"
                   :loading="downloadingKey === getResourceKey(res)"
                 >
-                  {{ isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存' }}
+                  {{ isSharedPool(res) ? '秒传' : (isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存') }}
                 </n-button>
               </div>
             </div>
@@ -196,19 +218,6 @@ const stripSeasonSuffix = (value) => {
     .trim();
 };
 
-const mediaTitle = computed(() => {
-  if (!props.media) return '';
-
-  let title = stripSeasonSuffix(rawTitle.value) || '未知影视';
-  const sNum = props.seasonNumber || props.media.season_number;
-
-  if (sNum && !title.includes('季')) {
-    title += ` 第 ${sNum} 季`;
-  }
-
-  return title;
-});
-
 const mediaYear = computed(() => {
   const media = props.media || {};
   const value = media.year || media.release_year || media.first_air_year || media.release_date || media.first_air_date;
@@ -216,23 +225,99 @@ const mediaYear = computed(() => {
   return match ? match[0] : '';
 });
 
-const hdhiveCount = computed(() => resources.value.filter((item) => !isChannel(item)).length);
+const formatTitleWithYearAndSeason = (raw, year, seasonNumber) => {
+  let title = stripSeasonSuffix(raw) || '未知影视';
+  const y = String(year || '').match(/\d{4}/)?.[0] || '';
+  if (y && !new RegExp(`[（(]\\s*${y}\\s*[）)]`).test(title)) {
+    title += `（${y}）`;
+  }
+  const sNum = Number(seasonNumber || 0);
+  if (sNum > 0 && !/第\s*\d+\s*季/.test(title)) {
+    title += `第 ${sNum} 季`;
+  }
+  return title;
+};
+
+const mediaTitle = computed(() => {
+  if (!props.media) return '';
+  const sNum = props.seasonNumber || props.media.season_number;
+  return formatTitleWithYearAndSeason(rawTitle.value, mediaYear.value, sNum);
+});
+
+const isSharedPool = (resource) => {
+  const source = String(resource?.source_type || resource?._cloud_source || resource?.source || '').toLowerCase();
+  return source === 'shared_pool' || source === 'shared' || source === 'shared_center' || source === 'center';
+};
+
+const isHDHive = (resource) => {
+  const source = String(resource?.source_type || resource?._cloud_source || resource?.source || '').toLowerCase();
+  return !isSharedPool(resource) && !isChannel(resource) && (source === 'hdhive' || source === 'hive' || Boolean(resource?.slug));
+};
+
+const hdhiveCount = computed(() => resources.value.filter((item) => isHDHive(item)).length);
 const channelCount = computed(() => resources.value.filter((item) => isChannel(item)).length);
+const sharedPoolCount = computed(() => resources.value.filter((item) => isSharedPool(item)).length);
+
+const parseSeasonNumber = (resource) => {
+  const direct = Number(resource?.season_number || resource?._shared_pool_season_number || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const text = `${resource?.title || ''} ${resource?.name || ''} ${resource?.remark || ''}`;
+  const matched = text.match(/第\s*(\d{1,3})\s*季/i) || text.match(/\bS(\d{1,3})\b/i) || text.match(/Season\s*(\d{1,3})/i);
+  const parsed = Number(matched?.[1] || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const parseSharedPoolVersionIndex = (resource) => {
+  const direct = Number(resource?._shared_pool_version_index || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const matched = String(resource?._shared_pool_version_label || '').match(/版本\s*(\d{1,3})\s*\//);
+  const parsed = Number(matched?.[1] || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const sourceRank = (resource) => {
+  if (isSharedPool(resource)) return 0;
+  if (isHDHive(resource)) return 1;
+  if (isChannel(resource)) return 2;
+  return 9;
+};
+
+const sortCloudResources = (list) => {
+  return [...(list || [])]
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const rankDiff = sourceRank(a.item) - sourceRank(b.item);
+      if (rankDiff) return rankDiff;
+      if (isSharedPool(a.item) && isSharedPool(b.item)) {
+        const seasonA = parseSeasonNumber(a.item) || 9999;
+        const seasonB = parseSeasonNumber(b.item) || 9999;
+        if (seasonA !== seasonB) return seasonA - seasonB;
+        const versionA = parseSharedPoolVersionIndex(a.item) || 9999;
+        const versionB = parseSharedPoolVersionIndex(b.item) || 9999;
+        if (versionA !== versionB) return versionA - versionB;
+      }
+      return a.index - b.index;
+    })
+    .map(({ item }) => item);
+};
 
 const displayResources = computed(() => {
   if (sourceFilter.value === 'hdhive') {
-    return resources.value.filter((item) => !isChannel(item));
+    return sortCloudResources(resources.value.filter((item) => isHDHive(item)));
   }
   if (sourceFilter.value === 'channel') {
-    return resources.value.filter((item) => isChannel(item));
+    return sortCloudResources(resources.value.filter((item) => isChannel(item)));
   }
-  return resources.value;
+  if (sourceFilter.value === 'shared_pool') {
+    return sortCloudResources(resources.value.filter((item) => isSharedPool(item)));
+  }
+  return sortCloudResources(resources.value);
 });
 
 const warningMessages = computed(() => stats.value?.warnings || []);
 const summaryText = computed(() => {
   if (!stats.value) return '';
-  return `影巢 ${stats.value.hdhive_filtered || 0}/${stats.value.hdhive_total || 0} 条，频道 ${stats.value.channel_total || 0} 条，当前展示 ${stats.value.shown || resources.value.length} 条。剧集云搜索默认不按季过滤，方便肉眼挑选。`;
+  return `共享池 ${stats.value.shared_pool_total || 0} 条，影巢 ${stats.value.hdhive_filtered || 0}/${stats.value.hdhive_total || 0} 条，频道 ${stats.value.channel_total || 0} 条，当前展示 ${stats.value.shown || resources.value.length} 条。剧集云搜索默认不按季过滤，方便肉眼挑选。`;
 });
 
 const formatPanType = (type) => {
@@ -241,6 +326,7 @@ const formatPanType = (type) => {
   const t = String(type).toLowerCase();
 
   if (t === '115') return '115网盘';
+  if (t === 'rapid115' || t === 'rapid' || t === 'shared_pool') return '115秒传';
   if (t === 'magnet') return '磁力链接';
   if (t === 'ed2k') return '电驴 ED2K';
   if (t === 'bt') return 'BT 种子';
@@ -255,7 +341,9 @@ const isOffline = (type) => {
 };
 
 const getPanTypeColor = (type) => {
-  if (!type || String(type).toLowerCase() === '115') return 'primary';
+  const t = String(type || '').toLowerCase();
+  if (t === 'rapid115' || t === 'rapid' || t === 'shared_pool') return 'success';
+  if (!type || t === '115') return 'primary';
   return 'info';
 };
 
@@ -290,14 +378,15 @@ const getTmdbId = () => {
 };
 
 const isChannel = (resource) => {
+  if (isSharedPool(resource)) return false;
   const source = String(resource?.source_type || resource?._cloud_source || resource?.source || '').toLowerCase();
-  return source === 'channel' || source === 'tg' || Boolean(resource?.target_link || resource?.magnet_url) && !resource?.slug;
+  return source === 'channel' || source === 'tg' || (Boolean(resource?.target_link || resource?.magnet_url) && !resource?.slug);
 };
 
 const getResourceKey = (resource) => {
   return (
     resource?.unique_id ||
-    `${resource?.source_type || 'res'}:${resource?.slug || resource?.message_link || resource?.target_link || resource?.magnet_url || resource?.title}`
+    `${resource?.source_type || 'res'}:${resource?.source_kind || ''}:${resource?.source_id || resource?.source_ref_id || ''}:${resource?.sha1 || resource?.manifest_hash || resource?.slug || resource?.message_link || resource?.target_link || resource?.magnet_url || resource?.title}`
   );
 };
 
@@ -312,6 +401,33 @@ const formatSource = (resource) => {
   if (Array.isArray(values)) return values.filter(Boolean).join(', ');
   if (typeof values === 'string' && values !== 'channel') return values;
   return '';
+};
+
+
+const sharedPoolTags = (resource) => {
+  if (!isSharedPool(resource)) return [];
+  const raw = resource?._shared_pool_tag_labels || resource?._shared_pool_tags || [];
+  const seen = new Set();
+  const tags = [];
+  const pushTag = (tag, fallbackType = 'default', bordered = true) => {
+    const obj = typeof tag === 'string' ? { label: tag, type: fallbackType, bordered } : { ...(tag || {}) };
+    const label = String(obj.label || obj.name || obj.text || '').trim();
+    if (!label || seen.has(label)) return;
+    if (label === resource?._completion_label) return;
+    seen.add(label);
+    tags.push({ label, type: obj.type || fallbackType, bordered: obj.bordered !== undefined ? obj.bordered : bordered });
+  };
+  if (Array.isArray(raw)) {
+    raw.forEach((tag) => pushTag(tag));
+  }
+  if (resource?.is_clean_version) pushTag({ label: '纯净版', type: 'warning', bordered: false });
+  if (resource?.is_short_drama) pushTag({ label: '短剧', type: 'info', bordered: false });
+  if (resource?.is_animation) pushTag({ label: '动漫', type: 'success', bordered: false });
+  const labels = resource?.tag_labels;
+  if (Array.isArray(labels)) {
+    labels.forEach((label) => pushTag(String(label), 'default', true));
+  }
+  return tags;
 };
 
 const formatQuality = (resource) => {
@@ -332,9 +448,10 @@ const fetchResources = async () => {
       media_type: getMediaType(),
       title: searchTitle.value || rawTitle.value || mediaTitle.value,
       year: mediaYear.value,
-      limit: 80,
+      limit: 100,
       hdhive_limit: 50,
-      channel_limit: 50
+      channel_limit: 50,
+      shared_limit: 100
     };
 
     const season = props.seasonNumber || props.media.season_number;
@@ -372,7 +489,7 @@ const download = async (resource) => {
 
   try {
     const payload = {
-      source_type: resource.source_type || resource._cloud_source || (resource.slug ? 'hdhive' : 'channel'),
+      source_type: resource.source_type || resource._cloud_source || (isSharedPool(resource) ? 'shared_pool' : (resource.slug ? 'hdhive' : 'channel')),
       resource,
       slug: resource.slug,
       tmdb_id: getTmdbId(),

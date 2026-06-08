@@ -22,7 +22,7 @@
                 <template #icon><n-icon :component="RefreshIcon" /></template>
                 刷新贡献点
               </n-button>
-              <n-button type="primary" ghost :loading="loading" @click="loadAll">
+              <n-button type="primary" ghost :loading="loading" @click="loadAll(true)">
                 <template #icon><n-icon :component="SyncIcon" /></template>
                 刷新列表
               </n-button>
@@ -101,8 +101,10 @@
               :columns="centerColumns"
               :data="groupedCenterSources"
               :pagination="centerPagination"
-              :row-key="row => row.group_key || row.source_id"
+              :row-key="centerTableRowKey"
+              :expanded-row-keys="centerExpandedRowKeys"
               :scroll-x="1680"
+              @update:expanded-row-keys="handleCenterExpandedRowKeys"
               @update:page="p => { centerPagination.page = p; loadCenterSources(); }"
               @update:page-size="s => { centerPagination.pageSize = s; centerPagination.page = 1; loadCenterSources(); }"
             />
@@ -368,6 +370,8 @@ const summary = ref({ shares: {}, credit: {} });
 const shareItems = ref([]);
 const ledgerItems = ref([]);
 const centerSources = ref([]);
+const centerExpandedRowKeys = ref([]);
+const centerChildrenLoading = reactive({});
 const shareRequests = ref([]);
 const shareRequestSearchKeyword = ref('');
 const shareRequestSearchItems = ref([]);
@@ -375,7 +379,7 @@ const selectedShareRequestMedia = ref(null);
 const shareRequestQuote = ref(null);
 const shareRequestEpisodeText = ref('');
 const groupedCenterSources = computed(() => groupCenterSources(centerSources.value || [], centerFilters.order_by));
-const shareFilters = reactive({ keyword: '', status: 'active', order_by: 'created_desc' });
+const shareFilters = reactive({ keyword: '', status: 'usable', order_by: 'created_desc' });
 const centerFilters = reactive({ keyword: '', status: 'alive,available', item_type: 'all', order_by: 'latest' });
 const requestFilters = reactive({ keyword: '', status: 'open', media_type: 'all', target_type: 'all' });
 const requestStatusOptions = [
@@ -476,17 +480,20 @@ const shareRequestForm = reactive({
 });
 
 const shareStatusOptions = [
-  { label: '有效共享', value: 'active' }, 
-  { label: '全部状态', value: 'all' }, 
-  { label: '已登记', value: 'reported' },
-  { label: '部分登记', value: 'partial' }, 
-  { label: '失败/异常', value: 'failed' },
-  { label: '已取消', value: 'cancelled' },
+  { label: '有效共享', value: 'usable' },
+  { label: '全部状态', value: 'all' },
+  { label: '已上报中心', value: 'reported' },
+  { label: '本地未上报', value: 'local' },
+  { label: '不合格/异常', value: 'failed' },
+  { label: 'RAW缺失', value: 'raw_missing' },
+  { label: '已停用', value: 'disabled' },
 ];
 
 const centerStatusOptions = [
   { label: '全部', value: 'alive,available' },
   { label: '仅可用', value: 'alive' },
+  { label: '已完结', value: 'completed_certified' },
+  { label: '动漫', value: 'animation' },
   { label: '纯净版', value: 'clean_version' },
   { label: '短剧', value: 'short_drama' },
 ];
@@ -536,7 +543,12 @@ const shareFailureReasonText = (row) => {
     row?.last_error, row?.error, row?.error_message, row?.failure_reason, row?.fail_reason,
   ].map(v => String(v || '').trim()).find(v => v && !isSuccessShareMessage(v));
 
-  if (rawErrorText) return rawErrorText;
+  const disabledStatus = statusParts.find(v => ['disabled', 'cancelled', 'canceled', 'deleted'].includes(v));
+  // 维护任务留下的 last_error 不能污染仍然有效/已登记的共享源备注。
+  if (rawErrorText && (failedStatus || disabledStatus)) {
+    if (rawErrorText === 'source_file_sha1_not_in_library') return '本地文件不在媒体库';
+    return rawErrorText;
+  }
 
   if (failedStatus) {
     const rawReasonText = [row?.reason, row?.message, row?.status_message, row?.review_message]
@@ -570,12 +582,12 @@ const shareSourceText = (row) => {
   const rawManual = Boolean(raw?.manual_payload || raw?.manual_share || raw?.manual_create || raw?.manual_created || raw?.manual_context);
   const rawAuto = Boolean(raw?.auto_gap || raw?.auto_payload || raw?.auto_task || raw?.maintenance_payload || raw?.maintenance_task || raw?.auto_share_payload || raw?.auto_context);
   const providerBackup = /(backup_mirror|backup_share|auto_backup_share|backup)/i.test(providerText) || /(备份共享|备份源|镜像共享)/.test(labelText);
-  const providerAuto = /(rapid_auto_library|rapid_all_library|rapid_completed_season|auto_gap_share|auto_share|auto_task|maintenance_task|maintenance_share|scheduler|scheduled_share|gap_share|watching_gap_share)/i.test(providerText) || /(自动共享|自动登记|入库自动|一键全库|完结季收藏)/.test(labelText);
-  const providerManual = /(user_share|manual_share|manual|local_manual|manual_create|manual_created)/i.test(providerText) || /手动共享/.test(labelText);
+  const providerAuto = /(rapid_auto_library|rapid_all_library|auto_gap_share|auto_share|auto_task|maintenance_task|maintenance_share|scheduler|scheduled_share|gap_share|watching_gap_share)/i.test(providerText) || /(自动共享|自动登记|入库自动|一键全库)/.test(labelText);
+  const providerManual = /(user_share|manual_share|manual|local_manual|manual_create|manual_created|rapid_completed_season)/i.test(providerText) || /(手动共享|完结季源|完结季收藏)/.test(labelText);
 
   // 备份共享是中心下发的特殊来源，必须优先于自动/手动兜底判断。
   if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || rawBackup || providerBackup) return '备份共享';
-  // Rapid v2 入库自动登记/一键全库/完结季收藏必须优先于 manual 兜底，避免 auto 记录被误标成手动共享。
+  // Rapid v2 入库自动登记/一键全库优先于 manual 兜底；rapid_completed_season 只是完结季源类型，不等于自动共享。
   if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance || rawAuto || providerAuto) return '自动共享';
   if (row?.is_manual_share || row?.manual_created || row?.created_by_user || rawManual || providerManual) return '手动共享';
 
@@ -591,13 +603,31 @@ const shareRemarkNode = (row) => {
   return h(NTag, { type, size: 'small', round: true }, { default: () => source });
 };
 const isAutoShareRow = (row) => shareSourceText(row) === '自动共享';
+const normalizedShareStatuses = (row) => [
+  row?.status,
+  row?.review_status,
+  row?.center_status,
+].map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+const shareInactiveStatuses = new Set(['disabled', 'cancelled', 'canceled', 'deleted']);
+const shareProblemStatuses = new Set(['failed', 'error', 'dead', 'expired', 'rejected', 'raw_missing', 'inconsistent', 'incomplete']);
+const shareUsableStatuses = new Set(['active', 'available', 'alive', 'reported', 'partial', 'usable']);
+const isInactiveShareRow = (row) => normalizedShareStatuses(row).some(v => shareInactiveStatuses.has(v));
+const isProblemShareRow = (row) => normalizedShareStatuses(row).some(v => shareProblemStatuses.has(v));
+const isEffectiveShareRow = (row) => {
+  const statuses = normalizedShareStatuses(row);
+  if (isInactiveShareRow(row) || isProblemShareRow(row)) return false;
+  return statuses.some(v => shareUsableStatuses.has(v));
+};
+const deleteShareDisabledTitle = (row) => isEffectiveShareRow(row)
+  ? '有效共享不能直接删除，除非媒体项已不存在，判定为无效共享后再删除本地记录'
+  : '删除本地共享记录';
 
 const statusMap = {
   transferring: { text: '秒传中', type: 'warning' }, deleted: { text: '已删除', type: 'default' }, error: { text: '异常', type: 'error' },
   active: { text: '本地可用', type: 'success' }, available: { text: '可用', type: 'success' }, alive: { text: '可用', type: 'success' },
   pending: { text: '待验证', type: 'warning' }, replenish: { text: '待补充', type: 'error' }, dead: { text: '失效', type: 'error' }, expired: { text: '已过期', type: 'default' },
   reported: { text: '已登记', type: 'success' }, local: { text: '本地未登记', type: 'default' }, partial: { text: '部分登记', type: 'warning' },
-  inconsistent: { text: '不一致', type: 'error' }, incomplete: { text: '不完整', type: 'warning' }, disabled: { text: '已停用', type: 'default' },
+  inconsistent: { text: '不一致', type: 'error' }, incomplete: { text: '不完整', type: 'warning' }, raw_missing: { text: 'RAW缺失', type: 'error' }, disabled: { text: '已停用', type: 'default' },
   failed: { text: '失败', type: 'error' }, rejected: { text: '未通过', type: 'error' }, cancelled: { text: '已取消', type: 'default' },
   not_reported: { text: '未登记', type: 'default' },
   open: { text: '求共享中', type: 'success' }, fulfilled: { text: '已完成', type: 'success' },
@@ -673,13 +703,67 @@ const metaLine = (row, parts = []) => h('div', { class: 'sub-title' }, [tmdbLink
 
 const hasCenterDevice = computed(() => Boolean((summary.value.credit || {}).device_id));
 
+const centerResourceStats = computed(() => {
+  const credit = summary.value.credit || {};
+  const rawStats = credit?.raw_json?.stats || {};
+  const mediaStats = credit.media_stats || rawStats.media_stats || {};
+  const numberValue = (...values) => {
+    for (const value of values) {
+      if (value === undefined || value === null || value === '') continue;
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return 0;
+  };
+  const movieCount = numberValue(credit.display_movie_count, credit.center_movie_count, mediaStats.movie_count, rawStats.display_movie_count, rawStats.movie_sources);
+  const seasonCount = numberValue(credit.display_season_count, credit.center_season_count, mediaStats.season_count, rawStats.display_season_count, rawStats.completed_season_sources);
+  const videoCount = numberValue(credit.video_count, mediaStats.video_count, rawStats.video_count, credit.raw_ffprobe, rawStats.raw_ffprobe);
+  return { movieCount, seasonCount, videoCount };
+});
+
+
+const proQuotaStats = computed(() => {
+  const credit = summary.value.credit || {};
+  const rawStats = credit?.raw_json?.stats || {};
+  const quota = credit.pro_quota || rawStats.pro_quota || credit?.raw_json?.me?.pro_quota || {};
+  const n = (value, fallback = 0) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  };
+  const tier = String(quota.pro_tier || quota.tier || '').trim().toUpperCase();
+  const label = quota.pro_label || ({ M: '月卡', Y: '年卡', L: '终身' }[tier] || tier);
+  return {
+    active: Boolean(quota.pro_active || quota.pro_valid),
+    usable: Boolean(quota.quota_usable),
+    tier,
+    label,
+    dailyGrant: n(quota.daily_grant),
+    balance: n(quota.quota_balance ?? quota.balance),
+    cap: n(quota.balance_cap ?? quota.cap),
+    expireTime: quota.pro_expire_time || '',
+    lastGrantDate: quota.last_grant_date || '',
+    lastVerifiedAt: quota.last_verified_at || '',
+  };
+});
+
+const creditCardDesc = computed(() => {
+  const credit = summary.value.credit || {};
+  const devices = `${credit.remote_devices ?? 0} 个设备`;
+  const quota = proQuotaStats.value;
+  if (!quota.active || !quota.tier) return devices;
+  const grant = quota.dailyGrant ? `今日 +${quota.dailyGrant}` : '今日未发放';
+  const capText = quota.cap ? `${quota.balance}/${quota.cap}` : `${quota.balance}`;
+  return `Pro ${quota.label || quota.tier} ${grant}，累计 ${capText} · ${devices}`;
+});
+
 const statCards = computed(() => {
   const shares = summary.value.shares || {};
   const credit = summary.value.credit || {};
+  const centerStats = centerResourceStats.value;
   return [
-    { key: 'credit', label: '贡献点', value: credit.credit ?? 0, desc: `${credit.remote_devices ?? 0} 个设备` },
+    { key: 'credit', label: '贡献点', value: credit.credit ?? 0, desc: creditCardDesc.value },
     { key: 'shares', label: '我的共享', value: shares.total ?? 0, desc: `${shares.alive ?? 0} 个有效共享` },
-    { key: 'remote_sources', label: '中心资源', value: credit.shared_sources ?? 0, desc: `${credit.raw_ffprobe ?? 0} 条媒体信息` },
+    { key: 'remote_sources', label: '中心资源', value: `电影 ${centerStats.movieCount} · 剧集 ${centerStats.seasonCount}`, desc: `共计视频 ${centerStats.videoCount} 个` },
     { key: 'share_requests', label: '求共享', value: credit.share_requests ?? credit.wanted_gaps ?? 0, desc: '活跃求共享需求' },
   ];
 });
@@ -706,7 +790,14 @@ const shareColumns = [
   } },
   { title: '创建时间', key: 'created_at', width: 170, render: row => fmtDate(row.created_at) },
   { title: '备注', key: 'share_remark', minWidth: 220, ellipsis: { tooltip: true }, render: row => shareRemarkNode(row) },
-  { title: '操作', key: 'actions', width: 110, fixed: 'right', render: row => h(NSpace, { size: 8 }, { default: () => [
+  { title: '操作', key: 'actions', width: 300, fixed: 'right', render: row => h(NSpace, { size: 8, align: 'center', wrap: false }, { default: () => [
+    h(NButton, {
+      size: 'small',
+      type: 'primary',
+      secondary: true,
+      title: '重新上传 RAW/summary_json，并重新登记中心',
+      onClick: () => reregisterShare(row),
+    }, { icon: () => h(NIcon, null, { default: () => h(ShareIcon) }), default: () => '重新登记' }),
     h(NButton, {
       size: 'small',
       type: 'error',
@@ -715,6 +806,14 @@ const shareColumns = [
       title: isAutoShareRow(row) ? '自动共享源由入库自动维护，不能手动停用' : '',
       onClick: () => cancelShare(row),
     }, { icon: () => h(NIcon, null, { default: () => h(CancelIcon) }), default: () => '停用' }),
+    h(NButton, {
+      size: 'small',
+      type: 'error',
+      secondary: true,
+      disabled: isEffectiveShareRow(row),
+      title: deleteShareDisabledTitle(row),
+      onClick: () => deleteShare(row),
+    }, { icon: () => h(NIcon, null, { default: () => h(CancelIcon) }), default: () => '删除' }),
   ]}) },
 ];
 
@@ -843,6 +942,11 @@ const ledgerEventLabel = (eventType) => {
     center_rapid_source_served_group: '共享资源被秒传',
     center_rapid_source_consumed: '秒传共享资源',
     center_rapid_source_consumed_group: '秒传共享资源',
+    center_daily_grant: 'Pro每日赠送额度',
+    center_rapid_quota_consumed: 'Pro额度抵扣',
+    center_tier_cap_adjust: 'Pro等级上限调整',
+    center_pro_expired_clear: 'Pro过期清空额度',
+    center_pro_inactive_clear: 'Pro认证失效清空额度',
     center_rapid_sign_success: '秒传签名成功',
     center_rapid_sign_failed: '秒传签名失败',
     center_rapid_sign_timeout: '秒传签名超时',
@@ -893,6 +997,11 @@ const ledgerReasonCodeLabel = (value) => ({
   backup_source_registered: '备份共享入池',
   shared_source_served: '共享资源被他人秒传',
   shared_source_consumed: '从共享中心秒传资源',
+  daily_grant: 'Pro每日赠送额度',
+  rapid_quota_consumed: 'Pro额度抵扣',
+  tier_cap_adjust: 'Pro等级上限调整',
+  pro_expired_clear: 'Pro过期清空额度',
+  pro_inactive_clear: 'Pro认证失效清空额度',
   share_request_escrow: '求共享冻结贡献点',
   share_request_refund: '求共享退回贡献点',
   share_request_bounty_paid: '求共享悬赏支付',
@@ -907,32 +1016,116 @@ const shortLedgerHash = (value, length = 12) => {
 };
 
 const looksLikeShareRequestId = (value) => /^srq_[0-9a-f]/i.test(String(value || '').trim());
-const ledgerDisplayTitle = (row) => {
-  if (row?.title_display) return row.title_display;
+const ledgerCode = (row) => String(row?.event_type || row?.reason || '').trim().toLowerCase();
+const ledgerReasonCode = (row) => String(row?.reason || row?.event_type || '').trim().toLowerCase().replace(/^center_/, '');
+const isLedgerSignRow = (row) => ledgerCode(row).includes('rapid_sign') || ledgerReasonCode(row).startsWith('rapid_sign');
+const isLedgerConsumedRow = (row) => ledgerCode(row).includes('rapid_source_consumed') || ledgerReasonCode(row) === 'rapid_source_consumed' || ledgerCode(row).includes('shared_source_consumed') || ledgerReasonCode(row) === 'shared_source_consumed';
+const isLedgerServedRow = (row) => ledgerCode(row).includes('rapid_source_served') || ledgerReasonCode(row) === 'rapid_source_served' || ledgerCode(row).includes('shared_source_served') || ledgerReasonCode(row) === 'shared_source_served';
+const isLedgerProQuotaRow = (row) => {
+  const code = ledgerCode(row);
+  const reason = ledgerReasonCode(row);
+  const ledgerType = String(row?.ledger_type || '').trim().toLowerCase();
+  return ledgerType === 'pro_quota' || ['daily_grant', 'rapid_quota_consumed', 'tier_cap_adjust', 'pro_expired_clear', 'pro_inactive_clear'].includes(reason) || ['center_daily_grant', 'center_rapid_quota_consumed', 'center_tier_cap_adjust', 'center_pro_expired_clear', 'center_pro_inactive_clear'].includes(code);
+};
+const ledgerSxx = (value) => {
+  const n = Number(value || 0);
+  return Number.isFinite(n) && n > 0 ? `S${String(Math.trunc(n)).padStart(2, '0')}` : '';
+};
+const ledgerExx = (value) => {
+  const n = Number(value || 0);
+  return Number.isFinite(n) && n > 0 ? `E${String(Math.trunc(n)).padStart(2, '0')}` : '';
+};
+const ledgerContext = (row = {}) => {
   const raw = ledgerRawJson(row);
-  const media = raw.media && typeof raw.media === 'object' ? raw.media : {};
-  const request = raw.request && typeof raw.request === 'object' ? raw.request : {};
-  const source = raw.source && typeof raw.source === 'object' ? raw.source : {};
-  const sharedSource = raw.shared_source && typeof raw.shared_source === 'object' ? raw.shared_source : {};
-  const job = raw.job && typeof raw.job === 'object' ? raw.job : {};
-  const candidates = [
-    row?.title, row?.file_name, media.title, media.name, request.title, request.name,
-    source.title, source.name, source.file_name, sharedSource.title, sharedSource.name, sharedSource.file_name,
-    job.title, job.name, job.file_name, raw.title, raw.name, raw.file_name, row?.ref_id, row?.id,
-  ];
-  for (const item of candidates) {
-    const text = String(item || '').trim();
-    if (!text || looksLikeShareRequestId(text)) continue;
-    if (text.toLowerCase().startsWith('rapid_sign:')) {
-      const sha = text.split(':').find(x => /^[A-Fa-f0-9]{40}$/.test(x));
-      return sha ? `秒传签名：${shortLedgerHash(sha)}` : '秒传签名任务';
-    }
-    return text;
+  const center = (raw.center_ledger && typeof raw.center_ledger === 'object') ? raw.center_ledger : {};
+  const source = (raw.source && typeof raw.source === 'object') ? raw.source : {};
+  const sharedSource = (raw.shared_source && typeof raw.shared_source === 'object') ? raw.shared_source : {};
+  const media = (raw.media && typeof raw.media === 'object') ? raw.media : {};
+  const job = (raw.job && typeof raw.job === 'object') ? raw.job : {};
+  const first = (...values) => values.find(v => v !== undefined && v !== null && String(v).trim() !== '');
+  return {
+    title: first(center.title, row.title, media.title, source.title, sharedSource.title, job.title, raw.title, center.file_name, row.file_name, raw.file_name),
+    file_name: first(center.file_name, row.file_name, media.file_name, source.file_name, sharedSource.file_name, job.file_name, raw.file_name),
+    tmdb_id: first(center.tmdb_id, row.tmdb_id, media.tmdb_id, source.tmdb_id, sharedSource.tmdb_id, raw.tmdb_id),
+    item_type: first(center.item_type, row.item_type, media.item_type, source.item_type, sharedSource.item_type, raw.item_type),
+    source_kind: first(center.source_kind, row.source_kind, source.source_kind, sharedSource.source_kind, raw.source_kind),
+    season_number: first(center.season_number, row.season_number, media.season_number, source.season_number, sharedSource.season_number, raw.season_number),
+    episode_number: first(center.episode_number, row.episode_number, media.episode_number, source.episode_number, sharedSource.episode_number, raw.episode_number),
+    sha1: first(row.sha1, row.ledger_sha1, center.sha1, raw.sha1, raw.file_sha1, source.sha1, sharedSource.sha1, media.sha1),
+  };
+};
+const cleanLedgerTitleText = (value) => {
+  const text = String(value || '').trim();
+  if (!text || looksLikeShareRequestId(text)) return '';
+  if (/^(?:rapid_sign:)?[A-Fa-f0-9]{40}(?::.*)?$/.test(text)) return '';
+  if (text.toLowerCase().startsWith('rapid_sign:')) return '';
+  return text;
+};
+const cleanLedgerBaseTitle = (base, row) => {
+  let text = cleanLedgerTitleText(base);
+  if (!text) return '';
+  const ctx = ledgerContext(row);
+  const sxx = ledgerSxx(ctx.season_number);
+  const exx = ledgerExx(ctx.episode_number);
+  if (sxx && exx) {
+    text = text
+      .replace(new RegExp(`\\s*${sxx}\\s*${exx}\\s*$`, 'i'), '')
+      .replace(new RegExp(`\\s*${sxx}${exx}\\s*$`, 'i'), '');
   }
+  if (sxx) text = text.replace(new RegExp(`\\s*${sxx}\\s*$`, 'i'), '');
+  text = text.replace(/\s+/g, ' ').replace(/[\s\-·._]+$/g, '').trim();
+  return text || cleanLedgerTitleText(base);
+};
+const appendLedgerSeasonEpisode = (base, row, { aggregate = false } = {}) => {
+  base = cleanLedgerBaseTitle(base, row);
+  if (!base) return '';
+  const ctx = ledgerContext(row);
+  const sxx = ledgerSxx(ctx.season_number);
+  const exx = ledgerExx(ctx.episode_number);
+  if (aggregate && isLedgerConsumedRow(row) && sxx) return `${base} ${sxx}`;
+  if (isLedgerSignRow(row) && sxx && exx) return `${base} ${sxx}${exx}`;
+  if ((String(ctx.item_type || '').toLowerCase() === 'episode' || String(ctx.source_kind || '').toLowerCase() === 'episode') && sxx && exx) return `${base} ${sxx}${exx}`;
+  if ((String(ctx.item_type || '').toLowerCase() === 'season' || String(ctx.source_kind || '').toLowerCase() === 'completed_season') && sxx) return `${base} ${sxx}`;
+  return base;
+};
+const ledgerCreditText = (row, rows = null) => {
+  const delta = rows ? rows.reduce((sum, item) => sum + Number(item?.delta || 0), 0) : Number(row?.delta || 0);
+  const count = rows ? rows.length : 0;
+  const proRows = rows ? rows.every(item => isLedgerProQuotaRow(item)) : isLedgerProQuotaRow(row);
+  const unitName = proRows ? 'Pro额度' : '贡献点';
+  if (rows && count > 1 && rows.every(item => Number(item?.delta || 0) === Number(rows[0]?.delta || 0))) {
+    const unit = Number(rows[0]?.delta || 0);
+    return `${unitName} ${formatDelta(unit)}*${count}`;
+  }
+  if (proRows && Math.abs(delta) > 1 && ledgerReasonCode(row) === 'rapid_quota_consumed') {
+    return `${unitName} ${delta > 0 ? '+1' : '-1'}*${Math.abs(delta)}`;
+  }
+  if (!proRows && (isLedgerConsumedRow(row) || isLedgerServedRow(row) || isLedgerSignRow(row)) && Math.abs(delta) > 1) {
+    return `${unitName} ${delta > 0 ? '+1' : '-1'}*${Math.abs(delta)}`;
+  }
+  return `${unitName} ${formatDelta(delta)}`;
+};
+const ledgerDisplayTitle = (row) => {
+  if (row?.title_display) {
+    const fixed = appendLedgerSeasonEpisode(row.title_display, row, { aggregate: Boolean(row.__ledger_aggregated && isLedgerConsumedRow(row)) });
+    if (fixed && !fixed.startsWith('秒传签名：') && !/^未知资源\s+[A-Fa-f0-9]/.test(fixed)) return fixed;
+  }
+  if (row?.ledger_aggregate_title && row.__ledger_aggregated) return row.ledger_aggregate_title;
+  const ctx = ledgerContext(row);
+  const title = appendLedgerSeasonEpisode(ctx.title || ctx.file_name, row, { aggregate: Boolean(row.__ledger_aggregated && isLedgerConsumedRow(row)) });
+  if (title && !title.startsWith('秒传签名：') && !/^未知资源\s+[A-Fa-f0-9]/.test(title)) return title;
+  const raw = ledgerRawJson(row);
   const event = String(row?.event_type || '').toLowerCase();
+  if (isLedgerProQuotaRow(row)) {
+    const tier = String(row?.pro_tier || ledgerRawJson(row)?.center_ledger?.pro_tier || '').trim().toUpperCase();
+    const label = ({ M: '月卡', Y: '年卡', L: '终身' }[tier] || tier || '');
+    if (event.includes('daily_grant')) return label ? `Pro${label}` : 'Pro每日赠送额度';
+    if (event.includes('quota_consumed')) return title || 'Pro额度抵扣';
+    return label ? `Pro${label}` : 'Pro额度';
+  }
   if (event.includes('share_request')) return '求共享';
-  if (event.includes('rapid') && event.includes('sign')) {
-    const sha = raw.sha1 || raw.file_sha1 || raw.sign_check || '';
+  if (isLedgerSignRow(row)) {
+    const sha = ctx.sha1 || raw.sha1 || raw.file_sha1 || raw.sign_check || '';
     return sha ? `秒传签名：${shortLedgerHash(sha)}` : '秒传签名任务';
   }
   return row?.title || '-';
@@ -942,7 +1135,7 @@ const ledgerReasonDisplay = (row) => {
   if (row?.reason_display) return row.reason_display;
   const event = String(row?.event_type || '');
   const reason = String(row?.reason || '').trim();
-  const deltaText = `贡献点 ${formatDelta(row?.delta || 0)}`;
+  const deltaText = ledgerCreditText(row);
   const title = ledgerDisplayTitle(row);
   const reasonMap = {
     share_request_escrow: `求共享冻结：${title}，${deltaText}`,
@@ -967,10 +1160,22 @@ const ledgerReasonDisplay = (row) => {
     center_rapid_source_served_group: `本机共享资源被他人秒传：${title}，${deltaText}`,
     center_rapid_source_registered: `共享资源登记入池：${title}，${deltaText}`,
     center_rapid_source_registered_group: `共享资源登记入池：${title}，${deltaText}`,
+    center_daily_grant: `Pro每日赠送额度：${title}，${deltaText}`,
+    center_rapid_quota_consumed: `Pro额度抵扣：${title}，${deltaText}`,
+    center_tier_cap_adjust: `Pro等级上限调整：${title}，${deltaText}`,
+    center_pro_expired_clear: `Pro过期清空额度：${title}，${deltaText}`,
+    center_pro_inactive_clear: `Pro认证失效清空额度：${title}，${deltaText}`,
   };
-  if (reasonMap[event]) return reasonMap[event];
+  if (reasonMap[event]) {
+    const balance = row?.balance_after ?? ledgerRawJson(row)?.center_ledger?.balance_after;
+    return isLedgerProQuotaRow(row) && balance !== undefined && balance !== null && balance !== '' ? `${reasonMap[event]}，余额 ${balance}` : reasonMap[event];
+  }
   const reasonLabel = ledgerReasonCodeLabel(reason) || ledgerReasonCodeLabel(event.replace(/^center_/, ''));
-  if (reasonLabel) return `${reasonLabel}：${title}，${deltaText}`;
+  if (reasonLabel) {
+    const balance = row?.balance_after ?? ledgerRawJson(row)?.center_ledger?.balance_after;
+    const suffix = isLedgerProQuotaRow(row) && balance !== undefined && balance !== null && balance !== '' ? `，余额 ${balance}` : '';
+    return `${reasonLabel}：${title}，${deltaText}${suffix}`;
+  }
   return reason || `${ledgerEventLabel(event)}：${title}，${deltaText}`;
 };
 
@@ -1045,29 +1250,51 @@ const shouldAggregateLedgerRow = (row) => {
     !isDeletedCenterSourceLedgerRow(row)
   );
 };
-const ledgerAggregateKey = (row) => `${normalizeLedgerKeyPart(row?.event_type)}::${ledgerFileKey(row)}`;
-const buildAggregatedLedgerReason = (latest, rows, totalDelta) => {
-  const unitDelta = Number(latest?.delta || 0);
-  const sameDelta = rows.every(row => Number(row?.delta || 0) === unitDelta);
-  const creditText = sameDelta ? `贡献点 ${formatDelta(unitDelta)}*${rows.length}` : `贡献点合计 ${formatDelta(totalDelta)}（${rows.length} 条）`;
+const ledgerSeasonAggregateKey = (row) => {
+  const ctx = ledgerContext(row);
+  const tmdb = normalizeLedgerKeyPart(ctx.tmdb_id);
+  const season = ledgerSxx(ctx.season_number) || normalizeLedgerKeyPart(ctx.season_number);
+  if (tmdb && season) return `${tmdb}:${season}`;
+  return ledgerFileKey(row);
+};
+const ledgerAggregateKey = (row) => {
+  const event = normalizeLedgerKeyPart(row?.event_type || row?.reason);
+  if (row?.ledger_aggregate_key) return `${event}::${row.ledger_aggregate_key}`;
+  if (isLedgerConsumedRow(row)) return `${event}::consume-season::${ledgerSeasonAggregateKey(row)}`;
+  return `${event}::${ledgerFileKey(row)}`;
+};
+const ledgerAggregateTitle = (latest, rows) => {
+  if (latest?.ledger_aggregate_title && isLedgerConsumedRow(latest)) return latest.ledger_aggregate_title;
+  if (isLedgerConsumedRow(latest)) return appendLedgerSeasonEpisode(ledgerContext(latest).title || ledgerContext(latest).file_name, latest, { aggregate: true }) || ledgerDisplayTitle(latest);
+  return ledgerDisplayTitle(latest);
+};
+const buildAggregatedLedgerReason = (latest, rows, totalDelta, titleOverride = '') => {
+  const creditText = ledgerCreditText(latest, rows);
+  const title = titleOverride || ledgerDisplayTitle(latest) || '-';
+  if (isLedgerSignRow(latest)) return `响应中心秒传签名成功：${title}，${creditText}`;
+  if (isLedgerConsumedRow(latest)) return `从共享中心秒传资源：${title}，${creditText}`;
+  if (isLedgerServedRow(latest)) return `本机共享资源被他人秒传：${title}，${creditText}`;
   const reason = String(latest?.reason_display || latest?.reason || '').trim();
   if (reason) {
     const replaced = reason.replace(/贡献点\s*[+-]?\d+(?:\.\d+)?(?:\*\d+)?(?=\s*[，,。；;、]?$)/, creditText);
     if (replaced !== reason) return replaced;
     return `${reason}，${creditText}`;
   }
-  return `${ledgerEventLabel(latest?.event_type)}：${ledgerDisplayTitle(latest) || '-'}，${creditText}`;
+  return `${ledgerEventLabel(latest?.event_type)}：${title}，${creditText}`;
 };
 const buildAggregatedLedgerRow = (rows, index) => {
   const sorted = [...rows].sort((a, b) => ledgerTimeValue(b) - ledgerTimeValue(a));
   const latest = sorted[0] || {};
   const delta = rows.reduce((sum, row) => sum + Number(row?.delta || 0), 0);
-  const aggregateReason = buildAggregatedLedgerReason(latest, rows, delta);
+  const aggregateTitle = ledgerAggregateTitle(latest, rows);
+  const aggregateReason = buildAggregatedLedgerReason(latest, rows, delta, aggregateTitle);
   return {
     ...latest,
     id: `ledger-aggregate:${ledgerAggregateKey(latest)}:${index}`,
     created_at: latest.created_at,
     delta,
+    title_display: aggregateTitle,
+    ledger_aggregate_title: aggregateTitle,
     reason: aggregateReason,
     reason_display: aggregateReason,
     __ledger_aggregated: true,
@@ -1164,7 +1391,9 @@ const centerTitleNode = (row) => {
   return h('div', { class: 'main-title center-title-ellipsis', title: text }, text);
 };
 const centerIsOngoingHub = (row) => Boolean(row?.is_ongoing_hub || row?.source_kind === 'season_hub' || row?.season_status === 'ongoing');
-const centerIsCompletedPack = (row) => Boolean(row?.source_kind === 'completed_season' || row?.season_status === 'completed');
+const centerStatusValue = (row) => String(row?.status || '').trim().toLowerCase();
+const centerIsCompletedPack = (row) => Boolean(row?.source_kind === 'completed_season');
+const centerIsCompletedCertifiedSource = (row) => Boolean(row?.source_kind === 'completed_season' && centerStatusValue(row) === 'available');
 const centerProgressText = (row) => {
   if (row?.progress_text) return String(row.progress_text);
   const current = Number(row?.progress_current || row?.pack_item_count || row?.file_count || 0);
@@ -1211,7 +1440,7 @@ const centerCleanVersionTooltip = (row) => {
 const centerNestedParts = (row) => {
   const parts = [];
   if (row && typeof row === 'object') parts.push(row);
-  for (const key of ['version_summary', 'summary_json', 'media_signature_json']) {
+  for (const key of ['version_summary', 'summary_json', 'media_signature_json', 'raw_summary_json', 'rapid_meta_json', 'clean_version_meta_json', 'short_drama_meta_json', 'animation_meta_json', 'completed_certified_meta_json']) {
     const v = row?.[key];
     if (v && typeof v === 'object') parts.push(v);
   }
@@ -1223,12 +1452,57 @@ const centerNestedParts = (row) => {
           if (x.version_summary && typeof x.version_summary === 'object') parts.push(x.version_summary);
           if (x.summary_json && typeof x.summary_json === 'object') parts.push(x.summary_json);
           if (x.media_signature_json && typeof x.media_signature_json === 'object') parts.push(x.media_signature_json);
+          if (x.rapid_meta_json && typeof x.rapid_meta_json === 'object') parts.push(x.rapid_meta_json);
+          if (x.animation_meta_json && typeof x.animation_meta_json === 'object') parts.push(x.animation_meta_json);
+          if (x.completed_certified_meta_json && typeof x.completed_certified_meta_json === 'object') parts.push(x.completed_certified_meta_json);
         }
       });
     }
   }
   return parts;
 };
+const centerCompletedCertifiedMeta = (row) => {
+  // 已完结是 ETK 官方认证标签，只允许 available 的 completed_season_source 输出。
+  // 不允许因为 source_kind=completed_season、Season 类型、watching_status=Completed 或进度满就兜底显示。
+  if (centerIsOngoingHub(row)) return {};
+  if (!centerIsCompletedCertifiedSource(row) && !row?.is_completed_certified) return {};
+  for (const part of centerNestedParts(row)) {
+    const meta = part?.completed_certified_meta_json || part?.completed_certified_meta || {};
+    if (part?.is_completed_certified || meta?.is_completed_certified) {
+      return meta && typeof meta === 'object' ? meta : { is_completed_certified: true };
+    }
+  }
+  if (centerIsCompletedCertifiedSource(row)) {
+    return { is_completed_certified: true, certified_by: 'completed_season_source', status: row?.status };
+  }
+  return {};
+};
+const isCenterCompletedCertified = (row) => Boolean(!centerIsOngoingHub(row) && centerCompletedCertifiedMeta(row).is_completed_certified);
+const centerCompletedCertifiedTooltip = (row) => {
+  const meta = centerCompletedCertifiedMeta(row);
+  const parts = ['已通过一致性校验'];
+  const fileCount = meta.file_count ?? row?.file_count ?? row?.pack_item_count;
+  const expected = meta.expected_episode_count ?? row?.expected_episode_count ?? row?.progress_total;
+  if (fileCount != null && expected != null) parts.push(`集数 ${fileCount}/${expected}`);
+  if (meta.message) parts.push(String(meta.message));
+  return parts.join(' · ');
+};
+const centerAnimationMeta = (row) => {
+  for (const part of centerNestedParts(row)) {
+    const meta = part?.animation_meta_json || part?.animation_meta || {};
+    if (part?.is_animation || meta?.is_animation || part?.genres_json_contains_animation) return meta && typeof meta === 'object' ? meta : { is_animation: true };
+  }
+  return {};
+};
+const isCenterAnimation = (row) => Boolean(centerAnimationMeta(row).is_animation || row?.is_animation);
+const centerAnimationTooltip = (row) => {
+  const meta = centerAnimationMeta(row);
+  const parts = ['动漫'];
+  if (meta.reason === 'tmdb_genres_animation') parts.push('TMDb 类型命中动画');
+  if (meta.source) parts.push(String(meta.source));
+  return parts.join(' · ');
+};
+
 const centerShortDramaMeta = (row) => {
   for (const part of centerNestedParts(row)) {
     const meta = part?.short_drama_meta_json || part?.short_drama_meta || {};
@@ -1252,6 +1526,20 @@ const centerTypeCell = (row) => {
 
   if (centerIsOngoingHub(row)) {
     tags.push(h(NTag, { size: 'small', round: true, type: 'info', class: 'center-flag-tag' }, { default: () => '连载中' }));
+  }
+
+  if (isCenterCompletedCertified(row) && !centerIsOngoingHub(row)) {
+    tags.push(h(NTooltip, { trigger: 'hover' }, {
+      trigger: () => h(NTag, { size: 'small', round: true, type: 'success', class: 'center-flag-tag' }, { default: () => '已完结' }),
+      default: () => centerCompletedCertifiedTooltip(row),
+    }));
+  }
+
+  if (isCenterAnimation(row)) {
+    tags.push(h(NTooltip, { trigger: 'hover' }, {
+      trigger: () => h(NTag, { size: 'small', round: true, type: 'info', class: 'center-flag-tag' }, { default: () => '动漫' }),
+      default: () => centerAnimationTooltip(row),
+    }));
   }
 
   if (isCenterCleanVersion(row)) {
@@ -1304,10 +1592,10 @@ const centerSourceText = (row) => {
 
   if (row?.is_backup_share || row?.backup_share || row?.auto_backup_share || /(backup_mirror|backup_share|auto_backup_share|backup|备份共享|备份源|镜像共享)/i.test(allText)) return '备份共享';
   if (row?.is_auto_share || row?.auto_created || row?.created_by_task || row?.from_auto_task || row?.is_gap_share || row?.is_auto_created || row?.auto_share || row?.auto_registered || row?.from_maintenance || row?.created_from_maintenance) return '自动共享';
-  if (/(rapid_auto_library|rapid_all_library|rapid_completed_season|auto|自动|入库自动|一键全库|完结季收藏|maintenance|scheduler|schedule|task|gap)/i.test(allText)) return '自动共享';
+  if (/(rapid_auto_library|rapid_all_library|auto|自动|入库自动|一键全库|maintenance|scheduler|schedule|task|gap)/i.test(allText)) return '自动共享';
   if (/(hdhive|影巢)/i.test(allText)) return '影巢';
   if (/(tg_channel|telegram|频道)/i.test(allText)) return '频道';
-  if (/(manual|user_share|手动|人工)/i.test(allText) || row?.is_manual_share) return '手动共享';
+  if (/(manual|user_share|rapid_completed_season|手动|人工|完结季源|完结季收藏)/i.test(allText) || row?.is_manual_share) return '手动共享';
 
   const label = labelParts.join(' ').trim();
   return label || '本机共享';
@@ -1508,75 +1796,220 @@ const centerGroupKey = (row) => {
   return `${baseType}:${tmdb || title}:${season}:${episode}`;
 };
 
+const centerTableRowKey = (row) => String(
+  row?.group_key || row?.display_group_key || row?.source_id || row?.source_ref_id || row?.hub_id || row?.episode_source_id || row?.source_file_id || centerGroupKey(row)
+).trim();
+
+const centerIsLazyPlaceholder = (row) => Boolean(row?.__center_lazy_placeholder);
+const centerChildCount = (row) => Number(row?.children_count || row?.child_count || row?.pack_item_count || row?.file_count || 0) || 0;
+const centerCanLazyLoadChildren = (row) => {
+  if (!row || centerIsLazyPlaceholder(row)) return false;
+  const typeLabel = centerTypeLabel(centerRowType(row));
+  const kind = String(row?.source_kind || '').toLowerCase();
+  if (typeLabel !== '季' && !['completed_season', 'season_hub'].includes(kind) && !row?.is_collapsed_pack) return false;
+  return Boolean(row?.has_children || row?.lazy_children_kind || centerChildCount(row) > 0 || kind === 'completed_season' || kind === 'season_hub');
+};
+const centerChildrenAreLoaded = (row) => Boolean(row?.children_loaded || row?._center_children_loaded || (Array.isArray(row?.children) && row.children.length && !row.children.some(centerIsLazyPlaceholder)));
+const centerNeedsLoadChildren = (row) => centerCanLazyLoadChildren(row) && !centerChildrenAreLoaded(row);
+const centerLazyPlaceholder = (row) => {
+  const key = centerTableRowKey(row);
+  const count = centerChildCount(row);
+  const loading = Boolean(centerChildrenLoading[key]);
+  return {
+    __center_lazy_placeholder: true,
+    group_key: `${key}:lazy-children`,
+    source_id: `${key}:lazy-children`,
+    item_type: 'Episode',
+    display_type: 'Episode',
+    title: loading ? '正在加载集明细…' : `展开后加载集明细${count ? `（${count} 集）` : ''}`,
+    status: loading ? 'loading' : 'pending',
+    status_label: loading ? '加载中' : '待加载',
+    versions: [],
+  };
+};
+
 const groupCenterSources = (items, orderBy = 'latest') => {
-  // 辅助函数 1：合并相同 SHA1 的版本，累加热度
+  const normSha1 = (value) => {
+    const text = String(value || '').trim().toUpperCase();
+    return /^[A-F0-9]{40}$/.test(text) ? text : '';
+  };
+  const sourceIdentity = (row) => String(
+    row?.source_file_id || row?.source_id || row?.source_ref_id || row?.episode_source_id || row?.center_source_id || row?.id || ''
+  ).trim();
+  const uniquePush = (arr, value) => {
+    const text = String(value || '').trim();
+    if (text && !arr.includes(text)) arr.push(text);
+  };
+  const childRowsForSignature = (row) => {
+    const children = Array.isArray(row?.children) ? row.children : [];
+    const packItems = Array.isArray(row?.pack_items) ? row.pack_items : [];
+    return children.length ? children : packItems;
+  };
+  const packManifestKey = (row) => {
+    const parts = [];
+    for (const child of childRowsForSignature(row)) {
+      const sha1 = normSha1(child?.sha1);
+      if (!sha1) continue;
+      const epRaw = child?.episode_number ?? '';
+      const epNum = Number(epRaw);
+      const epKey = Number.isFinite(epNum) && epNum > 0 ? String(epNum).padStart(4, '0') : String(epRaw || '').trim();
+      parts.push(`${epKey}:${sha1}`);
+    }
+    if (parts.length) return parts.sort().join('|');
+    const manifestHash = String(row?.manifest_hash || '').trim();
+    return manifestHash ? `manifest:${manifestHash}` : '';
+  };
+  const versionMergeKey = (row) => {
+    const typeLabel = centerTypeLabel(centerRowType(row));
+    const sourceKind = String(row?.source_kind || '').trim().toLowerCase();
+    const isPack = typeLabel === '季' || sourceKind === 'completed_season' || sourceKind === 'season_hub' || row?.is_collapsed_pack;
+    if (isPack) {
+      const manifest = packManifestKey(row);
+      // 季包只有“每一集 SHA1 全部一致”才算同一版本；任意一集不一致就是另一个版本。
+      if (manifest) return `pack:${manifest}`;
+    }
+    const sha1 = normSha1(row?.sha1);
+    if (sha1) return `sha1:${sha1}`;
+    return `source:${sourceIdentity(row) || JSON.stringify([row?.tmdb_id, row?.season_number, row?.episode_number, row?.file_name || row?.title || ''])}`;
+  };
+  const mergeChildLists = (left, right) => {
+    const out = [];
+    const seen = new Set();
+    for (const item of [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])]) {
+      if (!item || typeof item !== 'object') continue;
+      const key = sourceIdentity(item) || `${item.episode_number ?? ''}:${normSha1(item.sha1)}:${item.file_name || ''}`;
+      // 只按具体中心子源去重，不按 SHA1 去重；相同 SHA1 的不同来源要留给后续 mergeVersions 累加资源数。
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      out.push(item);
+    }
+    return out;
+  };
+  const countKeys = ['resource_count', 'usable_resource_count', 'available_holder_count', 'holder_count'];
+  const maxKnownCount = (a, b, fallback = 1) => {
+    const nums = [fallback];
+    for (const row of [a, b]) {
+      for (const key of countKeys) {
+        const value = Number(row?.[key]);
+        if (Number.isFinite(value) && value > 0) nums.push(value);
+      }
+    }
+    return Math.max(...nums);
+  };
+
+  // 合并相同版本：电影/单集按 SHA1；季包按“完整 episode_number:SHA1 manifest”。
+  // 相同版本只显示一行，资源数按不同中心源/holder 合并；不同 SHA1/manifest 才显示多版本行。
   const mergeVersions = (versions) => {
     const merged = [];
-    const sha1Map = new Map();
-    for (const v of (versions || [])) {
-      const sha1 = v.sha1;
-      if (sha1 && sha1Map.has(sha1)) {
-        // 相同 SHA1，合并热度
-        const existing = sha1Map.get(sha1);
-        existing.success_count = (existing.success_count || 0) + (v.success_count || 0);
-        // 保留最新的更新时间
-        if (new Date(v.updated_at || 0) > new Date(existing.updated_at || 0)) {
-          existing.updated_at = v.updated_at;
+    const versionMap = new Map();
+    for (const raw of (versions || [])) {
+      if (!raw || typeof raw !== 'object') continue;
+      const key = versionMergeKey(raw);
+      const srcId = sourceIdentity(raw);
+      if (key && versionMap.has(key)) {
+        const existing = versionMap.get(key);
+        existing._merged_source_ids = Array.isArray(existing._merged_source_ids) ? existing._merged_source_ids : [];
+        uniquePush(existing._merged_source_ids, srcId);
+        for (const id of (raw._merged_source_ids || [])) uniquePush(existing._merged_source_ids, id);
+        const mergeCount = Math.max(existing._merged_source_ids.length || 1, maxKnownCount(existing, raw, 1));
+        for (const countKey of countKeys) existing[countKey] = mergeCount;
+        existing.source_merge_count = mergeCount;
+        existing.version_count = mergeCount;
+        existing.success_count = (existing.success_count || 0) + (raw.success_count || 0);
+        existing.fail_count = (existing.fail_count || 0) + (raw.fail_count || 0);
+        existing.size = Math.max(Number(existing.size || existing.total_size || 0), Number(raw.size || raw.total_size || 0)) || existing.size || raw.size;
+        existing.total_size = Math.max(Number(existing.total_size || existing.size || 0), Number(raw.total_size || raw.size || 0)) || existing.total_size || raw.total_size;
+        existing.children = mergeChildLists(existing.children, raw.children);
+        existing.pack_items = mergeChildLists(existing.pack_items, raw.pack_items);
+        if (centerCreatedTime(raw) > centerCreatedTime(existing)) {
+          existing.created_at = raw.created_at || existing.created_at;
+          existing.updated_at = raw.updated_at || existing.updated_at;
+          existing.sort_timestamp = raw.sort_timestamp || existing.sort_timestamp;
         }
       } else {
-        const newV = { ...v };
-        if (sha1) sha1Map.set(sha1, newV);
-        merged.push(newV);
+        const item = {
+          ...raw,
+          _version_merge_key: key,
+          _merged_source_ids: [],
+          children: Array.isArray(raw.children) ? [...raw.children] : raw.children,
+          pack_items: Array.isArray(raw.pack_items) ? [...raw.pack_items] : raw.pack_items,
+        };
+        uniquePush(item._merged_source_ids, srcId);
+        const initialCount = Math.max(item._merged_source_ids.length || 1, maxKnownCount(item, null, 1));
+        if (initialCount > 0) {
+          for (const countKey of countKeys) item[countKey] = initialCount;
+          item.source_merge_count = initialCount;
+        }
+        if (key) versionMap.set(key, item);
+        merged.push(item);
       }
     }
     return merged;
   };
 
-  // 辅助函数 2：对展开后的子集 (children) 按集号进行严格聚合
+  // 展开后的子集按集号聚合；同一集内部再按 SHA1 合并资源数。
   const groupChildren = (children) => {
     if (!children || !children.length) return undefined;
     const groups = new Map();
-    
     for (const child of children) {
-      const epNum = child.episode_number || 0;
-      if (!groups.has(epNum)) {
-        groups.set(epNum, {
+      const epNum = Number(child?.episode_number || 0) || 0;
+      const key = epNum || child?.file_name || child?.sha1 || sourceIdentity(child);
+      if (!groups.has(key)) {
+        groups.set(key, {
           ...child,
-          group_key: child.group_key || `ep_${epNum}`,
-          versions: [] // 初始化子节点的 versions 数组
+          group_key: child.group_key || `ep_${key}`,
+          versions: [],
         });
       }
-      // 收集该集的所有版本
       const childVersions = Array.isArray(child.versions) && child.versions.length ? child.versions : [child];
-      groups.get(epNum).versions.push(...childVersions);
+      groups.get(key).versions.push(...childVersions);
     }
 
     const result = [];
     for (const group of groups.values()) {
-      // 对同一集内的版本进行 SHA1 去重合并
       group.versions = mergeVersions(group.versions);
+      // 让子行自身也继承第一条版本的展示字段，避免树表标题/状态列读取空值。
+      if (group.versions[0]) {
+        Object.assign(group, {
+          ...group,
+          source_id: group.source_id || group.versions[0].source_id,
+          source_ref_id: group.source_ref_id || group.versions[0].source_ref_id,
+          sha1: group.sha1 || group.versions[0].sha1,
+          size: group.size || group.versions[0].size,
+          version_summary: group.version_summary || group.versions[0].version_summary,
+          summary_json: group.summary_json || group.versions[0].summary_json,
+          media_signature_json: group.media_signature_json || group.versions[0].media_signature_json,
+        });
+      }
       result.push(group);
     }
-    // 按集号排序
-    result.sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
+    result.sort((a, b) => (Number(a.episode_number || 0) - Number(b.episode_number || 0)) || String(a.file_name || '').localeCompare(String(b.file_name || '')));
     return result;
   };
 
   let processedGroups = [];
 
-  // 新中心端数据处理 (带有 versions 数组)
   if ((items || []).some(item => Array.isArray(item?.versions))) {
     processedGroups = (items || []).map(item => {
       const topVersions = Array.isArray(item.versions) && item.versions.length ? item.versions : [item];
+      const allChildren = [];
+      for (const v of topVersions) {
+        allChildren.push(...(Array.isArray(v?.children) ? v.children : []));
+        // children 和 pack_items 通常内容相同；只有 children 为空时才用 pack_items，避免重复翻倍。
+        if (!Array.isArray(v?.children) || !v.children.length) {
+          allChildren.push(...(Array.isArray(v?.pack_items) ? v.pack_items : []));
+        }
+      }
+      if (Array.isArray(item.children)) allChildren.push(...item.children);
+      else if (Array.isArray(item.pack_items)) allChildren.push(...item.pack_items);
       return {
         ...item,
         group_key: item.group_key || item.display_group_key || centerGroupKey(item),
-        versions: mergeVersions(topVersions), // 处理顶层 SHA1 合并
-        children: groupChildren(item.children) // 递归处理展开后的子集
+        versions: mergeVersions(topVersions),
+        children: groupChildren(allChildren),
       };
     });
   } else {
-    // 兼容旧中心端散行数据处理
     const byKey = new Map();
     for (const item of (items || [])) {
       const key = centerGroupKey(item);
@@ -1585,28 +2018,31 @@ const groupCenterSources = (items, orderBy = 'latest') => {
         group = {
           ...item,
           group_key: key,
-          children: item.children, // 稍后统一处理
+          children: item.children,
+          pack_items: item.pack_items,
           versions: [],
         };
         byKey.set(key, group);
         processedGroups.push(group);
       }
       group.versions.push(item);
+      group.children = mergeChildLists(group.children, item.children);
+      group.pack_items = mergeChildLists(group.pack_items, item.pack_items);
     }
     for (const group of processedGroups) {
       group.versions = mergeVersions(group.versions);
-      group.children = groupChildren(group.children);
+      const allChildren = Array.isArray(group.children) && group.children.length ? group.children : group.pack_items;
+      group.children = groupChildren(allChildren);
     }
   }
 
-  // 排序逻辑
   for (const group of processedGroups) {
     if (orderBy === 'popular') {
       group.versions.sort((a, b) => (b.success_count || 0) - (a.success_count || 0));
       group.sort_val = Math.max(...group.versions.map(v => v.success_count || 0));
     } else if (orderBy === 'size') {
-      group.versions.sort((a, b) => (b.size || 0) - (a.size || 0));
-      group.sort_val = Math.max(...group.versions.map(v => v.size || 0));
+      group.versions.sort((a, b) => (b.size || b.total_size || 0) - (a.size || a.total_size || 0));
+      group.sort_val = Math.max(...group.versions.map(v => v.size || v.total_size || 0));
     } else if (orderBy === 'name') {
       group.versions.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
       group.sort_val = group.title || '';
@@ -1615,13 +2051,20 @@ const groupCenterSources = (items, orderBy = 'latest') => {
       group.sort_val = centerCreatedTime(group.versions[0]);
     }
     group.created_at = group.versions[0]?.created_at || group.created_at;
+    group.updated_at = group.versions[0]?.updated_at || group.updated_at;
   }
 
   processedGroups.sort((a, b) => {
     if (orderBy === 'popular' || orderBy === 'size') return b.sort_val - a.sort_val;
     if (orderBy === 'name') return String(a.sort_val).localeCompare(String(b.sort_val));
-    return b.sort_val - a.sort_val; // latest
+    return b.sort_val - a.sort_val;
   });
+
+  for (const group of processedGroups) {
+    if (centerNeedsLoadChildren(group) && (!Array.isArray(group.children) || !group.children.length)) {
+      group.children = [centerLazyPlaceholder(group)];
+    }
+  }
 
   return processedGroups;
 };
@@ -1797,7 +2240,7 @@ const centerColumns = [
     metaLine(row)
   ]) },
   // 主行只展示片名；从类型列开始按 versions 拆分多行展示多版本。
-  { title: '类型', key: 'item_type', width: 210, render: row => lineStack(row.versions, it => centerTypeCell(it), it => isCenterCleanVersion(it) ? centerCleanVersionTooltip(it) : '') },
+  { title: '类型', key: 'item_type', width: 210, render: row => lineStack(row.versions, it => centerTypeCell(it)) },
   { title: '分辨率', key: 'resolution', width: 90, render: row => lineStack(row.versions, it => h('span', centerParamText(it, centerVersionSummary(it).resolution))) },
   { title: '视频编码', key: 'video_codec', width: 120, render: row => lineStack(row.versions, it => {
     const v = centerVersionSummary(it) || {};
@@ -1900,7 +2343,7 @@ const saveSharedConfig = async () => {
 const loadSummary = async () => { const res = await axios.get('/api/shared/resources/summary'); summary.value = res.data?.data || { shares: {}, credit: {} }; };
 const loadShares = async () => { sharesLoading.value = true; try { const res = await axios.get('/api/shared/resources/shares', { params: { ...shareFilters, page: sharePagination.page, page_size: sharePagination.pageSize } }); shareItems.value = res.data?.items || []; sharePagination.itemCount = Number(res.data?.total || 0); } catch (e) { message.error(e.response?.data?.message || '加载我的共享源失败'); } finally { sharesLoading.value = false; } };
 
-const loadCenterSources = async () => {
+const loadCenterSources = async (forceRefresh = false) => {
   centerLoading.value = true;
   try {
     const params = {
@@ -1911,13 +2354,115 @@ const loadCenterSources = async () => {
       limit: centerPagination.pageSize,
       offset: (centerPagination.page - 1) * centerPagination.pageSize,
     };
+    if (forceRefresh) params.force_refresh = 1;
     const res = await axios.get('/api/shared/resources/center/sources', { params });
+    centerExpandedRowKeys.value = [];
+    clearCenterChildrenLoading();
     centerSources.value = res.data?.items || [];
     centerPagination.itemCount = Number(res.data?.total || 0);
   } catch (e) {
     message.error(e.response?.data?.message || '加载中心资源库失败');
   } finally {
     centerLoading.value = false;
+  }
+};
+
+
+const clearCenterChildrenLoading = () => {
+  Object.keys(centerChildrenLoading).forEach(key => delete centerChildrenLoading[key]);
+};
+
+const collectCenterSourceIds = (row) => {
+  const ids = [];
+  const push = (value) => {
+    const text = String(value || '').trim();
+    if (text && !ids.includes(text) && !text.includes(':lazy-children')) ids.push(text);
+  };
+  const visit = (item) => {
+    if (!item || typeof item !== 'object') return;
+    (Array.isArray(item._merged_source_ids) ? item._merged_source_ids : []).forEach(push);
+    push(item.source_id || item.source_ref_id || item.center_source_id);
+  };
+  visit(row);
+  (Array.isArray(row?.versions) ? row.versions : []).forEach(visit);
+  return ids.filter(id => !id.startsWith('hub_'));
+};
+
+const findCenterGroupByKey = (rows, key) => {
+  const target = String(key || '');
+  for (const row of rows || []) {
+    if (centerTableRowKey(row) === target) return row;
+    const found = findCenterGroupByKey(row?.children || [], target);
+    if (found) return found;
+  }
+  return null;
+};
+
+const centerItemMatchesLazyTarget = (item, target, sourceIds, hubId, targetKey) => {
+  if (!item || typeof item !== 'object') return false;
+  if (centerTableRowKey(item) === targetKey || centerGroupKey(item) === targetKey) return true;
+  const itemHub = String(item.hub_id || item.source_id || item.source_ref_id || '').trim();
+  if (hubId && itemHub === hubId) return true;
+  const itemIds = collectCenterSourceIds(item);
+  if (String(item.source_id || item.source_ref_id || '').trim()) itemIds.push(String(item.source_id || item.source_ref_id).trim());
+  return sourceIds.some(id => itemIds.includes(id));
+};
+
+const applyCenterLoadedChildren = (target, children, packItems) => {
+  const sourceIds = collectCenterSourceIds(target);
+  const hubId = String(target?.hub_id || (target?.source_kind === 'season_hub' ? (target.source_id || target.source_ref_id) : '') || '').trim();
+  const targetKey = centerTableRowKey(target);
+  const normalizedChildren = Array.isArray(children) ? children : [];
+  const normalizedPackItems = Array.isArray(packItems) ? packItems : normalizedChildren;
+  centerSources.value = (centerSources.value || []).map(item => {
+    if (centerItemMatchesLazyTarget(item, target, sourceIds, hubId, targetKey)) {
+      return {
+        ...item,
+        children: normalizedChildren,
+        pack_items: normalizedPackItems,
+        children_loaded: true,
+        _center_children_loaded: true,
+        has_children: normalizedChildren.length > 0,
+      };
+    }
+    return item;
+  });
+};
+
+const loadCenterSourceChildren = async (row) => {
+  if (!centerNeedsLoadChildren(row)) return;
+  const key = centerTableRowKey(row);
+  if (!key || centerChildrenLoading[key]) return;
+  centerChildrenLoading[key] = true;
+  try {
+    const sourceKind = String(row?.source_kind || row?.lazy_children_kind || '').toLowerCase();
+    const isHub = sourceKind === 'season_hub' || row?.is_ongoing_hub;
+    const sourceIds = collectCenterSourceIds(row);
+    const params = {
+      source_kind: isHub ? 'season_hub' : 'completed_season',
+      source_id: isHub ? (row?.hub_id || row?.source_id || row?.source_ref_id || '') : (sourceIds[0] || row?.source_id || row?.source_ref_id || ''),
+      source_ids: isHub ? '' : sourceIds.join(','),
+      hub_id: row?.hub_id || '',
+      limit: 5000,
+    };
+    const res = await axios.get('/api/shared/resources/center/sources/children', { params });
+    const children = res.data?.children || res.data?.items || [];
+    const packItems = res.data?.pack_items || children;
+    applyCenterLoadedChildren(row, children, packItems);
+  } catch (e) {
+    message.error(e.response?.data?.message || '加载季包集明细失败');
+  } finally {
+    delete centerChildrenLoading[key];
+  }
+};
+
+const handleCenterExpandedRowKeys = async (keys) => {
+  const oldKeys = new Set(centerExpandedRowKeys.value || []);
+  centerExpandedRowKeys.value = keys || [];
+  const newlyExpanded = (keys || []).filter(key => !oldKeys.has(key));
+  for (const key of newlyExpanded) {
+    const row = findCenterGroupByKey(groupedCenterSources.value || [], key);
+    if (row && centerNeedsLoadChildren(row)) await loadCenterSourceChildren(row);
   }
 };
 
@@ -2142,7 +2687,13 @@ const triggerSharedMaintenance = async () => {
 };
 
 const loadLedger = async () => { ledgerLoading.value = true; try { const res = await axios.get('/api/shared/resources/credit/ledger', { params: { limit: 200, actual_only: 1, sync_center: 1 } }); ledgerItems.value = res.data?.items || []; } catch { message.error('加载贡献点流水失败'); } finally { ledgerLoading.value = false; } };
-const loadAll = async () => { await Promise.allSettled([loadSummary(), loadShares(), loadCenterSources(), loadLedger()]); };
+const loadAll = async (forceRefresh = false) => {
+  const tasks = [loadSummary(), loadLedger()];
+  if (activeTab.value === 'center') tasks.push(loadCenterSources(forceRefresh));
+  else if (activeTab.value === 'requests') tasks.push(loadShareRequests());
+  else tasks.push(loadShares());
+  await Promise.allSettled(tasks);
+};
 const handleTabChange = (name) => { if (name === 'shares') loadShares(); if (name === 'center') loadCenterSources(); if (name === 'requests') loadShareRequests(); if (name === 'ledger') loadLedger(); };
 
 const registerCenterDevice = async () => {
@@ -2311,11 +2862,12 @@ const confirmShareAllLibrary = () => {
     onPositiveClick: async () => {
       shareAllLoading.value = true;
       try {
-        const res = await axios.post('/api/shared/resources/shares/share-library', {});
-        message.success(res.data?.message || '已启动一键登记媒体库任务');
-        await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]);
+        const res = await axios.post('/api/tasks/run', {
+          task_name: 'share-all-library'
+        });
+        message.success(res.data?.message || '一键登记媒体库任务已提交');
       } catch (e) {
-        message.error(e.response?.data?.message || '启动一键登记媒体库失败');
+        message.error(e.response?.data?.error || e.response?.data?.message || '启动一键登记媒体库失败');
       } finally {
         shareAllLoading.value = false;
       }
@@ -2347,6 +2899,33 @@ const manualCreateShare = async () => {
   } finally { manualCreating.value = false; }
 };
 
+
+const reregisterShare = (row) => {
+  const ids = Array.isArray(row.source_ids) ? row.source_ids.filter(Boolean) : [];
+  const isBatch = ids.length > 1;
+  const title = row.title || row.root_name || row.file_name || '该资源';
+  const countText = isBatch ? `该聚合项下 ${ids.length} 个本机源` : '该本机源';
+  dialog.warning({
+    title: '重新登记共享源',
+    content: `确定重新登记《${title}》的${countText}吗？系统会重新上传 RAW/summary_json，并向中心重新登记；可用于修复中心 RAW 缺失导致的不可用状态。`,
+    positiveText: '重新登记',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        if (isBatch) {
+          await axios.post('/api/shared/resources/shares/reregister-batch', { ids });
+        } else {
+          await axios.post(`/api/shared/resources/shares/${row.id}/reregister`, {});
+        }
+        message.success('已重新登记共享源');
+        await Promise.allSettled([loadShares(), loadCenterSources(), loadSummary(), loadLedger()]);
+      } catch (e) {
+        message.error(e.response?.data?.message || '重新登记失败');
+      }
+    }
+  });
+};
+
 const cancelShare = (row) => {
   if (isAutoShareRow(row)) {
     return message.warning('自动共享源由入库自动维护，不能手动停用');
@@ -2371,6 +2950,39 @@ const cancelShare = (row) => {
         await Promise.allSettled([loadShares(), loadSummary(), loadLedger()]);
       } catch (e) {
         message.error(e.response?.data?.message || '停用失败');
+      }
+    }
+  });
+};
+
+
+const deleteShare = (row) => {
+  if (isEffectiveShareRow(row)) {
+    return message.warning('有效共享不能直接删除，请先停用，停用成功后再删除本地记录');
+  }
+  const ids = Array.isArray(row.source_ids) ? row.source_ids.filter(Boolean) : [];
+  const isBatch = ids.length > 1;
+  const title = row.title || row.root_name || row.file_name || '该资源';
+  const alreadyDisabled = isInactiveShareRow(row);
+  const countText = isBatch ? `该聚合项下 ${ids.length} 个本机源` : '该本机源';
+  dialog.warning({
+    title: '删除共享源',
+    content: alreadyDisabled
+      ? `确定彻底删除《${title}》的${countText}本地记录吗？该资源已停用，不会再请求中心。`
+      : `确定删除《${title}》的${countText}吗？有效共享会先同步中心取消登记，成功后再删除本地数据。`,
+    positiveText: alreadyDisabled ? '删除本地数据' : '取消登记并删除',
+    negativeText: '保留',
+    onPositiveClick: async () => {
+      try {
+        if (isBatch) {
+          await axios.post('/api/shared/resources/shares/delete-batch', { ids });
+        } else {
+          await axios.post(`/api/shared/resources/shares/${row.id}/delete`);
+        }
+        message.success(alreadyDisabled ? '已删除本地共享记录' : '已取消登记并删除共享记录');
+        await Promise.allSettled([loadShares(), loadCenterSources(), loadSummary(), loadLedger()]);
+      } catch (e) {
+        message.error(e.response?.data?.message || '删除失败');
       }
     }
   });

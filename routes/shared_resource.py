@@ -100,6 +100,11 @@ def _center_headers_for_cfg(cfg: Dict[str, Any]) -> Dict[str, str]:
 
 def _fetch_center_credit() -> Dict[str, Any]:
     client = SharedCenterClient()
+    pro_report = {}
+    try:
+        pro_report = client.report_current_pro_quota_auth()
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] Pro 额度认证上报失败，继续同步贡献点: {e}")
     me = client.me()
     stats = client.stats()
     ledger = {}
@@ -115,12 +120,22 @@ def _fetch_center_credit() -> Dict[str, Any]:
         'share_requests': int(stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0),
         'shared_sources': int(stats.get('movie_sources') or 0) + int(stats.get('episode_sources') or 0) + int(stats.get('completed_season_sources') or 0),
         'raw_ffprobe': int(stats.get('raw_ffprobe') or 0),
+        'display_movie_count': int(stats.get('display_movie_count') or (stats.get('media_stats') or {}).get('movie_count') or stats.get('movie_sources') or 0),
+        'display_season_count': int(stats.get('display_season_count') or (stats.get('media_stats') or {}).get('season_count') or 0),
+        'video_count': int(stats.get('video_count') or (stats.get('media_stats') or {}).get('video_count') or stats.get('raw_ffprobe') or 0),
+        'media_stats': stats.get('media_stats') or {
+            'movie_count': int(stats.get('display_movie_count') or stats.get('movie_sources') or 0),
+            'season_count': int(stats.get('display_season_count') or 0),
+            'video_count': int(stats.get('video_count') or stats.get('raw_ffprobe') or 0),
+        },
+        'pro_quota': (pro_report.get('pro_quota') or pro_report.get('quota') or stats.get('pro_quota') or me.get('pro_quota') or {}),
         'remote_devices': int(stats.get('devices') or 0),
         'raw_json': {'me': me, 'stats': stats},
     }
     saved = shared_credit_db.upsert_credit_snapshot(snapshot)
-    synced_ledger = shared_credit_db.sync_center_credit_ledger(ledger.get('items') or [], device_snapshot=me)
-    return {'ok': True, 'snapshot': saved, 'synced_ledger': synced_ledger}
+    center_ledger_items = ledger.get('items') or []
+    synced_ledger = shared_credit_db.sync_center_credit_ledger(center_ledger_items, device_snapshot=me)
+    return {'ok': True, 'snapshot': saved, 'synced_ledger': synced_ledger, 'center_ledger_items': center_ledger_items}
 
 
 def _decorate_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,8 +160,8 @@ def _decorate_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
         'source_provider', 'register_source', 'register_from', 'task_source',
         'task_type', 'source_provider_label', 'source_label', 'message', 'reason'
     ))
-    auto_provider_values = {'rapid_auto_library', 'rapid_all_library', 'rapid_completed_season'}
-    auto_provider_keywords = ('入库自动', '自动登记', '自动共享', '一键全库', '完结季收藏')
+    auto_provider_values = {'rapid_auto_library', 'rapid_all_library'}
+    auto_provider_keywords = ('入库自动', '自动登记', '自动共享', '一键全库')
     row['is_auto_share'] = bool(
         provider in auto_provider_values
         or row.get('is_auto_share')
@@ -160,7 +175,7 @@ def _decorate_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
         'manual_rapid': '手动登记',
         'rapid_auto_library': '入库自动登记',
         'rapid_all_library': '一键全库登记',
-        'rapid_completed_season': '完结季收藏源',
+        'rapid_completed_season': '完结季源',
     }.get(provider, provider or '本地秒传源')
     return row
 
@@ -185,18 +200,13 @@ def _min_text(values: List[Any]) -> str:
 
 
 def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """我的共享源展示聚合。
-
-    Rapid v2 里本机登记到中心的是电影源/分集源/完结季包源。
-    UI 不应该把同一季的分集散铺成几十行，否则停用只能一集集点。
-    这里只改变本机管理页展示口径：同一 tmdb_id + season_number 的 episode 源聚合为一个季行，
-    真正停用时仍按 source_ids 批量停用每个本机源。
-    """
-    decorated = [_decorate_local_source(r) for r in (rows or []) if isinstance(r, dict)]
+    """我的共享源展示聚合。"""
+    # 【核心优化】直接使用轻量级字典，不执行任何耗时操作
+    raw_rows = [r for r in (rows or []) if isinstance(r, dict)]
     groups: Dict[str, Dict[str, Any]] = {}
     singles: List[Dict[str, Any]] = []
 
-    for row in decorated:
+    for row in raw_rows:
         source_kind = str(row.get('source_kind') or '').strip().lower()
         item_type = str(row.get('item_type') or '').strip().lower()
         season = row.get('season_number')
@@ -271,7 +281,7 @@ def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         g['created_at'] = _min_text(created_values) or g.get('created_at')
         g['updated_at'] = _max_text(updated_values) or g.get('updated_at')
         g['share_remark'] = f"聚合显示：{g.get('aggregated_source_count') or len(g.get('source_ids') or [])} 个本机分集源"
-        out.append(_decorate_local_source(g))
+        out.append(g)
 
     out.extend(singles)
     out.sort(key=lambda r: str(r.get('updated_at') or r.get('created_at') or ''), reverse=True)
@@ -335,6 +345,62 @@ def _apply_local_season_meta(row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def _share_status_tokens(value: Any) -> List[str]:
+    tokens = []
+    for token in str(value or 'usable').split(','):
+        token = token.strip().lower()
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens or ['usable']
+
+
+def _share_row_matches_filter(row: Dict[str, Any], status_filter: str) -> bool:
+    """我的共享源筛选口径。
+
+    Rapid v2 本地源的 status 表示本地源状态，center_status 表示中心登记状态。
+    旧分享模式的“已登记/部分登记”直接按 status 查会把 available/active 源过滤没，
+    所以这里统一在聚合后按 Rapid 语义筛选。
+    """
+    tokens = _share_status_tokens(status_filter)
+    if any(t in {'all', '全部', '全部状态'} for t in tokens):
+        return True
+
+    row = row if isinstance(row, dict) else {}
+    status = str(row.get('status') or row.get('review_status') or '').strip().lower()
+    center_status = str(row.get('center_status') or '').strip().lower()
+    source_kind = str(row.get('source_kind') or '').strip().lower()
+    has_center_id = bool(str(row.get('center_source_id') or '').strip())
+
+    live = status in {'active', 'available'}
+    disabled = status in {'disabled', 'cancelled', 'canceled', 'deleted'} or center_status in {'disabled', 'cancelled', 'canceled'}
+    failed = status in {'failed', 'error', 'dead', 'expired', 'rejected', 'inconsistent', 'incomplete', 'raw_missing'} or center_status in {'failed', 'error', 'dead', 'expired', 'rejected', 'raw_missing'}
+    reported = center_status in {'reported', 'partial'} or has_center_id
+    local_only = not has_center_id and center_status in {'', 'local', 'pending', 'not_reported'}
+
+    for token in tokens:
+        if token in {'usable', 'active', 'alive', 'valid', 'valid_share', '有效', '有效共享'}:
+            if live and not disabled and not failed:
+                return True
+        elif token in {'reported', 'center_reported', 'registered', '已登记', '已登记中心', '已上报'}:
+            if reported:
+                return True
+        elif token in {'partial', '部分登记'}:
+            if center_status == 'partial':
+                return True
+        elif token in {'local', 'local_only', 'unreported', 'not_reported', '本地', '本地未登记', '未登记'}:
+            if local_only:
+                return True
+        elif token in {'failed', 'error', 'abnormal', 'invalid', '失败', '异常', '不合格'}:
+            if failed:
+                return True
+        elif token in {'disabled', 'cancelled', 'canceled', 'deleted', '停用', '已停用', '已取消'}:
+            if disabled:
+                return True
+        elif token == status or token == center_status or token == source_kind:
+            return True
+    return False
+
+
 @shared_resource_bp.route('/config', methods=['GET', 'POST'])
 @admin_required
 def api_shared_resource_config():
@@ -353,18 +419,83 @@ def api_shared_resource_summary():
 @shared_resource_bp.route('/shares', methods=['GET'])
 @admin_required
 def api_list_local_sources():
-    status = request.args.get('status') or 'all'
+    status = request.args.get('status') or 'usable'
     keyword = request.args.get('keyword') or request.args.get('q') or ''
     page = max(1, int(request.args.get('page') or 1))
     page_size = max(1, min(int(request.args.get('page_size') or 30), 200))
+    raw_limit = max(1000, min(int(request.args.get('raw_limit') or 200000), 200000))
 
-    # 先取本机匹配源再聚合，避免同一季 30 多集被分页拆成多页重复季。
-    # 这是本机管理页，不是中心资源库；中心资源库仍由中心端 display-list 做分页/筛选/聚合。
-    rows, _raw_total = shared_share_db.list_local_sources(status=status, keyword=keyword, page=1, page_size=100000)
-    aggregated = _aggregate_local_sources(rows)
+    from database.connection import get_db_connection
+    from database.shared_share_db import _local_sources_where_sql, _local_sources_order_sql, _rows
+
+    where_sql, args = _local_sources_where_sql(status='all', keyword=keyword)
+    order_sql = _local_sources_order_sql(order_by='updated_desc')
+
+    # 1. 极速轻量级查询：绝不查任何 JSONB 字段，只查聚合和过滤需要的基础列
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS n FROM shared_rapid_sources {where_sql}", args)
+            row = cur.fetchone()
+            raw_total = dict(row)['n'] if row else 0
+
+            cur.execute(f"""
+                SELECT 
+                    id, source_kind, item_type, tmdb_id, season_number, episode_number, 
+                    status, center_status, center_source_id, created_at, updated_at, 
+                    file_count, title, file_name, source_provider
+                FROM shared_rapid_sources 
+                {where_sql} 
+                ORDER BY {order_sql} 
+                LIMIT %s
+            """, args + [raw_limit])
+            light_rows = _rows(cur.fetchall())
+
+    # 2. 在内存中进行聚合和过滤（因为没有庞大的 JSON，这一步只需 1-2 毫秒）
+    aggregated = _aggregate_local_sources(light_rows)
+    filtered = [row for row in aggregated if _share_row_matches_filter(row, status)]
+    
     start = (page - 1) * page_size
     end = start + page_size
-    return jsonify({'success': True, 'items': aggregated[start:end], 'total': len(aggregated)})
+    page_items = filtered[start:end]
+
+    # 3. 提取当前页需要展示的真实数据库 ID
+    needed_ids = set()
+    for item in page_items:
+        if item.get('source_ids'):
+            needed_ids.update(item['source_ids'])
+        elif item.get('id'):
+            needed_ids.add(item['id'])
+
+    # 4. 只为这 30 条数据去数据库拉取完整的 JSONB 字段 (耗时极低)
+    full_rows_map = {}
+    if needed_ids:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT id, raw_json FROM shared_rapid_sources WHERE id = ANY(%s)", (list(needed_ids),))
+                for r in _rows(cur.fetchall()):
+                    full_rows_map[r['id']] = r['raw_json']
+
+    # 5. 将完整的 raw_json 拼装回去，并执行装饰器
+    final_items = []
+    for item in page_items:
+        if item.get('source_ids'):
+            # 聚合季包：取第一个子项的 raw_json 作为代表
+            rep_id = item['source_ids'][0] if item['source_ids'] else None
+            item['raw_json'] = full_rows_map.get(rep_id, {})
+        else:
+            item['raw_json'] = full_rows_map.get(item.get('id'), {})
+        
+        final_items.append(_decorate_local_source(item))
+
+    return jsonify({
+        'success': True,
+        'items': final_items,
+        'total': len(filtered),
+        'raw_total': raw_total,
+        'scanned_raw': len(light_rows),
+        'page': page,
+        'page_size': page_size,
+    })
 
 
 @shared_resource_bp.route('/shares/<int:source_id>/check', methods=['POST'])
@@ -388,6 +519,78 @@ def api_report_local_source(source_id: int):
     }
     result = shared_tasks.register_candidate_to_center(candidate, source_provider=row.get('source_provider') or 'manual_rapid')
     return jsonify({'success': bool(result.get('ok')), 'message': result.get('message') or '已登记中心', 'data': result})
+
+
+
+@shared_resource_bp.route('/shares/<int:source_id>/reregister', methods=['POST'])
+@admin_required
+def api_reregister_local_source(source_id: int):
+    """重新登记本地源：重新上传 RAW/summary_json，并恢复中心可用状态。"""
+    row = shared_share_db.get_local_source(source_id)
+    if not row:
+        return jsonify({'success': False, 'message': '本地共享源不存在'}), 404
+    result = shared_tasks.reregister_local_source(source_id)
+    status = 200 if result.get('ok') else 400
+    return jsonify({'success': bool(result.get('ok')), 'message': result.get('message') or '重新登记完成', 'data': result}), status
+
+
+@shared_resource_bp.route('/shares/reregister-batch', methods=['POST'])
+@admin_required
+def api_reregister_local_sources_batch():
+    data = _request_json()
+    raw_ids = data.get('ids') or data.get('source_ids') or []
+    ids = []
+    for value in raw_ids if isinstance(raw_ids, list) else []:
+        sid = _safe_int(value, 0)
+        if sid > 0 and sid not in ids:
+            ids.append(sid)
+    if not ids:
+        return jsonify({'success': False, 'message': '缺少要重新登记的本地源 ID'}), 400
+    result = shared_tasks.reregister_local_sources(ids)
+    status = 200 if result.get('ok') else 400
+    return jsonify({'success': bool(result.get('ok')), 'message': result.get('message') or '重新登记完成', 'data': result}), status
+
+
+
+def _local_source_requires_center_cancel(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    if not str(row.get('center_source_id') or '').strip():
+        return False
+    status = str(row.get('status') or '').strip().lower()
+    center_status = str(row.get('center_status') or '').strip().lower()
+    if status in {'disabled', 'cancelled', 'canceled', 'deleted'}:
+        return False
+    if center_status in {'disabled', 'cancelled', 'canceled', 'deleted'}:
+        return False
+    return bool(status in {'active', 'available', 'updating', 'pending', ''} or center_status in {'reported', 'partial', 'local', 'pending', ''})
+
+
+def _cancel_center_source_for_local_row(row: Dict[str, Any], message: str = 'local delete') -> Dict[str, Any]:
+    row = row if isinstance(row, dict) else {}
+    if not _local_source_requires_center_cancel(row):
+        return {'ok': True, 'skipped': True, 'reason': 'local_only_or_already_disabled'}
+    try:
+        return SharedCenterClient().disable_source(row.get('source_kind'), row.get('center_source_id'), message=message)
+    except Exception as e:
+        return {'ok': False, 'message': str(e)}
+
+
+def _delete_local_source_with_center_cancel(source_id: int, *, message: str = 'local delete') -> Dict[str, Any]:
+    row = shared_share_db.get_local_source(source_id)
+    if not row:
+        return {'ok': False, 'missing': True, 'id': source_id, 'message': '本地共享源不存在'}
+    center_resp = _cancel_center_source_for_local_row(row, message=message)
+    if _local_source_requires_center_cancel(row) and center_resp.get('ok') is False:
+        return {'ok': False, 'id': source_id, 'center': center_resp, 'message': center_resp.get('message') or '中心取消登记失败，未删除本地数据'}
+    deleted = shared_share_db.delete_local_source(source_id)
+    return {
+        'ok': bool(deleted),
+        'id': source_id,
+        'item': _decorate_local_source(row),
+        'deleted': deleted,
+        'center': center_resp,
+        'center_cancelled': bool(center_resp and not center_resp.get('skipped') and center_resp.get('ok') is not False),
+    }
 
 
 @shared_resource_bp.route('/shares/<int:source_id>/cancel', methods=['POST'])
@@ -448,6 +651,68 @@ def api_disable_local_sources_batch():
     })
 
 
+
+@shared_resource_bp.route('/shares/<int:source_id>/delete', methods=['POST', 'DELETE'])
+@admin_required
+def api_delete_local_source(source_id: int):
+    result = _delete_local_source_with_center_cancel(source_id, message='local delete')
+    status = 200 if result.get('ok') else (404 if result.get('missing') else 400)
+    message = '已删除本地共享源'
+    center = result.get('center') or {}
+    if result.get('center_cancelled'):
+        message = '已同步中心取消登记，并删除本地共享源'
+    elif center.get('skipped'):
+        message = '共享源已停用或未登记中心，已直接删除本地数据'
+    return jsonify({'success': bool(result.get('ok')), 'message': result.get('message') or message, 'data': result}), status
+
+
+@shared_resource_bp.route('/shares/delete-batch', methods=['POST'])
+@admin_required
+def api_delete_local_sources_batch():
+    data = _request_json()
+    raw_ids = data.get('ids') or data.get('source_ids') or []
+    ids = []
+    for value in raw_ids if isinstance(raw_ids, list) else []:
+        sid = _safe_int(value, 0)
+        if sid > 0 and sid not in ids:
+            ids.append(sid)
+    if not ids:
+        return jsonify({'success': False, 'message': '缺少要删除的本地源 ID'}), 400
+
+    deleted = []
+    missing = []
+    failed = []
+    center_results = []
+    for sid in ids:
+        result = _delete_local_source_with_center_cancel(sid, message='local delete batch')
+        if result.get('missing'):
+            missing.append(sid)
+            continue
+        if not result.get('ok'):
+            failed.append({'id': sid, 'message': result.get('message'), 'center': result.get('center')})
+            continue
+        deleted.append(result.get('item') or {'id': sid})
+        center_results.append({'id': sid, 'center': result.get('center'), 'center_cancelled': result.get('center_cancelled')})
+
+    success = not failed
+    parts = [f'已删除 {len(deleted)} 个本地共享源']
+    cancelled_count = len([x for x in center_results if x.get('center_cancelled')])
+    if cancelled_count:
+        parts.append(f'同步取消中心登记 {cancelled_count} 个')
+    if missing:
+        parts.append(f'{len(missing)} 个不存在')
+    if failed:
+        parts.append(f'{len(failed)} 个中心取消失败未删除')
+    return jsonify({
+        'success': success,
+        'message': '，'.join(parts),
+        'items': deleted,
+        'center': center_results,
+        'missing': missing,
+        'failed': failed,
+    }), 200 if success else 400
+
+
 @shared_resource_bp.route('/media/search', methods=['GET'])
 @admin_required
 def api_search_shareable_media():
@@ -480,15 +745,23 @@ def api_manual_validate():
     前端仍沿用 /shares/manual-validate 这个路由名，但这里不再校验 115 分享码/提取码，
     只确认本地能定位到可秒传文件，并检查 RAW 媒体信息是否可用于中心展示/匹配。
     """
-    data = _request_json()
-    consistency = shared_share_db.repair_candidate_fingerprints(data, log_result=True)
+    data = shared_tasks._normalize_series_candidate_identity(_request_json())
+    # 手动预校验只检查本地是否能定位视频、是否能生成 RAW/summary_json。
+    # 不再调用 repair_candidate_fingerprints，避免连载季/维护前预检触发季包一致性校验。
+    data['_skip_fingerprint_repair'] = True
+    consistency = {}
     files = shared_share_db.collect_files_for_candidate(data)
     root = shared_share_db.candidate_root_from_files(files)
     missing_raw = []
     for f in files:
         sha1 = str(f.get('sha1') or '').upper()
-        if sha1 and not (shared_share_db.raw_ffprobe_for_sha1(sha1) or {}).get('raw_ffprobe_json'):
-            missing_raw.append({'sha1': sha1, 'file_name': f.get('file_name')})
+        # 不只检查 RAW 是否存在，还要确认能生成中心资源库展示用 summary_json。
+        try:
+            entry = shared_tasks._prepare_raw_upload_entry(f)
+        except Exception:
+            entry = {}
+        if sha1 and not entry:
+            missing_raw.append({'sha1': sha1, 'file_name': f.get('file_name'), 'reason': 'RAW 或 summary_json 缺失'})
 
     if not files:
         message = '没有找到可登记视频文件'
@@ -528,22 +801,6 @@ def api_manual_create():
     return jsonify({'success': bool(result.get('ok')), 'message': result.get('message') or '共享源已登记中心', 'data': result}), status
 
 
-@shared_resource_bp.route('/shares/share-library', methods=['POST'])
-@admin_required
-def api_share_library():
-    data = _request_json()
-    max_items = int(data.get('max_items') or 100000)
-    # 默认异步，避免前端等待全库扫描。
-    def _runner():
-        try:
-            shared_tasks.share_all_library(max_items=max_items)
-        except Exception as e:
-            logger.error(f"  ➜ [共享资源] 一键登记媒体库任务失败: {e}", exc_info=True)
-    threading.Thread(target=_runner, name='shared-rapid-register-all-library', daemon=True).start()
-    return jsonify({'success': True, 'message': '已启动一键登记媒体库任务；不会创建 115 分享，只登记中心秒传索引'})
-
-
-
 def _json_dict(value):
     if isinstance(value, dict):
         return value
@@ -574,9 +831,51 @@ def _center_nested_rows(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _bool_state(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes', 'y', 'on', '启用', '开启', '是'):
+        return True
+    if text in ('0', 'false', 'no', 'n', 'off', '停用', '关闭', '否'):
+        return False
+    return None
+
+
+def _center_direct_flag_state(row: Dict[str, Any], flag_key: str, meta_key: str):
+    """只读取顶层/顶层摘要容器里的显式标签状态。
+
+    中心端会给聚合季包写入聚合后的 is_short_drama=false。
+    这时不能再递归子项，否则历史子项残留的 true 会把季包重新污染。
+    """
+    row = row if isinstance(row, dict) else {}
+    for container_key in (
+        '', meta_key, 'version_summary', 'summary_json', 'media_signature_json', 'raw_summary_json', 'rapid_meta_json'
+    ):
+        container = row if not container_key else _json_dict(row.get(container_key))
+        if not isinstance(container, dict):
+            continue
+        state = _bool_state(container.get(flag_key)) if flag_key in container else None
+        if state is not None:
+            return state
+        meta = _json_dict(container.get(meta_key))
+        state = _bool_state(meta.get(flag_key)) if flag_key in meta else None
+        if state is not None:
+            return state
+    return None
+
+
 def _center_flag_meta(row: Dict[str, Any], flag_key: str, meta_key: str) -> Dict[str, Any]:
     for part in _center_nested_rows(row):
-        for container_key in ('', 'version_summary', 'summary_json', 'media_signature_json', 'raw_summary_json'):
+        for container_key in (
+            '', 'version_summary', 'summary_json', 'media_signature_json', 'raw_summary_json',
+            'rapid_meta_json', 'clean_version_meta_json', 'short_drama_meta_json',
+            'animation_meta_json', 'completed_certified_meta_json',
+        ):
             container = part if not container_key else _json_dict(part.get(container_key))
             if not isinstance(container, dict):
                 continue
@@ -589,11 +888,34 @@ def _center_flag_meta(row: Dict[str, Any], flag_key: str, meta_key: str) -> Dict
     return {}
 
 
+def _center_source_is_animation(row: Dict[str, Any]) -> bool:
+    return bool(_center_flag_meta(row, 'is_animation', 'animation_meta_json'))
+
+
+def _center_source_is_completed_certified(row: Dict[str, Any]) -> bool:
+    """中心资源库“已完结认证”只认 available 的 completed_season。
+
+    不能用 Season 类型、进度满、watching_status=Completed 或 source_kind=completed_season 兜底，
+    否则历史脏数据 status=alive 的 completed_season 也会被前端打上“已完结”。
+    """
+    row = row if isinstance(row, dict) else {}
+    source_kind = str(row.get('source_kind') or '').strip().lower()
+    status = str(row.get('status') or '').strip().lower()
+    if source_kind == 'completed_season':
+        return status == 'available'
+    if source_kind == 'season_hub' or row.get('is_ongoing_hub'):
+        return False
+    return bool(_center_flag_meta(row, 'is_completed_certified', 'completed_certified_meta_json'))
+
+
 def _center_source_is_clean_version(row: Dict[str, Any]) -> bool:
     return bool(_center_flag_meta(row, 'is_clean_version', 'clean_version_meta_json'))
 
 
 def _center_source_is_short_drama(row: Dict[str, Any]) -> bool:
+    direct = _center_direct_flag_state(row, 'is_short_drama', 'short_drama_meta_json')
+    if direct is not None:
+        return bool(direct)
     return bool(_center_flag_meta(row, 'is_short_drama', 'short_drama_meta_json'))
 
 
@@ -646,6 +968,39 @@ def _center_version_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     })
     return {k: v for k, v in out.items() if v not in (None, '', [], {})}
 
+
+def _strip_center_display_children(row: Dict[str, Any]) -> Dict[str, Any]:
+    """中心资源库列表兜底瘦身。
+
+    即使中心端旧版本在搜索/筛选时仍返回 children/pack_items，客户端列表接口也只把
+    季包壳传给前端；真正展开时再调用 /center/sources/children 按需加载。
+    """
+    if not isinstance(row, dict):
+        return {}
+    row = dict(row)
+    for key in ('versions',):
+        if isinstance(row.get(key), list):
+            row[key] = [_strip_center_display_children(x) for x in row.get(key) if isinstance(x, dict)]
+    child_values = []
+    for key in ('children', 'pack_items'):
+        value = row.get(key)
+        if isinstance(value, list) and value:
+            child_values.extend([x for x in value if isinstance(x, dict)])
+        row.pop(key, None)
+    if child_values:
+        row['has_children'] = True
+        row['children_loaded'] = False
+        if not row.get('children_count'):
+            row['children_count'] = len(child_values)
+        if not row.get('child_count'):
+            row['child_count'] = row.get('children_count')
+        if not row.get('pack_item_count'):
+            row['pack_item_count'] = row.get('children_count')
+        if not row.get('lazy_children_kind'):
+            kind = str(row.get('source_kind') or '').strip().lower()
+            row['lazy_children_kind'] = 'season_hub' if kind == 'season_hub' else 'completed_season'
+    return row
+
 @shared_resource_bp.route('/center/sources', methods=['GET'])
 @admin_required
 def api_center_sources():
@@ -659,6 +1014,10 @@ def api_center_sources():
             order_by=request.args.get('order_by') or 'latest',
             limit=int(request.args.get('limit') or request.args.get('page_size') or 200),
             offset=int(request.args.get('offset') or 0),
+            force_refresh=_boolish(
+                request.args.get('force_refresh') or request.args.get('refresh') or request.args.get('no_cache'),
+                False,
+            ),
         )
 
         def _decorate_center_row(row):
@@ -668,10 +1027,33 @@ def api_center_sources():
             for key in ('versions', 'children', 'pack_items'):
                 if isinstance(row.get(key), list):
                     row[key] = [_decorate_center_row(x) for x in row.get(key) if isinstance(x, dict)]
-            short_meta = _center_flag_meta(row, 'is_short_drama', 'short_drama_meta_json')
-            if short_meta:
-                row['is_short_drama'] = True
-                row['short_drama_meta_json'] = short_meta
+            short_direct = _center_direct_flag_state(row, 'is_short_drama', 'short_drama_meta_json')
+            if short_direct is False:
+                row['is_short_drama'] = False
+                row['short_drama_meta_json'] = row.get('short_drama_meta_json') or {'is_short_drama': False, 'manual_override': True}
+            else:
+                short_meta = _center_flag_meta(row, 'is_short_drama', 'short_drama_meta_json')
+                if short_meta:
+                    row['is_short_drama'] = True
+                    row['short_drama_meta_json'] = short_meta
+            animation_meta = _center_flag_meta(row, 'is_animation', 'animation_meta_json')
+            if animation_meta:
+                row['is_animation'] = True
+                row['animation_meta_json'] = animation_meta
+            completed_certified = _center_source_is_completed_certified(row)
+            completed_meta = _center_flag_meta(row, 'is_completed_certified', 'completed_certified_meta_json') if completed_certified else {}
+            if completed_certified:
+                row['is_completed_certified'] = True
+                row['is_completed'] = True
+                row['completed_certified_meta_json'] = completed_meta or {
+                    'is_completed_certified': True,
+                    'certified_by': 'completed_season_source',
+                    'status': row.get('status'),
+                }
+            else:
+                row['is_completed_certified'] = False
+                row['is_completed'] = False
+                row.pop('completed_certified_meta_json', None)
             # 连载季公共包没有统一版本参数；完结季包/电影/展开后的集才展示。
             if row.get('is_ongoing_hub') or row.get('source_kind') == 'season_hub':
                 row['version_summary'] = {}
@@ -684,10 +1066,91 @@ def api_center_sources():
             row = _apply_local_season_meta(row)
             return row
 
-        resp['items'] = [_decorate_center_row(row) for row in (resp.get('items') or []) if isinstance(row, dict)]
+        resp['items'] = [
+            _strip_center_display_children(_decorate_center_row(row))
+            for row in (resp.get('items') or [])
+            if isinstance(row, dict)
+        ]
         return jsonify({'success': True, **resp})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e), 'items': [], 'total': 0}), 500
+
+
+@shared_resource_bp.route('/center/sources/children', methods=['GET'])
+@admin_required
+def api_center_source_children():
+    """中心资源库季包展开懒加载：默认列表不再携带 children/pack_items。"""
+    try:
+        raw_ids = request.args.get('source_ids') or ''
+        source_ids = []
+        for value in str(raw_ids).replace(';', ',').split(','):
+            value = value.strip()
+            if value and value not in source_ids:
+                source_ids.append(value)
+        source_id = str(request.args.get('source_id') or '').strip()
+        if source_id and source_id not in source_ids:
+            source_ids.insert(0, source_id)
+        client = SharedCenterClient()
+        resp = client.list_display_children(
+            source_kind=request.args.get('source_kind') or '',
+            source_id=source_id,
+            source_ids=source_ids,
+            hub_id=request.args.get('hub_id') or '',
+            limit=int(request.args.get('limit') or 5000),
+            offset=int(request.args.get('offset') or 0),
+        )
+
+        def _decorate_center_row(row):
+            if not isinstance(row, dict):
+                return {}
+            row = dict(row)
+            for key in ('versions', 'children', 'pack_items'):
+                if isinstance(row.get(key), list):
+                    row[key] = [_decorate_center_row(x) for x in row.get(key) if isinstance(x, dict)]
+            short_direct = _center_direct_flag_state(row, 'is_short_drama', 'short_drama_meta_json')
+            if short_direct is False:
+                row['is_short_drama'] = False
+                row['short_drama_meta_json'] = row.get('short_drama_meta_json') or {'is_short_drama': False, 'manual_override': True}
+            else:
+                short_meta = _center_flag_meta(row, 'is_short_drama', 'short_drama_meta_json')
+                if short_meta:
+                    row['is_short_drama'] = True
+                    row['short_drama_meta_json'] = short_meta
+            animation_meta = _center_flag_meta(row, 'is_animation', 'animation_meta_json')
+            if animation_meta:
+                row['is_animation'] = True
+                row['animation_meta_json'] = animation_meta
+            completed_certified = _center_source_is_completed_certified(row)
+            completed_meta = _center_flag_meta(row, 'is_completed_certified', 'completed_certified_meta_json') if completed_certified else {}
+            if completed_certified:
+                row['is_completed_certified'] = True
+                row['is_completed'] = True
+                row['completed_certified_meta_json'] = completed_meta or {
+                    'is_completed_certified': True,
+                    'certified_by': 'completed_season_source',
+                    'status': row.get('status'),
+                }
+            elif row.get('source_kind') != 'completed_season':
+                row['is_completed_certified'] = False
+                row['is_completed'] = False
+                row.pop('completed_certified_meta_json', None)
+            if row.get('is_ongoing_hub') or row.get('source_kind') == 'season_hub':
+                row['version_summary'] = {}
+                row['summary_json'] = {}
+                row['media_signature_json'] = {}
+            else:
+                row['version_summary'] = _center_version_summary(row)
+            if not row.get('size') and row.get('total_size'):
+                row['size'] = row.get('total_size')
+            row = _apply_local_season_meta(row)
+            return row
+
+        for key in ('items', 'children', 'pack_items', 'parents'):
+            if isinstance(resp.get(key), list):
+                resp[key] = [_decorate_center_row(row) for row in resp.get(key) if isinstance(row, dict)]
+        return jsonify({'success': True, **resp})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e), 'items': [], 'children': [], 'pack_items': [], 'total': 0}), 500
 
 
 @shared_resource_bp.route('/center/import', methods=['POST'])
@@ -781,6 +1244,11 @@ LEDGER_EVENT_LABEL_MAP = {
     'center_rapid_sign_job_failed': '秒传签名失败',
     'center_rapid_raw_uploaded': '上传媒体信息',
     'center_rapid_raw_ffprobe_uploaded': '上传媒体信息',
+    'center_daily_grant': 'Pro每日赠送额度',
+    'center_rapid_quota_consumed': 'Pro额度抵扣',
+    'center_tier_cap_adjust': 'Pro等级上限调整',
+    'center_pro_expired_clear': 'Pro过期清空额度',
+    'center_pro_inactive_clear': 'Pro认证失效清空额度',
     'share_created': '登记共享源',
     'share_reported_center': '登记中心',
     'share_raw_uploaded': '上传媒体信息',
@@ -804,9 +1272,20 @@ LEDGER_REASON_LABEL_MAP = {
     'rapid_source_consumed': '从共享中心秒传资源',
     'rapid_source_served': '本机共享资源被他人秒传',
     'source_registered': '共享资源登记入池',
+    'center_initial_credit': '基础贡献点',
     'backup_source_registered': '备份共享入池',
     'shared_source_served': '共享资源被他人秒传',
     'shared_source_consumed': '从共享中心秒传资源',
+    'daily_grant': 'Pro每日赠送额度',
+    'rapid_quota_consumed': 'Pro额度抵扣',
+    'tier_cap_adjust': 'Pro等级上限调整',
+    'pro_expired_clear': 'Pro过期清空额度',
+    'pro_inactive_clear': 'Pro认证失效清空额度',
+    'center_daily_grant': 'Pro每日赠送额度',
+    'center_rapid_quota_consumed': 'Pro额度抵扣',
+    'center_tier_cap_adjust': 'Pro等级上限调整',
+    'center_pro_expired_clear': 'Pro过期清空额度',
+    'center_pro_inactive_clear': 'Pro认证失效清空额度',
 }
 
 
@@ -844,29 +1323,286 @@ def _ledger_json(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _ledger_title(row: Dict[str, Any]) -> str:
+def _ledger_extract_sha1(row: Dict[str, Any]) -> str:
+    raw = _ledger_json((row or {}).get('raw_json'))
+    values = [
+        (row or {}).get('sha1'), (row or {}).get('ref_id'), raw.get('sha1'), raw.get('file_sha1'),
+        raw.get('sign_check'), raw.get('source_ref_id'), raw.get('source_id'),
+    ]
+    for key in ('media', 'source', 'shared_source', 'job'):
+        obj = raw.get(key) if isinstance(raw.get(key), dict) else {}
+        values.extend([obj.get('sha1'), obj.get('file_sha1'), obj.get('sign_check'), obj.get('ref_id')])
+    for value in values:
+        m = re.search(r'([A-Fa-f0-9]{40})', str(value or ''))
+        if m:
+            return m.group(1).upper()
+    return ''
+
+
+def _ledger_local_media_by_sha1(sha1: str) -> Dict[str, Any]:
+    sha1 = str(sha1 or '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{40}', sha1):
+        return {}
+    cache = getattr(_ledger_local_media_by_sha1, '_cache', None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_ledger_local_media_by_sha1, '_cache', cache)
+    if sha1 in cache:
+        return cache[sha1]
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        m.tmdb_id, m.item_type, m.parent_series_tmdb_id, m.season_number, m.episode_number,
+                        m.title, m.original_title, m.release_year,
+                        p.title AS series_title, p.original_title AS series_original_title, p.release_year AS series_release_year
+                    FROM media_metadata m
+                    LEFT JOIN media_metadata p
+                      ON p.item_type='Series' AND p.tmdb_id=m.parent_series_tmdb_id
+                    WHERE COALESCE(m.file_sha1_json::text, '') ILIKE %s
+                    ORDER BY
+                        CASE m.item_type WHEN 'Episode' THEN 0 WHEN 'Movie' THEN 1 WHEN 'Season' THEN 2 ELSE 3 END,
+                        COALESCE(m.in_library, FALSE) DESC,
+                        COALESCE(m.last_updated_at, m.date_added, m.created_at) DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (f'%{sha1}%',),
+                )
+                row = cur.fetchone()
+                cache[sha1] = dict(row) if row else {}
+    except Exception:
+        cache[sha1] = {}
+    return cache[sha1]
+
+
+def _ledger_sxx(season) -> str:
+    try:
+        return f"S{int(season):02d}"
+    except Exception:
+        return ''
+
+
+def _ledger_exx(episode) -> str:
+    try:
+        return f"E{int(episode):02d}"
+    except Exception:
+        return ''
+
+
+def _ledger_media_context(row: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(row or {})
+    sha1 = _ledger_extract_sha1(row)
+    raw = _ledger_json(row.get('raw_json'))
+    center_ledger = raw.get('center_ledger') if isinstance(raw.get('center_ledger'), dict) else {}
+    out: Dict[str, Any] = {}
+
+    # 贡献点明细的媒体名应优先来自中心 /credit/ledger 的 join 结果。
+    # 本地库只做最后兜底，避免本地重组/重命名导致“标题 S03 S03E08”这种重复拼接。
+    for source in (center_ledger, row):
+        for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind', 'title', 'file_name', 'release_year', 'file_count'):
+            if source.get(key) not in (None, ''):
+                out[key] = source.get(key)
+
+    for key in ('title', 'file_name', 'name'):
+        if out.get('title') in (None, '') and raw.get(key):
+            out['title'] = raw.get(key)
+
+    if out.get('title') in (None, '') and sha1:
+        local = _ledger_local_media_by_sha1(sha1)
+        for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind', 'title', 'file_name', 'release_year'):
+            if out.get(key) in (None, '') and local.get(key) not in (None, ''):
+                out[key] = local.get(key)
+
+    if sha1:
+        out['sha1'] = sha1
+    return out
+
+
+def _ledger_clean_base_title(base: str, season=None, episode=None) -> str:
+    text = str(base or '').strip()
+    if not text:
+        return ''
+    sxx = _ledger_sxx(season)
+    exx = _ledger_exx(episode)
+    # 去掉标题末尾已经带着的 Sxx / SxxEyy，后面统一追加一次，防止 S03S03。
+    if sxx and exx:
+        text = re.sub(rf'\s*{re.escape(sxx)}\s*{re.escape(exx)}\s*$', '', text, flags=re.I)
+        text = re.sub(rf'\s*{re.escape(sxx)}{re.escape(exx)}\s*$', '', text, flags=re.I)
+    if sxx:
+        text = re.sub(rf'\s*{re.escape(sxx)}\s*$', '', text, flags=re.I)
+    text = re.sub(r'\s+', ' ', text).strip(' -·._')
+    return text or str(base or '').strip()
+
+
+def _ledger_title_from_context(ctx: Dict[str, Any], *, aggregate: bool = False) -> str:
+    ctx = ctx or {}
+    item_type = str(ctx.get('item_type') or '').strip().lower()
+    source_kind = str(ctx.get('source_kind') or '').strip().lower()
+    season = ctx.get('season_number')
+    episode = ctx.get('episode_number')
+    base = str(
+        ctx.get('series_title')
+        or ctx.get('series_original_title')
+        or ctx.get('title')
+        or ctx.get('file_name')
+        or ctx.get('name')
+        or ''
+    ).strip()
+    sxx = _ledger_sxx(season)
+    exx = _ledger_exx(episode)
+    base = _ledger_clean_base_title(base, season, episode)
+
+    if item_type == 'episode' or source_kind == 'episode' or (sxx and exx):
+        if not base:
+            return ''
+        return f"{base} {sxx}" if aggregate and sxx else f"{base} {sxx}{exx}".strip()
+    if item_type == 'season' or source_kind == 'completed_season' or (sxx and not exx):
+        if not base:
+            return ''
+        return f"{base} {sxx}" if sxx else base
+    return base
+
+
+def _ledger_aggregate_key_for_row(row: Dict[str, Any], ctx: Dict[str, Any]) -> str:
+    event = str((row or {}).get('event_type') or (row or {}).get('reason') or '').strip()
+    item_type = str((ctx or {}).get('item_type') or '').strip().lower()
+    source_kind = str((ctx or {}).get('source_kind') or '').strip().lower()
+    tmdb_id = str((ctx or {}).get('tmdb_id') or '').strip()
+    season = (ctx or {}).get('season_number')
+    episode = (ctx or {}).get('episode_number')
+    sha1 = str((ctx or {}).get('sha1') or _ledger_extract_sha1(row) or '').strip().upper()
+    sxx = _ledger_sxx(season)
+
+    # 签名成功按“具体文件/具体集”聚合：家业 S01E01 +1*3。
+    if _ledger_is_sign_row(row):
+        if sha1:
+            return f"{event}:sign:sha1:{sha1}"
+        if tmdb_id and sxx and episode not in (None, ''):
+            return f"{event}:sign:{tmdb_id}:{sxx}:E{episode}"
+
+    # 秒传扣分按“季”聚合：家业 S01 -1*42。
+    if _ledger_is_consumed_row(row) and tmdb_id and (sxx or source_kind == 'completed_season' or item_type in {'episode', 'season'}):
+        return f"{event}:consume-season:{tmdb_id}:{sxx or season or ''}"
+
+    if tmdb_id and (item_type in {'episode', 'season'} or source_kind in {'episode', 'completed_season'}):
+        return f"{event}:season:{tmdb_id}:{sxx or season or ''}"
+    if tmdb_id:
+        return f"{event}:movie:{tmdb_id}"
+    if sha1:
+        return f"{event}:sha1:{sha1}"
+    return f"{event}:{str((row or {}).get('ref_id') or (row or {}).get('id') or '').strip()}"
+
+def _ledger_title(row: Dict[str, Any], *, aggregate: bool = False) -> str:
+    ctx = _ledger_media_context(row)
+    media_title = _ledger_title_from_context(ctx, aggregate=aggregate)
+    if media_title:
+        return media_title
+
     raw = _ledger_json((row or {}).get('raw_json'))
     nested = [raw.get(k) for k in ('media', 'request', 'source', 'shared_source', 'job') if isinstance(raw.get(k), dict)]
-    values = [row.get('title'), row.get('file_name'), raw.get('title'), raw.get('name'), raw.get('file_name')]
+    values = [raw.get('title'), raw.get('name'), raw.get('file_name')]
     for obj in nested:
         values.extend([obj.get('title'), obj.get('name'), obj.get('file_name')])
-    values.extend([row.get('ref_id'), row.get('source_id')])
+    values.extend([row.get('title'), row.get('file_name')])
     for value in values:
         text = str(value or '').strip()
         if not text or re.match(r'^srq_[0-9a-f]', text, re.I):
             continue
         if text.lower().startswith('rapid_sign:'):
-            sha = next((x for x in text.split(':') if re.fullmatch(r'[A-Fa-f0-9]{40}', x)), '')
-            return f"秒传签名：{sha[:12]}..." if sha else '秒传签名任务'
+            continue
+        if re.fullmatch(r'(?:rapid_sign:)?[A-Fa-f0-9]{40}(?::.*)?', text):
+            continue
         return text
-    event = str(row.get('event_type') or '').lower()
+    event = str((row or {}).get('event_type') or '').lower()
     if 'share_request' in event:
         return '求共享'
-    if 'rapid' in event and 'sign' in event:
-        sha = str(raw.get('sha1') or raw.get('file_sha1') or raw.get('sign_check') or '').strip()
-        return f"秒传签名：{sha[:12]}..." if sha else '秒传签名任务'
+    sha = _ledger_extract_sha1(row)
+    if sha:
+        return f"未知资源 {sha[:12]}..."
     return '-'
 
+
+
+
+def _ledger_event_code(row: Dict[str, Any]) -> str:
+    row = row if isinstance(row, dict) else {}
+    return str(row.get('event_type') or row.get('reason') or '').strip().lower()
+
+
+def _ledger_reason_code(row: Dict[str, Any]) -> str:
+    row = row if isinstance(row, dict) else {}
+    return str(row.get('reason') or row.get('event_type') or '').strip().lower().replace('center_', '')
+
+
+def _ledger_is_sign_row(row: Dict[str, Any]) -> bool:
+    code = _ledger_event_code(row)
+    reason = _ledger_reason_code(row)
+    return 'rapid_sign' in code or reason.startswith('rapid_sign')
+
+
+def _ledger_is_consumed_row(row: Dict[str, Any]) -> bool:
+    code = _ledger_event_code(row)
+    reason = _ledger_reason_code(row)
+    return 'rapid_source_consumed' in code or reason == 'rapid_source_consumed' or 'shared_source_consumed' in code or reason == 'shared_source_consumed'
+
+
+def _ledger_is_served_row(row: Dict[str, Any]) -> bool:
+    code = _ledger_event_code(row)
+    reason = _ledger_reason_code(row)
+    return 'rapid_source_served' in code or reason == 'rapid_source_served' or 'shared_source_served' in code or reason == 'shared_source_served'
+
+
+def _ledger_is_pro_quota_row(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    code = _ledger_event_code(row)
+    reason = _ledger_reason_code(row)
+    ledger_type = str(row.get('ledger_type') or '').strip().lower()
+    return ledger_type == 'pro_quota' or reason in {
+        'daily_grant', 'rapid_quota_consumed', 'tier_cap_adjust',
+        'pro_expired_clear', 'pro_inactive_clear',
+    } or code in {
+        'center_daily_grant', 'center_rapid_quota_consumed', 'center_tier_cap_adjust',
+        'center_pro_expired_clear', 'center_pro_inactive_clear',
+    }
+
+
+def _ledger_credit_text(row: Dict[str, Any]) -> str:
+    try:
+        n = int(float((row or {}).get('delta') or 0))
+    except Exception:
+        n = 0
+    sign = '+' if n > 0 else ''
+    if _ledger_is_pro_quota_row(row):
+        if abs(n) > 1 and _ledger_reason_code(row) == 'rapid_quota_consumed':
+            unit = '+1' if n > 0 else '-1'
+            return f"Pro额度 {unit}*{abs(n)}"
+        return f"Pro额度 {sign}{n}"
+    # Rapid v2 这里的绝对值就是“视频数/签名次数”：-42 应显示为 -1*42。
+    if (_ledger_is_consumed_row(row) or _ledger_is_served_row(row) or _ledger_is_sign_row(row)) and abs(n) > 1:
+        unit = '+1' if n > 0 else '-1'
+        return f"贡献点 {unit}*{abs(n)}"
+    return f"贡献点 {sign}{n}"
+
+
+def _normalize_center_credit_ledger_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    """把中心 /credit/ledger 返回行转换成本地前端兼容格式。
+
+    本地旧同步表可能只留下 rapid_sign:SHA1，中心实时返回的 ledger 已经携带 title / season_number / episode_number，
+    sync_center=1 时优先使用这份富信息，避免贡献点明细展示 SHA1。
+    """
+    row = dict(row or {})
+    reason = str(row.get('reason') or '').strip()
+    if reason and not row.get('event_type'):
+        row['event_type'] = reason if reason.startswith('center_') else f'center_{reason}'
+    raw = row.get('raw_json') if isinstance(row.get('raw_json'), dict) else {}
+    raw.setdefault('center_ledger', {k: v for k, v in row.items() if k != 'raw_json'})
+    row['raw_json'] = raw
+    if row.get('ref_id') and not row.get('source_id') and str(row.get('source_kind') or '') in {'movie', 'episode', 'completed_season'}:
+        row['source_id'] = row.get('ref_id')
+    return row
 
 def _ledger_delta_text(delta: Any) -> str:
     try:
@@ -880,8 +1616,10 @@ def _decorate_credit_ledger_item(row: Dict[str, Any]) -> Dict[str, Any]:
     row = dict(row or {})
     event = str(row.get('event_type') or '').strip()
     reason = str(row.get('reason') or '').strip()
+    ctx = _ledger_media_context(row)
     title = _ledger_title(row)
-    delta_text = f"贡献点 {_ledger_delta_text(row.get('delta'))}"
+    aggregate_title = (_ledger_title(row, aggregate=True) if _ledger_is_consumed_row(row) else title) or title
+    delta_text = _ledger_credit_text(row)
     event_label = _ledger_event_label(event)
     reason_label = LEDGER_REASON_LABEL_MAP.get(reason) or LEDGER_REASON_LABEL_MAP.get(event.replace('center_', ''))
     if not reason_label and event.startswith('center_share_request_'):
@@ -890,7 +1628,21 @@ def _decorate_credit_ledger_item(row: Dict[str, Any]) -> Dict[str, Any]:
         reason_label = event_label
     row['event_label'] = event_label
     row['title_display'] = title
-    row['reason_display'] = f'{reason_label or event_label}：{title}，{delta_text}' if (reason_label or not reason) else reason
+    row['ledger_aggregate_title'] = aggregate_title
+    row['ledger_aggregate_key'] = _ledger_aggregate_key_for_row(row, ctx)
+    row['ledger_sha1'] = ctx.get('sha1') or _ledger_extract_sha1(row)
+    # 让前端即使不重新解析 raw_json，也能按季聚合签名贡献点。
+    for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind'):
+        if row.get(key) in (None, '') and ctx.get(key) not in (None, ''):
+            row[key] = ctx.get(key)
+    if _ledger_is_pro_quota_row(row):
+        tier_label = {'M': '月卡', 'Y': '年卡', 'L': '终身'}.get(str(row.get('pro_tier') or '').upper(), str(row.get('pro_tier') or '').upper())
+        title = title if title and title != '-' else (f'Pro{tier_label}' if tier_label else 'Pro额度')
+        balance = row.get('balance_after')
+        balance_text = f'，余额 {balance}' if balance not in (None, '') else ''
+        row['reason_display'] = f'{reason_label or event_label}：{title}，{delta_text}{balance_text}'
+    else:
+        row['reason_display'] = f'{reason_label or event_label}：{title}，{delta_text}' if (reason_label or not reason) else reason
     row['delta_display'] = _ledger_delta_text(row.get('delta'))
     return row
 
@@ -898,13 +1650,18 @@ def _decorate_credit_ledger_item(row: Dict[str, Any]) -> Dict[str, Any]:
 @shared_resource_bp.route('/credit/ledger', methods=['GET'])
 @admin_required
 def api_credit_ledger():
+    center_items = []
     if _boolish(request.args.get('sync_center'), False):
         try:
-            _fetch_center_credit()
+            sync_result = _fetch_center_credit()
+            center_items = sync_result.get('center_ledger_items') or []
         except Exception as e:
             logger.warning(f"  ➜ [共享资源] 同步中心贡献点失败: {e}")
     limit = int(request.args.get('limit') or 200)
-    items = shared_credit_db.list_credit_ledger(limit=limit, actual_only=_boolish(request.args.get('actual_only'), False))
+    if center_items:
+        items = [_normalize_center_credit_ledger_item(x) for x in center_items[:limit] if isinstance(x, dict)]
+    else:
+        items = shared_credit_db.list_credit_ledger(limit=limit, actual_only=_boolish(request.args.get('actual_only'), False))
     items = [_decorate_credit_ledger_item(x) for x in (items or []) if isinstance(x, dict)]
     return jsonify({'success': True, 'items': items})
 
