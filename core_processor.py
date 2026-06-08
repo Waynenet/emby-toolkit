@@ -1752,7 +1752,25 @@ class MediaProcessor:
             douban_id_override=douban_id, 
             mtype=douban_type
         )
+        
+        # ★★★ 修复点 1：不能只拿 cast(演员)！TMDb 传进来的有导演和编剧，必须把豆瓣的幕后也合并进来，否则匹配不到！
         douban_cast_raw = cast_data.get("cast", [])
+        for crew_key in ["directors", "writers", "creators"]:
+            if crew_key in cast_data and isinstance(cast_data[crew_key], list):
+                douban_cast_raw.extend(cast_data[crew_key])
+                
+        # 简单去重 (防止豆瓣接口返回身兼数职的重复人员)
+        seen_douban_ids = set()
+        unique_douban_cast = []
+        for d in douban_cast_raw:
+            did = d.get("id") or d.get("DoubanCelebrityId") or d.get("name") # 没 ID 的按名字去重
+            if did:
+                if did not in seen_douban_ids:
+                    unique_douban_cast.append(d)
+                    seen_douban_ids.add(did)
+            else:
+                unique_douban_cast.append(d)
+        douban_cast_raw = unique_douban_cast
 
         # =================================================================
         # 优先级 4: 将 API 成功获取的数据写入 PostgreSQL 缓存 (不污染本地神医目录)
@@ -2492,14 +2510,41 @@ class MediaProcessor:
                 local_name = str(l_actor.get("name") or "").lower().strip()
                 local_original_name = str(l_actor.get("original_name") or "").lower().strip()
                 
-                # 【强化版匹配逻辑】支持倒装匹配和无视空格
+                # 【终极版匹配逻辑】支持倒装、无视空格、以及纯中文与拼音的跨物种匹配
                 def _is_name_match(n1: str, n2: str) -> bool:
                     if not n1 or not n2: return False
-                    if n1 == n2: return True
-                    if n1.replace(" ", "") == n2.replace(" ", ""): return True
+                    
+                    n1_clean = n1.replace(" ", "").replace("-", "").lower()
+                    n2_clean = n2.replace(" ", "").replace("-", "").lower()
+                    if n1_clean == n2_clean: return True
+                    
                     p1, p2 = n1.split(), n2.split()
-                    if len(p1) == 2 and len(p2) == 2 and p1[0] == p2[1] and p1[1] == p2[0]:
-                        return True
+                    if len(p1) == 2 and len(p2) == 2:
+                        if p1[0] == p2[1] and p1[1] == p2[0]: return True
+
+                    # ★★★ 修复点 2：终极拼音兜底匹配 (解决豆瓣缺失英文名，只有中文名的情况) ★★★
+                    try:
+                        import pypinyin
+                        def _check_pinyin(zh_name, en_name_clean):
+                            # 如果不包含中文，则跳过拼音转换
+                            if not any('\u4e00' <= char <= '\u9fff' for char in zh_name): return False
+                            
+                            # 1. 正常顺序拼音 (例如：郑华 -> zhenghua)
+                            py_normal = "".join(pypinyin.lazy_pinyin(zh_name)).lower()
+                            if py_normal == en_name_clean: return True
+                            
+                            # 2. 倒装顺序拼音 (例如：华郑 -> huazheng，适配西方 名+姓 规则)
+                            if len(zh_name) >= 2:
+                                py_rev = "".join(pypinyin.lazy_pinyin(zh_name[1:] + zh_name[0])).lower()
+                                if py_rev == en_name_clean: return True
+                            return False
+
+                        # 无论哪个变量是中文，哪个是拼音，互相交叉检查一次
+                        if _check_pinyin(n1, n2_clean) or _check_pinyin(n2, n1_clean):
+                            return True
+                    except ImportError:
+                        pass # 如果环境没有 pypinyin 库则静默跳过兜底
+                        
                     return False
 
                 is_match = False
