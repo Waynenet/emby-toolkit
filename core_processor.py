@@ -2377,6 +2377,13 @@ class MediaProcessor:
                 return val
             return None
 
+        # --- [新增] 专门用于判断该人是否真的是幕后导演，而非角色名叫导演 ---
+        def _is_actual_director(d_actor_dict):
+            jobs = d_actor_dict.get("jobs", [])
+            if isinstance(jobs, list) and "导演" in jobs:
+                return True
+            return False
+
         # ======================================================================
         # 预处理: 清洗同名演员
         # ======================================================================
@@ -2509,18 +2516,23 @@ class MediaProcessor:
                     
                     # 使用提取到的有效豆瓣具体角色覆盖TMDB
                     valid_d_role = _extract_douban_role(d_actor) or _extract_douban_role(raw_actor)
+                    is_douban_director = _is_actual_director(d_actor) or _is_actual_director(raw_actor)
+                    
                     if valid_d_role:
                         current_char = l_actor.get("character", "")
                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣普通角色覆盖而消失
-                        if '导演' in current_char and '导演' not in valid_d_role:
+                        # 必须同时具备 _is_crew 烙印，才能证明他是真导演，而不是角色名叫"xx导演"
+                        is_tmdb_director = l_actor.get('_is_crew', False) and '导演' in current_char
+                        
+                        if is_tmdb_director and '导演' not in valid_d_role:
                             l_actor["character"] = f"导演 / {valid_d_role}"
                         else:
                             l_actor["character"] = valid_d_role
                             
-                        # [新增保险] 如果豆瓣判定是导演，且该人在 TMDb 排序靠后，强制提权置顶！
-                        if '导演' in valid_d_role and l_actor.get('order', 999) > 0:
-                            l_actor['order'] = -50
-                            l_actor['_is_crew'] = True
+                    # [新增保险] 如果豆瓣真实职业(jobs)判定是导演，且该人在 TMDb 排序靠后，强制提权置顶！
+                    if is_douban_director and l_actor.get('order', 999) > 0:
+                        l_actor['order'] = -50
+                        l_actor['_is_crew'] = True
                         
                     # ★★★ 病根 2 修复：匹配成功后，必须把 TMDb 的英文名替换为豆瓣的中文名！
                     if raw_zh and utils.contains_chinese(raw_zh):
@@ -2571,15 +2583,16 @@ class MediaProcessor:
                             if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
                             if valid_d_role: 
                                 current_char = existing_actor.get("character", "")
+                                is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                 # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                if '导演' in current_char and '导演' not in valid_d_role:
+                                if is_tmdb_director and '导演' not in valid_d_role:
                                     existing_actor["character"] = f"导演 / {valid_d_role}"
                                 else:
                                     existing_actor["character"] = valid_d_role
                             match_found = True
                         else:
-                            # ★★★ 修复：仅有导演才算无视限制的核心特权人员 ★★★
-                            is_important_crew = valid_d_role and '导演' in valid_d_role
+                            # ★★★ 修复：根据真实的 jobs 列表判断，而不是角色名包含"导演" ★★★
+                            is_important_crew = _is_actual_director(d_actor)
                             
                             # 【优化】如果还没满 30 人，或者他是核心主创，无视限制强行塞进去置顶！
                             if len(final_cast_map) < limit or is_important_crew:
@@ -2642,15 +2655,16 @@ class MediaProcessor:
                                     if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
                                     if valid_d_role: 
                                         current_char = existing_actor.get("character", "")
+                                        is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                        if '导演' in current_char and '导演' not in valid_d_role:
+                                        if is_tmdb_director and '导演' not in valid_d_role:
                                             existing_actor["character"] = f"导演 / {valid_d_role}"
                                         else:
                                             existing_actor["character"] = valid_d_role
                                     match_found = True
                                 else:
-                                    # ★★★ 修复：仅有导演才算无视限制的核心特权人员 ★★★
-                                    is_important_crew = valid_d_role and '导演' in valid_d_role
+                                    # ★★★ 修复：根据真实的 jobs 列表判断，而不是角色名包含"导演" ★★★
+                                    is_important_crew = _is_actual_director(d_actor)
                                     
                                     if len(final_cast_map) < limit or is_important_crew:
                                         final_cast_map[tmdb_id_from_find] = {
@@ -2679,8 +2693,9 @@ class MediaProcessor:
                                         existing_actor["name"] = new_name
                                     if valid_d_role:
                                         current_char = existing_actor.get("character", "")
+                                        is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                        if '导演' in current_char and '导演' not in valid_d_role:
+                                        if is_tmdb_director and '导演' not in valid_d_role:
                                             existing_actor["character"] = f"导演 / {valid_d_role}"
                                         else:
                                             existing_actor["character"] = valid_d_role
