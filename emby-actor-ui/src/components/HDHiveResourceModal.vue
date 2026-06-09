@@ -106,16 +106,13 @@
                     {{ res._shared_pool_source_label }}
                   </n-tag>
 
-                  <n-tag size="small" type="default" :bordered="true" v-if="res._shared_pool_version_label">
-                    {{ res._shared_pool_version_label }}
-                  </n-tag>
 
                   <n-tag size="small" type="success" :bordered="false" v-if="res._completion_label">
                     {{ res._completion_label }}
                   </n-tag>
 
                   <n-tag
-                    v-for="tag in sharedPoolTags(res)"
+                    v-for="tag in cloudFeatureTags(res)"
                     :key="tag.label"
                     size="small"
                     :type="tag.type || 'default'"
@@ -125,11 +122,11 @@
                   </n-tag>
                 </n-space>
 
-                <div v-if="formatQuality(res)" style="font-size: 13px; color: #555; line-height: 1.5; margin-bottom: 4px;">
+                <div v-if="formatQuality(res) && !isSharedPool(res)" style="font-size: 13px; color: #555; line-height: 1.5; margin-bottom: 4px;">
                   📦 {{ formatQuality(res) }}
                 </div>
 
-                <div v-if="res.remark" style="font-size: 12px; color: #777; line-height: 1.5; word-break: break-all;">
+                <div v-if="res.remark && !isSharedPool(res)" style="font-size: 12px; color: #777; line-height: 1.5; word-break: break-all;">
                   📝 {{ res.remark }}
                 </div>
 
@@ -398,9 +395,117 @@ const formatResolution = (resource) => {
 
 const formatSource = (resource) => {
   const values = resource?.source;
-  if (Array.isArray(values)) return values.filter(Boolean).join(', ');
-  if (typeof values === 'string' && values !== 'channel') return values;
-  return '';
+  const normalize = (value) => {
+    const text = String(value || '').trim();
+    if (!text || text === 'channel' || text === '共享秒传' || text === '可秒传') return '';
+    return text;
+  };
+  if (Array.isArray(values)) return values.map(normalize).filter(Boolean).join(', ');
+  return normalize(values);
+};
+
+
+const normalizeTrackTexts = (value) => {
+  const out = [];
+  const add = (text) => {
+    const valueText = String(text || '').trim();
+    if (valueText && !out.includes(valueText)) out.push(valueText);
+  };
+  const walk = (node) => {
+    if (node === null || node === undefined || node === '') return;
+    if (Array.isArray(node)) {
+      node.slice(0, 80).forEach(walk);
+      return;
+    }
+    if (typeof node === 'object') {
+      [
+        'display', 'DisplayTitle', 'title', 'Title', 'name', 'Name',
+        'language', 'Language', 'lang', 'DisplayLanguage',
+        'codec', 'Codec', 'channel_layout', 'channels'
+      ].forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(node, key)) walk(node[key]);
+      });
+      return;
+    }
+    add(node);
+  };
+  walk(value);
+  return out;
+};
+
+const metadataContainers = (resource) => {
+  const item = resource || {};
+  return [
+    item,
+    item.version_summary,
+    item.summary_json,
+    item.media_signature_json,
+    item.raw_summary_json,
+    item.rapid_meta_json
+  ].filter((x) => x && typeof x === 'object');
+};
+
+const trackTexts = (resource, kind) => {
+  const keys = kind === 'audio'
+    ? [
+        'audio_list', 'audios', 'audio_tracks', 'audio', 'audio_track',
+        'default_audio', 'default_audio_track', 'audio_languages', 'languages'
+      ]
+    : [
+        'subtitle_list', 'subtitles', 'subtitle_tracks', 'subtitle', 'subtitles_text',
+        'default_subtitle', 'default_subtitle_track', 'subtitle_languages'
+      ];
+  const texts = [];
+  metadataContainers(resource).forEach((container) => {
+    keys.forEach((key) => {
+      normalizeTrackTexts(container[key]).forEach((text) => {
+        if (text && !texts.includes(text)) texts.push(text);
+      });
+    });
+  });
+  return texts;
+};
+
+const containsMandarinAudioText = (text) => {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return value.includes('国语') || value.includes('普通话') || value.includes('普通話');
+};
+
+const containsChineseSubtitleText = (text) => {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return ['中文', '简中', '繁中', '简体', '繁体', '中英'].some((token) => value.includes(token));
+};
+
+const containsSpecialEffectSubtitleText = (text) => {
+  const value = String(text || '').trim();
+  return !!value && value.includes('特效');
+};
+
+const containsBilingualSubtitleText = (text) => {
+  const value = String(text || '').trim();
+  return !!value && (value.includes('双语') || value.includes('雙語'));
+};
+
+const hasMandarinAudio = (resource) => {
+  if (resource?.has_mandarin_audio === true) return true;
+  return trackTexts(resource, 'audio').some(containsMandarinAudioText);
+};
+
+const hasChineseSubtitle = (resource) => {
+  if (resource?.has_chinese_subtitle === true) return true;
+  return trackTexts(resource, 'subtitle').some(containsChineseSubtitleText);
+};
+
+const hasSpecialEffectSubtitle = (resource) => {
+  if (resource?.has_special_effect_subtitle === true) return true;
+  return trackTexts(resource, 'subtitle').some(containsSpecialEffectSubtitleText);
+};
+
+const hasBilingualSubtitle = (resource) => {
+  if (resource?.has_bilingual_subtitle === true) return true;
+  return trackTexts(resource, 'subtitle').some(containsBilingualSubtitleText);
 };
 
 
@@ -427,6 +532,23 @@ const sharedPoolTags = (resource) => {
   if (Array.isArray(labels)) {
     labels.forEach((label) => pushTag(String(label), 'default', true));
   }
+  return tags;
+};
+
+const cloudFeatureTags = (resource) => {
+  const tags = isSharedPool(resource) ? sharedPoolTags(resource) : [];
+  const seen = new Set(tags.map((tag) => String(tag?.label || '').trim()).filter(Boolean));
+  const push = (label, type = 'default', bordered = false) => {
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    tags.push({ label, type, bordered });
+  };
+
+  if (hasMandarinAudio(resource)) push('国语', 'success', false);
+  if (hasChineseSubtitle(resource)) push('中字', 'info', false);
+  if (hasSpecialEffectSubtitle(resource)) push('特效', 'warning', false);
+  if (hasBilingualSubtitle(resource)) push('双语', 'info', false);
+
   return tags;
 };
 

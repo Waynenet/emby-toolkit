@@ -243,6 +243,239 @@ def _target_cid() -> str:
     return cid
 
 
+def _safe_115_folder_name(value: Any, fallback: str = '共享季包') -> str:
+    """生成 115 临时接收目录名：保留 TMDb/Season 识别信息，清理路径危险字符。"""
+    text = str(value or '').strip()
+    if not text:
+        text = fallback
+    text = re.sub(r'[\\/:*?"<>|\r\n\t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip(' ._-')
+    return (text or fallback)[:180]
+
+
+def _first_nonempty(*values):
+    for value in values:
+        if value not in (None, '', [], {}):
+            return value
+    return None
+
+
+def _season_package_context(payload: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = payload or {}
+    first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
+
+    season_number = _first_nonempty(
+        payload.get('season_number'), first.get('season_number')
+    )
+    try:
+        season_number = int(float(season_number)) if season_number not in (None, '') else None
+    except Exception:
+        season_number = None
+    if season_number is None:
+        season_number, _ = _guess_se_from_source(first, payload)
+
+    tmdb_id = str(_first_nonempty(
+        payload.get('parent_series_tmdb_id'), payload.get('series_tmdb_id'), payload.get('parent_tmdb_id'),
+        first.get('parent_series_tmdb_id'), first.get('series_tmdb_id'), first.get('parent_tmdb_id'),
+        payload.get('tmdb_id'), first.get('tmdb_id'),
+    ) or '').strip()
+
+    title = str(_first_nonempty(
+        payload.get('title'), payload.get('name'), payload.get('series_title'), payload.get('series_name'),
+        first.get('title'), first.get('series_title'), first.get('series_name'),
+    ) or '').strip()
+
+    year = str(_first_nonempty(
+        payload.get('release_year'), payload.get('year'), first.get('release_year'), first.get('year')
+    ) or '').strip()
+    if not re.fullmatch(r'(19|20)\d{2}', year):
+        year = ''
+
+    return {
+        'tmdb_id': tmdb_id,
+        'title': title,
+        'release_year': year,
+        'season_number': season_number,
+    }
+
+
+def _build_season_package_temp_dir_name(
+    *,
+    source_kind: str,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any]]:
+    ctx = _season_package_context(payload, files)
+    title = _safe_115_folder_name(ctx.get('title') or f'共享季包 {str(source_id or "")[:8]}')
+    year_part = f" ({ctx['release_year']})" if ctx.get('release_year') else ''
+    tmdb_part = f" {{tmdb={ctx['tmdb_id']}}}" if ctx.get('tmdb_id') else ''
+
+    season_number = ctx.get('season_number')
+    if season_number is not None:
+        season_part = f" - Season {int(season_number):02d}"
+    else:
+        season_part = ' - Season'
+
+    name = _safe_115_folder_name(f'{title}{year_part}{tmdb_part}{season_part}', fallback=f'共享季包 {str(source_id or "")[:8]}')
+    ctx.update({'source_kind': source_kind, 'source_id': source_id})
+    return name, ctx
+
+
+def _prepare_rapid_target_dir_for_source(
+    *,
+    base_target_cid: str,
+    source_kind: str,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """季包秒传先落到待整理下的临时标准剧目录，避免整理阶段把每集当 root item 单独处理。"""
+    normalized_kind = _normalize_source_kind(source_kind)
+    files = [f for f in (files or []) if isinstance(f, dict)]
+
+    # 单集/电影仍保持原逻辑：直接秒传到待整理根目录。
+    if normalized_kind not in ('completed_season', 'season_hub') or len(files) <= 1:
+        return {
+            'target_cid': str(base_target_cid),
+            'base_target_cid': str(base_target_cid),
+            'season_package_temp_dir': False,
+        }
+
+    folder_name, ctx = _build_season_package_temp_dir_name(
+        source_kind=normalized_kind,
+        source_id=source_id,
+        payload=payload or {},
+        files=files,
+    )
+
+    try:
+        p115 = P115Service.get_client()
+        if not p115:
+            raise RuntimeError('115 客户端未初始化')
+
+        mk_resp = p115.fs_mkdir(folder_name, str(base_target_cid))
+        if not isinstance(mk_resp, dict) or not mk_resp.get('state'):
+            raise RuntimeError(str(mk_resp))
+
+        temp_cid = str(
+            mk_resp.get('cid')
+            or mk_resp.get('file_id')
+            or mk_resp.get('id')
+            or (mk_resp.get('data') or {}).get('file_id')
+            or (mk_resp.get('data') or {}).get('cid')
+            or ''
+        ).strip()
+        if not temp_cid:
+            raise RuntimeError(f'创建成功但未返回 CID: {mk_resp}')
+
+        # 给整理扫描补一个权威上下文；目录名已经带 {tmdb=}，这里是双保险。
+        try:
+            if ctx.get('tmdb_id') and ctx.get('title'):
+                P115CacheManager.save_transfer_context(
+                    root_name=folder_name,
+                    tmdb_id=ctx.get('tmdb_id'),
+                    media_type='tv',
+                    title=ctx.get('title'),
+                    season_number=ctx.get('season_number'),
+                    source='shared-permanent-import',
+                    source_kind=normalized_kind,
+                    source_kinds=[normalized_kind, 'shared_transfer_context'],
+                    confidence='high',
+                    authority_role='expected',
+                    evidence=[f'rapid:{normalized_kind}:{source_id}'],
+                )
+        except Exception as e:
+            logger.debug(f"  ➜ [共享资源] 保存季包整理上下文失败：{folder_name} -> {e}")
+
+        logger.info(
+            f"  ➜ [共享资源] 季包秒传启用临时接收目录：{folder_name} "
+            f"(cid={temp_cid}, files={len(files)})"
+        )
+        return {
+            'target_cid': temp_cid,
+            'base_target_cid': str(base_target_cid),
+            'season_package_temp_dir': True,
+            'folder_name': folder_name,
+            'folder_cid': temp_cid,
+            'context': ctx,
+        }
+    except Exception as e:
+        # 季包必须落临时目录，不能回退到待整理根目录；否则一季几十集会再次被整理成
+        # 根目录单文件，失败时也难以清理已秒传的部分文件。
+        logger.warning(
+            f"  ➜ [共享资源] 创建季包临时接收目录失败，拒绝本次季包秒传："
+            f"source={normalized_kind}:{source_id}, err={e}"
+        )
+        return {
+            'target_cid': str(base_target_cid),
+            'base_target_cid': str(base_target_cid),
+            'season_package_temp_dir': False,
+            'temp_dir_required': True,
+            'temp_dir_error': str(e),
+        }
+
+
+def _cleanup_rapid_temp_dir(rapid_target: Dict[str, Any], *, reason: str = '') -> Dict[str, Any]:
+    """删除季包秒传临时接收目录。
+
+    完结季/公共季包必须全量秒传成功才允许进入整理；只要有一集失败，就把临时目录
+    整个删除，避免 8/9 这种半季被批量移动入库。
+    """
+    if not isinstance(rapid_target, dict) or not rapid_target.get('season_package_temp_dir'):
+        return {'ok': True, 'skipped': True}
+    folder_cid = str(rapid_target.get('folder_cid') or rapid_target.get('target_cid') or '').strip()
+    folder_name = str(rapid_target.get('folder_name') or folder_cid or '').strip()
+    if not folder_cid:
+        return {'ok': False, 'skipped': True, 'message': '缺少临时目录 CID'}
+    try:
+        p115 = P115Service.get_client()
+        if not p115:
+            raise RuntimeError('115 客户端未初始化')
+        resp = p115.fs_delete([folder_cid])
+        ok = bool(isinstance(resp, dict) and resp.get('state'))
+        if ok:
+            logger.warning(
+                f"  ➜ [共享资源] 已删除季包临时接收目录：{folder_name} "
+                f"(cid={folder_cid})，原因：{reason or 'season package aborted'}"
+            )
+        else:
+            logger.warning(
+                f"  ➜ [共享资源] 删除季包临时接收目录失败：{folder_name} "
+                f"(cid={folder_cid})，resp={resp}"
+            )
+        return {'ok': ok, 'response': resp, 'folder_cid': folder_cid, 'folder_name': folder_name}
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源] 删除季包临时接收目录异常：{folder_name} (cid={folder_cid}) -> {e}")
+        return {'ok': False, 'error': str(e), 'folder_cid': folder_cid, 'folder_name': folder_name}
+
+
+def _report_transfer_failed_safely(
+    client: SharedCenterClient,
+    *,
+    source_kind: str,
+    source_id: str,
+    files: List[Dict[str, Any]],
+    errors: List[Any],
+    message: str = '',
+) -> Dict[str, Any]:
+    fail_kind = _normalize_source_kind(source_kind)
+    if fail_kind not in ('movie', 'episode', 'completed_season') or not source_id:
+        return {'ok': False, 'skipped': True, 'reason': 'unsupported_source_kind'}
+    try:
+        return client.report_transfer(
+            fail_kind,
+            source_id,
+            'failed',
+            success_count=0,
+            total_count=len(files or []),
+            message=(message or json.dumps(errors or [], ensure_ascii=False))[:1000],
+        ) or {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 上报秒传失败失败：{fail_kind}:{source_id} -> {e}")
+        return {'ok': False, 'error': str(e)}
+
+
 def _rapid_success(resp: Any) -> bool:
     if isinstance(resp, dict):
         if resp.get('state') is True or resp.get('success') is True:
@@ -373,7 +606,7 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     if not job_id:
         raise RuntimeError(f'中心未返回 sign_job id: {create_resp}')
     logger.info(f"  ➜ [负载均衡签名] 签名任务已创建：等待源客户端签名...")
-    wait_resp = client.wait_rapid_sign_job(job_id, timeout=45)
+    wait_resp = client.wait_rapid_sign_job(job_id, timeout=75)
     status = str(wait_resp.get('status') or (wait_resp.get('job') or {}).get('status') or '')
     sign_val = str(wait_resp.get('sign_val') or (wait_resp.get('job') or {}).get('sign_val') or '').strip().upper()
     if status != 'done' or not _norm_sha1(sign_val):
@@ -973,9 +1206,27 @@ def _event_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[str, str, List[Dict[str, Any]]]:
     payload = _event_payload(event)
     source_kind = _normalize_source_kind(event.get('source_kind') or payload.get('source_kind') or '')
-    source_id = str(event.get('source_ref_id') or payload.get('source_id') or payload.get('source_ref_id') or '').strip()
+    source_id = str(
+        event.get('source_ref_id')
+        or payload.get('source_id')
+        or payload.get('source_ref_id')
+        or payload.get('hub_id')
+        or payload.get('id')
+        or ''
+    ).strip()
     if not source_kind:
-        source_kind = _normalize_source_kind(payload.get('kind') or payload.get('item_type') or payload.get('display_type') or '')
+        if payload.get('hub_id') or payload.get('is_season_hub'):
+            source_kind = 'season_hub'
+        else:
+            source_kind = _normalize_source_kind(
+                payload.get('kind') or payload.get('item_type') or payload.get('display_type') or ''
+            )
+
+    # display-list 里的 Pack 如果是公共连载季壳，通常只有 hub_id，没有 completed source_id。
+    # 这种壳不能走 completed_season_manifest，否则会拿不到 7-8 这类 children 分集。
+    if source_kind == 'completed_season' and payload.get('hub_id') and not payload.get('source_id'):
+        source_kind = 'season_hub'
+        source_id = str(payload.get('hub_id') or source_id or '').strip()
 
     # 兼容中心返回的 completed season 包：列表接口只给源摘要，真正文件清单要再取 manifest。
     # 如果 manifest 为空，不能再显示“秒传完成 0/0”，这属于 manifest 缺失/旧数据，需要重新登记该季。
@@ -1004,7 +1255,8 @@ def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[s
             f.setdefault('source_ref_id', source_id)
         return source_kind, source_id, files
 
-    # 公共连载季包：中心 display-list 返回 season_hub，真正可秒传文件在 pack_items/children 中。
+    # 公共连载季包：中心 display-list 返回 season_hub 壳，真正可秒传文件在 pack_items/children 中。
+    # 资源库为了快，列表页可能不带 children；订阅秒传不能只吃壳，必须懒加载 display-children。
     # 每个子项仍然是 episode 源；转存和贡献流水按 episode 上报，不把 season_hub 当作某个设备的源。
     if source_kind == 'season_hub':
         raw_files = []
@@ -1013,12 +1265,43 @@ def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[s
             if isinstance(value, list) and value:
                 raw_files = value
                 break
+
+        if not raw_files:
+            try:
+                child_resp = client.list_display_children(
+                    source_kind='season_hub',
+                    source_id=source_id,
+                    hub_id=str(payload.get('hub_id') or source_id or '').strip(),
+                    limit=20000,
+                ) or {}
+                containers = [child_resp]
+                data = child_resp.get('data') if isinstance(child_resp, dict) and isinstance(child_resp.get('data'), dict) else {}
+                if data:
+                    containers.append(data)
+                for box in containers:
+                    if not isinstance(box, dict):
+                        continue
+                    for key in ('pack_items', 'children', 'files', 'items'):
+                        value = box.get(key)
+                        if isinstance(value, list) and value:
+                            raw_files = value
+                            break
+                    if raw_files:
+                        break
+                logger.info(
+                    f"  ➜ [共享资源] 公共连载季包已补拉子项：hub={source_id}, children={len(raw_files or [])}"
+                )
+            except Exception as e:
+                logger.warning(f"  ➜ [共享资源] 拉取公共连载季包子项失败：hub={source_id}, err={e}")
+
         files = []
         for item in raw_files or []:
             if not isinstance(item, dict):
                 continue
             f = dict(item)
             f.setdefault('tmdb_id', payload.get('tmdb_id'))
+            f.setdefault('parent_series_tmdb_id', payload.get('parent_series_tmdb_id') or payload.get('series_tmdb_id') or payload.get('tmdb_id'))
+            f.setdefault('series_tmdb_id', payload.get('series_tmdb_id') or payload.get('parent_series_tmdb_id') or payload.get('tmdb_id'))
             f.setdefault('item_type', 'Episode')
             f.setdefault('season_number', payload.get('season_number'))
             f.setdefault('title', payload.get('title'))
@@ -1386,7 +1669,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'match_filter': match_filter,
         }
 
-    target_cid = _target_cid()
+    base_target_cid = _target_cid()
 
     clean_flag = _center_clean_version_flagged(source_kind, payload, files)
     if _block_clean_version_transfer_enabled() and clean_flag.get('blocked'):
@@ -1442,31 +1725,75 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'washing_rejected': bool(preflight.get('washing_rejected')),
         }
 
+    rapid_target = _prepare_rapid_target_dir_for_source(
+        base_target_cid=base_target_cid,
+        source_kind=source_kind,
+        source_id=source_id,
+        payload=payload,
+        files=files,
+    )
+    target_cid = str(rapid_target.get('target_cid') or base_target_cid)
+
+    is_package_transfer = source_kind in ('completed_season', 'season_hub') and len(files) > 1
+    if is_package_transfer and rapid_target.get('temp_dir_required') and not rapid_target.get('season_package_temp_dir'):
+        message = f"季包临时接收目录创建失败，放弃本次整季入库：{rapid_target.get('temp_dir_error') or 'unknown'}"
+        _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message)
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='failed', message=message[:500])
+            except Exception:
+                pass
+        return {
+            'ok': False,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': len(files),
+            'errors': [{'error': message}],
+            'preflight': locals().get('preflight', {}),
+            'rapid_target': rapid_target,
+            'aborted_season_package': True,
+        }
+
     ok_count = 0
     errors = []
     success_sources = []
+    RAPID_TRANSFER_MAX_RETRIES = 3
 
     def _rapid_transfer_one(raw_file: Dict[str, Any]) -> Dict[str, Any]:
         f = dict(raw_file or {})
-        try:
-            f.setdefault('source_kind', source_kind)
-            f.setdefault('source_id', source_id)
-            f.setdefault('source_ref_id', source_id)
-            file_source_kind = _normalize_source_kind(f.get('source_kind') or source_kind or '')
-            file_source_id = str(f.get('source_id') or f.get('source_ref_id') or source_id or '').strip()
-            result = rapid_save_file(f, target_cid=target_cid)
-            if result.get('ok'):
-                return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
-            return {'ok': False, 'file': f, 'error': {'file': f.get('file_name') or f.get('sha1'), 'response': result.get('response')}}
-        except Exception as e:
-            return {'ok': False, 'file': f, 'error': {'file': f.get('file_name') or f.get('sha1'), 'error': str(e)}}
+        f.setdefault('source_kind', source_kind)
+        f.setdefault('source_id', source_id)
+        f.setdefault('source_ref_id', source_id)
+        file_source_kind = _normalize_source_kind(f.get('source_kind') or source_kind or '')
+        file_source_id = str(f.get('source_id') or f.get('source_ref_id') or source_id or '').strip()
+        file_label = f.get('file_name') or f.get('name') or f.get('sha1') or 'unknown'
+        last_error = None
+        attempts = RAPID_TRANSFER_MAX_RETRIES + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if attempt > 1:
+                    logger.warning(
+                        f"  ➜ [共享资源] 秒传重试 {attempt - 1}/{RAPID_TRANSFER_MAX_RETRIES}：{file_label}"
+                    )
+                    time.sleep(min(1.5 * attempt, 6.0))
+                result = rapid_save_file(f, target_cid=target_cid)
+                if result.get('ok'):
+                    result['attempt'] = attempt
+                    return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
+                last_error = {'file': file_label, 'response': result.get('response'), 'result': result, 'attempt': attempt}
+            except Exception as e:
+                last_error = {'file': file_label, 'error': str(e), 'attempt': attempt}
+        return {'ok': False, 'file': f, 'error': last_error or {'file': file_label, 'error': 'unknown'}}
 
     # 完结季/公共季包通常会触发多文件 status=7 签名；并发发起秒传，中心才能把 sign_job
     # 同时派给多个 holder，避免一集一集串行等待。单文件/电影仍走轻量串行。
-    parallel_transfer = source_kind in ('completed_season', 'season_hub') and len(files) > 1
+    parallel_transfer = is_package_transfer
     if parallel_transfer:
         max_workers = max(1, min(len(files), 8))
-        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}")
+        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}, retries={RAPID_TRANSFER_MAX_RETRIES}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='shared-rapid-transfer') as executor:
             future_map = {executor.submit(_rapid_transfer_one, f): f for f in files}
             for future in concurrent.futures.as_completed(future_map):
@@ -1474,7 +1801,6 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 if item.get('ok'):
                     ok_count += 1
                     success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
-                    _register_local_rapid_holder(client, source_kind=item.get('kind'), source_id=item.get('id'), file_info=item.get('file') or {})
                 else:
                     errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
     else:
@@ -1483,13 +1809,53 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             if item.get('ok'):
                 ok_count += 1
                 success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
-                _register_local_rapid_holder(client, source_kind=item.get('kind'), source_id=item.get('id'), file_info=item.get('file') or {})
             else:
                 errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
 
     report_errors = []
     report_results = []
     skipped_report_sources = []
+    cleanup_result = {}
+
+    # 季包必须全量成功。任何一集连续重试后仍失败，整季放弃入库，删除临时目录，
+    # 不上报 success，不触发整理，避免 8/9 半季污染媒体库。消费端贡献点也不会被扣除。
+    if is_package_transfer and ok_count != len(files):
+        message = f'季包秒传不完整，已放弃整季入库：成功 {ok_count}/{len(files)}，失败 {len(errors)} 个文件'
+        cleanup_result = _cleanup_rapid_temp_dir(rapid_target, reason=message)
+        fail_report = _report_transfer_failed_safely(
+            client,
+            source_kind=source_kind,
+            source_id=source_id,
+            files=files,
+            errors=errors,
+            message=message,
+        )
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='failed', message=message[:500])
+            except Exception as e:
+                logger.debug(f"  ➜ [共享资源] ACK 中心事件失败: {e}")
+        logger.warning(f"  ➜ [共享资源] {message}；临时目录清理结果：{cleanup_result}")
+        return {
+            'ok': False,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'rapid_success_count': ok_count,
+            'total': len(files),
+            'errors': errors,
+            'failed_report': fail_report,
+            'cleanup_result': cleanup_result,
+            'preflight': locals().get('preflight', {}),
+            'rapid_target': locals().get('rapid_target', {}),
+            'aborted_season_package': True,
+        }
+
+    # 到这里才说明成功文件会留在网盘里；此时再登记本机 holder，避免季包失败清理后留下假 holder。
+    for report_kind, report_id, report_file in success_sources:
+        _register_local_rapid_holder(client, source_kind=report_kind, source_id=report_id, file_info=report_file or {})
 
     if ok_count:
         report_groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -1527,19 +1893,14 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 logger.warning(f"  ➜ [共享资源] 上报秒传成功失败，热度不会增加: {err}")
         _kick_115_organize_detached(reason=f'rapid:{source_kind}:{source_id}')
     else:
-        fail_kind = _normalize_source_kind(source_kind) if _normalize_source_kind(source_kind) in ('movie', 'episode', 'completed_season') else ''
-        if fail_kind and source_id:
-            try:
-                client.report_transfer(
-                    fail_kind,
-                    source_id,
-                    'failed',
-                    success_count=0,
-                    total_count=len(files),
-                    message=json.dumps(errors, ensure_ascii=False)[:1000],
-                )
-            except Exception:
-                pass
+        _report_transfer_failed_safely(
+            client,
+            source_kind=source_kind,
+            source_id=source_id,
+            files=files,
+            errors=errors,
+            message=json.dumps(errors, ensure_ascii=False)[:1000],
+        )
 
     if ack and event_id:
         try:
@@ -1555,6 +1916,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
         'report_results': report_results, 'report_errors': report_errors,
         'skipped_report_sources': skipped_report_sources,
         'preflight': locals().get('preflight', {}),
+        'rapid_target': locals().get('rapid_target', {}),
     }
 
 
@@ -1717,10 +2079,24 @@ def _consume_sources(
             # 统一订阅已经知道缺集时，必须把缺集号透传到消费层；
             # season_hub / completed_season 会在 RAW/洗版预检前按集号裁剪。
             payload['_requested_missing_episode_numbers'] = missing_episode_numbers
+        event_source_kind = payload.get('source_kind') or payload.get('kind')
+        if not event_source_kind and (payload.get('hub_id') or payload.get('is_season_hub')):
+            event_source_kind = 'season_hub'
+        if not event_source_kind:
+            event_source_kind = payload.get('item_type') or payload.get('display_type')
+        event_source_kind = _normalize_source_kind(event_source_kind)
+        if event_source_kind == 'completed_season' and payload.get('hub_id') and not payload.get('source_id'):
+            event_source_kind = 'season_hub'
+
         event = {
             'event_id': '',
-            'source_kind': payload.get('source_kind'),
-            'source_ref_id': payload.get('source_id') or payload.get('source_ref_id'),
+            'source_kind': event_source_kind,
+            'source_ref_id': (
+                payload.get('source_id')
+                or payload.get('source_ref_id')
+                or payload.get('hub_id')
+                or payload.get('id')
+            ),
             'payload_json': payload,
         }
         result = consume_device_event(event, ack=False)

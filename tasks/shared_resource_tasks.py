@@ -1083,42 +1083,103 @@ def _prepare_raw_upload_entry(file_info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _upload_raw_batch(client: SharedCenterClient, files: List[Dict[str, Any]]) -> Dict[str, Any]:
-    entries = []
+    """按需上传 RAW。
+
+    Rapid v2 的 RAW/summary_json 是 SHA1 级缓存，不是“来源客户端”级数据。
+    所以登记前先问中心哪些 SHA1 已经 ready；已有可用 RAW 的直接复用，
+    只给中心补传缺失、对象文件丢失或 summary_json 不可用的 SHA1。
+    """
+    by_sha1: Dict[str, Dict[str, Any]] = {}
     for f in files or []:
+        sha1 = _norm_sha1((f or {}).get('sha1'))
+        if sha1 and sha1 not in by_sha1:
+            by_sha1[sha1] = f
+
+    uploaded: Dict[str, bool] = {}
+    errors = []
+    skipped_existing = 0
+    need_upload_sha1s = set(by_sha1.keys())
+
+    if by_sha1 and hasattr(client, 'raw_batch'):
+        try:
+            resp = client.raw_batch(list(by_sha1.keys())) or {}
+            for item in resp.get('items') or []:
+                sha = _norm_sha1((item or {}).get('sha1'))
+                if not sha:
+                    continue
+                ready = item.get('raw_ready') is not False and _summary_json_usable_for_center((item or {}).get('summary_json') or {})
+                if ready:
+                    uploaded[sha] = True
+                    need_upload_sha1s.discard(sha)
+                    skipped_existing += 1
+            missing = {_norm_sha1(x) for x in (resp.get('missing') or []) if _norm_sha1(x)}
+            # 中心明确 missing 的保留在 need_upload_sha1s；其余未返回项也按需补传，兼容异常响应。
+            need_upload_sha1s = {sha for sha in need_upload_sha1s if sha in missing or sha not in uploaded}
+        except Exception as e:
+            logger.debug(f"  ➜ [共享资源] 查询中心 RAW 状态失败，改为按旧逻辑上传: {e}")
+            uploaded = {}
+            skipped_existing = 0
+            need_upload_sha1s = set(by_sha1.keys())
+
+    entries = []
+    for sha1, f in by_sha1.items():
+        if sha1 not in need_upload_sha1s:
+            continue
         entry = _prepare_raw_upload_entry(f)
         if entry:
             entries.append(entry)
-    if not entries:
-        return {'ok': True, 'uploaded': {}, 'count': 0, 'errors': []}
 
-    uploaded = {}
-    errors = []
+    if not entries:
+        return {'ok': True, 'uploaded': uploaded, 'count': len(uploaded), 'uploaded_count': 0, 'skipped_existing': skipped_existing, 'errors': errors}
+
     try:
         if hasattr(client, 'upload_raw_ffprobe_batch'):
             resp = client.upload_raw_ffprobe_batch(entries)
             ok_items = resp.get('items') or resp.get('uploaded') or []
+            before = set(uploaded.keys())
             for item in ok_items:
                 sha = _norm_sha1((item or {}).get('sha1'))
                 if sha:
                     uploaded[sha] = True
             # 中心旧版本可能只返回 count；这种情况下视本批次都成功，避免回退逐个再刷屏。
-            if not uploaded and int(resp.get('count') or 0) == len(entries) and not resp.get('errors'):
-                uploaded = {_norm_sha1(x.get('sha1')): True for x in entries if _norm_sha1(x.get('sha1'))}
+            if len(uploaded) == len(before) and int(resp.get('count') or 0) == len(entries) and not resp.get('errors'):
+                for x in entries:
+                    sha = _norm_sha1(x.get('sha1'))
+                    if sha:
+                        uploaded[sha] = True
             errors = resp.get('errors') or []
-            if uploaded:
-                return {'ok': not errors, 'uploaded': uploaded, 'count': len(uploaded), 'errors': errors}
+            uploaded_count = len(set(uploaded.keys()) - before)
+            if uploaded_count or skipped_existing:
+                return {
+                    'ok': not errors,
+                    'uploaded': uploaded,
+                    'count': len(uploaded),
+                    'uploaded_count': uploaded_count,
+                    'skipped_existing': skipped_existing,
+                    'errors': errors,
+                }
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] RAW 批量上传失败，回退逐个上传: {e}")
 
     # 兼容未升级中心：单个逐个传，但只作为 fallback。
+    before = set(uploaded.keys())
     for entry in entries:
         sha = _norm_sha1(entry.get('sha1'))
+        if not sha or uploaded.get(sha):
+            continue
         try:
             client.upload_raw_ffprobe(sha, entry.get('raw_ffprobe_json') or {}, size=entry.get('size'), summary_json=entry.get('summary_json'))
             uploaded[sha] = True
         except Exception as e:
             errors.append({'sha1': sha, 'error': str(e)})
-    return {'ok': not errors, 'uploaded': uploaded, 'count': len(uploaded), 'errors': errors}
+    return {
+        'ok': not errors,
+        'uploaded': uploaded,
+        'count': len(uploaded),
+        'uploaded_count': len(set(uploaded.keys()) - before),
+        'skipped_existing': skipped_existing,
+        'errors': errors,
+    }
 
 
 
@@ -1686,6 +1747,7 @@ def _detect_clean_version_for_completed_season(
 
     口径：
     - 连载季不调用本函数；
+    - 动漫剧集不做纯净版判断，命中 TMDb 动画类型后直接跳过；
     - 自动/完结任务使用本地 media_metadata.runtime_minutes；
     - 手动共享完结季实时查询 TMDb 季详情；
     - 只生成中心端标签，消费端不再二次兜底识别。
@@ -1702,6 +1764,19 @@ def _detect_clean_version_for_completed_season(
     season = _safe_int_or_none(candidate.get('season_number'))
     if not parent or season is None:
         return {'is_clean_version': False, 'clean_version_checked': False, 'reason': 'missing_identity'}
+
+    animation_genre = _short_drama_source_has_animation_genre(candidate)
+    if animation_genre:
+        return {
+            'is_clean_version': False,
+            'clean_version_checked': False,
+            'clean_version_skipped': True,
+            'reason': 'animation_genre_skipped',
+            'parent_series_tmdb_id': parent,
+            'season_number': season,
+            'animation_genre_checked': True,
+            'genres_json_contains_animation': True,
+        }
 
     manual = _is_manual_clean_detect_source(source_provider, candidate)
     runtime_map = _load_tmdb_runtime_map_for_season(parent, season) if manual else _load_local_runtime_map_for_season(parent, season)
@@ -1757,8 +1832,7 @@ def _detect_clean_version_for_completed_season(
             'comparable_count': comparable,
         }
 
-    animation_genre = _short_drama_source_has_animation_genre(candidate)
-    short_hits = [] if animation_genre else [ep for ep in episode_rows if 0 < float(ep.get('actual_runtime_minutes') or 0) < _SHORT_DRAMA_MAX_RUNTIME_MINUTES]
+    short_hits = [ep for ep in episode_rows if 0 < float(ep.get('actual_runtime_minutes') or 0) < _SHORT_DRAMA_MAX_RUNTIME_MINUTES]
     short_required_hits = max(1, int(math.ceil(comparable * _SHORT_DRAMA_HIT_RATIO)))
     is_short_drama = bool((not animation_genre) and len(short_hits) >= short_required_hits)
     min_delta = _CLEAN_VERSION_SHORT_DRAMA_MIN_DELTA_MINUTES if is_short_drama else _CLEAN_VERSION_MIN_DELTA_MINUTES
@@ -2196,7 +2270,9 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
     client = SharedCenterClient()
     raw_batch_result = _upload_raw_batch(client, files)
     uploaded_sha1s = raw_batch_result.get('uploaded') or {}
-    uploaded = int(raw_batch_result.get('count') or 0)
+    uploaded = int(raw_batch_result.get('uploaded_count') if raw_batch_result.get('uploaded_count') is not None else (raw_batch_result.get('count') or 0))
+    raw_ready_count = int(raw_batch_result.get('count') or 0)
+    skipped_existing_raw = int(raw_batch_result.get('skipped_existing') or 0)
     errors = list(raw_batch_result.get('errors') or [])
     raw_missing = _raw_batch_missing_for_files(files, uploaded_sha1s)
     if raw_missing:
@@ -2207,6 +2283,8 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             'ok': False,
             'message': f'RAW/summary_json 缺失，已拒绝登记中心：{names}',
             'raw_uploaded_count': uploaded,
+            'raw_ready_count': raw_ready_count,
+            'raw_skipped_existing': skipped_existing_raw,
             'missing_raw': raw_missing,
             'errors': errors,
             'fingerprint_repair': repair_result or {},
@@ -2417,6 +2495,8 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
         'ok': bool(results or completed_resp),
         'registered_count': len(results),
         'raw_uploaded_count': uploaded,
+        'raw_ready_count': raw_ready_count,
+        'raw_skipped_existing': skipped_existing_raw,
         'completed_season': completed_resp,
         'episode_cancelled': episode_cancelled,
         'errors': errors,
