@@ -25,6 +25,7 @@ from handler.p115_service import (
     _parse_115_size,
     _identify_media_enhanced,
     _transfer_context_to_recognition_hints,
+    resolve_p115_sorting_target_by_local_path,
 )
 from handler.p115_media_analyzer import P115MediaAnalyzerMixin
 from handler.tg_media_candidate import candidate_to_recognition_hints, lookup_candidate_hint_for_name
@@ -2085,3 +2086,778 @@ class LifeEventMonitorDaemon:
             with cls._lock:
                 if get_config().get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
                     cls._schedule_next(interval_secs)
+
+# ======================================================================
+# ★★★ 洗版优先级一键重算任务 ★★★
+# ======================================================================
+def _ensure_washing_priority_snapshot_columns():
+    """确保洗版优先级快照字段存在，便于增量升级和手动补丁兼容。"""
+    from database.connection import get_db_connection
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                ALTER TABLE p115_filesystem_cache
+                ADD COLUMN IF NOT EXISTS washing_level INTEGER,
+                ADD COLUMN IF NOT EXISTS washing_snapshot_json JSONB DEFAULT '{}'::jsonb;
+            """)
+            cursor.execute("""
+                ALTER TABLE media_metadata
+                ADD COLUMN IF NOT EXISTS washing_level INTEGER,
+                ADD COLUMN IF NOT EXISTS washing_snapshot_json JSONB DEFAULT '{}'::jsonb;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_mm_washing_level
+                ON media_metadata (washing_level)
+                WHERE in_library = TRUE AND item_type IN ('Movie','Episode');
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_p115_washing_level
+                ON p115_filesystem_cache (washing_level)
+                WHERE washing_level IS NOT NULL;
+            """)
+        conn.commit()
+
+
+def _jsonish_to_obj(value, default=None):
+    if default is None:
+        default = []
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return json.loads(text)
+        except Exception:
+            return default
+    return default
+
+
+def _as_clean_list(value):
+    value = _jsonish_to_obj(value, [])
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        if item in (None, '', [], {}):
+            continue
+        out.append(str(item).strip())
+    return out
+
+
+def _safe_int_or_none(value):
+    try:
+        if value in (None, ''):
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _first_non_empty(*values):
+    for value in values:
+        if value not in (None, '', [], {}):
+            return value
+    return None
+
+
+def _make_washing_identity(row, file_name=None):
+    item_type = str(row.get('item_type') or '').strip()
+    media_type = 'movie' if item_type == 'Movie' else 'series'
+    identity = {
+        'title': row.get('title') or '',
+        'tmdb_id': str(row.get('tmdb_id') or '').strip(),
+        'file_name': file_name or '',
+        'item_type': item_type,
+        'media_type': media_type,
+        'parent_series_tmdb_id': str(row.get('parent_series_tmdb_id') or '').strip() or None,
+        'season_number': _safe_int_or_none(row.get('season_number')),
+        'episode_number': _safe_int_or_none(row.get('episode_number')),
+    }
+    return {k: v for k, v in identity.items() if v not in (None, '', [], {})}
+
+
+def _extract_asset_file_name(asset_details, index=0):
+    assets = _jsonish_to_obj(asset_details, [])
+    if isinstance(assets, dict):
+        assets = [assets]
+    if not isinstance(assets, list) or not assets:
+        return ''
+    candidates = []
+    if index < len(assets):
+        candidates.append(assets[index])
+    candidates.extend(assets)
+    for asset in candidates:
+        if not isinstance(asset, dict):
+            continue
+        path = asset.get('path') or asset.get('Path') or asset.get('file_path') or asset.get('FilePath')
+        name = asset.get('file_name') or asset.get('FileName') or asset.get('name') or asset.get('Name')
+        if name:
+            return str(name)
+        if path:
+            return os.path.basename(str(path).replace('\\', '/'))
+    return ''
+
+
+def _lookup_p115_cache_row(cursor, sha1='', pick_code=''):
+    sha1 = str(sha1 or '').strip().upper()
+    pick_code = str(pick_code or '').strip()
+    clauses = []
+    params = []
+    order_params = []
+    if pick_code:
+        clauses.append('pick_code = %s')
+        params.append(pick_code)
+        order_params.append(pick_code)
+    if sha1:
+        clauses.append('UPPER(sha1) = %s')
+        params.append(sha1)
+    if not clauses:
+        return None
+
+    order_sql = 'updated_at DESC NULLS LAST'
+    if pick_code:
+        order_sql = 'CASE WHEN pick_code = %s THEN 0 ELSE 1 END, updated_at DESC NULLS LAST'
+
+    cursor.execute(f"""
+        SELECT id, parent_id, name, sha1, pick_code, local_path, size,
+               washing_level, washing_snapshot_json
+        FROM p115_filesystem_cache
+        WHERE {' OR '.join(clauses)}
+        ORDER BY {order_sql}
+        LIMIT 1
+    """, tuple(params + order_params))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _lookup_mediainfo_by_sha1(cursor, sha1):
+    sha1 = str(sha1 or '').strip().upper()
+    if not sha1:
+        return None
+    cursor.execute("""
+        SELECT sha1, mediainfo_json
+        FROM p115_mediainfo_cache
+        WHERE sha1 = %s OR UPPER(sha1) = %s
+        LIMIT 1
+    """, (sha1, sha1))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _build_priority_input(raw_info, *, file_name='', file_size=0, original_lang=''):
+    from handler.resubscribe_service import WashingService
+
+    parsed = WashingService._safe_parse_jsonish(raw_info)
+    if parsed is None:
+        parsed = raw_info
+
+    if isinstance(parsed, list):
+        if parsed and isinstance(parsed[0], dict):
+            info = dict(parsed[0])
+        else:
+            info = {}
+    elif isinstance(parsed, dict):
+        info = dict(parsed)
+    else:
+        info = {}
+
+    if file_name:
+        info['filename'] = file_name
+    if file_size:
+        info['_file_size'] = int(file_size or 0)
+    if original_lang:
+        info['_original_lang'] = original_lang
+    return info
+
+
+def _infer_target_cid_from_local_path(cache_row=None, local_path=''):
+    """用 p115_filesystem_cache.local_path 反推分类目录 CID。
+
+    这是 MP 直出/旧数据的零 API 兜底：不向 115 向上溯源，
+    只根据本地 STRM 相对路径匹配 p115_sorting_rules.category_path。
+    """
+    cache_row = cache_row or {}
+    path = local_path or cache_row.get('local_path') or ''
+    try:
+        target = resolve_p115_sorting_target_by_local_path(path)
+    except Exception as e:
+        logger.debug(f"  ➜ [洗版优先级重算] 通过 local_path 推导分类 CID 失败: {path} -> {e}")
+        return '', ''
+
+    if not target:
+        return '', ''
+    return str(target.get('cid') or '').strip(), str(target.get('category_path') or '').strip()
+
+
+def _has_normal_washing_priorities(priorities):
+    """判断优先级列表里是否真的包含普通优先级规则。
+
+    WashingService._load_priorities 会合并 media_type='All' 的全局规则。
+    如果当前 target_cid 没命中分类规则，但存在全局排除规则，priorities 也不会为空。
+    这种情况下仍应视作“未命中普通规则”，继续尝试 local_path 反推分类 CID。
+    """
+    if not isinstance(priorities, list):
+        return False
+    return any(isinstance(rule, dict) and not bool(rule.get('is_exclude', False)) for rule in priorities)
+
+
+def _lookup_organize_record_target_cid(cursor, *, cache_row=None, pick_code='', sha1=''):
+    """从 115 整理记录反查分类目标 CID。
+
+    p115_filesystem_cache.parent_id 只是文件当前所在父目录，剧集通常是剧名/季目录，
+    不能拿来匹配洗版优先级规则。真正的分类目标目录应以
+    p115_organize_records.target_cid 为准。
+
+    MP 直出模式通常没有 p115_organize_records，且不允许为了重算去频繁调用 115 API
+    向上溯源；这种情况返回空，交给全局无目录规则兜底，或标记为未命中规则。
+    """
+    cache_row = cache_row or {}
+    pick_code = str(pick_code or cache_row.get('pick_code') or '').strip()
+    file_id = str(cache_row.get('id') or cache_row.get('fid') or '').strip()
+
+    where = []
+    params = []
+    if pick_code:
+        where.append('pick_code = %s')
+        params.append(pick_code)
+    if file_id:
+        where.append('file_id = %s')
+        params.append(file_id)
+
+    if not where:
+        return ''
+
+    cursor.execute(f"""
+        SELECT target_cid
+        FROM p115_organize_records
+        WHERE ({' OR '.join(where)})
+          AND target_cid IS NOT NULL
+          AND target_cid <> ''
+        ORDER BY processed_at DESC NULLS LAST, id DESC
+        LIMIT 1
+    """, tuple(params))
+    rec = cursor.fetchone()
+    return str(rec.get('target_cid') or '').strip() if rec else ''
+
+
+def _backfill_organize_record_target_cid(cursor, *, cache_row=None, row=None, target_cid='', category_name=''):
+    """把 local_path 推导出的真实分类 CID 回填到 p115_organize_records。
+
+    一键重算已经通过 p115_filesystem_cache.local_path 零 API 推导出了分类根目录 CID，
+    顺手写回整理记录后，下次重算就能优先从 p115_organize_records.target_cid
+    直接命中，不必每次都再跑路径前缀匹配。
+    """
+    cache_row = cache_row or {}
+    row = row or {}
+    target_cid = str(target_cid or '').strip()
+    if not target_cid:
+        return False
+
+    file_id = str(cache_row.get('id') or cache_row.get('fid') or '').strip()
+    pick_code = str(cache_row.get('pick_code') or '').strip()
+    if not file_id and not pick_code:
+        return False
+
+    category_name = str(category_name or '').strip()
+    original_name = str(cache_row.get('name') or row.get('title') or file_id or pick_code).strip()
+    renamed_name = str(cache_row.get('name') or original_name).strip()
+    tmdb_id = str(row.get('tmdb_id') or '').strip() or None
+    item_type = str(row.get('item_type') or '').strip()
+    media_type = 'movie' if item_type == 'Movie' else 'tv'
+    season_number = row.get('season_number')
+
+    where = []
+    params = [target_cid, category_name or None, tmdb_id, media_type, season_number]
+    if pick_code:
+        where.append('pick_code = %s')
+        params.append(pick_code)
+    if file_id:
+        where.append('file_id = %s')
+        params.append(file_id)
+
+    if where:
+        cursor.execute(f"""
+            UPDATE p115_organize_records
+            SET target_cid = %s,
+                category_name = COALESCE(NULLIF(category_name, ''), %s),
+                tmdb_id = COALESCE(tmdb_id, %s),
+                media_type = COALESCE(media_type, %s),
+                season_number = COALESCE(season_number, %s)
+            WHERE {' OR '.join(where)}
+            RETURNING id
+        """, tuple(params))
+        if cursor.fetchone():
+            return True
+
+    if not file_id:
+        return False
+
+    try:
+        cursor.execute("""
+            INSERT INTO p115_organize_records
+                (file_id, pick_code, original_name, status, tmdb_id, media_type,
+                 target_cid, category_name, renamed_name, processed_at, season_number)
+            VALUES (%s, %s, %s, 'success', %s, %s, %s, %s, %s, NOW(), %s)
+            ON CONFLICT (file_id)
+            DO UPDATE SET
+                target_cid = EXCLUDED.target_cid,
+                category_name = COALESCE(NULLIF(p115_organize_records.category_name, ''), EXCLUDED.category_name),
+                tmdb_id = COALESCE(p115_organize_records.tmdb_id, EXCLUDED.tmdb_id),
+                media_type = COALESCE(p115_organize_records.media_type, EXCLUDED.media_type),
+                season_number = COALESCE(p115_organize_records.season_number, EXCLUDED.season_number)
+            RETURNING id
+        """, (
+            file_id,
+            pick_code or None,
+            original_name,
+            tmdb_id,
+            media_type,
+            target_cid,
+            category_name or None,
+            renamed_name or None,
+            season_number,
+        ))
+        return bool(cursor.fetchone())
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [洗版优先级重算] 回填 p115_organize_records.target_cid 失败: "
+            f"file_id={file_id}, pc={(pick_code or '-')[:8]}, target={target_cid}, err={e}"
+        )
+        return False
+
+
+def _resolve_media_original_language(cursor, row):
+    """解析媒体原始语种；分集自身为空时回退父剧条目的 original_language。
+
+    media_metadata 里 Episode 行通常没有 original_language，真实值在父级
+    Series 行上。一键重算洗版优先级时，如果这里拿不到 zh/ja/ko 等
+    原语种，后续“原产国豁免音轨/字幕规则”就无法生效。
+    """
+    original_lang = str((row or {}).get('original_language') or '').strip()
+    if original_lang:
+        return original_lang
+
+    item_type = str((row or {}).get('item_type') or '').strip()
+    if item_type != 'Episode':
+        return ''
+
+    parent_tmdb_id = str((row or {}).get('parent_series_tmdb_id') or '').strip()
+    if not parent_tmdb_id:
+        return ''
+
+    try:
+        cursor.execute("""
+            SELECT original_language
+            FROM media_metadata
+            WHERE item_type = 'Series'
+              AND tmdb_id = %s
+              AND NULLIF(original_language, '') IS NOT NULL
+            ORDER BY in_library DESC, last_updated_at DESC NULLS LAST
+            LIMIT 1
+        """, (parent_tmdb_id,))
+        parent = cursor.fetchone()
+        return str((parent or {}).get('original_language') or '').strip() if parent else ''
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [洗版优先级重算] 查询父剧原语种失败: "
+            f"parent_tmdb={parent_tmdb_id}, err={e}"
+        )
+        return ''
+
+
+def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
+    """重算单个 media_metadata 媒体项的洗版优先级，并写回 p115/cache + media_metadata。"""
+    from handler.resubscribe_service import WashingService
+
+    sha1s = _as_clean_list(row.get('file_sha1_json'))
+    pickcodes = _as_clean_list(row.get('file_pickcode_json'))
+    count = max(len(sha1s), len(pickcodes))
+    evaluated_at = datetime.utcnow().isoformat() + 'Z'
+    item_type = str(row.get('item_type') or '').strip()
+    db_media_type = 'Movie' if item_type == 'Movie' else 'Series'
+    media_type = 'movie' if item_type == 'Movie' else 'series'
+    original_lang = _resolve_media_original_language(cursor, row)
+
+    versions = []
+    stats = {
+        'version_count': count,
+        'evaluated_versions': 0,
+        'missing_raw': 0,
+        'missing_identity': 0,
+        'no_priority_rules': 0,
+        'backfilled_target_cid': 0,
+    }
+
+    if count <= 0:
+        snapshot_data = {
+            'reason': '缺少 SHA1/PC，无法重算洗版优先级',
+            'media_type': media_type,
+            'evaluated_at': evaluated_at
+        }
+        cursor.execute("""
+            UPDATE media_metadata
+            SET washing_level = NULL,
+                washing_snapshot_json = %s::jsonb,
+                last_updated_at = NOW()
+            WHERE tmdb_id = %s AND item_type = %s
+        """, (json.dumps(snapshot_data, ensure_ascii=False), row.get('tmdb_id'), row.get('item_type')))
+        stats['missing_identity'] += 1
+        return stats
+
+    for idx in range(count):
+        sha1 = sha1s[idx].upper() if idx < len(sha1s) else ''
+        pc = pickcodes[idx] if idx < len(pickcodes) else ''
+        cache_row = _lookup_p115_cache_row(cursor, sha1=sha1, pick_code=pc)
+        
+        cache_snapshot = {}
+        if cache_row:
+            sha1 = sha1 or str(cache_row.get('sha1') or '').strip().upper()
+            pc = pc or str(cache_row.get('pick_code') or '').strip()
+            cache_snapshot = cache_row.get('washing_snapshot_json') or {}
+            if isinstance(cache_snapshot, str):
+                try: cache_snapshot = json.loads(cache_snapshot)
+                except: cache_snapshot = {}
+
+        file_name = (
+            (cache_row or {}).get('name')
+            or _extract_asset_file_name(row.get('asset_details_json'), idx)
+            or ''
+        )
+        file_size = int((cache_row or {}).get('size') or 0)
+        
+        organize_target_cid = _lookup_organize_record_target_cid(
+            cursor,
+            cache_row=cache_row,
+            pick_code=pc,
+            sha1=sha1,
+        )
+        
+        row_snapshot = row.get('washing_snapshot_json') or {}
+        if isinstance(row_snapshot, str):
+            try: row_snapshot = json.loads(row_snapshot)
+            except: row_snapshot = {}
+
+        target_cid = str(_first_non_empty(
+            organize_target_cid,
+            cache_snapshot.get('target_cid'),
+            row_snapshot.get('target_cid'),
+            ''
+        ) or '').strip()
+        
+        inferred_target_cid, inferred_category_path = _infer_target_cid_from_local_path(cache_row)
+        identity = _make_washing_identity(row, file_name=file_name)
+
+        level = None
+        reason = '未计算'
+
+        raw_row = _lookup_mediainfo_by_sha1(cursor, sha1) if sha1 else None
+        if not raw_row or raw_row.get('mediainfo_json') in (None, '', [], {}):
+            level = 0
+            reason = '缺少媒体流信息，无法重算洗版优先级'
+            stats['missing_raw'] += 1
+        else:
+            try:
+                priorities = WashingService._load_priorities(db_media_type, target_cid)
+
+                if (not _has_normal_washing_priorities(priorities)) and inferred_target_cid and inferred_target_cid != target_cid:
+                    fallback_priorities = WashingService._load_priorities(db_media_type, inferred_target_cid)
+                    if _has_normal_washing_priorities(fallback_priorities):
+                        old_target_cid = target_cid
+                        target_cid = inferred_target_cid
+                        priorities = fallback_priorities
+                        logger.debug(
+                            f"  ➜ [洗版优先级重算] local_path 推导分类 CID 生效: "
+                            f"{old_target_cid or '-'} -> {target_cid} ({inferred_category_path or '-'}) | {file_name}"
+                        )
+
+                if not _has_normal_washing_priorities(priorities):
+                    level = None
+                    if inferred_target_cid and target_cid != inferred_target_cid:
+                        reason = f'原目标分类CID({target_cid or "-"})只命中全局/排除规则，local_path 推导分类CID({inferred_target_cid})后仍未命中普通优先级规则'
+                    elif target_cid:
+                        reason = f'目标分类CID({target_cid})未命中普通洗版优先级规则'
+                    else:
+                        reason = '缺少整理目标分类CID，且 local_path 未命中分类规则'
+                    stats['no_priority_rules'] += 1
+                else:
+                    priority_input = _build_priority_input(
+                        raw_row.get('mediainfo_json'),
+                        file_name=file_name,
+                        file_size=file_size,
+                        original_lang=original_lang,
+                    )
+                    norm = WashingService._normalize_info(priority_input)
+                    level, reason = WashingService.get_level(norm, priorities)
+                    if inferred_target_cid and target_cid == inferred_target_cid and inferred_category_path:
+                        reason = f"{reason}（分类路径: {inferred_category_path}）"
+                    stats['evaluated_versions'] += 1
+            except Exception as e:
+                level = 0
+                reason = f'重算异常: {e}'
+                logger.warning(f"  ➜ [洗版优先级重算] 版本评分失败 sha1={sha1[:12]}...: {e}", exc_info=True)
+
+        if inferred_target_cid and target_cid == inferred_target_cid and organize_target_cid != inferred_target_cid:
+            try:
+                if _backfill_organize_record_target_cid(
+                    cursor,
+                    cache_row=cache_row,
+                    row=row,
+                    target_cid=inferred_target_cid,
+                    category_name=inferred_category_path,
+                ):
+                    stats['backfilled_target_cid'] += 1
+            except Exception as e:
+                logger.debug(
+                    f"  ➜ [洗版优先级重算] 回填整理记录 target_cid 异常: "
+                    f"sha1={sha1[:12]}..., target={inferred_target_cid}, err={e}"
+                )
+
+        version = {
+            'fid': str((cache_row or {}).get('id') or ''),
+            'sha1': sha1,
+            'size': file_size,
+            'level': level,
+            'reason': reason,
+            'identity': identity,
+            'file_name': file_name,
+            'pick_code': pc,
+            'media_type': media_type,
+            'target_cid': target_cid,
+            'evaluated_at': evaluated_at,
+        }
+        versions.append(version)
+
+        if cache_row and cache_row.get('id'):
+            new_cache_snapshot = {
+                'reason': reason,
+                'target_cid': target_cid or None,
+                'media_type': media_type,
+                'identity': identity,
+                'evaluated_at': evaluated_at
+            }
+            cursor.execute("""
+                UPDATE p115_filesystem_cache
+                SET washing_level = %s,
+                    washing_snapshot_json = %s::jsonb,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (
+                level,
+                json.dumps(new_cache_snapshot, ensure_ascii=False),
+                cache_row.get('id'),
+            ))
+
+    def _best_sort_key(v):
+        lvl = v.get('level')
+        if isinstance(lvl, int) and lvl > 0:
+            return (0, lvl)
+        if lvl is None:
+            return (2, 999999)
+        return (1, abs(int(lvl or 0)))
+
+    best = sorted(versions, key=_best_sort_key)[0] if versions else {}
+    best_level = best.get('level') if best else None
+    
+    new_mm_snapshot = {
+        'versions': versions,
+        'reason': best.get('reason') if best else '无有效版本',
+        'sha1': best.get('sha1') if best else None,
+        'target_cid': best.get('target_cid') if best else None,
+        'media_type': media_type,
+        'evaluated_at': evaluated_at
+    }
+
+    cursor.execute("""
+        UPDATE media_metadata
+        SET washing_level = %s,
+            washing_snapshot_json = %s::jsonb,
+            last_updated_at = NOW()
+        WHERE tmdb_id = %s AND item_type = %s
+    """, (
+        best_level,
+        json.dumps(new_mm_snapshot, ensure_ascii=False),
+        row.get('tmdb_id'),
+        row.get('item_type'),
+    ))
+
+    return stats
+
+
+def task_recalculate_library_washing_priorities(processor=None, item_type='all', limit=None):
+    """重算当前媒体库所有电影/分集的洗版优先级快照。"""
+    from database.connection import get_db_connection
+
+    try:
+        import task_manager
+    except Exception:
+        task_manager = None
+
+    def _yield_frontend_log_polling():
+        """让 gevent/前端日志轮询有机会实时取到进度。"""
+        try:
+            from gevent import sleep as gevent_sleep
+            gevent_sleep(0.01) # ★ 核心修复：强制让出 10ms，保证前端 WebSocket/轮询能拿到数据
+        except Exception:
+            try:
+                time.sleep(0.01)
+            except Exception:
+                pass
+
+    def _flush_log_handlers():
+        try:
+            root_logger = logging.getLogger()
+            for handler in list(getattr(root_logger, 'handlers', []) or []):
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def update_task_status(prog, msg):
+        """只刷新顶部任务状态，不写实时日志，避免日志刷屏。"""
+        if task_manager:
+            task_manager.update_status_from_thread(prog, msg)
+        _yield_frontend_log_polling()
+
+    def update_progress(prog, msg):
+        """刷新顶部任务状态 + 写入实时日志。"""
+        update_task_status(prog, msg)
+        logger.info(msg)
+        _flush_log_handlers()
+        _yield_frontend_log_polling()
+
+    _ensure_washing_priority_snapshot_columns()
+
+    item_type = str(item_type or 'all').strip().lower()
+    allowed_types = ['Movie', 'Episode']
+    if item_type in ('movie', 'movies'):
+        allowed_types = ['Movie']
+    elif item_type in ('episode', 'episodes', 'series', 'tv'):
+        allowed_types = ['Episode']
+
+    stats = {
+        'scanned_items': 0,
+        'updated_items': 0,
+        'evaluated_versions': 0,
+        'missing_raw': 0,
+        'missing_identity': 0,
+        'no_priority_rules': 0,
+        'backfilled_target_cid': 0,
+        'errors': 0,
+        'started_at': datetime.utcnow().isoformat() + 'Z',
+        'finished_at': None,
+    }
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            params = [allowed_types]
+            limit_sql = ''
+            if limit:
+                try:
+                    limit = int(limit)
+                    if limit > 0:
+                        limit_sql = 'LIMIT %s'
+                        params.append(limit)
+                except Exception:
+                    limit_sql = ''
+
+            cursor.execute(f"""
+                SELECT mm.tmdb_id, mm.item_type, mm.parent_series_tmdb_id, mm.season_number, mm.episode_number,
+                       mm.title,
+                       COALESCE(NULLIF(mm.original_language, ''), NULLIF(parent.original_language, '')) AS original_language,
+                       mm.file_sha1_json, mm.file_pickcode_json,
+                       mm.asset_details_json, mm.washing_snapshot_json
+                FROM media_metadata mm
+                LEFT JOIN LATERAL (
+                    SELECT p.original_language
+                    FROM media_metadata p
+                    WHERE mm.item_type = 'Episode'
+                      AND p.item_type = 'Series'
+                      AND p.tmdb_id = mm.parent_series_tmdb_id
+                      AND NULLIF(p.original_language, '') IS NOT NULL
+                    ORDER BY p.in_library DESC, p.last_updated_at DESC NULLS LAST
+                    LIMIT 1
+                ) parent ON TRUE
+                WHERE mm.in_library = TRUE
+                  AND mm.item_type = ANY(%s)
+                ORDER BY mm.item_type ASC, COALESCE(mm.title, '') ASC, mm.tmdb_id ASC
+                {limit_sql}
+            """, tuple(params))
+            rows = cursor.fetchall() or []
+            total_rows = len(rows)
+            update_progress(1, f"  ➜ [洗版优先级重算] 开始执行，待处理 {total_rows} 个媒体项")
+
+            for row in rows:
+                stats['scanned_items'] += 1
+                try:
+                    item_stats = _evaluate_washing_level_for_row(cursor, dict(row))
+                    for key in ('evaluated_versions', 'missing_raw', 'missing_identity', 'no_priority_rules', 'backfilled_target_cid'):
+                        stats[key] += int(item_stats.get(key) or 0)
+                    stats['updated_items'] += 1
+                except Exception as e:
+                    stats['errors'] += 1
+                    logger.warning(
+                        f"  ➜ [洗版优先级重算] 媒体项失败: "
+                        f"tmdb={row.get('tmdb_id')}, type={row.get('item_type')}, err={e}",
+                        exc_info=True,
+                    )
+
+                # ★ 核心修复：加快前端刷新频率 (每 10 条刷新状态，每 50 条打印日志并提交)
+                if stats['scanned_items'] % 10 == 0:
+                    progress = 5 + int((stats['scanned_items'] / max(total_rows, 1)) * 90)
+                    status_msg = (
+                        f"  ➜ [洗版优先级重算] 进度: {stats['scanned_items']}/{total_rows}，"
+                        f"已更新 {stats['updated_items']}，缺 RAW {stats['missing_raw']}，"
+                        f"未命中规则 {stats['no_priority_rules']}，回填CID {stats['backfilled_target_cid']}"
+                    )
+                    update_task_status(min(progress, 95), status_msg)
+
+                if stats['scanned_items'] % 50 == 0:
+                    conn.commit()
+                    progress = 5 + int((stats['scanned_items'] / max(total_rows, 1)) * 90)
+                    update_progress(
+                        min(progress, 95),
+                        f"  ➜ [洗版优先级重算] 进度: {stats['scanned_items']}/{total_rows}，"
+                        f"已更新 {stats['updated_items']}，缺 RAW {stats['missing_raw']}，"
+                        f"未命中规则 {stats['no_priority_rules']}，回填CID {stats['backfilled_target_cid']}"
+                    )
+
+            conn.commit()
+
+    stats['finished_at'] = datetime.utcnow().isoformat() + 'Z'
+    update_progress(
+        100,
+        f"  ➜ [洗版优先级重算] 完成：总数 {stats['scanned_items']}，"
+        f"已更新 {stats['updated_items']}，缺 RAW {stats['missing_raw']}，"
+        f"未命中规则 {stats['no_priority_rules']}，回填CID {stats['backfilled_target_cid']}"
+    )
+    return stats
+
+def submit_washing_priority_recalculate_task(item_type='all', limit=None):
+    """提交后台任务：重算媒体库所有资源的洗版优先级快照。"""
+    try:
+        import task_manager
+    except Exception as e:
+        raise RuntimeError(f"无法导入 task_manager: {e}")
+
+    item_type = item_type or 'all'
+    limit = limit if limit not in ('', None) else None
+
+    def _task(processor=None):
+        return task_recalculate_library_washing_priorities(
+            processor=processor,
+            item_type=item_type,
+            limit=limit,
+        )
+
+    task_manager.submit_task(
+        _task,
+        task_name="重算媒体库洗版优先级",
+        processor_type='media'
+    )
+

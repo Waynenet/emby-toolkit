@@ -54,6 +54,113 @@ def get_115_ua(app_type):
     return ua_map.get(str(app_type).lower() if app_type else 'web', ua_map['web'])
 
 
+
+
+def _p115_normalize_rule_path(path):
+    """标准化 115 分类相对路径 / 本地 STRM 相对路径，用于无 API 前缀匹配。"""
+    text = str(path or '').strip().replace('\\', '/')
+    text = re.sub(r'/+', '/', text).strip('/')
+    return text
+
+
+def _p115_load_sorting_rule_targets():
+    """读取 115 分类规则，输出可用于路径前缀匹配的分类目录。
+
+    返回项包含：cid / category_path / rule。category_path 是相对本地 STRM 根目录的路径，
+    例如“纪录片”或“电影/外语电影”。
+    """
+    raw_rules = settings_db.get_setting('p115_sorting_rules') or []
+    if isinstance(raw_rules, str):
+        try:
+            raw_rules = json.loads(raw_rules)
+        except Exception:
+            raw_rules = []
+    if not isinstance(raw_rules, list):
+        return []
+
+    targets = []
+    seen = set()
+    for rule in raw_rules:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get('enabled') is False:
+            continue
+        cid = str(rule.get('cid') or '').strip()
+        if not cid or cid == '0':
+            continue
+        category_path = _p115_normalize_rule_path(
+            rule.get('category_path')
+            or rule.get('dir_name')
+            or rule.get('name')
+        )
+        if not category_path:
+            continue
+        key = (cid, category_path.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append({
+            'cid': cid,
+            'category_path': category_path,
+            'rule': rule,
+        })
+
+    # 最长路径优先，防止“电影”抢先命中“电影/外语电影”。
+    targets.sort(key=lambda x: len(x.get('category_path') or ''), reverse=True)
+    return targets
+
+
+def resolve_p115_sorting_target_by_local_path(local_path, *, local_root=None):
+    """根据本地/相对路径推导 115 分类规则 target_cid，零 115 API 消耗。
+
+    适用于 MP 直出：Webhook 能拿到文件绝对路径或 115_path 映射后的相对路径，
+    只要它位于某个分类 category_path 下，就能反推出分类根目录 CID。
+    """
+    rel_path = _p115_normalize_rule_path(local_path)
+    if not rel_path:
+        return None
+
+    candidates = []
+    # 调用方显式传入 local_root 优先；否则使用配置中的本地 STRM 根目录。
+    if local_root:
+        candidates.append(local_root)
+    try:
+        cfg = get_config() or {}
+        for key in (constants.CONFIG_OPTION_LOCAL_STRM_ROOT, 'local_strm_root', 'p115_local_strm_root', 'strm_root', 'p115_strm_root'):
+            value = cfg.get(key)
+            if value:
+                candidates.append(value)
+    except Exception:
+        pass
+
+    rel_cf = rel_path.casefold()
+    for root in candidates:
+        root_norm = _p115_normalize_rule_path(root)
+        if not root_norm:
+            continue
+        root_cf = root_norm.casefold()
+        if rel_cf == root_cf:
+            rel_path = ''
+            rel_cf = ''
+            break
+        if rel_cf.startswith(root_cf + '/'):
+            rel_path = rel_path[len(root_norm):].strip('/')
+            rel_cf = rel_path.casefold()
+            break
+
+    if not rel_path:
+        return None
+
+    for target in _p115_load_sorting_rule_targets():
+        cat = _p115_normalize_rule_path(target.get('category_path'))
+        if not cat:
+            continue
+        cat_cf = cat.casefold()
+        if rel_cf == cat_cf or rel_cf.startswith(cat_cf + '/'):
+            return dict(target)
+
+    return None
+
 def _p115_parse_sign_check_range(sign_check):
     """解析 115 upload/init 返回的 sign_check，返回闭区间 start/end。"""
     text = str(sign_check or '').strip()
@@ -3057,14 +3164,23 @@ class P115CacheManager:
             logger.error(f"  ➜ 清理 115 DB 缓存失败: {e}")
 
     @staticmethod
-    def save_file_cache(fid, parent_id, name, sha1=None, pick_code=None, local_path=None, size=0, preid=None):
-        """专门将文件(fc=1)的 SHA1、PC码、本地相对路径、大小和 preid 存入本地数据库缓存"""
+    def save_file_cache(
+        fid, parent_id, name, sha1=None, pick_code=None, local_path=None, size=0, preid=None,
+        washing_level=None, washing_snapshot_json=None,
+    ):
+        """专门将文件(fc=1)的 SHA1、PC码、本地相对路径、大小、preid 和洗版快照存入本地数据库缓存"""
         if not fid or not parent_id or not name: return
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     P115CacheManager._ensure_preid_column()
+                    P115CacheManager._ensure_washing_snapshot_columns()
                     preid = P115CacheManager._norm_preid(preid)
+                    try:
+                        washing_level = int(washing_level) if washing_level not in (None, '', [], {}) else None
+                    except Exception:
+                        washing_level = None
+                    washing_snapshot_json = washing_snapshot_json if isinstance(washing_snapshot_json, dict) else {}
                     if not preid:
                         cursor.execute(
                             """
@@ -3085,31 +3201,29 @@ class P115CacheManager:
                             preid = P115CacheManager._norm_preid(old_row.get('preid'))
                     cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = %s", (str(fid),))
 
+                    from psycopg2.extras import Json
                     cursor.execute("""
-                        INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1, pick_code, local_path, size, preid)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO p115_filesystem_cache (
+                            id, parent_id, name, sha1, pick_code, local_path, size, preid,
+                            washing_level, washing_snapshot_json
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (parent_id, name)
                         DO UPDATE SET
-                            sha1 = CASE
-                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.sha1
-                                ELSE COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1)
-                            END,
-                            pick_code = CASE
-                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.pick_code
-                                ELSE COALESCE(EXCLUDED.pick_code, p115_filesystem_cache.pick_code)
-                            END,
+                            sha1 = CASE WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.sha1 ELSE COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1) END,
+                            pick_code = CASE WHEN p115_filesystem_cache.id != EXCLUDED.id THEN EXCLUDED.pick_code ELSE COALESCE(EXCLUDED.pick_code, p115_filesystem_cache.pick_code) END,
                             local_path = COALESCE(EXCLUDED.local_path, p115_filesystem_cache.local_path),
-                            size = CASE
-                                WHEN EXCLUDED.size > 0 THEN EXCLUDED.size
-                                ELSE p115_filesystem_cache.size
-                            END,
-                            preid = CASE
-                                WHEN p115_filesystem_cache.id != EXCLUDED.id THEN COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid)
-                                ELSE COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid)
-                            END,
+                            size = CASE WHEN EXCLUDED.size > 0 THEN EXCLUDED.size ELSE p115_filesystem_cache.size END,
+                            preid = CASE WHEN p115_filesystem_cache.id != EXCLUDED.id THEN COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid) ELSE COALESCE(EXCLUDED.preid, p115_filesystem_cache.preid) END,
+                            washing_level = CASE WHEN EXCLUDED.washing_snapshot_json IS NOT NULL THEN EXCLUDED.washing_level ELSE p115_filesystem_cache.washing_level END,
+                            washing_snapshot_json = COALESCE(EXCLUDED.washing_snapshot_json, p115_filesystem_cache.washing_snapshot_json),
                             id = EXCLUDED.id,
                             updated_at = NOW()
-                    """, (str(fid), str(parent_id), str(name), sha1, pick_code, local_path, size, preid or None))
+                    """, (
+                        str(fid), str(parent_id), str(name), sha1, pick_code, local_path, size, preid or None,
+                        washing_level, 
+                        Json(washing_snapshot_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if washing_snapshot_json else None
+                    ))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 文件缓存失败: {e}")
@@ -3134,7 +3248,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE id = %s
                         LIMIT 1
@@ -3153,7 +3267,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE pick_code = %s
                         LIMIT 1
@@ -3172,7 +3286,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE UPPER(sha1) = UPPER(%s)
                         ORDER BY updated_at DESC NULLS LAST
@@ -3198,7 +3312,7 @@ class P115CacheManager:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid
+                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE local_path = %s
                         LIMIT 1
@@ -3210,7 +3324,7 @@ class P115CacheManager:
                     # 挂载/路径前缀不一致时的兜底：只允许“完整路径段后缀”匹配，避免单文件名误命中。
                     if '/' in normalized:
                         cursor.execute("""
-                            SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                            SELECT id, parent_id, name, sha1, pick_code, local_path, size, preid, washing_level, washing_snapshot_json
                             FROM p115_filesystem_cache
                             WHERE local_path IS NOT NULL
                               AND %s LIKE '%%/' || local_path
@@ -3417,6 +3531,19 @@ class P115CacheManager:
                     conn.commit()
         except Exception as e:
             logger.debug(f"  ➜ [115缓存] 确认 preid 字段失败: {e}")
+
+    @staticmethod
+    def _ensure_washing_snapshot_columns():
+        """兼容旧库：确保 p115_filesystem_cache 有洗版优先级快照字段。"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("ALTER TABLE p115_filesystem_cache ADD COLUMN IF NOT EXISTS washing_level INTEGER")
+                    cursor.execute("ALTER TABLE p115_filesystem_cache ADD COLUMN IF NOT EXISTS washing_snapshot_json JSONB DEFAULT '{}'::jsonb")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_washing_level ON p115_filesystem_cache (washing_level) WHERE washing_level IS NOT NULL")
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 确认 washing_* 字段失败: {e}")
 
     @staticmethod
     def _extract_preid_range_bytes(pick_code, start=0, end=131071):
@@ -6597,6 +6724,155 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
             from handler.resubscribe_service import WashingService
             original_lang = (self.raw_metadata or {}).get('lang_code')
+
+            # 同一批待整理里可能同时出现同一电影/同一集的多个视频版本。
+            # decide_washing_action() 只能和“已入库旧版”比较；批内第一个候选尚未入库，
+            # 后续候选不会自然触发“旧版对比”，因此这里额外做一次批内 PK，防止多版本同时入库。
+            batch_washing_best = {}
+
+            def _batch_washing_identity_key(_item, _is_video):
+                if not _is_video:
+                    return None
+                if self.media_type == 'movie':
+                    return ('movie', str(self.tmdb_id))
+                _s = _item.get('_season_num')
+                _e = _item.get('_episode_num')
+                if _s is None or _e is None:
+                    return None
+                try:
+                    return ('episode', int(_s), int(_e))
+                except Exception:
+                    return ('episode', str(_s), str(_e))
+
+            def _batch_washing_level_from_reason(_reason):
+                text = str(_reason or '')
+                m = re.search(r'优先级\s*([0-9]+)', text)
+                if m:
+                    try:
+                        return int(m.group(1))
+                    except Exception:
+                        pass
+                # 手动重组/特权替换可能没有优先级文本；这种情况下不按规则等级压制，
+                # 只在同批候选之间用体积做兜底。
+                return 9999
+
+            def _batch_washing_score(_level, _file_size):
+                try:
+                    size_int = int(_file_size or 0)
+                except Exception:
+                    size_int = 0
+                # level 越小越好；同级体积越大越优。
+                return (int(_level or 9999), -size_int)
+
+            def _build_washing_snapshot(_item, _new_name, _reason='', _file_size=0, _has_ext_sub=False):
+                """给 p115_filesystem_cache 写入洗版优先级快照。失败只返回空快照，不影响整理。"""
+                try:
+                    file_sha1 = _item.get('sha1') or _item.get('sha')
+                    level = _batch_washing_level_from_reason(_reason)
+                    level_reason = str(_reason or '').strip()
+
+                    # reason 里没有优先级时，现场按 RAW 再算一次，保证非 replace/手动重组也能留下快照。
+                    if level >= 9999 and file_sha1:
+                        raw_info = WashingService._get_raw_info_by_sha1(file_sha1)
+                        if isinstance(raw_info, list) and raw_info:
+                            new_info = dict(raw_info[0])
+                        elif isinstance(raw_info, dict):
+                            new_info = dict(raw_info)
+                        else:
+                            new_info = {}
+                        if new_info:
+                            new_info['filename'] = _new_name
+                            new_info['_file_size'] = _file_size
+                            new_info['_original_lang'] = original_lang
+                            new_info['has_external_subtitle'] = bool(_has_ext_sub)
+                            norm_new = WashingService._normalize_info(new_info)
+                            db_media_type = 'Movie' if self.media_type == 'movie' else 'Series'
+                            priorities = WashingService._load_priorities(db_media_type, str(target_cid))
+                            if priorities:
+                                level, level_reason = WashingService.get_level(norm_new, priorities)
+
+                    if level >= 9999:
+                        return {}
+
+                    identity = {
+                        'tmdb_id': str(self.tmdb_id or ''),
+                        'media_type': self.media_type,
+                    }
+                    if self.media_type == 'tv':
+                        identity.update({
+                            'season_number': _item.get('_season_num'),
+                            'episode_number': _item.get('_episode_num'),
+                        })
+                    from datetime import datetime, timezone
+                    return {
+                        'washing_level': int(level),
+                        'washing_snapshot_json': {
+                            'reason': level_reason or f'优先级 {level}',
+                            'target_cid': str(target_cid or ''),
+                            'media_type': 'movie' if self.media_type == 'movie' else 'series',
+                            'identity': identity,
+                            'evaluated_at': datetime.now(timezone.utc).isoformat()
+                        }
+                    }
+                except Exception as e:
+                    logger.debug(f"  ➜ [洗版快照] 计算失败: {_new_name} -> {e}")
+                    return {}
+
+            def _register_batch_washing_candidate(_item, _new_name, _action, _reason, _file_size):
+                key = _batch_washing_identity_key(_item, True)
+                if key is None:
+                    return True
+
+                level = _batch_washing_level_from_reason(_reason)
+                score = _batch_washing_score(level, _file_size)
+                current = batch_washing_best.get(key)
+
+                if not current:
+                    batch_washing_best[key] = {
+                        'item': _item,
+                        'name': _new_name,
+                        'level': level,
+                        'score': score,
+                        'action': _action,
+                        'reason': _reason,
+                    }
+                    return True
+
+                old_item = current.get('item')
+                old_name = current.get('name')
+                old_level = current.get('level')
+                old_score = current.get('score')
+
+                if score < old_score:
+                    try:
+                        valid_items.remove(old_item)
+                    except ValueError:
+                        pass
+                    old_fid = old_item.get('fid') or old_item.get('file_id') if isinstance(old_item, dict) else None
+                    if old_fid:
+                        unrecognized_fids.append(old_fid)
+                    batch_washing_best[key] = {
+                        'item': _item,
+                        'name': _new_name,
+                        'level': level,
+                        'score': score,
+                        'action': _action,
+                        'reason': _reason,
+                    }
+                    logger.info(
+                        f"  ➜ [批内洗版淘汰] {old_name} -> 同批候选 {_new_name} 更优/同级更大，"
+                        f"old_level={old_level}, new_level={level}"
+                    )
+                    return True
+
+                fid = _item.get('fid') or _item.get('file_id')
+                if fid:
+                    unrecognized_fids.append(fid)
+                logger.info(
+                    f"  ➜ [批内洗版跳过] {_new_name} -> 同批已有更优/同级候选 {old_name}，"
+                    f"old_level={old_level}, new_level={level}"
+                )
+                return False
             
             for item in items:
                 new_name = item['_new_filename']
@@ -6606,9 +6882,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 is_vid = ext in known_video_exts
                 file_size = _parse_115_size(item.get('fs') or item.get('size'))
                 
-                # 检查带头大哥是否已经挂了
-                if (s_num, e_num) in rejected_episodes:
-                    logger.info(f"  ➜ [关联跳过] 视频已被拦截/跳过，同步忽略字幕: {new_name}")
+                # 检查带头大哥是否已经挂了。仅剧集允许按 S/E 株连字幕/关联文件；
+                # 电影的 s_num/e_num 都是 None，不能把 (None, None) 放进黑名单，
+                # 否则一个电影版本失败会误杀后续所有电影视频。
+                if (
+                    self.media_type == 'tv'
+                    and s_num is not None
+                    and e_num is not None
+                    and (s_num, e_num) in rejected_episodes
+                ):
+                    logger.info(f"  ➜ [关联跳过] 同集视频已被拦截/跳过，同步忽略关联文件: {new_name}")
                     unrecognized_fids.append(item.get('fid') or item.get('file_id'))
                     continue
 
@@ -6656,17 +6939,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             'fid': item.get('fid') or item.get('file_id'), 'name': item.get('fn') or item.get('file_name'), 
                             'reason': reason, 'pc': item.get('pc') or item.get('pick_code'), 'season_num': s_num
                         })
-                        # ★ 记入黑名单，株连九族
-                        rejected_episodes.add((s_num, e_num))
+                        # 剧集才按 S/E 记黑名单，电影不能写入 (None, None)。
+                        if self.media_type == 'tv' and s_num is not None and e_num is not None:
+                            rejected_episodes.add((s_num, e_num))
                         continue
                     elif action == 'SKIP':
                         logger.info(f"  ➜ [洗版跳过] {new_name} -> {reason}")
                         unrecognized_fids.append(item.get('fid') or item.get('file_id'))
-                        # ★ 记入黑名单，株连九族
-                        rejected_episodes.add((s_num, e_num))
+                        # 剧集才按 S/E 记黑名单，电影不能写入 (None, None)。
+                        if self.media_type == 'tv' and s_num is not None and e_num is not None:
+                            rejected_episodes.add((s_num, e_num))
                         continue
                     elif action == 'REPLACE':
                         logger.info(f"  ➜ [洗版替换] {new_name} -> {reason}")
+                        item['_washing_snapshot'] = _build_washing_snapshot(item, new_name, reason, file_size, has_ext_sub)
+                        if not _register_batch_washing_candidate(item, new_name, action, reason, file_size):
+                            continue
                         if self.media_type == 'tv' and s_num is not None and e_num is not None:
                             fids_to_delete.update(existing_tv_eps.get((s_num, e_num), []))
                         else:
@@ -6674,6 +6962,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         valid_items.append(item)
                     elif action == 'ACCEPT':
                         logger.info(f"  ➜ [洗版入库] {new_name} -> {reason}")
+                        item['_washing_snapshot'] = _build_washing_snapshot(item, new_name, reason, file_size, has_ext_sub)
+                        if not _register_batch_washing_candidate(item, new_name, action, reason, file_size):
+                            continue
                         if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
                 else:
@@ -7040,12 +7331,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 file_local_path = file_local_path.replace('\\', '/')
                                 file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
 
+                                washing_snapshot = file_item.get('_washing_snapshot') if isinstance(file_item, dict) else {}
+                                if is_video and not washing_snapshot:
+                                    washing_snapshot = _build_washing_snapshot(file_item, new_filename, '', file_size, False)
+
                                 if pick_code and fid:
                                     P115CacheManager.save_file_cache(
                                         fid, batch_target_cid, new_filename, 
                                         sha1=file_sha1, pick_code=pick_code, 
                                         local_path=file_local_path, size=file_size,
-                                        preid=file_item.get('preid')
+                                        preid=file_item.get('preid'),
+                                        **(washing_snapshot or {})
                                     )
                                     # 负载均衡分享资产记录钩子：
                                     # 对影巢/TG 等外部分享导入后再整理的资源，只有这里拿到的
@@ -7239,6 +7535,21 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 logger.warning(f"  ➜ [MP直出] 缺少 115_path 参数，无法映射目录结构: {original_name}")
                 continue
 
+            # 根据本地相对路径反推真实分类目录 CID。
+            # MP 直出不移动文件，parent_id 只是文件真实父目录/季目录，不能作为洗版规则 target_cid。
+            # 这里用 p115_sorting_rules.category_path 做前缀匹配，0 API 消耗。
+            inferred_sorting_target = resolve_p115_sorting_target_by_local_path(parent_rel_path or original_name, local_root=local_root)
+            inferred_target_cid = str((inferred_sorting_target or {}).get('cid') or '').strip()
+            inferred_category_path = str((inferred_sorting_target or {}).get('category_path') or '').strip()
+
+            if inferred_target_cid:
+                logger.debug(
+                    f"  ➜ [MP直出] 已通过路径匹配分类目录: {parent_rel_path or original_name} "
+                    f"-> CID={inferred_target_cid} ({inferred_category_path or '-'})"
+                )
+            else:
+                logger.debug(f"  ➜ [MP直出] 未能通过路径匹配分类目录，暂沿用父目录CID: {parent_rel_path or original_name}")
+
             # 确定本地落盘目录
             local_dir = os.path.join(local_root, parent_rel_path) if parent_rel_path else local_root
             os.makedirs(local_dir, exist_ok=True)
@@ -7358,8 +7669,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     status="success",
                     tmdb_id=self.tmdb_id,
                     media_type=self.media_type,
-                    target_cid=parent_id,
-                    category_name="MP直出",
+                    # MP直出的真实分类目录来自本地路径匹配；失败时才退回父目录，避免旧逻辑断链。
+                    target_cid=inferred_target_cid or parent_id,
+                    category_name=(f"MP直出/{inferred_category_path}" if inferred_category_path else "MP直出"),
                     renamed_name=original_name,
                     season_number=file_item.get('_forced_season')
                 )

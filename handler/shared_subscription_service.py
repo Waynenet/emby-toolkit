@@ -810,6 +810,36 @@ def _center_clean_version_flagged(source_kind: str, payload: Dict[str, Any], fil
     return {'blocked': False}
 
 
+
+def _current_organize_conflict_mode(default: str = 'skip') -> str:
+    """读取 115 整理覆盖模式，并统一成 skip/replace/keep_both。"""
+    try:
+        rename_config = settings_db.get_setting('p115_rename_config') or {}
+        if isinstance(rename_config, str):
+            try:
+                rename_config = json.loads(rename_config)
+            except Exception:
+                rename_config = {}
+        mode = str((rename_config or {}).get('conflict_mode') or default or '').strip().lower()
+    except Exception:
+        mode = str(default or '').strip().lower()
+
+    aliases = {
+        'overwrite': 'replace',
+        '洗版': 'replace',
+        '替换': 'replace',
+        'skip_existing': 'skip',
+        '跳过': 'skip',
+        'keep': 'keep_both',
+        'both': 'keep_both',
+        'keepboth': 'keep_both',
+        '保留两者': 'keep_both',
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in ('skip', 'replace', 'keep_both'):
+        return str(default or 'skip').strip().lower() or 'skip'
+    return mode
+
 def _preflight_context(source_kind: str, source_id: str, payload: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
     first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
     return {
@@ -841,7 +871,32 @@ def _prepare_files_before_rapid_transfer(
     files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
     source_label = f"{source_kind or '-'}:{source_id or '-'}"
     preflight_started_at = time.time()
-    logger.info(f"  ➜ [共享资源] 秒传前预检开始：source={source_label}, files={len(files)}")
+    logger.debug(f"  ➜ [共享资源] 秒传前预检开始：source={source_label}, files={len(files)}")
+
+    conflict_mode = _current_organize_conflict_mode(default='skip')
+    if conflict_mode == 'replace':
+        files, inventory_gate = _replace_mode_short_circuit_best_inventory(
+            source_kind=source_kind,
+            source_id=source_id,
+            payload=payload,
+            files=files,
+        )
+        if not files:
+            message = inventory_gate.get('message') or '本地库存已是洗版优先级 1，跳过共享秒传。'
+            logger.info(
+                f"  ➜ [共享资源] 秒传前预检提前结束：source={source_label}, "
+                f"reason={inventory_gate.get('reason') or '-'}，耗时 {time.time() - preflight_started_at:.1f}s"
+            )
+            return [], {
+                'raw_cached_count': 0,
+                'raw_cache_errors': [],
+                'washing_checked': False,
+                'washing_rejected': False,
+                'inventory_best_short_circuit': True,
+                'errors': [message],
+                'message': message,
+                'inventory_gate': inventory_gate,
+            }
 
     raw_started_at = time.time()
     logger.info(f"  ➜ [共享资源] 秒传前预检：开始拉取中心 RAW，source={source_label}, files={len(files)}")
@@ -873,8 +928,6 @@ def _prepare_files_before_rapid_transfer(
         f"失败 {len(cache_errors)}"
     )
 
-    rename_config = settings_db.get_setting('p115_rename_config') or {}
-    conflict_mode = str(rename_config.get('conflict_mode') or '').strip().lower()
     if conflict_mode != 'replace':
         logger.info(
             f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 {conflict_mode or '未配置'}，"
@@ -1477,6 +1530,199 @@ def _local_episode_in_library(parent_series_tmdb_id: Any, season_number: Any, ep
         return False
 
 
+
+def _local_movie_washing_snapshot(tmdb_id: Any) -> Dict[str, Any]:
+    """读取本地电影入库洗版快照；只用于 replace 秒传前短路。"""
+    tmdb = str(tmdb_id or '').strip()
+    if not tmdb:
+        return {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tmdb_id, title, washing_level, washing_snapshot_json
+                    FROM media_metadata
+                    WHERE item_type='Movie'
+                      AND tmdb_id=%s
+                      AND COALESCE(in_library, FALSE)=TRUE
+                    ORDER BY CASE
+                                WHEN washing_level = 1 THEN 0
+                                WHEN washing_level IS NOT NULL AND washing_level > 0 THEN 1
+                                ELSE 2
+                             END,
+                             washing_level ASC NULLS LAST,
+                             last_updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (tmdb,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 查询本地电影洗版快照失败: tmdb={tmdb}, err={e}")
+        return {}
+
+
+def _local_episode_washing_snapshot(parent_series_tmdb_id: Any, season_number: Any, episode_number: Any) -> Dict[str, Any]:
+    """读取本地分集入库洗版快照；只用于 replace 秒传前短路。"""
+    parent = str(parent_series_tmdb_id or '').strip()
+    season = _safe_int_or_none(season_number)
+    episode = _safe_int_or_none(episode_number)
+    if not parent or season is None or episode is None:
+        return {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT parent_series_tmdb_id, season_number, episode_number, title,
+                        washing_level, washing_snapshot_json
+                    FROM media_metadata
+                    WHERE item_type='Episode'
+                      AND parent_series_tmdb_id=%s
+                      AND season_number=%s
+                      AND episode_number=%s
+                      AND COALESCE(in_library, FALSE)=TRUE
+                    ORDER BY CASE
+                                WHEN washing_level = 1 THEN 0
+                                WHEN washing_level IS NOT NULL AND washing_level > 0 THEN 1
+                                ELSE 2
+                             END,
+                             washing_level ASC NULLS LAST,
+                             last_updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (parent, season, episode),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [共享资源] 查询本地分集洗版快照失败: tmdb={parent}, "
+            f"S{season}E{episode}, err={e}"
+        )
+        return {}
+
+
+def _is_inventory_best_washing_level(snapshot: Dict[str, Any]) -> bool:
+    try:
+        return int((snapshot or {}).get('washing_level')) == 1
+    except Exception:
+        return False
+
+
+def _replace_mode_short_circuit_best_inventory(
+    *,
+    source_kind: str,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """replace 模式下，RAW/洗版预检前先看库存优先级。
+
+    本地已经是优先级 1 的电影/单集没有必要再拉中心 RAW、算目标目录、调用规则。
+    完结季必须整季洗版：只有整包所有视频对应的本地集都已是优先级 1，才整包短路；
+    只要有一集不是 1，就保留整包进入后续预检。
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
+    normalized_source_kind = _normalize_source_kind(source_kind)
+    context = _preflight_context(source_kind, source_id, payload, files)
+    source_label = f"{source_kind or '-'}:{source_id or '-'}"
+
+    best_skips = []
+    kept = []
+    completed_video_checks = []
+
+    for f in files:
+        file_name = f.get('file_name') or f.get('name') or f.get('sha1') or ''
+        ext = os.path.splitext(str(file_name or ''))[1].lower()
+        is_video = (not ext) or ext in VIDEO_EXTS
+        if not is_video:
+            kept.append(f)
+            continue
+
+        item_type = str(f.get('item_type') or context.get('item_type') or payload.get('item_type') or '').strip()
+        file_kind = _normalize_source_kind(f.get('source_kind') or source_kind or '')
+        is_movie = file_kind == 'movie' or item_type == 'Movie'
+        is_episode_like = file_kind in ('episode', 'season_hub', 'completed_season') or item_type in ('Episode', 'Season')
+
+        if is_movie:
+            movie_tmdb = f.get('tmdb_id') or payload.get('tmdb_id') or context.get('tmdb_id')
+            snap = _local_movie_washing_snapshot(movie_tmdb)
+            if _is_inventory_best_washing_level(snap):
+                best_skips.append(file_name)
+                continue
+            kept.append(f)
+            continue
+
+        if is_episode_like:
+            s_num, e_num = _guess_se_from_source(f, context)
+            parent_tmdb = _source_parent_series_tmdb_id(f, context)
+            snap = _local_episode_washing_snapshot(parent_tmdb, s_num, e_num)
+            is_best = _is_inventory_best_washing_level(snap)
+            if normalized_source_kind == 'completed_season':
+                completed_video_checks.append({
+                    'file': f,
+                    'file_name': file_name,
+                    'known': bool(parent_tmdb and s_num is not None and e_num is not None),
+                    'best': is_best,
+                    'snapshot': snap,
+                })
+                kept.append(f)
+                continue
+            if is_best:
+                best_skips.append(f"S{s_num if s_num is not None else '-'}E{e_num if e_num is not None else '-'} {file_name}".strip())
+                continue
+            kept.append(f)
+            continue
+
+        kept.append(f)
+
+    if normalized_source_kind == 'completed_season' and completed_video_checks:
+        # 完结季不能单集洗。只有整季所有视频都已在库内达到优先级 1，才整包短路。
+        if all(x.get('known') and x.get('best') for x in completed_video_checks):
+            message = f"本地完结季库存所有分集均已是洗版优先级 1，跳过整季秒传：{payload.get('title') or source_id}"
+            logger.info(f"  ➜ [共享资源] {message}")
+            return [], {
+                'checked': True,
+                'short_circuit': True,
+                'reason': 'completed_pack_inventory_best_level_1',
+                'message': message,
+                'best_count': len(completed_video_checks),
+                'kept_count': 0,
+                'skipped': {'inventory_best_level_1': [x.get('file_name') for x in completed_video_checks[:20]]},
+            }
+        return files, {
+            'checked': True,
+            'short_circuit': False,
+            'message': '完结季未达到整包库存优先级 1，继续整季洗版预检。',
+            'best_count': sum(1 for x in completed_video_checks if x.get('best')),
+            'kept_count': len(files),
+        }
+
+    if best_skips:
+        logger.debug(
+            f"  ➜ [共享资源] 洗版优先级对比：source={source_label}，"
+            f"本地已是优先级1，跳过 {len(best_skips)} 个，保留 {len(kept)} 个进入预检。"
+        )
+
+    reason = 'inventory_best_level_1' if files and not kept and best_skips else ''
+    message = '本地库存已是洗版优先级 1，跳过共享秒传。' if reason else 'replace 库存优先级检查完成。'
+    return kept, {
+        'checked': True,
+        'short_circuit': bool(reason),
+        'reason': reason,
+        'message': message,
+        'best_count': len(best_skips),
+        'kept_count': len(kept),
+        'skipped': {'inventory_best_level_1': best_skips[:20]} if best_skips else {},
+    }
+
+
 def _filter_files_before_transfer(
     *,
     client: SharedCenterClient,
@@ -1486,15 +1732,19 @@ def _filter_files_before_transfer(
     files: List[Dict[str, Any]],
     requested_missing_episode_numbers: List[int] = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """在 RAW/洗版预检前做业务级过滤。
+    """在 RAW/洗版预检前做业务级过滤，严格服从整理覆盖模式。
 
-    - 统一订阅传入缺集号时，只允许中心返回的目标集进入秒传；
-    - 中心事件推送没有缺集上下文时，实时查询本地库，已入库集直接 ACK 跳过；
-    - 本机登记的中心源直接跳过，避免秒传自己的共享资源形成回旋镖。
+    - keep_both：只排除本机源；不做缺集过滤、不做已入库过滤，命中订阅就秒传；
+    - replace：电影/单集交给洗版预检比较；完结季保留整包进入洗版，不能被缺集列表裁成单集；
+    - skip：只要本地已存在同电影/同集，就拒绝该项入库。
     """
     payload = payload if isinstance(payload, dict) else {}
     files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
     missing_set = set(_normalize_episode_numbers(requested_missing_episode_numbers))
+    conflict_mode = _current_organize_conflict_mode(default='skip')
+    normalized_source_kind = _normalize_source_kind(source_kind)
+    is_completed_pack_source = normalized_source_kind == 'completed_season'
+
     kept: List[Dict[str, Any]] = []
     skipped = {
         'self_source': [],
@@ -1505,6 +1755,48 @@ def _filter_files_before_transfer(
     context = _preflight_context(source_kind, source_id, payload, files)
     source_label = f"{source_kind or '-'}:{source_id or '-'}"
 
+    # keep_both 是显式多版本模式：订阅命中后只兜底排除本机源，其他一律交给秒传。
+    if conflict_mode == 'keep_both':
+        for f in files:
+            file_name = f.get('file_name') or f.get('name') or f.get('sha1') or ''
+            if _file_is_own_center_source(f, payload, client):
+                skipped['self_source'].append(file_name)
+                continue
+            kept.append(f)
+
+        total_skipped = sum(len(v) for v in skipped.values())
+        if total_skipped:
+            logger.info(
+                f"  ➜ [共享资源] 秒传前匹配过滤：source={source_label}, conflict_mode=keep_both，"
+                f"输入 {len(files)}，保留 {len(kept)}，仅跳过本机源 {len(skipped['self_source'])}。"
+            )
+        else:
+            logger.info(
+                f"  ➜ [共享资源] keep_both 模式：source={source_label}，"
+                f"跳过缺集/已入库过滤，直接保留 {len(kept)}/{len(files)} 个中心文件。"
+            )
+
+        if files and not kept and skipped['self_source'] and len(skipped['self_source']) == len(files):
+            reason = 'all_self_source'
+            message = '中心返回的是本机共享源，已跳过，避免秒传自己的资源。'
+        else:
+            reason = ''
+            message = 'keep_both 模式：已跳过缺集/已入库过滤，命中订阅直接秒传。'
+
+        return kept, {
+            'checked': True,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'input_count': len(files),
+            'kept_count': len(kept),
+            'skipped_count': total_skipped,
+            'requested_missing_episode_numbers': sorted(missing_set),
+            'conflict_mode': conflict_mode,
+            'skipped': {k: v[:20] for k, v in skipped.items() if v},
+            'reason': reason,
+            'message': message,
+        }
+
     for f in files:
         file_name = f.get('file_name') or f.get('name') or f.get('sha1') or ''
         if _file_is_own_center_source(f, payload, client):
@@ -1512,31 +1804,42 @@ def _filter_files_before_transfer(
             continue
 
         item_type = str(f.get('item_type') or context.get('item_type') or payload.get('item_type') or '').strip()
-        file_kind = str(f.get('source_kind') or source_kind or '').strip()
+        file_kind = _normalize_source_kind(f.get('source_kind') or source_kind or '')
         is_movie = file_kind == 'movie' or item_type == 'Movie'
         is_episode_like = file_kind in ('episode', 'season_hub', 'completed_season') or item_type in ('Episode', 'Season')
 
         if is_movie:
             movie_tmdb = f.get('tmdb_id') or payload.get('tmdb_id') or context.get('tmdb_id')
-            if _local_movie_in_library(movie_tmdb):
+            if conflict_mode == 'skip' and _local_movie_in_library(movie_tmdb):
                 skipped['already_in_library'].append(file_name)
                 continue
+            # replace 模式不在这里拦截已入库电影，交给洗版预检决定 ACCEPT/REPLACE/SKIP/REJECT。
             kept.append(f)
             continue
 
         if is_episode_like:
             s_num, e_num = _guess_se_from_source(f, context)
             parent_tmdb = _source_parent_series_tmdb_id(f, context)
-            if e_num is not None and missing_set and int(e_num) not in missing_set:
-                skipped['not_requested_episode'].append(f"E{int(e_num):02d} {file_name}".strip())
-                continue
-            # 没有统一订阅缺集列表时，中心事件/手动秒传都用本地库实时兜底，避免重复秒传已入库集。
-            if e_num is not None and _local_episode_in_library(parent_tmdb, s_num, e_num):
-                skipped['already_in_library'].append(f"E{int(e_num):02d} {file_name}".strip())
-                continue
-            if e_num is None and missing_set:
-                skipped['unknown_identity'].append(file_name)
-                continue
+
+            # replace + 完结季收藏包必须整包进入洗版预检，不能按缺集列表裁成单集。
+            if not (conflict_mode == 'replace' and is_completed_pack_source):
+                if e_num is not None and missing_set and int(e_num) not in missing_set:
+                    skipped['not_requested_episode'].append(f"E{int(e_num):02d} {file_name}".strip())
+                    continue
+                if e_num is None and missing_set:
+                    skipped['unknown_identity'].append(file_name)
+                    continue
+
+            if conflict_mode == 'skip':
+                if e_num is None:
+                    # skip 模式必须能确定集身份；否则无法证明“同集不存在”，宁可拒绝。
+                    skipped['unknown_identity'].append(file_name)
+                    continue
+                if _local_episode_in_library(parent_tmdb, s_num, e_num):
+                    skipped['already_in_library'].append(f"E{int(e_num):02d} {file_name}".strip())
+                    continue
+
+            # replace 模式不因本地已有同集拦截，交给洗版预检；skip 模式已在上面处理。
             kept.append(f)
             continue
 
@@ -1545,11 +1848,18 @@ def _filter_files_before_transfer(
     total_skipped = sum(len(v) for v in skipped.values())
     if total_skipped:
         logger.info(
-            f"  ➜ [共享资源] 秒传前匹配过滤：source={source_label}, "
+            f"  ➜ [共享资源] 秒传前匹配过滤：source={source_label}, conflict_mode={conflict_mode}, "
             f"输入 {len(files)}，保留 {len(kept)}，跳过 {total_skipped} "
             f"(非缺失集 {len(skipped['not_requested_episode'])}, 已入库 {len(skipped['already_in_library'])}, "
             f"本机源 {len(skipped['self_source'])}, 身份不明 {len(skipped['unknown_identity'])})"
         )
+
+    if conflict_mode == 'replace' and is_completed_pack_source and files:
+        logger.info(
+            f"  ➜ [共享资源] replace 模式完结季整包洗版：source={source_label}，"
+            f"保留 {len(kept)}/{len(files)} 个文件进入整季洗版预检，缺集过滤已禁用。"
+        )
+
     reason = ''
     if files and not kept:
         if skipped['self_source'] and len(skipped['self_source']) == len(files):
@@ -1560,12 +1870,21 @@ def _filter_files_before_transfer(
             message = f"中心当前资源不包含本机缺失集 {sorted(missing_set)}，已跳过。"
         elif skipped['already_in_library'] and len(skipped['already_in_library']) == len(files):
             reason = 'all_already_in_library'
-            message = '中心返回的集本机均已入库，已跳过重复秒传。'
+            if conflict_mode == 'skip':
+                message = '本地已存在同电影/同集，conflict_mode=skip，已拒绝重复入库。'
+            else:
+                message = '中心返回的集本机均已入库，已跳过重复秒传。'
         else:
             reason = 'all_filtered'
             message = '中心返回的资源经缺集/已入库/本机源过滤后无可秒传文件。'
     else:
-        message = '秒传前匹配过滤完成'
+        if conflict_mode == 'replace':
+            message = 'replace 模式：已保留候选进入洗版预检。'
+        elif conflict_mode == 'skip':
+            message = 'skip 模式：已拒绝本地存在的同电影/同集，保留可入库候选。'
+        else:
+            message = '秒传前匹配过滤完成'
+
     return kept, {
         'checked': True,
         'source_kind': source_kind,
@@ -1574,11 +1893,11 @@ def _filter_files_before_transfer(
         'kept_count': len(kept),
         'skipped_count': total_skipped,
         'requested_missing_episode_numbers': sorted(missing_set),
+        'conflict_mode': conflict_mode,
         'skipped': {k: v[:20] for k, v in skipped.items() if v},
         'reason': reason,
         'message': message,
     }
-
 
 def _handle_pro_quota_auth_event(client: SharedCenterClient, event: Dict[str, Any], *, ack: bool = True) -> Dict[str, Any]:
     event_id = str((event or {}).get('event_id') or '')
@@ -1952,18 +2271,62 @@ def _build_gap_query(item: Dict[str, Any], title: str = '', tmdb_id=None, item_t
 
 
 def report_shared_gap(item: Dict[str, Any], title: str = '', tmdb_id=None, item_type: str = '', parent_tmdb_id=None, season_number=None, year='') -> bool:
-    if not shared_center_enabled():
-        return False
-    client = SharedCenterClient()
-    if not client.ready:
-        logger.warning('  ➜ [共享资源] 已启用但中心地址/token 未配置，跳过缺口登记。')
-        return False
+    """普通缺口登记已废弃。
+
+    Rapid v2 现在由中心端“有效资源入池广播”驱动消费端补缺/洗版，
+    客户端不再向中心写 wanted_gaps / wanted_gap_devices。保留函数只为兼容
+    旧导入，避免其他模块 import 失败。
+    """
+    logger.debug(
+        "  ➜ [共享资源] 普通缺口登记已废弃，跳过 report_shared_gap："
+        f"title={title or (item or {}).get('title') or '-'}, "
+        f"tmdb={tmdb_id or (item or {}).get('tmdb_id') or '-'}, item_type={item_type or (item or {}).get('item_type') or '-'}"
+    )
+    return False
+
+
+def _probe_subscriptions_batch_no_gap(client: SharedCenterClient, queries: List[Dict[str, Any]], limit_per_item: int = 200) -> Dict[str, Any]:
+    """只查询共享池候选，不登记缺口。
+
+    新中心端已取消普通缺口登记；这里额外向兼容实现传递禁用标记。
+    如果旧客户端封装不支持这些关键字，则退回旧签名，但本函数自身绝不再调用
+    report_gaps。
+    """
+    safe_queries = []
+    for q in queries or []:
+        if not isinstance(q, dict):
+            continue
+        item = dict(q)
+        item['_disable_gap_report'] = True
+        item['disable_gap_report'] = True
+        item['report_gap'] = False
+        item['register_gap'] = False
+        safe_queries.append(item)
+
     try:
-        client.report_gaps([_build_gap_query(item, title, tmdb_id, item_type, parent_tmdb_id, season_number, year)])
-        return True
-    except Exception as e:
-        logger.warning(f"  ➜ [共享资源] 登记缺口失败: {e}")
-        return False
+        return client.probe_subscriptions_batch(
+            safe_queries,
+            limit_per_item=limit_per_item,
+            report_gap=False,
+            disable_gap_report=True,
+            register_gap=False,
+        )
+    except TypeError:
+        try:
+            return client.probe_subscriptions_batch(
+                safe_queries,
+                limit_per_item=limit_per_item,
+                report_gap=False,
+            )
+        except TypeError:
+            try:
+                return client.probe_subscriptions_batch(
+                    safe_queries,
+                    limit_per_item=limit_per_item,
+                    disable_gap_report=True,
+                )
+            except TypeError:
+                return client.probe_subscriptions_batch(safe_queries, limit_per_item=limit_per_item)
 
 
 def _normalize_probe_item_for_center(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -2003,7 +2366,7 @@ def batch_probe_shared_resources(items: List[Dict[str, Any]], limit_per_item: in
     queries = [q for q in queries if q.get('tmdb_id') and q.get('item_type')]
     if not queries:
         return {'supported': True, 'items': [], 'hit_count': 0, 'gap_count': 0, 'by_key': {}}
-    resp = client.probe_subscriptions_batch(queries, limit_per_item=limit_per_item)
+    resp = _probe_subscriptions_batch_no_gap(client, queries, limit_per_item=limit_per_item)
     # subscriptions.py 期待 by_key；这里按 Rapid v2 规范键补一个映射。
     by_key = {}
     for row in resp.get('items') or resp.get('results') or []:
@@ -2041,14 +2404,7 @@ def _flatten_sources_from_probe(resp_or_row: Dict[str, Any]) -> List[Dict[str, A
 
 
 def _reported_gap_from_probe(resp_or_row: Dict[str, Any]) -> bool:
-    data = resp_or_row or {}
-    if data.get('reported_gap') or data.get('gap') or data.get('status') in ('gap_registered', 'reported_gap'):
-        return True
-    if int(data.get('gap_count') or 0) > 0:
-        return True
-    for item in data.get('items') or data.get('results') or []:
-        if item.get('reported_gap') or item.get('gap') or item.get('status') in ('gap_registered', 'reported_gap'):
-            return True
+    """普通缺口登记已废弃，探测结果里的 gap 字段统一忽略。"""
     return False
 
 
@@ -2060,7 +2416,7 @@ def _consume_sources(
     consume_context: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     if not sources:
-        return {'enabled': True, 'success': False, 'reported_gap': bool(report_gap), 'mode': 'rapid', 'count': 0}
+        return {'enabled': True, 'success': False, 'reported_gap': False, 'mode': 'rapid', 'count': 0}
     ok = 0
     errors = []
     skipped = []
@@ -2116,7 +2472,7 @@ def _consume_sources(
     return {
         'enabled': True,
         'success': ok > 0,
-        'reported_gap': bool(report_gap),
+        'reported_gap': False,
         'mode': 'rapid',
         'action_type': '共享资源秒传',
         'count': ok,
@@ -2133,12 +2489,11 @@ def try_consume_shared_resource(item: Dict[str, Any], title: str = '', tmdb_id=N
     query = _build_gap_query(item or {}, title, tmdb_id, item_type, parent_tmdb_id, season_number, year)
     client = SharedCenterClient()
     try:
-        resp = client.probe_subscriptions_batch([query], limit_per_item=50)
+        resp = _probe_subscriptions_batch_no_gap(client, [query], limit_per_item=50)
         sources = _flatten_sources_from_probe(resp)
-        reported_gap = _reported_gap_from_probe(resp)
-        result = _consume_sources(
+        return _consume_sources(
             sources,
-            report_gap=reported_gap,
+            report_gap=False,
             missing_episode_numbers=missing_episode_numbers,
             consume_context={
                 'title': title,
@@ -2149,14 +2504,6 @@ def try_consume_shared_resource(item: Dict[str, Any], title: str = '', tmdb_id=N
                 'year': year,
             },
         )
-        if not result.get('success') and not reported_gap:
-            # list 没命中时，保险登记缺口，等待中心事件监听异步处理。
-            try:
-                client.report_gaps([query])
-                result['reported_gap'] = True
-            except Exception:
-                pass
-        return result
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 秒传中心资源失败: {e}")
         return {'enabled': True, 'success': False, 'reported_gap': False, 'message': str(e)}
@@ -2164,17 +2511,15 @@ def try_consume_shared_resource(item: Dict[str, Any], title: str = '', tmdb_id=N
 
 def try_consume_preprobed_shared_resource(probe_row: Dict[str, Any] = None, item: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
     sources = _flatten_sources_from_probe(probe_row or {})
-    reported_gap = _reported_gap_from_probe(probe_row or {})
     if sources:
         return _consume_sources(
             sources,
-            report_gap=reported_gap,
+            report_gap=False,
             missing_episode_numbers=kwargs.get('missing_episode_numbers'),
             consume_context=kwargs,
         )
-    if reported_gap:
-        return {'enabled': True, 'success': False, 'reported_gap': True, 'mode': 'rapid', 'count': 0}
-    return try_consume_shared_resource(item or {}, **kwargs)
+    # 未命中时不再登记缺口，等待中心端入池广播事件。
+    return {'enabled': True, 'success': False, 'reported_gap': False, 'mode': 'rapid', 'count': 0}
 
 
 
