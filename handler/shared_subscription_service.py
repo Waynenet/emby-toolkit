@@ -610,8 +610,19 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     status = str(wait_resp.get('status') or (wait_resp.get('job') or {}).get('status') or '')
     sign_val = str(wait_resp.get('sign_val') or (wait_resp.get('job') or {}).get('sign_val') or '').strip().upper()
     if status != 'done' or not _norm_sha1(sign_val):
-        logger.warning(f"  ➜ [负载均衡签名] sign_job 未完成：job_id={job_id}, status={status}, resp={str(wait_resp)[:500]}")
-        return {'ok': False, 'response': first_resp, 'sign_job': wait_resp, 'message': f'sign_job 未完成: {status}'}
+        job_obj = (wait_resp.get('job') or {}) if isinstance(wait_resp, dict) else {}
+        job_message = str(job_obj.get('message') or wait_resp.get('message') or '') if isinstance(wait_resp, dict) else ''
+        no_retry = status in ('failed', 'expired') or any(
+            x in job_message for x in ('所有 holder', '无可用 holder', 'no rapid sign holder available', 'holder 未领取签名任务')
+        )
+        logger.warning(f"  ➜ [负载均衡签名] sign_job 未完成：job_id={job_id}, status={status}, no_retry={no_retry}, resp={str(wait_resp)[:500]}")
+        return {
+            'ok': False,
+            'response': first_resp,
+            'sign_job': wait_resp,
+            'message': job_message or f'sign_job 未完成: {status}',
+            'no_retry': bool(no_retry),
+        }
 
     signed_meta = dict(rapid_meta or {})
     signed_meta['sign_key'] = sign_req.get('sign_key')
@@ -883,7 +894,7 @@ def _prepare_files_before_rapid_transfer(
         )
         if not files:
             message = inventory_gate.get('message') or '本地库存已是洗版优先级 1，跳过共享秒传。'
-            logger.info(
+            logger.debug(
                 f"  ➜ [共享资源] 秒传前预检提前结束：source={source_label}, "
                 f"reason={inventory_gate.get('reason') or '-'}，耗时 {time.time() - preflight_started_at:.1f}s"
             )
@@ -1242,9 +1253,29 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
             )
             if retry.get('ok'):
                 return retry
-            resp = retry.get('response') or resp
+            return {
+                'ok': False,
+                'response': retry.get('response') or resp,
+                'sha1': sha1,
+                'file_name': file_name,
+                'target_cid': target_cid,
+                'sign_job': retry.get('sign_job'),
+                'message': retry.get('message') or '中心 holder 签名未完成',
+                'no_retry': bool(retry.get('no_retry')),
+            }
         except Exception as e:
+            err_text = str(e)
+            no_retry = 'no rapid sign holder available' in err_text or '无可用 holder' in err_text
             logger.warning(f"  ➜ [负载均衡签名] 中心 holder 签名闭环失败：{e}")
+            return {
+                'ok': False,
+                'response': resp,
+                'sha1': sha1,
+                'file_name': file_name,
+                'target_cid': target_cid,
+                'message': err_text,
+                'no_retry': bool(no_retry),
+            }
 
     return {'ok': False, 'response': resp, 'sha1': sha1, 'file_name': file_name, 'target_cid': target_cid}
 
@@ -1685,7 +1716,7 @@ def _replace_mode_short_circuit_best_inventory(
     if normalized_source_kind == 'completed_season' and completed_video_checks:
         # 完结季不能单集洗。只有整季所有视频都已在库内达到优先级 1，才整包短路。
         if all(x.get('known') and x.get('best') for x in completed_video_checks):
-            message = f"本地完结季库存所有分集均已是洗版优先级 1，跳过整季秒传：{payload.get('title') or source_id}"
+            message = f"本地完结季库存所有分集均已是最佳版本，跳过整季秒传：{payload.get('title') or source_id}"
             logger.info(f"  ➜ [共享资源] {message}")
             return [], {
                 'checked': True,
@@ -1699,7 +1730,7 @@ def _replace_mode_short_circuit_best_inventory(
         return files, {
             'checked': True,
             'short_circuit': False,
-            'message': '完结季未达到整包库存优先级 1，继续整季洗版预检。',
+            'message': '完结季未达到最佳版本，继续整季洗版预检。',
             'best_count': sum(1 for x in completed_video_checks if x.get('best')),
             'kept_count': len(files),
         }
@@ -1707,11 +1738,11 @@ def _replace_mode_short_circuit_best_inventory(
     if best_skips:
         logger.debug(
             f"  ➜ [共享资源] 洗版优先级对比：source={source_label}，"
-            f"本地已是优先级1，跳过 {len(best_skips)} 个，保留 {len(kept)} 个进入预检。"
+            f"本地已是最佳版本，跳过 {len(best_skips)} 个，保留 {len(kept)} 个进入预检。"
         )
 
     reason = 'inventory_best_level_1' if files and not kept and best_skips else ''
-    message = '本地库存已是洗版优先级 1，跳过共享秒传。' if reason else 'replace 库存优先级检查完成。'
+    message = '本地已是最佳版本，跳过共享秒传。' if reason else 'replace 库存优先级检查完成。'
     return kept, {
         'checked': True,
         'short_circuit': bool(reason),
@@ -1778,7 +1809,7 @@ def _filter_files_before_transfer(
 
         if files and not kept and skipped['self_source'] and len(skipped['self_source']) == len(files):
             reason = 'all_self_source'
-            message = '中心返回的是本机共享源，已跳过，避免秒传自己的资源。'
+            message = '你已有该资源，已跳过秒传。'
         else:
             reason = ''
             message = 'keep_both 模式：已跳过缺集/已入库过滤，命中订阅直接秒传。'
@@ -1864,7 +1895,7 @@ def _filter_files_before_transfer(
     if files and not kept:
         if skipped['self_source'] and len(skipped['self_source']) == len(files):
             reason = 'all_self_source'
-            message = '中心返回的是本机共享源，已跳过，避免秒传自己的资源。'
+            message = '你已有该资源，已跳过秒传。'
         elif skipped['not_requested_episode'] and len(skipped['not_requested_episode']) == len(files):
             reason = 'no_requested_episode'
             message = f"中心当前资源不包含本机缺失集 {sorted(missing_set)}，已跳过。"
@@ -2103,6 +2134,12 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                     result['attempt'] = attempt
                     return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
                 last_error = {'file': file_label, 'response': result.get('response'), 'result': result, 'attempt': attempt}
+                if result.get('no_retry'):
+                    logger.warning(
+                        f"  ➜ [共享资源] 中心已判定无可用 holder，本文件不再重复创建 sign_job：{file_label}，"
+                        f"reason={result.get('message') or '-'}"
+                    )
+                    break
             except Exception as e:
                 last_error = {'file': file_label, 'error': str(e), 'attempt': attempt}
         return {'ok': False, 'file': f, 'error': last_error or {'file': file_label, 'error': 'unknown'}}
@@ -2172,10 +2209,8 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'aborted_season_package': True,
         }
 
-    # 到这里才说明成功文件会留在网盘里；此时再登记本机 holder，避免季包失败清理后留下假 holder。
-    for report_kind, report_id, report_file in success_sources:
-        _register_local_rapid_holder(client, source_kind=report_kind, source_id=report_id, file_info=report_file or {})
-
+    # 不在“秒传成功”阶段登记 holder。文件只是落入待整理目录，尚未完成整理入库；
+    # 只有 webhook 入库后触发自动共享登记，才代表本机真正具备可签名能力。
     if ok_count:
         report_groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for report_kind, report_id, report_file in success_sources:

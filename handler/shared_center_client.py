@@ -367,6 +367,23 @@ class SharedCenterClient:
             'offset': max(0, int(offset or 0)),
         }, timeout=30)
 
+
+    def display_detail(self, *, source_kind: str = '', source_id: str = '', hub_id: str = '',
+                       tmdb_id: str = '', item_type: str = '', season_number=None,
+                       limit: int = 200, **_ignored) -> Dict[str, Any]:
+        """中心资源库卡片详情：点开卡片后取展示元数据、演职员和资源列表。"""
+        params = {
+            'source_kind': source_kind or '',
+            'source_id': source_id or '',
+            'hub_id': hub_id or '',
+            'tmdb_id': tmdb_id or '',
+            'item_type': item_type or '',
+            'limit': max(1, min(int(limit or 200), 1000)),
+        }
+        if season_number not in (None, ''):
+            params['season_number'] = season_number
+        return self._get('/api/v1/sources/display-detail', params, timeout=30)
+
     def list_hubs(self, *, q: str = '', status: str = '', tmdb_id: str = '', limit: int = 200, offset: int = 0) -> Dict[str, Any]:
         return self._get('/api/v1/hubs/list', {'q': q or '', 'status': status or '', 'tmdb_id': tmdb_id or '', 'limit': limit, 'offset': offset}, timeout=20)
 

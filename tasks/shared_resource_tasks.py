@@ -2200,6 +2200,413 @@ def _normalize_series_candidate_identity(candidate: Dict[str, Any]) -> Dict[str,
     return candidate
 
 
+
+def _safe_json_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _safe_json_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _first_display_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _person_id_from_credit(value: Dict[str, Any]):
+    if not isinstance(value, dict):
+        return None
+    for key in ('tmdb_person_id', 'person_id', 'id', 'tmdb_id'):
+        raw = value.get(key)
+        try:
+            if raw not in (None, ''):
+                n = int(float(raw))
+                if n > 0:
+                    return n
+        except Exception:
+            continue
+    return None
+
+
+def _credit_character_text(value: Dict[str, Any]) -> str:
+    if not isinstance(value, dict):
+        return ''
+    raw = value.get('character') or value.get('role') or value.get('role_name') or value.get('character_name') or ''
+    if isinstance(raw, list):
+        raw = ' / '.join(str(x or '').strip() for x in raw if str(x or '').strip())
+    return str(raw or '').strip()
+
+
+def _credit_order_value(value: Dict[str, Any], default: int = 0) -> int:
+    for key in ('order', 'sort_order', 'sort', 'index'):
+        try:
+            if value.get(key) not in (None, ''):
+                return int(float(value.get(key)))
+        except Exception:
+            pass
+    return default
+
+
+def _lookup_people_for_display(person_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    ids = sorted({int(x) for x in person_ids if x})[:64]
+    if not ids:
+        return {}
+    out: Dict[int, Dict[str, Any]] = {}
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tmdb_person_id, primary_name, original_name, profile_path
+                    FROM person_metadata
+                    WHERE tmdb_person_id = ANY(%s)
+                    """,
+                    (ids,),
+                )
+                for row in cur.fetchall() or []:
+                    item = dict(row)
+                    pid = _safe_int(item.get('tmdb_person_id'), 0)
+                    if pid > 0:
+                        out[pid] = item
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 查询人物展示元数据失败: {e}")
+    return out
+
+
+def _build_display_credits_bundle(meta_row: Dict[str, Any]) -> Dict[str, Any]:
+    """从本地媒体元数据提取“前 6 位主演 + 1 位导演”。
+
+    中心端只存轻量展示缓存：人物基础信息进 center_person_metadata，
+    角色名/排序进 center_media_credits，不镜像完整 TMDb cast。
+    """
+    actors_raw = _safe_json_list((meta_row or {}).get('actors_json'))
+    directors_raw = _safe_json_list((meta_row or {}).get('directors_json'))
+
+    actor_items = []
+    for idx, raw in enumerate(actors_raw):
+        if not isinstance(raw, dict):
+            continue
+        pid = _person_id_from_credit(raw)
+        if not pid:
+            continue
+        actor_items.append((
+            _credit_order_value(raw, idx),
+            pid,
+            raw,
+        ))
+    actor_items.sort(key=lambda x: x[0])
+    actor_items = actor_items[:6]
+
+    director_items = []
+    for idx, raw in enumerate(directors_raw):
+        if not isinstance(raw, dict):
+            continue
+        pid = _person_id_from_credit(raw)
+        if not pid:
+            continue
+        director_items.append((_credit_order_value(raw, idx), pid, raw))
+    director_items.sort(key=lambda x: x[0])
+    director_items = director_items[:1]
+
+    person_ids = [x[1] for x in actor_items] + [x[1] for x in director_items]
+    person_map = _lookup_people_for_display(person_ids)
+
+    people = []
+    credits = []
+
+    def add_person(pid: int, raw: Dict[str, Any]) -> None:
+        info = person_map.get(pid) or {}
+        people.append({
+            'tmdb_person_id': pid,
+            'primary_name': _first_display_text(info.get('primary_name'), raw.get('primary_name'), raw.get('name'), raw.get('actor_name')),
+            'original_name': _first_display_text(info.get('original_name'), raw.get('original_name'), raw.get('originalName')),
+            'profile_path': _first_display_text(info.get('profile_path'), raw.get('profile_path'), raw.get('profile')),
+        })
+
+    seen_people = set()
+    for sort_order, pid, raw in actor_items:
+        if pid not in seen_people:
+            add_person(pid, raw)
+            seen_people.add(pid)
+        credits.append({
+            'tmdb_person_id': pid,
+            'credit_type': 'actor',
+            'character_name': _credit_character_text(raw),
+            'sort_order': sort_order,
+        })
+
+    for sort_order, pid, raw in director_items:
+        if pid not in seen_people:
+            add_person(pid, raw)
+            seen_people.add(pid)
+        credits.append({
+            'tmdb_person_id': pid,
+            'credit_type': 'director',
+            'character_name': '',
+            'sort_order': 1000 + sort_order,
+        })
+
+    return {'people_json': people, 'credits_json': credits}
+
+
+def _display_image_path_for_center(*values: Any) -> str:
+    """中心元数据补齐时，图片字段只取本地库第一个非空值。
+
+    本地 media_metadata 里的 poster_path/backdrop_path 已经是标准图片字段，
+    这里不再做 TMDb/Emby/局域网路径白名单判断。
+    """
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _display_title_is_season_only(value: Any) -> bool:
+    """避免把“第 1 季 / S01 / Season 1”写进 Series 公共壳标题。"""
+    text = str(value or '').strip()
+    if not text:
+        return False
+    compact = re.sub(r'\s+', '', text, flags=re.I)
+    if re.fullmatch(r'第\d{1,3}季', compact):
+        return True
+    if re.fullmatch(r'S\d{1,3}', compact, flags=re.I):
+        return True
+    if re.fullmatch(r'Season\d{1,3}', compact, flags=re.I):
+        return True
+    if re.fullmatch(r'(?:第)?\d{1,3}(?:季|期)', compact):
+        return True
+    return False
+
+
+def _strip_display_season_suffix(value: Any) -> str:
+    """Series 壳标题只能是剧名；客户端即使只拿到“剧名 第 X 季”也先剥掉季号。"""
+    text = _first_display_text(value)
+    if not text:
+        return ''
+    for pattern in (
+        r'\s*(?:[-·—–_]+\s*)?S\d{1,3}\s*$',
+        r'\s*(?:[-·—–_]+\s*)?Season\s*\d{1,3}\s*$',
+        r'\s*(?:[-·—–_]+\s*)?第\s*\d{1,3}\s*季\s*$',
+    ):
+        text = re.sub(pattern, '', text, flags=re.I).strip()
+    return '' if _display_title_is_season_only(text) else text
+
+
+def _safe_series_title(*values: Any) -> str:
+    for value in values:
+        text = _strip_display_season_suffix(value)
+        if text:
+            return text
+    return ''
+
+
+def _local_display_meta_rows_for_candidate(candidate: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """读取展示元数据源行。剧集拆成 Season 行和 Series 行。
+
+    口径：
+    - Movie：电影行。
+    - Season/Episode：海报/简介优先 Season 行，Series 行兜底；类型/评分/演职员只取 Series 行。
+    """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    item_type = str(candidate.get('item_type') or '').strip()
+    tmdb_id = str(candidate.get('tmdb_id') or '').strip()
+    series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or tmdb_id).strip()
+    season_no = _safe_int_or_none(candidate.get('season_number'))
+    out = {'movie': {}, 'season': {}, 'series': {}}
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if item_type == 'Movie' and tmdb_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM media_metadata
+                        WHERE item_type='Movie' AND tmdb_id=%s
+                        ORDER BY last_updated_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (tmdb_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        out['movie'] = dict(row)
+                    return out
+
+                if item_type in ('Season', 'Episode') and series_id:
+                    if season_no is not None:
+                        cur.execute(
+                            """
+                            SELECT * FROM media_metadata
+                            WHERE item_type='Season'
+                              AND season_number=%s
+                              AND (tmdb_id=%s OR parent_series_tmdb_id=%s)
+                            ORDER BY CASE WHEN parent_series_tmdb_id=%s THEN 0 ELSE 1 END,
+                                     last_updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (season_no, series_id, series_id, series_id),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            out['season'] = dict(row)
+                    cur.execute(
+                        """
+                        SELECT * FROM media_metadata
+                        WHERE item_type='Series' AND tmdb_id=%s
+                        ORDER BY last_updated_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (series_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        out['series'] = dict(row)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 查询本地展示元数据失败: {e}")
+    return out
+
+
+def _local_display_meta_row_for_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    rows = _local_display_meta_rows_for_candidate(candidate)
+    item_type = str((candidate or {}).get('item_type') or '').strip()
+    if item_type == 'Movie':
+        return rows.get('movie') or {}
+    return rows.get('season') or rows.get('series') or {}
+
+
+def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """登记时上传“公共媒体壳”元数据，而不是把海报/简介绑在某个资源 source 上。
+
+    口径：
+    - Movie：创建/补充 Movie 壳，演职员挂 Movie 壳。
+    - Season/Episode：同时创建/补充 Series 壳和 Season 壳；
+      Season 壳只放季专属海报/简介，Series 壳放类型/评分/演职员。
+    - 中心端负责按“缺失才补、中文优先”合并，不让某个客户端拥有壳的所有权。
+    """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    item_type = str(candidate.get('item_type') or '').strip()
+    rows = _local_display_meta_rows_for_candidate(candidate)
+
+    def compact(meta: Dict[str, Any]) -> Dict[str, Any]:
+        out = {}
+        for k, v in (meta or {}).items():
+            if v in (None, '', [], {}):
+                continue
+            out[k] = v
+        return out
+
+    def meta_from_row(*, tmdb_id: str, item_type: str, season_number=None, row: Dict[str, Any] = None,
+                      fallback_title: str = '', fallback_year=None, include_series_fields: bool = True) -> Dict[str, Any]:
+        row = row if isinstance(row, dict) else {}
+        genres = _safe_json_list(row.get('genres_json')) if row and include_series_fields else []
+        title_value = _first_display_text(row.get('title'), fallback_title)
+        original_title_value = _first_display_text(row.get('original_title'), candidate.get('original_title'))
+        if item_type == 'Series':
+            title_value = _safe_series_title(row.get('title'), fallback_title, candidate.get('series_title'), candidate.get('name'))
+            if _display_title_is_season_only(original_title_value):
+                original_title_value = ''
+        meta = {
+            'tmdb_id': str(tmdb_id or '').strip(),
+            'item_type': item_type,
+            'season_number': season_number,
+            'title': title_value,
+            'original_title': original_title_value,
+            'overview': _first_display_text(row.get('overview')),  # Season 不拿 Series 简介，由中心详情合并兜底。
+            'poster_path': _display_image_path_for_center(row.get('poster_path'), row.get('poster_url'), row.get('image'), row.get('cover')),
+            'backdrop_path': _display_image_path_for_center(row.get('backdrop_path'), row.get('backdrop_url'), row.get('background')),
+            'release_year': _safe_int_or_none(row.get('release_year')) or _safe_int_or_none(fallback_year),
+            'release_date': str(row.get('release_date') or '') or None,
+        }
+        if include_series_fields:
+            meta.update({
+                'rating': row.get('rating'),
+                'genres_json': genres[:12],
+                'original_language': _first_display_text(row.get('original_language'), candidate.get('original_language')),
+            })
+        return compact(meta)
+
+    if item_type == 'Movie':
+        media_tmdb_id = str(candidate.get('tmdb_id') or '').strip()
+        if not media_tmdb_id:
+            return {}
+        movie_row = rows.get('movie') or {}
+        movie_meta = meta_from_row(
+            tmdb_id=media_tmdb_id,
+            item_type='Movie',
+            season_number=None,
+            row=movie_row,
+            fallback_title=candidate.get('title'),
+            fallback_year=candidate.get('release_year'),
+            include_series_fields=True,
+        )
+        bundle = {
+            'display_meta_json': movie_meta,
+            'display_meta_items_json': [movie_meta] if movie_meta else [],
+        }
+        bundle.update(_build_display_credits_bundle(movie_row) if movie_row else {'people_json': [], 'credits_json': []})
+        return bundle
+
+    series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
+    season_no = _safe_int_or_none(candidate.get('season_number'))
+    if not series_id:
+        return {}
+
+    season_row = rows.get('season') or {}
+    series_row = rows.get('series') or {}
+    series_meta = meta_from_row(
+        tmdb_id=series_id,
+        item_type='Series',
+        season_number=None,
+        row=series_row,
+        fallback_title=candidate.get('title'),
+        fallback_year=candidate.get('release_year'),
+        include_series_fields=True,
+    ) if (series_row or series_id) else {}
+    season_meta = meta_from_row(
+        tmdb_id=series_id,
+        item_type='Season',
+        season_number=season_no,
+        row=season_row,
+        fallback_title=(season_row or {}).get('title') or candidate.get('title'),
+        fallback_year=(season_row or {}).get('release_year') or candidate.get('release_year'),
+        include_series_fields=False,
+    ) if season_no is not None else {}
+
+    items = []
+    if series_meta:
+        items.append(series_meta)
+    if season_meta:
+        items.append(season_meta)
+    # 兼容旧中心：display_meta_json 仍然给 Season 壳；新中心优先吃 display_meta_items_json。
+    legacy_meta = season_meta or series_meta
+    bundle = {
+        'display_meta_json': legacy_meta,
+        'display_meta_items_json': items,
+    }
+    # 演职员只从 Series 条目取；没有 Series 行就不上传，避免 Season/分集演员污染整剧壳。
+    bundle.update(_build_display_credits_bundle(series_row) if series_row else {'people_json': [], 'credits_json': []})
+    return bundle
+
 def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: str = 'manual_rapid') -> Dict[str, Any]:
     """把本地媒体库中的电影/分集/季登记到 Rapid v2 中心。
 
@@ -2290,6 +2697,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             'fingerprint_repair': repair_result or {},
         }
     animation_meta = _animation_meta_for_candidate(candidate)
+    display_meta_bundle = _center_display_meta_bundle_for_candidate(candidate)
     results = []
     if item_type == 'Season' and not should_register_completed:
         should_register_completed = _candidate_is_completed_season(candidate, source_provider=source_provider, files=files)
@@ -2317,6 +2725,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                     'title': candidate.get('title'),
                     'release_year': candidate.get('release_year'),
                     'source_provider': source_provider,
+                    **display_meta_bundle,
                     **common,
                 }
                 resp = client.register_movie_source(payload)
@@ -2349,6 +2758,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                     'release_year': candidate.get('release_year'),
                     'expected_episode_count': expected_count,
                     'source_provider': source_provider,
+                    **display_meta_bundle,
                     **common,
                 }
                 resp = client.register_episode_source(payload)
@@ -2461,6 +2871,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                 'status_message': status['message'],
                 'manifest_hash': shared_share_db.manifest_hash(completed_files),
                 'source_provider': 'rapid_completed_season',
+                **display_meta_bundle,
                 'is_clean_version': is_clean_version,
                 'clean_version_confidence': clean_confidence,
                 'clean_version_meta_json': clean_detection,
@@ -2892,7 +3303,15 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
                 exc_info=True,
             )
             try:
-                submit = client.submit_rapid_sign_job(job_id, {'status': 'failed', 'message': str(e)[:1000]})
+                err_text = str(e)[:1000]
+                stale_holder = any(x in err_text for x in (
+                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code'
+                ))
+                submit = client.submit_rapid_sign_job(job_id, {
+                    'status': 'failed',
+                    'message': err_text,
+                    'result_meta_json': {'stale_holder': stale_holder, 'file_name': file_name},
+                })
             except Exception as submit_err:
                 submit = {'ok': False, 'error': str(submit_err)}
             results.append({'job_id': job_id, 'ok': False, 'error': str(e), 'submit': submit})
@@ -3528,6 +3947,333 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
     return {'ok': failed == 0, 'offline_found': len(rows), 'disabled': disabled, 'failed': failed, 'items': items[:50]}
 
 
+
+
+def _center_request_headers_for_display_meta() -> Dict[str, str]:
+    cfg = settings_db.get_shared_resource_config() or {}
+    return {
+        'X-Device-Token': str(cfg.get('p115_shared_device_token') or '').strip(),
+        'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
+        'Content-Type': 'application/json',
+    }
+
+
+def _center_base_url_for_display_meta() -> str:
+    cfg = settings_db.get_shared_resource_config() or {}
+    return str(cfg.get('p115_shared_center_url') or '').strip().rstrip('/')
+
+
+def _center_request_kwargs_for_display_meta(timeout: int = 60) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {'timeout': timeout}
+    getter = getattr(config_manager, 'get_proxies_for_requests', None)
+    if callable(getter):
+        try:
+            proxies = getter()
+            if proxies:
+                kwargs['proxies'] = proxies
+        except Exception:
+            pass
+    return kwargs
+
+
+def _display_meta_key(meta: Dict[str, Any]) -> tuple:
+    meta = meta if isinstance(meta, dict) else {}
+    typ = str(meta.get('item_type') or '').strip()
+    tmdb = str(meta.get('tmdb_id') or '').strip()
+    season = _safe_int_or_none(meta.get('season_number')) if typ == 'Season' else None
+    return (tmdb, typ, season)
+
+
+def _display_meta_has_useful_payload(meta: Dict[str, Any]) -> bool:
+    meta = meta if isinstance(meta, dict) else {}
+    for key in (
+        'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
+        'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
+    ):
+        if meta.get(key) not in (None, '', [], {}):
+            return True
+    return False
+
+
+def _fetch_center_missing_display_meta_rows(limit: int = 500) -> Dict[str, Any]:
+    """向中心端询问哪些公共媒体壳缺展示元数据。
+
+    维护补齐不能再从本机 shared_rapid_sources 反推范围：
+    只要中心资源库里某个电影/季壳缺海报/简介/标题等展示字段，
+    任意客户端本地库有对应 media_metadata，就可以补传。
+    """
+    base_url = _center_base_url_for_display_meta()
+    headers = _center_request_headers_for_display_meta()
+    if not base_url or not headers.get('X-Device-Token'):
+        return {'ok': False, 'items': [], 'message': '共享中心 URL 或设备 Token 未配置'}
+    try:
+        resp = requests.get(
+            f"{base_url}/api/v1/metadata/display/missing",
+            headers=headers,
+            params={'limit': max(1, min(int(limit or 500), 5000))},
+            **_center_request_kwargs_for_display_meta(timeout=60),
+        )
+        if resp.status_code >= 400:
+            return {'ok': False, 'items': [], 'message': f"HTTP {resp.status_code}: {resp.text[:300]}"}
+        data = resp.json() if resp.content else {}
+        items = [x for x in (data.get('items') or []) if isinstance(x, dict)]
+        return {'ok': True, 'items': items, 'count': len(items), 'raw': data}
+    except Exception as e:
+        return {'ok': False, 'items': [], 'message': str(e)}
+
+
+def _list_display_meta_backfill_source_rows(limit: int = 500) -> List[Dict[str, Any]]:
+    """维护任务只按中心缺失壳补齐，不再扫描本机已登记共享源。"""
+    limit = max(1, min(int(limit or 500), 5000))
+    fetched = _fetch_center_missing_display_meta_rows(limit=limit)
+    if not fetched.get('ok'):
+        logger.warning(f"  ➜ [共享资源维护] 查询中心缺失海报/元数据失败: {fetched.get('message') or 'unknown'}")
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for item in fetched.get('items') or []:
+        item_type = str(item.get('item_type') or '').strip()
+        tmdb_id = str(item.get('tmdb_id') or '').strip()
+        if item_type not in ('Movie', 'Season') or not tmdb_id:
+            continue
+        season_no = _safe_int_or_none(item.get('season_number')) if item_type == 'Season' else None
+        if item_type == 'Season' and season_no is None:
+            continue
+        rows.append({
+            'id': item.get('media_key') or f"center-missing:{item_type}:{tmdb_id}:{season_no or ''}",
+            'source_kind': 'movie' if item_type == 'Movie' else 'season_hub',
+            'center_source_id': '',
+            'tmdb_id': tmdb_id,
+            'parent_series_tmdb_id': tmdb_id if item_type == 'Season' else '',
+            'series_tmdb_id': tmdb_id if item_type == 'Season' else '',
+            'item_type': item_type,
+            'season_number': season_no,
+            'episode_number': None,
+            'title': item.get('title') or item.get('fallback_title') or '',
+            'release_year': item.get('release_year'),
+            'missing_fields': item.get('missing_fields') or [],
+            'center_missing': True,
+        })
+    return rows
+
+
+def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type: str, missing_fields: List[str] = None) -> bool:
+    """确认本地 media_metadata 真有中心缺的字段，避免无效反复补传。"""
+    rows = rows if isinstance(rows, dict) else {}
+    item_type = str(item_type or '').strip()
+    missing = {str(x or '').strip() for x in (missing_fields or []) if str(x or '').strip()}
+
+    def has_any(row: Dict[str, Any], keys) -> bool:
+        row = row if isinstance(row, dict) else {}
+        return any(row.get(k) not in (None, '', [], {}) for k in keys)
+
+    def has_image(row: Dict[str, Any], *keys) -> bool:
+        row = row if isinstance(row, dict) else {}
+        return bool(_display_image_path_for_center(*(row.get(k) for k in keys)))
+
+    movie = rows.get('movie') or {}
+    series = rows.get('series') or {}
+    season = rows.get('season') or {}
+
+    if missing:
+        if item_type == 'Movie':
+            checks = {
+                'title': has_any(movie, ('title', 'original_title')),
+                'poster_path': has_image(movie, 'poster_path', 'poster_url', 'image', 'cover'),
+                'backdrop_path': has_image(movie, 'backdrop_path', 'backdrop_url', 'background'),
+                'overview': has_any(movie, ('overview',)),
+                'movie_meta': has_any(movie, (
+                    'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
+                    'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
+                    'actors_json', 'directors_json',
+                )),
+            }
+        else:
+            checks = {
+                'title': has_any(series, ('title', 'original_title')) or has_any(season, ('title', 'original_title')),
+                'poster_path': has_image(season, 'poster_path', 'poster_url', 'image', 'cover') or has_image(series, 'poster_path', 'poster_url', 'image', 'cover'),
+                'season_poster_path': has_image(season, 'poster_path', 'poster_url', 'image', 'cover'),
+                'series_poster_path': has_image(series, 'poster_path', 'poster_url', 'image', 'cover'),
+                'backdrop_path': has_image(season, 'backdrop_path', 'backdrop_url', 'background') or has_image(series, 'backdrop_path', 'backdrop_url', 'background'),
+                'season_backdrop_path': has_image(season, 'backdrop_path', 'backdrop_url', 'background'),
+                'series_backdrop_path': has_image(series, 'backdrop_path', 'backdrop_url', 'background'),
+                'overview': has_any(season, ('overview',)) or has_any(series, ('overview',)),
+                'season_overview': has_any(season, ('overview',)),
+                'series_overview': has_any(series, ('overview',)),
+                'series_meta': has_any(series, (
+                    'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
+                    'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
+                    'actors_json', 'directors_json',
+                )),
+                'season_meta': has_any(season, (
+                    'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
+                    'release_year', 'release_date',
+                )),
+            }
+        return any(checks.get(field, False) for field in missing)
+
+    candidates = [movie] if item_type == 'Movie' else [series, season]
+    useful_keys = (
+        'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
+        'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
+        'actors_json', 'directors_json',
+    )
+    return any(has_any(row, useful_keys) for row in candidates)
+
+def _build_display_meta_backfill_bundles(limit: int = 500) -> Dict[str, Any]:
+    rows = _list_display_meta_backfill_source_rows(limit=limit)
+    bundles: List[Dict[str, Any]] = []
+    seen_meta_keys = set()
+    scanned_meta_items = 0
+    skipped_empty = 0
+
+    for row in rows:
+        candidate = _candidate_from_local_source(row)
+        if not candidate:
+            skipped_empty += 1
+            continue
+        try:
+            candidate = _normalize_series_candidate_identity(candidate)
+            local_rows = _local_display_meta_rows_for_candidate(candidate)
+            if not _local_rows_have_display_payload(local_rows, str(candidate.get('item_type') or ''), row.get('missing_fields') or []):
+                skipped_empty += 1
+                continue
+            bundle = _center_display_meta_bundle_for_candidate(candidate)
+        except Exception as e:
+            logger.debug(
+                "  ➜ [共享资源维护] 构建展示元数据补齐包失败: id=%s, tmdb=%s, err=%s",
+                row.get('id'), row.get('tmdb_id'), e,
+            )
+            skipped_empty += 1
+            continue
+
+        meta_items = bundle.get('display_meta_items_json') if isinstance(bundle.get('display_meta_items_json'), list) else []
+        if not meta_items and isinstance(bundle.get('display_meta_json'), dict):
+            meta_items = [bundle.get('display_meta_json')]
+
+        filtered_items = []
+        for meta in meta_items:
+            if not isinstance(meta, dict):
+                continue
+            key = _display_meta_key(meta)
+            if not key[0] or key[1] not in ('Movie', 'Series', 'Season'):
+                continue
+            scanned_meta_items += 1
+            if key in seen_meta_keys:
+                continue
+            if not _display_meta_has_useful_payload(meta):
+                continue
+            seen_meta_keys.add(key)
+            filtered_items.append(meta)
+
+        if not filtered_items:
+            skipped_empty += 1
+            continue
+
+        out = dict(bundle)
+        out['display_meta_items_json'] = filtered_items
+        out['display_meta_json'] = filtered_items[-1]
+        out['_local_source_id'] = row.get('id')
+        out['_source_kind'] = row.get('source_kind')
+        bundles.append(out)
+
+    return {
+        'rows': rows,
+        'bundles': bundles,
+        'candidate_count': len(rows),
+        'meta_item_count': len(seen_meta_keys),
+        'scanned_meta_items': scanned_meta_items,
+        'skipped_empty': skipped_empty,
+    }
+
+
+def _post_center_display_meta_backfill(bundles: List[Dict[str, Any]], *, batch_size: int = 100) -> Dict[str, Any]:
+    base_url = _center_base_url_for_display_meta()
+    headers = _center_request_headers_for_display_meta()
+    if not base_url or not headers.get('X-Device-Token'):
+        return {'ok': False, 'message': '共享中心 URL 或设备 Token 未配置', 'posted_batches': 0, 'accepted_meta_items': 0}
+
+    batch_size = max(1, min(int(batch_size or 100), 300))
+    accepted_meta_items = 0
+    accepted_bundles = 0
+    posted_batches = 0
+    errors = []
+    url = f"{base_url}/api/v1/metadata/display/upsert"
+
+    for start in range(0, len(bundles or []), batch_size):
+        batch = bundles[start:start + batch_size]
+        if not batch:
+            continue
+        try:
+            resp = requests.post(
+                url,
+                headers=headers,
+                json={'items': batch},
+                **_center_request_kwargs_for_display_meta(timeout=90),
+            )
+            posted_batches += 1
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+            data = resp.json() if resp.content else {}
+            accepted_meta_items += _safe_int(data.get('accepted_meta_items'), 0)
+            accepted_bundles += _safe_int(data.get('accepted_bundles'), 0)
+            if data.get('errors'):
+                errors.extend(data.get('errors') or [])
+        except Exception as e:
+            errors.append({'batch_start': start, 'error': str(e)[:500]})
+
+    return {
+        'ok': not errors,
+        'posted_batches': posted_batches,
+        'accepted_meta_items': accepted_meta_items,
+        'accepted_bundles': accepted_bundles,
+        'errors': errors[:20],
+    }
+
+
+def _backfill_center_display_metadata(limit: int = 500) -> Dict[str, Any]:
+    """共享维护：把本机 media_metadata 中的海报/简介/演职员补传到中心公共壳。"""
+    built = _build_display_meta_backfill_bundles(limit=limit)
+    bundles = built.get('bundles') or []
+    if not bundles:
+        return {
+            'ok': True,
+            'candidate_count': built.get('candidate_count', 0),
+            'prepared_bundles': 0,
+            'prepared_meta_items': 0,
+            'uploaded_meta_items': 0,
+            'skipped_empty': built.get('skipped_empty', 0),
+        }
+
+    posted = _post_center_display_meta_backfill(bundles, batch_size=100)
+    uploaded = _safe_int(posted.get('accepted_meta_items'), 0)
+    if uploaded:
+        logger.info(
+            "  ➜ [共享资源维护] 中心海报/元数据补齐完成：候选=%s，补传壳=%s，中心接受=%s，批次=%s",
+            built.get('candidate_count', 0),
+            len(bundles),
+            uploaded,
+            posted.get('posted_batches', 0),
+        )
+    elif posted.get('errors'):
+        logger.warning(
+            "  ➜ [共享资源维护] 中心海报/元数据补齐失败：候选=%s，待传=%s，错误=%s",
+            built.get('candidate_count', 0),
+            len(bundles),
+            posted.get('errors'),
+        )
+    return {
+        'ok': bool(posted.get('ok')),
+        'candidate_count': built.get('candidate_count', 0),
+        'prepared_bundles': len(bundles),
+        'prepared_meta_items': built.get('meta_item_count', 0),
+        'uploaded_meta_items': uploaded,
+        'uploaded_bundles': _safe_int(posted.get('accepted_bundles'), 0),
+        'posted_batches': posted.get('posted_batches', 0),
+        'skipped_empty': built.get('skipped_empty', 0),
+        'errors': posted.get('errors') or [],
+    }
+
 def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
     result = result or {}
     parts = [f"监听={'已启动' if result.get('device_event_listener') else '未启动'}"]
@@ -3561,9 +4307,14 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             failed_items = followup.get('failed_items') if isinstance(followup.get('failed_items'), list) else []
             names = '、'.join([str(x.get('title') or '').strip() for x in failed_items[:3] if isinstance(x, dict) and str(x.get('title') or '').strip()])
             parts.append(f"补登失败={followup.get('failed')}" + (f"（{names}）" if names else ''))
+    display_meta = result.get('display_meta_backfill') if isinstance(result.get('display_meta_backfill'), dict) else {}
+    if display_meta:
+        parts.append(f"海报元数据补齐={display_meta.get('uploaded_meta_items', 0)}/{display_meta.get('prepared_meta_items', 0)}")
+        if display_meta.get('errors'):
+            parts.append(f"元数据补齐失败={len(display_meta.get('errors') or [])}")
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -3591,6 +4342,10 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         result['airing_episode_backfill'] = _backfill_airing_episode_sources(limit=500)
     except Exception as e:
         result['airing_episode_backfill_error'] = str(e)
+    try:
+        result['display_meta_backfill'] = _backfill_center_display_metadata(limit=3000)
+    except Exception as e:
+        result['display_meta_backfill_error'] = str(e)
     try:
         result['credit'] = _sync_center_credit()
     except Exception as e:

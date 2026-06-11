@@ -322,13 +322,77 @@ def _lookup_local_season_meta(tmdb_id: str, season_number) -> Dict[str, Any]:
         return {}
 
 
-def _apply_local_season_meta(row: Dict[str, Any]) -> Dict[str, Any]:
+def _batch_lookup_local_season_meta(rows: List[Dict[str, Any]]) -> Dict[tuple, Dict[str, Any]]:
+    """批量从本机 media_metadata 补齐季总集数，避免中心资源库首屏 N+1。"""
+    pairs = []
+
+    def visit(value):
+        if not isinstance(value, dict):
+            return
+        item_type = str(value.get('item_type') or value.get('display_type') or '').strip().lower()
+        source_kind = str(value.get('source_kind') or '').strip().lower()
+        if item_type in ('season', 'pack') or source_kind in ('season_hub', 'completed_season'):
+            tmdb_id = str(value.get('tmdb_id') or '').strip()
+            season_no = _safe_int(value.get('season_number'), 0)
+            if tmdb_id and season_no > 0 and (tmdb_id, season_no) not in pairs:
+                pairs.append((tmdb_id, season_no))
+        for key in ('versions', 'children', 'pack_items'):
+            children = value.get(key)
+            if isinstance(children, list):
+                for child in children:
+                    visit(child)
+
+    for row in rows or []:
+        visit(row)
+    if not pairs:
+        return {}
+
+    tmdb_ids = sorted({x[0] for x in pairs})
+    season_numbers = sorted({x[1] for x in pairs})
+    wanted = set(pairs)
+    out: Dict[tuple, Dict[str, Any]] = {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tmdb_id, parent_series_tmdb_id, season_number, total_episodes, watching_status, last_updated_at
+                    FROM media_metadata
+                    WHERE item_type='Season'
+                      AND season_number = ANY(%s)
+                      AND (tmdb_id = ANY(%s) OR parent_series_tmdb_id = ANY(%s))
+                    ORDER BY last_updated_at DESC NULLS LAST
+                    """,
+                    (season_numbers, tmdb_ids, tmdb_ids),
+                )
+                for raw in cur.fetchall() or []:
+                    meta = dict(raw)
+                    season_no = _safe_int(meta.get('season_number'), 0)
+                    keys = [
+                        (str(meta.get('parent_series_tmdb_id') or '').strip(), season_no),
+                        (str(meta.get('tmdb_id') or '').strip(), season_no),
+                    ]
+                    for key in keys:
+                        if key in wanted and key not in out:
+                            out[key] = meta
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 批量查询本机季元数据失败: {e}")
+    return out
+
+
+def _apply_local_season_meta(row: Dict[str, Any], meta_map: Dict[tuple, Dict[str, Any]] | None = None) -> Dict[str, Any]:
     row = dict(row or {})
     item_type = str(row.get('item_type') or row.get('display_type') or '').strip().lower()
     source_kind = str(row.get('source_kind') or '').strip().lower()
     if item_type not in ('season', 'pack') and source_kind not in ('season_hub', 'completed_season'):
         return row
-    meta = _lookup_local_season_meta(row.get('tmdb_id'), row.get('season_number'))
+    tmdb_id = str(row.get('tmdb_id') or '').strip()
+    season_no = _safe_int(row.get('season_number'), 0)
+    if meta_map is not None:
+        meta = meta_map.get((tmdb_id, season_no)) or {}
+    else:
+        meta = _lookup_local_season_meta(row.get('tmdb_id'), row.get('season_number'))
     if not meta:
         return row
     total = _safe_int(meta.get('total_episodes'), 0)
@@ -1020,11 +1084,16 @@ def api_center_sources():
             ),
         )
 
+        raw_items = [row for row in (resp.get('items') or []) if isinstance(row, dict)]
+        local_season_meta_map = _batch_lookup_local_season_meta(raw_items)
+
         def _decorate_center_row(row):
             if not isinstance(row, dict):
                 return {}
             row = dict(row)
-            for key in ('versions', 'children', 'pack_items'):
+            # 列表页只保留壳；children/pack_items 会被瘦身丢弃，不能先递归装饰再丢，
+            # 否则旧中心或筛选结果一旦带子项，就会把首屏又拖回 N+1。
+            for key in ('versions',):
                 if isinstance(row.get(key), list):
                     row[key] = [_decorate_center_row(x) for x in row.get(key) if isinstance(x, dict)]
             short_direct = _center_direct_flag_state(row, 'is_short_drama', 'short_drama_meta_json')
@@ -1063,13 +1132,12 @@ def api_center_sources():
                 row['version_summary'] = _center_version_summary(row)
             if not row.get('size') and row.get('total_size'):
                 row['size'] = row.get('total_size')
-            row = _apply_local_season_meta(row)
+            row = _apply_local_season_meta(row, local_season_meta_map)
             return row
 
         resp['items'] = [
             _strip_center_display_children(_decorate_center_row(row))
-            for row in (resp.get('items') or [])
-            if isinstance(row, dict)
+            for row in raw_items
         ]
         return jsonify({'success': True, **resp})
     except Exception as e:
@@ -1152,6 +1220,63 @@ def api_center_source_children():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e), 'items': [], 'children': [], 'pack_items': [], 'total': 0}), 500
 
+
+
+@shared_resource_bp.route('/center/sources/detail', methods=['GET'])
+@admin_required
+def api_center_source_detail():
+    """中心资源库卡片详情：代理中心 display-detail，供详情模态框按需加载。"""
+    try:
+        client = SharedCenterClient()
+        resp = client.display_detail(
+            source_kind=request.args.get('source_kind') or '',
+            source_id=request.args.get('source_id') or '',
+            hub_id=request.args.get('hub_id') or '',
+            tmdb_id=request.args.get('tmdb_id') or '',
+            item_type=request.args.get('item_type') or '',
+            season_number=request.args.get('season_number') or None,
+            limit=int(request.args.get('limit') or 200),
+        )
+
+        def _is_pack_detail_row(row):
+            row = row if isinstance(row, dict) else {}
+            kind = str(row.get('source_kind') or row.get('lazy_children_kind') or '').strip().lower()
+            typ = str(row.get('display_type') or row.get('item_type') or '').strip().lower()
+            return bool(kind in {'season_hub', 'completed_season'} or typ in {'pack', 'season', 'series'})
+
+        def _decorate_detail_row(row):
+            if not isinstance(row, dict):
+                return {}
+            row = dict(row)
+            # 详情页资源列表只展示“电影源/季包源”这一层。
+            # children / pack_items 是季包包内单集，避免详情弹窗把整季几十集全部铺出来。
+            if _is_pack_detail_row(row):
+                row.pop('children', None)
+                row.pop('pack_items', None)
+            else:
+                for key in ('versions', 'children', 'pack_items', 'resources'):
+                    if isinstance(row.get(key), list):
+                        row[key] = [_decorate_detail_row(x) for x in row.get(key) if isinstance(x, dict)]
+            if row.get('is_ongoing_hub') or row.get('source_kind') == 'season_hub':
+                row['version_summary'] = {}
+                row.setdefault('summary_json', {})
+                row.setdefault('media_signature_json', {})
+            else:
+                row['version_summary'] = _center_version_summary(row)
+            if not row.get('size') and row.get('total_size'):
+                row['size'] = row.get('total_size')
+            row = _apply_local_season_meta(row)
+            return row
+
+        for key in ('resources', 'versions', 'items'):
+            if isinstance(resp.get(key), list):
+                resp[key] = [_decorate_detail_row(x) for x in resp.get(key) if isinstance(x, dict)]
+        # 顶层 children / pack_items 不再给详情弹窗使用；展开集详情另走 children 接口。
+        resp['children'] = []
+        resp['pack_items'] = []
+        return jsonify({'success': True, 'data': resp, **resp})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e), 'data': {}, 'resources': [], 'versions': [], 'children': []}), 500
 
 @shared_resource_bp.route('/center/import', methods=['POST'])
 @admin_required
