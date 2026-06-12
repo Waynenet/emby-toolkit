@@ -1,5 +1,6 @@
 # handler/shared_subscription_service.py
 # Rapid v2 共享资源消费入口：中心调度，本机 CK 执行秒传/入库。
+import base64
 import concurrent.futures
 import json
 import logging
@@ -41,10 +42,10 @@ def _kick_115_organize_detached(reason: str = '', delay: float = 3.0) -> Dict[st
             time.sleep(delay)
         try:
             from tasks.p115 import task_scan_and_organize_115
-            logger.info(f"  ➜ [共享资源] 异步触发 115 待整理扫描: {reason or 'rapid-import'}")
+            logger.info(f"  ➜ [共享资源] 准备扫描待整理...")
             task_scan_and_organize_115()
         except Exception as e:
-            logger.error(f"  ➜ [共享资源] 异步触发 115 待整理扫描失败: {e}", exc_info=True)
+            logger.error(f"  ➜ [共享资源] 触发 115 待整理扫描失败: {e}", exc_info=True)
 
     threading.Thread(target=_runner, name='shared-rapid-import-organize', daemon=True).start()
     return {'started': True, 'message': '已异步触发 115 待整理扫描'}
@@ -599,7 +600,12 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
         'backend': sign_req.get('backend') or '',
         'sign_key': sign_req.get('sign_key'),
         'sign_check': sign_req.get('sign_check'),
-        'request_meta_json': {'stage': sign_req.get('stage') or '', 'target_cid': target_cid},
+        'request_meta_json': {
+            'stage': sign_req.get('stage') or '',
+            'target_cid': target_cid,
+            'rapid_transfer_token': str(file_info.get('_rapid_transfer_token') or rapid_meta.get('_rapid_transfer_token') or ''),
+            'package_transfer': bool(file_info.get('_rapid_is_package_transfer') or rapid_meta.get('_rapid_is_package_transfer')),
+        },
     })
     job_id = str(create_resp.get('job_id') or (create_resp.get('job') or {}).get('job_id') or '').strip()
     holder_id = str(create_resp.get('holder_id') or (create_resp.get('job') or {}).get('holder_id') or '').strip()
@@ -612,16 +618,19 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     if status != 'done' or not _norm_sha1(sign_val):
         job_obj = (wait_resp.get('job') or {}) if isinstance(wait_resp, dict) else {}
         job_message = str(job_obj.get('message') or wait_resp.get('message') or '') if isinstance(wait_resp, dict) else ''
-        no_retry = status in ('failed', 'expired') or any(
-            x in job_message for x in ('所有 holder', '无可用 holder', 'no rapid sign holder available', 'holder 未领取签名任务')
+        result_meta = job_obj.get('result_meta_json') if isinstance(job_obj.get('result_meta_json'), dict) else {}
+        abort_transfer = bool(wait_resp.get('abort_transfer') or result_meta.get('abort_transfer'))
+        no_retry = status in ('failed', 'expired', 'cancelled') or abort_transfer or any(
+            x in job_message for x in ('所有 holder', '无可用 holder', 'no rapid sign holder available', 'holder 未领取签名任务', '资源签名不可用')
         )
-        logger.warning(f"  ➜ [负载均衡签名] sign_job 未完成：job_id={job_id}, status={status}, no_retry={no_retry}, resp={str(wait_resp)[:500]}")
+        logger.warning(f"  ➜ [负载均衡签名] sign_job 未完成：job_id={job_id}, status={status}, no_retry={no_retry}, abort={abort_transfer}, resp={str(wait_resp)[:500]}")
         return {
             'ok': False,
             'response': first_resp,
             'sign_job': wait_resp,
-            'message': job_message or f'sign_job 未完成: {status}',
+            'message': job_message or wait_resp.get('message') or f'sign_job 未完成: {status}',
             'no_retry': bool(no_retry),
+            'abort_transfer': bool(abort_transfer or status in ('failed', 'expired', 'cancelled')),
         }
 
     signed_meta = dict(rapid_meta or {})
@@ -629,7 +638,7 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     signed_meta['sign_val'] = sign_val
     logger.info(
         f"  ➜ [负载均衡签名] 已收到签名，开始秒传："
-        f"job_id={job_id}, sign_val={sign_val[:12]}..., file={file_name}"
+        f"{file_name}"
     )
     signed_resp = _call_rapid_method(
         p115,
@@ -648,6 +657,72 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     return {'ok': ok, 'response': signed_resp, 'sign_job': wait_resp, 'sha1': sha1, 'file_name': file_name, 'target_cid': target_cid}
 
 
+def _remember_rapid_preid_hint(
+    file_info: Dict[str, Any],
+    *,
+    target_cid: str,
+    sha1: str,
+    size: int,
+    file_name: str,
+    rapid_meta: Dict[str, Any] = None,
+    response: Any = None,
+) -> str:
+    """共享秒传成功后，把中心已知 preid 喂给整理缓存链路。"""
+    rapid_meta = dict(rapid_meta or {})
+    preid = _norm_sha1(
+        (file_info or {}).get('preid')
+        or rapid_meta.get('preid')
+        or rapid_meta.get('pre_sha1')
+        or rapid_meta.get('pre_sha1_128k')
+    )
+    if not preid:
+        return ''
+
+    hint_payload = {
+        'sha1': sha1,
+        'preid': preid,
+        'file_name': file_name,
+        'name': file_name,
+        'size': size,
+        'file_size': size,
+        'parent_id': str(target_cid or ''),
+        'target_cid': str(target_cid or ''),
+        'source_kind': (file_info or {}).get('source_kind') or rapid_meta.get('source_kind') or '',
+        'source_id': (file_info or {}).get('source_id') or (file_info or {}).get('source_ref_id') or rapid_meta.get('source_id') or '',
+    }
+
+    if isinstance(response, dict):
+        for key in ('fid', 'file_id', 'id', 'pick_code', 'pickcode', 'pc'):
+            value = response.get(key)
+            if value not in (None, '', [], {}):
+                hint_payload[key] = value
+        data = response.get('data') if isinstance(response.get('data'), dict) else {}
+        for key in ('fid', 'file_id', 'id', 'pick_code', 'pickcode', 'pc'):
+            value = data.get(key)
+            if value not in (None, '', [], {}) and key not in hint_payload:
+                hint_payload[key] = value
+
+    try:
+        cached_preid = P115CacheManager.register_preid_hint(
+            hint_payload,
+            sha1=sha1,
+            preid=preid,
+            parent_id=str(target_cid or ''),
+            file_name=file_name,
+            size=size,
+            source='shared_rapid_transfer',
+        )
+        if cached_preid:
+            logger.debug(
+                f"  ➜ [共享资源] 已缓存共享秒传 preid 提示："
+                f"{file_name}, sha1={sha1[:12]}..., preid={cached_preid[:12]}..., target_cid={target_cid}"
+            )
+        return cached_preid or ''
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 缓存共享秒传 preid 提示失败：{file_name} -> {e}")
+        return ''
+
+
 def _json_obj(value) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -658,6 +733,141 @@ def _json_obj(value) -> Dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _chunks(values: List[Any], size: int):
+    size = max(1, int(size or 1))
+    for i in range(0, len(values or []), size):
+        yield values[i:i + size]
+
+
+def _extract_raw_items_from_batch_response(resp: Any) -> List[Dict[str, Any]]:
+    if not isinstance(resp, dict):
+        return []
+    items = resp.get('items') or resp.get('data') or resp.get('results') or []
+    return [x for x in items if isinstance(x, dict)] if isinstance(items, list) else []
+
+
+def _decode_zstd_b64_raw(value: Any) -> Dict[str, Any]:
+    text = str(value or '').strip()
+    if not text:
+        return {}
+    try:
+        compressed = base64.b64decode(text)
+    except Exception:
+        return {}
+    try:
+        import zstandard as zstd
+        raw_bytes = zstd.ZstdDecompressor().decompress(compressed)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 解压中心 RAW zstd 失败，准备降级单条 RAW：{e}")
+        return {}
+    try:
+        raw = json.loads(raw_bytes.decode('utf-8'))
+        return raw if isinstance(raw, dict) else {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 解析中心 RAW JSON 失败，准备降级单条 RAW：{e}")
+        return {}
+
+
+def _raw_from_batch_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    raw = item.get('raw_ffprobe_json') or item.get('raw_json') or item.get('raw') or {}
+    if isinstance(raw, dict) and raw:
+        return raw
+    return _decode_zstd_b64_raw(item.get('raw_zstd_b64') or item.get('raw_zstd_base64') or item.get('raw_compressed_b64'))
+
+
+def _call_center_raw_batch(client: SharedCenterClient, sha1s: List[str]) -> Dict[str, Dict[str, Any]]:
+    """走中心批量 RAW 拉取，但默认请求 zstd_base64，避免中心端巨型 JSON 负优化。"""
+    sha1s = [x for x in (sha1s or []) if _norm_sha1(x)]
+    if not sha1s:
+        return {}
+
+    method = None
+    for name in ('get_raw_ffprobe_batch', 'fetch_raw_ffprobe_batch', 'get_raw_batch'):
+        candidate = getattr(client, name, None)
+        if callable(candidate):
+            method = candidate
+            break
+    if not method:
+        return {}
+
+    def fetch_chunk(chunk: List[str]) -> Dict[str, Dict[str, Any]]:
+        chunk_out: Dict[str, Dict[str, Any]] = {}
+        try:
+            try:
+                resp = method(chunk, return_compressed=True)
+            except TypeError:
+                try:
+                    resp = method({'sha1_list': chunk, 'return_compressed': True})
+                except TypeError:
+                    resp = method(chunk)
+            for item in _extract_raw_items_from_batch_response(resp):
+                sha1 = _norm_sha1(item.get('sha1'))
+                raw = _raw_from_batch_item(item)
+                if sha1 and isinstance(raw, dict) and raw:
+                    chunk_out[sha1] = raw
+        except Exception as e:
+            logger.debug(
+                f"  ➜ [共享资源] 批量拉取中心 RAW 失败，降级单条："
+                f"batch={len(chunk)}, err={e}"
+            )
+        return chunk_out
+
+    # 压缩 RAW 批量可以适当放大，但仍分片，避免一季几百/上千集形成超大响应。
+    chunks = list(_chunks(sha1s, 48))
+    out: Dict[str, Dict[str, Any]] = {}
+    if len(chunks) == 1:
+        return fetch_chunk(chunks[0])
+
+    workers = min(4, len(chunks))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='center-raw-batch') as executor:
+        futures = [executor.submit(fetch_chunk, chunk) for chunk in chunks]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                out.update(future.result() or {})
+            except Exception:
+                pass
+    return out
+
+
+def _fetch_single_center_raw(client: SharedCenterClient, sha1: str) -> Tuple[str, Dict[str, Any]]:
+    sha1 = _norm_sha1(sha1)
+    if not sha1:
+        return '', {}
+    try:
+        resp = client.get_raw_ffprobe(sha1)
+        raw = (resp or {}).get('raw_ffprobe_json') or (resp or {}).get('raw') or {}
+        if isinstance(raw, dict) and raw:
+            return sha1, raw
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 拉取中心 RAW 失败: sha1={sha1[:12]}..., err={e}")
+    return sha1, {}
+
+
+def _call_center_raw_single_parallel(client: SharedCenterClient, sha1s: List[str]) -> Dict[str, Dict[str, Any]]:
+    """批量缺失/旧中心兜底：并发单条拉取，避免回到纯串行。"""
+    sha1s = [x for x in (sha1s or []) if _norm_sha1(x)]
+    if not sha1s:
+        return {}
+    if len(sha1s) == 1:
+        sha1, raw = _fetch_single_center_raw(client, sha1s[0])
+        return {sha1: raw} if sha1 and raw else {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    workers = min(8, len(sha1s))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='center-raw-get') as executor:
+        futures = [executor.submit(_fetch_single_center_raw, client, sha1) for sha1 in sha1s]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                sha1, raw = future.result()
+                if sha1 and isinstance(raw, dict) and raw:
+                    out[sha1] = raw
+            except Exception:
+                pass
+    return out
 
 
 def _load_center_raw_map(client: SharedCenterClient, files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -675,16 +885,27 @@ def _load_center_raw_map(client: SharedCenterClient, files: List[Dict[str, Any]]
         if sha1 not in missing:
             missing.append(sha1)
 
-    for sha1 in missing:
-        if sha1 in raw_map:
-            continue
-        try:
-            resp = client.get_raw_ffprobe(sha1)
-            raw = (resp or {}).get('raw_ffprobe_json') or (resp or {}).get('raw') or {}
-            if isinstance(raw, dict) and raw:
-                raw_map[sha1] = raw
-        except Exception as e:
-            logger.debug(f"  ➜ [共享资源] 拉取中心 RAW 失败: sha1={sha1[:12]}..., err={e}")
+    if missing:
+        batch_started = time.time()
+        batch_map = _call_center_raw_batch(client, missing)
+        if batch_map:
+            raw_map.update(batch_map)
+        logger.debug(
+            f"  ➜ [共享资源] 批量拉取中心 RAW(zstd)：命中 {len(batch_map)}/{len(missing)}，"
+            f"耗时 {time.time() - batch_started:.1f}s"
+        )
+
+    # 批量未命中的再并发单条兜底：旧中心、旧 client、缺 zstandard 依赖都不会退回纯串行。
+    remain = [sha1 for sha1 in missing if sha1 not in raw_map]
+    if remain:
+        single_started = time.time()
+        single_map = _call_center_raw_single_parallel(client, remain)
+        if single_map:
+            raw_map.update(single_map)
+        logger.info(
+            f"  ➜ [共享资源] 并发单条拉取中心 RAW：命中 {len(single_map)}/{len(remain)}，"
+            f"耗时 {time.time() - single_started:.1f}s"
+        )
     return raw_map
 
 
@@ -807,6 +1028,73 @@ def _block_clean_version_transfer_enabled() -> bool:
         return False
 
 
+def _episode_transfer_disabled_enabled() -> bool:
+    """读取“禁用单集共享秒传”开关。
+
+    优先使用 shared_resource_config，兼容后续如果把同名 key 放进 APP_CONFIG。
+    启用后只跳过 episode / season_hub 这类按集消费的共享源，
+    不影响 movie 和 completed_season 完结季包。
+    """
+    key = 'p115_shared_disable_episode_transfer'
+    try:
+        shared_cfg = settings_db.get_shared_resource_config() or {}
+        if key in shared_cfg:
+            return _boolish_local(shared_cfg.get(key), False)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 读取单集秒传禁用开关失败，降级 APP_CONFIG：{e}")
+    return _boolish_local(_cfg('CONFIG_OPTION_115_SHARED_DISABLE_EPISODE_TRANSFER', key, False), False)
+
+
+def _episode_transfer_disabled_guard(source_kind: str, source_id: str = '', payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """启用 p115_shared_disable_episode_transfer 时，跳过单集/连载集消费。
+
+    season_hub 是公共连载季壳，但实际消费的是 episode 源；因此也归为
+    “单集秒传”并跳过。completed_season 是整季收藏包，不在此处拦截。
+    """
+    if not _episode_transfer_disabled_enabled():
+        return {'blocked': False}
+    payload = payload if isinstance(payload, dict) else {}
+    normalized_kind = _normalize_source_kind(source_kind)
+    if normalized_kind == 'completed_season' and payload.get('hub_id') and not payload.get('source_id'):
+        normalized_kind = 'season_hub'
+    if not normalized_kind and payload.get('hub_id'):
+        normalized_kind = 'season_hub'
+    if normalized_kind not in ('episode', 'season_hub'):
+        return {'blocked': False, 'source_kind': normalized_kind}
+    sid = str(source_id or payload.get('source_id') or payload.get('source_ref_id') or payload.get('hub_id') or payload.get('id') or '').strip()
+    title = str(payload.get('title') or payload.get('name') or payload.get('file_name') or sid or '').strip()
+    message = f"已按配置 p115_shared_disable_episode_transfer 跳过单集共享秒传：{title or sid or normalized_kind}"
+    return {
+        'blocked': True,
+        'source_kind': normalized_kind,
+        'source_id': sid,
+        'message': message,
+    }
+
+
+def _event_episode_transfer_disabled_guard(event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    event_kind = _normalize_source_kind(
+        (event or {}).get('source_kind')
+        or payload.get('source_kind')
+        or payload.get('kind')
+        or payload.get('item_type')
+        or payload.get('display_type')
+        or ''
+    )
+    if not event_kind and (payload.get('hub_id') or payload.get('is_season_hub')):
+        event_kind = 'season_hub'
+    event_id = str(
+        (event or {}).get('source_ref_id')
+        or payload.get('source_id')
+        or payload.get('source_ref_id')
+        or payload.get('hub_id')
+        or payload.get('id')
+        or ''
+    ).strip()
+    return _episode_transfer_disabled_guard(event_kind, event_id, payload)
+
+
 def _center_clean_version_flagged(source_kind: str, payload: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
     """消费端只信中心端标签，不再根据 RAW/TMDb 现场识别纯净版。"""
     if str(source_kind or '').strip() != 'completed_season':
@@ -910,9 +1198,9 @@ def _prepare_files_before_rapid_transfer(
             }
 
     raw_started_at = time.time()
-    logger.info(f"  ➜ [共享资源] 秒传前预检：开始拉取中心 RAW，source={source_label}, files={len(files)}")
+    logger.info(f"  ➜ [共享资源] 秒传前预检：开始拉取 {len(files)} 条媒体信息")
     raw_map = _load_center_raw_map(client, files)
-    logger.info(
+    logger.debug(
         f"  ➜ [共享资源] 秒传前预检：中心 RAW 拉取完成，"
         f"命中 {len(raw_map)}/{len(files)}，耗时 {time.time() - raw_started_at:.1f}s"
     )
@@ -934,7 +1222,7 @@ def _prepare_files_before_rapid_transfer(
         except Exception as e:
             cache_errors.append(file_name or sha1)
             logger.warning(f"  ➜ [共享资源] 秒传前预检：RAW 转本地 MediaInfo 异常：{file_name} -> {e}")
-    logger.info(
+    logger.debug(
         f"  ➜ [共享资源] 秒传前预检：RAW 缓存完成，成功 {cached}/{len(raw_map)}，"
         f"失败 {len(cache_errors)}"
     )
@@ -982,7 +1270,7 @@ def _prepare_files_before_rapid_transfer(
     is_ongoing_hub = str(source_kind or '') == 'season_hub'
     target_cache: Dict[Tuple[str, str, Any], Dict[str, Any]] = {}
 
-    logger.info(
+    logger.debug(
         f"  ➜ [共享资源] 洗版预检开始：source={source_label}, files={len(files)}, "
         f"completed_pack={is_completed_pack}, ongoing_hub={is_ongoing_hub}"
     )
@@ -1014,7 +1302,7 @@ def _prepare_files_before_rapid_transfer(
         raw = raw_map.get(sha1)
         logger.info(
             f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 准备："
-            f"{file_name}，sha1={(sha1[:12] + '...') if sha1 else '-'}"
+            f"{file_name}"
         )
         if not raw:
             msg = f"{file_name}: 中心缺少 RAW，洗版预检拒绝秒传"
@@ -1057,7 +1345,7 @@ def _prepare_files_before_rapid_transfer(
             )
         else:
             target_started_at = time.time()
-            logger.info(
+            logger.debug(
                 f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 计算目标目录："
                 f"tmdb={tmdb_for_washing}, media_type={media_type}, season={s_num if s_num is not None else '-'}, file={file_name}"
             )
@@ -1078,7 +1366,7 @@ def _prepare_files_before_rapid_transfer(
                     'target_cid': str(target_cid_for_washing),
                     'original_lang': original_lang or '',
                 }
-                logger.info(
+                logger.debug(
                     f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 目标目录完成："
                     f"target_cid={target_cid_for_washing}, lang={original_lang or '-'}, "
                     f"耗时 {time.time() - target_started_at:.1f}s"
@@ -1093,7 +1381,7 @@ def _prepare_files_before_rapid_transfer(
 
         file_size = _rapid_size_to_int(src.get('size') or src.get('file_size'), 0)
         decision_started_at = time.time()
-        logger.info(
+        logger.debug(
             f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 调用规则："
             f"target_cid={target_cid_for_washing}, tmdb={tmdb_for_washing}, "
             f"S{s_num if s_num is not None else '-'}E{e_num if e_num is not None else '-'}, size={file_size}"
@@ -1111,7 +1399,7 @@ def _prepare_files_before_rapid_transfer(
             is_active_washing=False,
             has_external_subtitle=False,
         )
-        logger.info(
+        logger.debug(
             f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 规则结果："
             f"{file_name} -> {action}，{reason}，耗时 {time.time() - decision_started_at:.1f}s"
         )
@@ -1123,7 +1411,7 @@ def _prepare_files_before_rapid_transfer(
             continue
 
         level_started_at = time.time()
-        logger.info(f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 计算评分：{file_name}")
+        logger.debug(f"  ➜ [共享资源] 洗版预检[{idx + 1}/{len(files)}] 计算评分：{file_name}")
         level, level_reason = _washing_new_level(
             sha1,
             file_name,
@@ -1197,7 +1485,7 @@ def _prepare_files_before_rapid_transfer(
 
     # 电影/单集/完结季：预检通过的文件全部进入秒传；完结季如果任一视频被拒绝，前面已 hard_reject。
     logger.info(
-        f"  ➜ [共享资源] 洗版预检通过：source={source_label}, "
+        f"  ➜ [共享资源] 洗版预检通过："
         f"选中 {len(candidates)}/{len(files)}，跳过/拒绝 {len(errors)}，耗时 {time.time() - preflight_started_at:.1f}s"
     )
     return [c['file'] for c in sorted(candidates, key=lambda x: x.get('index') or 0)], {
@@ -1230,7 +1518,7 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
     preid = _norm_sha1(file_info.get('preid') or rapid_meta.get('preid') or rapid_meta.get('pre_sha1') or rapid_meta.get('pre_sha1_128k'))
     if preid:
         rapid_meta.setdefault('preid', preid)
-    logger.info(f"  ➜ [共享资源] 准备执行 115 秒传：{file_name}, sha1={sha1[:8]}..., preid={(preid[:8] + '...') if preid else '-'}, size={size}, target_cid={target_cid}")
+    logger.info(f"  ➜ [共享资源] 准备执行 115 秒传：{file_name}")
     resp = _call_rapid_method(
         p115,
         target_cid=target_cid,
@@ -1241,6 +1529,15 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
         rapid_meta=rapid_meta,
     )
     if _rapid_success(resp):
+        _remember_rapid_preid_hint(
+            file_info,
+            target_cid=target_cid,
+            sha1=sha1,
+            size=size,
+            file_name=file_name,
+            rapid_meta=rapid_meta,
+            response=resp,
+        )
         return {'ok': True, 'response': resp, 'sha1': sha1, 'file_name': file_name, 'target_cid': target_cid}
 
     sign_req = _rapid_sign_request_from_response(resp)
@@ -1252,6 +1549,15 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
                 sha1=sha1, size=size, file_name=file_name, rapid_meta=rapid_meta, first_resp=resp,
             )
             if retry.get('ok'):
+                _remember_rapid_preid_hint(
+                    file_info,
+                    target_cid=target_cid,
+                    sha1=sha1,
+                    size=size,
+                    file_name=file_name,
+                    rapid_meta=rapid_meta,
+                    response=retry.get('response'),
+                )
                 return retry
             return {
                 'ok': False,
@@ -1262,6 +1568,7 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
                 'sign_job': retry.get('sign_job'),
                 'message': retry.get('message') or '中心 holder 签名未完成',
                 'no_retry': bool(retry.get('no_retry')),
+                'abort_transfer': bool(retry.get('abort_transfer')),
             }
         except Exception as e:
             err_text = str(e)
@@ -1275,6 +1582,7 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
                 'target_cid': target_cid,
                 'message': err_text,
                 'no_retry': bool(no_retry),
+                'abort_transfer': bool(no_retry),
             }
 
     return {'ok': False, 'response': resp, 'sha1': sha1, 'file_name': file_name, 'target_cid': target_cid}
@@ -1930,6 +2238,216 @@ def _filter_files_before_transfer(
         'message': message,
     }
 
+
+def _completed_share_channel_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    for key in ('share_channel', 'completed_season_share_channel', 'completed_share_channel'):
+        value = payload.get(key)
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
+def _completed_share_channel_for_transfer(client: SharedCenterClient, source_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """读取完结季可转存分享通道。只信中心托管 channel，不扫描 115 全量分享列表。"""
+    source_id = str(source_id or '').strip()
+    channel = _completed_share_channel_from_payload(payload)
+    if str((channel or {}).get('status') or '').lower() == 'valid' and channel.get('share_code'):
+        return channel
+    if not source_id:
+        return {}
+    try:
+        resp = client.get_completed_season_share_channel(source_id) or {}
+        item = resp.get('item') if isinstance(resp.get('item'), dict) else {}
+        if str((item or {}).get('status') or '').lower() == 'valid' and item.get('share_code'):
+            return dict(item)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 查询完结季分享通道失败：source={source_id}, err={e}")
+    return {}
+
+
+def _share_import_resp_text(resp: Any, error: str = '') -> str:
+    try:
+        base = json.dumps(resp, ensure_ascii=False, default=str) if isinstance(resp, (dict, list)) else str(resp or '')
+    except Exception:
+        base = str(resp or '')
+    return (base + ' ' + str(error or '')).strip()
+
+
+def _share_import_resp_code(resp: Any) -> str:
+    if isinstance(resp, dict):
+        for key in ('errno', 'code', 'errNo', 'err_no'):
+            value = resp.get(key)
+            if value not in (None, ''):
+                return str(value)
+    return ''
+
+
+def _is_share_import_already_saved(resp: Any) -> bool:
+    """115 返回“已经转存/接收过”只代表本账号幂等限制，不代表共享源失效。
+
+    融合版要求文件进入待整理目录；因此这里不能直接当作转存成功，
+    只能归为本机账号侧问题，后续自动回退 Rapid。
+    """
+    code = _share_import_resp_code(resp)
+    text = _share_import_resp_text(resp).lower()
+    return (
+        code == '4100024'
+        or '4100024' in text
+        or '你已经转存过' in text
+        or '已经转存过' in text
+        or '转存过该文件' in text
+        or '已接收过' in text
+        or '已经接收过' in text
+        or '重复接收' in text
+        or '无需重复' in text
+        or 'already received' in text
+        or 'already saved' in text
+    )
+
+
+def _is_share_import_local_account_issue(resp: Any, error: str = '') -> bool:
+    """本机账号/频率/空间/幂等问题，不应污染中心 share_channel 状态。"""
+    if _is_share_import_already_saved(resp):
+        return True
+    code = _share_import_resp_code(resp)
+    if code in ('4200041',):
+        return True
+    text = _share_import_resp_text(resp, error).lower()
+    return any(k in text for k in (
+        '空间不足', '超过限制', '转存超限', '任务上限', '频繁',
+        '你已被限制接收', '限制接收', '被限制接收', '接收功能受限', '接收功能被限制',
+        '你已被限制转存', '限制转存', '被限制转存', '转存功能受限', '转存功能被限制',
+        '770004', '990001', '4100010', '4100025', '4200041',
+        'quota', 'limit', 'too many', 'rate', 'account', 'permission',
+    ))
+
+
+def _is_share_import_source_dead(resp: Any, error: str = '') -> bool:
+    """只有明确死链/提取码错误/源文件删除，才允许把中心通道置为异常。"""
+    if _is_share_import_local_account_issue(resp, error):
+        return False
+    code = _share_import_resp_code(resp)
+    if code in ('4100005',):
+        return True
+    text = _share_import_resp_text(resp, error).lower()
+    return any(k in text for k in (
+        '分享已取消', '分享已失效', '分享不存在', '取消分享', '已取消', '已失效',
+        '提取码错误', '访问码错误', '密码错误',
+        '文件(夹)已被移动或删除', '已被移动或删除', '源文件不存在',
+        'share not found', 'expired', 'cancelled', 'canceled', 'not found', 'deleted',
+    ))
+
+
+def _share_import_success(resp: Any) -> bool:
+    """分享转存成功判定。
+
+    注意：4100024/已经转存过不能算成功；融合版要把资源放进待整理目录，
+    这种幂等限制只能走 Rapid 兜底。
+    """
+    if _is_share_import_already_saved(resp):
+        return False
+    text = _share_import_resp_text(resp).lower()
+    if isinstance(resp, dict):
+        if resp.get('state') is True or resp.get('success') is True:
+            return True
+        code = _share_import_resp_code(resp)
+        if code in ('0', '200'):
+            return True
+    return any(k in text for k in ('转存成功', '接收成功', '保存成功', 'receive success', 'successfully'))
+
+
+def _share_import_failed_status(resp: Any, error: str = '') -> str:
+    if _is_share_import_source_dead(resp, error):
+        return 'expired'
+    text = _share_import_resp_text(resp, error).lower()
+    if any(x in text for x in ('审核', '处理中', 'pending', 'review', 'processing')):
+        return 'pending_review'
+    if _is_share_import_local_account_issue(resp, error):
+        return 'local_account_issue'
+    return 'import_failed'
+
+
+def _try_completed_season_share_transfer(
+    *,
+    client: SharedCenterClient,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    target_cid: str,
+) -> Dict[str, Any]:
+    if _normalize_source_kind(payload.get('source_kind') or 'completed_season') != 'completed_season':
+        return {'ok': False, 'skipped': True, 'reason': 'not_completed_season'}
+    channel = _completed_share_channel_for_transfer(client, source_id, payload)
+    if not channel:
+        return {'ok': False, 'skipped': True, 'reason': 'no_valid_share_channel'}
+    share_code = str(channel.get('share_code') or '').strip()
+    receive_code = str(channel.get('receive_code') or '').strip()
+    channel_id = str(channel.get('channel_id') or '').strip()
+    if not share_code:
+        return {'ok': False, 'skipped': True, 'reason': 'share_code_missing', 'channel': channel}
+    try:
+        p115 = P115Service.get_client()
+        if not p115:
+            raise RuntimeError('115 客户端未初始化')
+        title = payload.get('title') or payload.get('share_title') or source_id
+        logger.info(f"  ➜ [共享资源] 完结季优先走 115 分享转存：《{title}》，channel={channel_id or '-'}，target_cid={target_cid}")
+        resp = p115.share_import(share_code, receive_code, target_cid)
+        if _share_import_success(resp):
+            report = client.report_transfer(
+                'completed_season',
+                source_id,
+                'success',
+                success_count=len(files or []) or int(channel.get('file_count') or 1),
+                total_count=len(files or []) or int(channel.get('file_count') or 1),
+                message=f"本机通过 115 分享转存成功：{len(files or []) or int(channel.get('file_count') or 1)} 个视频；channel={channel_id or '-'}",
+            )
+            _kick_115_organize_detached(reason=f'share:{source_id}')
+            return {'ok': True, 'transfer_mode': 'share', 'channel': channel, 'response': resp, 'report': report}
+
+        status = _share_import_failed_status(resp)
+        msg = f"115 分享转存失败，准备回退 Rapid：{resp}"
+
+        # 只在确认分享源自身异常时污染中心通道状态。
+        # 空间不足/频控/已转存过等都是消费端本机账号问题，不能把共享池 valid 通道改成 import_failed。
+        should_update_center = channel_id and status in {'expired', 'pending_review'}
+        if should_update_center:
+            try:
+                client.update_completed_season_share_status(channel_id, {
+                    'status': status,
+                    'review_status': 'expired' if status == 'expired' else 'pending',
+                    'status_message': str(msg)[:1000],
+                    'raw_json': {'share_import_response': resp, 'consumer_source_id': source_id, 'failure_scope': 'share_channel'},
+                })
+            except Exception as e:
+                logger.debug(f"  ➜ [共享资源] 上报分享转存失败状态失败：channel={channel_id}, err={e}")
+        elif status == 'local_account_issue':
+            logger.warning(
+                f"  ➜ [共享资源] 115 分享转存命中本机账号限制/幂等限制，不更新中心通道状态，直接回退 Rapid："
+                f"source={source_id}, channel={channel_id or '-'}"
+            )
+        else:
+            logger.warning(
+                f"  ➜ [共享资源] 115 分享转存返回未知失败，不污染中心通道状态，先回退 Rapid："
+                f"source={source_id}, channel={channel_id or '-'}"
+            )
+        logger.warning(f"  ➜ [共享资源] {msg}")
+        return {'ok': False, 'attempted': True, 'transfer_mode': 'share', 'channel': channel, 'response': resp, 'status': status, 'message': msg}
+    except Exception as e:
+        status = _share_import_failed_status({}, str(e))
+        if channel_id and status in {'expired', 'pending_review'}:
+            try:
+                client.update_completed_season_share_status(channel_id, {
+                    'status': status,
+                    'review_status': 'expired' if status == 'expired' else 'pending',
+                    'status_message': f'115 分享转存异常，准备回退 Rapid：{e}'[:1000],
+                    'raw_json': {'share_import_exception': str(e), 'consumer_source_id': source_id, 'failure_scope': 'share_channel'},
+                })
+            except Exception:
+                pass
+        logger.warning(f"  ➜ [共享资源] 115 分享转存异常，准备回退 Rapid：source={source_id}, status={status}, err={e}")
+        return {'ok': False, 'attempted': True, 'transfer_mode': 'share', 'channel': channel, 'status': status, 'message': str(e)}
+
 def _handle_pro_quota_auth_event(client: SharedCenterClient, event: Dict[str, Any], *, ack: bool = True) -> Dict[str, Any]:
     event_id = str((event or {}).get('event_id') or '')
     try:
@@ -1968,7 +2486,52 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     # 消费端再兜底排除本机共享源；即使手动中心资源库/批量探测返回了 is_mine，
     # 也不能秒传自己的资源形成回旋镖。
 
+    episode_disabled = _event_episode_transfer_disabled_guard(event, payload)
+    if episode_disabled.get('blocked'):
+        message = episode_disabled.get('message') or '已按配置跳过单集共享秒传'
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='ok', message=message[:500])
+            except Exception:
+                pass
+        logger.info(f"  ➜ [共享资源] {message}")
+        return {
+            'ok': False,
+            'skipped': True,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': episode_disabled.get('source_kind') or '',
+            'source_id': episode_disabled.get('source_id') or '',
+            'success_count': 0,
+            'total': 0,
+            'errors': [],
+            'skip_reason': 'episode_transfer_disabled',
+            'episode_transfer_filter': {'enabled': True, **episode_disabled},
+        }
+
     source_kind, source_id, files = _event_sources(event, client)
+    episode_disabled = _episode_transfer_disabled_guard(source_kind, source_id, payload)
+    if episode_disabled.get('blocked'):
+        message = episode_disabled.get('message') or '已按配置跳过单集共享秒传'
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='ok', message=message[:500])
+            except Exception:
+                pass
+        logger.info(f"  ➜ [共享资源] {message}")
+        return {
+            'ok': False,
+            'skipped': True,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': episode_disabled.get('source_kind') or source_kind,
+            'source_id': episode_disabled.get('source_id') or source_id,
+            'success_count': 0,
+            'total': 0,
+            'errors': [],
+            'skip_reason': 'episode_transfer_disabled',
+            'episode_transfer_filter': {'enabled': True, **episode_disabled},
+        }
     if not source_kind or not source_id:
         if ack and event_id:
             client.ack_device_events([event_id], result='failed', message='事件缺少 source_kind/source_id')
@@ -2085,6 +2648,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     target_cid = str(rapid_target.get('target_cid') or base_target_cid)
 
     is_package_transfer = source_kind in ('completed_season', 'season_hub') and len(files) > 1
+    payload.setdefault('source_kind', source_kind)
     if is_package_transfer and rapid_target.get('temp_dir_required') and not rapid_target.get('season_package_temp_dir'):
         message = f"季包临时接收目录创建失败，放弃本次整季入库：{rapid_target.get('temp_dir_error') or 'unknown'}"
         _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message)
@@ -2107,73 +2671,166 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'aborted_season_package': True,
         }
 
+    share_transfer = {}
+    if source_kind == 'completed_season':
+        share_transfer = _try_completed_season_share_transfer(
+            client=client,
+            source_id=source_id,
+            payload=payload,
+            files=files,
+            target_cid=target_cid,
+        )
+        if share_transfer.get('ok'):
+            if ack and event_id:
+                try:
+                    client.ack_device_events([event_id], result='ok', message=f"转存 {len(files)}/{len(files)}")
+                except Exception as e:
+                    logger.debug(f"  ➜ [共享资源] ACK 中心事件失败: {e}")
+            return {
+                'ok': True,
+                'message': f"转存完成：{len(files)}/{len(files)}",
+                'event_id': event_id,
+                'source_kind': source_kind,
+                'source_id': source_id,
+                'success_count': len(files),
+                'total': len(files),
+                'errors': [],
+                'transfer_mode': 'share',
+                'share_transfer': share_transfer,
+                'preflight': locals().get('preflight', {}),
+                'rapid_target': locals().get('rapid_target', {}),
+            }
+        if share_transfer.get('attempted'):
+            logger.warning(
+                f"  ➜ [共享资源] 完结季分享转存未成功，自动回退 Rapid 秒传："
+                f"source={source_kind}:{source_id}, reason={share_transfer.get('status') or share_transfer.get('reason') or '-'}"
+            )
+            # 分享转存失败后，目标临时目录里可能已经被 115 写入了部分内容；
+            # Rapid 兜底必须换一个干净临时目录，避免半季/重复目录污染整理扫描。
+            if is_package_transfer and rapid_target.get('season_package_temp_dir'):
+                cleanup_after_share = _cleanup_rapid_temp_dir(
+                    rapid_target,
+                    reason=f"share_import_failed_before_rapid_fallback:{share_transfer.get('status') or share_transfer.get('reason') or 'unknown'}",
+                )
+                rapid_target = _prepare_rapid_target_dir_for_source(
+                    base_target_cid=base_target_cid,
+                    source_kind=source_kind,
+                    source_id=source_id,
+                    payload=payload,
+                    files=files,
+                )
+                target_cid = str(rapid_target.get('target_cid') or base_target_cid)
+                share_transfer['rapid_fallback_cleanup'] = cleanup_after_share
+                share_transfer['rapid_fallback_target'] = rapid_target
+                if rapid_target.get('temp_dir_required') and not rapid_target.get('season_package_temp_dir'):
+                    message = f"分享转存失败后重建 Rapid 临时目录也失败，放弃本次整季入库：{rapid_target.get('temp_dir_error') or 'unknown'}"
+                    _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message)
+                    if ack and event_id:
+                        try:
+                            client.ack_device_events([event_id], result='failed', message=message[:500])
+                        except Exception:
+                            pass
+                    return {
+                        'ok': False,
+                        'message': message,
+                        'event_id': event_id,
+                        'source_kind': source_kind,
+                        'source_id': source_id,
+                        'success_count': 0,
+                        'total': len(files),
+                        'errors': [{'error': message}],
+                        'share_transfer': share_transfer,
+                        'preflight': locals().get('preflight', {}),
+                        'rapid_target': rapid_target,
+                        'aborted_season_package': True,
+                    }
+
     ok_count = 0
     errors = []
     success_sources = []
-    RAPID_TRANSFER_MAX_RETRIES = 3
+    transfer_token = f"rapid:{event_id or source_id}:{int(time.time() * 1000)}"
+    abort_event = threading.Event()
 
     def _rapid_transfer_one(raw_file: Dict[str, Any]) -> Dict[str, Any]:
         f = dict(raw_file or {})
         f.setdefault('source_kind', source_kind)
         f.setdefault('source_id', source_id)
         f.setdefault('source_ref_id', source_id)
+        f['_rapid_transfer_token'] = transfer_token
+        f['_rapid_is_package_transfer'] = bool(is_package_transfer)
         file_source_kind = _normalize_source_kind(f.get('source_kind') or source_kind or '')
         file_source_id = str(f.get('source_id') or f.get('source_ref_id') or source_id or '').strip()
         file_label = f.get('file_name') or f.get('name') or f.get('sha1') or 'unknown'
-        last_error = None
-        attempts = RAPID_TRANSFER_MAX_RETRIES + 1
-        for attempt in range(1, attempts + 1):
-            try:
-                if attempt > 1:
-                    logger.warning(
-                        f"  ➜ [共享资源] 秒传重试 {attempt - 1}/{RAPID_TRANSFER_MAX_RETRIES}：{file_label}"
-                    )
-                    time.sleep(min(1.5 * attempt, 6.0))
-                result = rapid_save_file(f, target_cid=target_cid)
-                if result.get('ok'):
-                    result['attempt'] = attempt
-                    return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
-                last_error = {'file': file_label, 'response': result.get('response'), 'result': result, 'attempt': attempt}
-                if result.get('no_retry'):
-                    logger.warning(
-                        f"  ➜ [共享资源] 中心已判定无可用 holder，本文件不再重复创建 sign_job：{file_label}，"
-                        f"reason={result.get('message') or '-'}"
-                    )
-                    break
-            except Exception as e:
-                last_error = {'file': file_label, 'error': str(e), 'attempt': attempt}
-        return {'ok': False, 'file': f, 'error': last_error or {'file': file_label, 'error': 'unknown'}}
+        if abort_event.is_set():
+            return {
+                'ok': False,
+                'file': f,
+                'error': {'file': file_label, 'error': 'transfer_aborted_by_center', 'abort_transfer': True},
+            }
+        try:
+            result = rapid_save_file(f, target_cid=target_cid)
+            if result.get('ok'):
+                result['attempt'] = 1
+                return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
+            error = {
+                'file': file_label,
+                'response': result.get('response'),
+                'result': result,
+                'attempt': 1,
+                'abort_transfer': bool(result.get('abort_transfer')),
+            }
+            if result.get('no_retry') or result.get('abort_transfer'):
+                abort_event.set()
+                logger.warning(
+                    f"  ➜ [共享资源] 中心已终止本次秒传：{file_label}，"
+                    f"reason={result.get('message') or '-'}"
+                )
+            return {'ok': False, 'file': f, 'error': error}
+        except Exception as e:
+            return {'ok': False, 'file': f, 'error': {'file': file_label, 'error': str(e), 'attempt': 1}}
 
-    # 完结季/公共季包通常会触发多文件 status=7 签名；并发发起秒传，中心才能把 sign_job
-    # 同时派给多个 holder，避免一集一集串行等待。单文件/电影仍走轻量串行。
+    # 完结季/公共季包并发发起签名请求；失败后的重派只由中心端在同一个 sign_job 内完成。
     parallel_transfer = is_package_transfer
     if parallel_transfer:
         max_workers = max(1, min(len(files), 8))
-        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}, retries={RAPID_TRANSFER_MAX_RETRIES}")
+        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}, local_retries=0")
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='shared-rapid-transfer') as executor:
             future_map = {executor.submit(_rapid_transfer_one, f): f for f in files}
             for future in concurrent.futures.as_completed(future_map):
-                item = future.result()
+                try:
+                    item = future.result()
+                except concurrent.futures.CancelledError:
+                    continue
                 if item.get('ok'):
                     ok_count += 1
                     success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
                 else:
                     errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
+                    if (item.get('error') or {}).get('abort_transfer'):
+                        abort_event.set()
+                        for other in future_map:
+                            if other is not future:
+                                other.cancel()
     else:
         for f in files:
+            if abort_event.is_set():
+                break
             item = _rapid_transfer_one(f)
             if item.get('ok'):
                 ok_count += 1
                 success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
             else:
                 errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
+                if (item.get('error') or {}).get('abort_transfer'):
+                    abort_event.set()
+                    break
 
     report_errors = []
     report_results = []
     skipped_report_sources = []
     cleanup_result = {}
 
-    # 季包必须全量成功。任何一集连续重试后仍失败，整季放弃入库，删除临时目录，
+    # 季包必须全量成功。任何一集由中心判定不可签名/不可秒传，整季放弃入库，删除临时目录，
     # 不上报 success，不触发整理，避免 8/9 半季污染媒体库。消费端贡献点也不会被扣除。
     if is_package_transfer and ok_count != len(files):
         message = f'季包秒传不完整，已放弃整季入库：成功 {ok_count}/{len(files)}，失败 {len(errors)} 个文件'
@@ -2271,6 +2928,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
         'skipped_report_sources': skipped_report_sources,
         'preflight': locals().get('preflight', {}),
         'rapid_target': locals().get('rapid_target', {}),
+        'share_transfer': locals().get('share_transfer', {}),
     }
 
 

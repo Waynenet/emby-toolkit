@@ -1710,7 +1710,6 @@ class P115CookieClient:
 
         logger.info(
             f"  ➜ [Cookie秒传] 初始化上传: {file_name} | "
-            f"sha1={sha1[:12]}... | size={size} | target={target}"
         )
 
         try:
@@ -3022,6 +3021,9 @@ class P115Service:
 # ★★★ 115 目录树 DB 缓存管理器 ★★★
 # ======================================================================
 class P115CacheManager:
+    _rapid_preid_hints = LimitedCache(maxsize=10000)
+    _rapid_preid_hints_lock = threading.Lock()
+
     @staticmethod
     def get_local_path(cid):
         """从本地数据库获取已缓存的完整相对路径"""
@@ -3164,6 +3166,195 @@ class P115CacheManager:
             logger.error(f"  ➜ 清理 115 DB 缓存失败: {e}")
 
     @staticmethod
+    def _preid_hint_keys(*, sha1=None, fid=None, pick_code=None, parent_id=None, name=None, size=None):
+        """生成共享秒传 preid 提示键。preid 是内容属性，SHA1 命中最可信。"""
+        keys = []
+
+        def add(key):
+            key = str(key or '').strip()
+            if key and key not in keys:
+                keys.append(key)
+
+        sha1 = str(sha1 or '').strip().upper()
+        fid = str(fid or '').strip()
+        pick_code = str(pick_code or '').strip()
+        parent_id = str(parent_id or '').strip()
+        name_norm = re.sub(r'\s+', ' ', str(name or '').strip()).casefold()
+        try:
+            size_int = int(float(size or 0))
+        except Exception:
+            size_int = 0
+
+        if fid:
+            add(f'fid:{fid}')
+        if pick_code:
+            add(f'pc:{pick_code}')
+        if sha1 and re.fullmatch(r'[A-F0-9]{40}', sha1):
+            add(f'sha1:{sha1}')
+            if parent_id:
+                add(f'parent_sha1:{parent_id}:{sha1}')
+        if parent_id and name_norm and size_int > 0:
+            add(f'parent_name_size:{parent_id}:{name_norm}:{size_int}')
+        return keys
+
+    @staticmethod
+    def _update_preid_for_existing_cache(preid, *, fid=None, parent_id=None, name=None, sha1=None, pick_code=None):
+        """把已知 preid 回填到已经存在的 p115_filesystem_cache 行，避免后续再 Range 直链。"""
+        preid = P115CacheManager._norm_preid(preid)
+        if not preid:
+            return False
+        clauses, args = [], []
+        fid = str(fid or '').strip()
+        parent_id = str(parent_id or '').strip()
+        name = str(name or '').strip()
+        pick_code = str(pick_code or '').strip()
+        sha1 = str(sha1 or '').strip().upper()
+        if fid:
+            clauses.append('id=%s')
+            args.append(fid)
+        if parent_id and name:
+            clauses.append('(parent_id=%s AND name=%s)')
+            args.extend([parent_id, name])
+        if pick_code:
+            clauses.append('pick_code=%s')
+            args.append(pick_code)
+        if sha1 and re.fullmatch(r'[A-F0-9]{40}', sha1):
+            clauses.append('UPPER(sha1)=%s')
+            args.append(sha1)
+        if not clauses:
+            return False
+        try:
+            P115CacheManager._ensure_preid_column()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"""
+                        UPDATE p115_filesystem_cache
+                        SET preid=%s, updated_at=NOW()
+                        WHERE ({' OR '.join(clauses)})
+                          AND (preid IS NULL OR preid='' OR preid=%s)
+                        """,
+                        [preid, *args, preid],
+                    )
+                    changed = cursor.rowcount or 0
+                conn.commit()
+            return changed > 0
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 回填共享秒传 preid 提示失败: {e}")
+            return False
+
+    @staticmethod
+    def register_preid_hint(file_info=None, *, sha1=None, preid=None, fid=None, pick_code=None, parent_id=None, target_cid=None, file_name=None, name=None, size=None, source=''):
+        """登记已知 preid 提示。
+
+        共享池 Rapid v2 秒传时，中心源已经携带 preid；秒传成功后 115 新文件会进入待整理扫描，
+        但 /files 列表不会返回 preid。这里先按 SHA1/目标目录/文件名保存提示，整理阶段写缓存或
+        ensure_file_preid 时直接复用，避免再获取直链并 Range 读取前 128KB。
+        """
+        item = dict(file_info or {}) if isinstance(file_info, dict) else {}
+        preid = P115CacheManager._norm_preid(
+            preid
+            or item.get('preid')
+            or item.get('pre_sha1')
+            or item.get('pre_sha1_128k')
+        )
+        if not preid:
+            return ''
+        sha1 = str(sha1 or item.get('sha1') or item.get('sha') or item.get('file_sha1') or '').strip().upper()
+        fid = str(fid or item.get('fid') or item.get('file_id') or item.get('id') or '').strip()
+        pick_code = str(pick_code or item.get('pick_code') or item.get('pc') or item.get('pickcode') or '').strip()
+        parent_id = str(parent_id or target_cid or item.get('parent_id') or item.get('pid') or item.get('cid') or item.get('target_cid') or '').strip()
+        file_name = str(file_name or name or item.get('file_name') or item.get('fn') or item.get('name') or '').strip()
+        if size in (None, '', [], {}):
+            size = item.get('size') or item.get('fs') or item.get('file_size') or item.get('filesize') or 0
+        try:
+            size_int = int(float(size or 0))
+        except Exception:
+            size_int = 0
+
+        keys = P115CacheManager._preid_hint_keys(
+            sha1=sha1,
+            fid=fid,
+            pick_code=pick_code,
+            parent_id=parent_id,
+            name=file_name,
+            size=size_int,
+        )
+        if not keys:
+            return preid
+        hint = {
+            'preid': preid,
+            'sha1': sha1,
+            'fid': fid,
+            'pick_code': pick_code,
+            'parent_id': parent_id,
+            'name': file_name,
+            'size': size_int,
+            'source': str(source or ''),
+            'updated_at': time.time(),
+        }
+        try:
+            with P115CacheManager._rapid_preid_hints_lock:
+                for key in keys:
+                    P115CacheManager._rapid_preid_hints[key] = dict(hint)
+        except Exception:
+            pass
+
+        P115CacheManager._update_preid_for_existing_cache(
+            preid,
+            fid=fid,
+            parent_id=parent_id,
+            name=file_name,
+            sha1=sha1,
+            pick_code=pick_code,
+        )
+        logger.debug(
+            f"  ➜ [115缓存] 已登记共享秒传 preid 提示: "
+            f"sha1={(sha1[:12] + '...') if sha1 else '-'}, parent={parent_id or '-'}, "
+            f"name={file_name or '-'}, preid={preid[:12]}..., keys={len(keys)}"
+        )
+        return preid
+
+    @staticmethod
+    def _lookup_preid_hint(file_info=None, *, sha1=None, fid=None, pick_code=None, parent_id=None, target_cid=None, file_name=None, name=None, size=None):
+        """查找共享秒传阶段登记的 preid 提示。"""
+        item = dict(file_info or {}) if isinstance(file_info, dict) else {}
+        direct = P115CacheManager._norm_preid(item.get('preid') or item.get('pre_sha1') or item.get('pre_sha1_128k'))
+        if direct:
+            return direct
+        sha1 = str(sha1 or item.get('sha1') or item.get('sha') or item.get('file_sha1') or '').strip().upper()
+        fid = str(fid or item.get('fid') or item.get('file_id') or item.get('id') or '').strip()
+        pick_code = str(pick_code or item.get('pick_code') or item.get('pc') or item.get('pickcode') or '').strip()
+        parent_id = str(parent_id or target_cid or item.get('parent_id') or item.get('pid') or item.get('cid') or item.get('target_cid') or '').strip()
+        file_name = str(file_name or name or item.get('file_name') or item.get('fn') or item.get('name') or '').strip()
+        if size in (None, '', [], {}):
+            size = item.get('size') or item.get('fs') or item.get('file_size') or item.get('filesize') or 0
+        try:
+            size_int = int(float(size or 0))
+        except Exception:
+            size_int = 0
+
+        keys = P115CacheManager._preid_hint_keys(
+            sha1=sha1,
+            fid=fid,
+            pick_code=pick_code,
+            parent_id=parent_id,
+            name=file_name,
+            size=size_int,
+        )
+        for key in keys:
+            try:
+                with P115CacheManager._rapid_preid_hints_lock:
+                    hint = P115CacheManager._rapid_preid_hints.get(key)
+                if isinstance(hint, dict):
+                    preid = P115CacheManager._norm_preid(hint.get('preid'))
+                    if preid:
+                        return preid
+            except Exception:
+                continue
+        return ''
+
+    @staticmethod
     def save_file_cache(
         fid, parent_id, name, sha1=None, pick_code=None, local_path=None, size=0, preid=None,
         washing_level=None, washing_snapshot_json=None,
@@ -3176,6 +3367,15 @@ class P115CacheManager:
                     P115CacheManager._ensure_preid_column()
                     P115CacheManager._ensure_washing_snapshot_columns()
                     preid = P115CacheManager._norm_preid(preid)
+                    if not preid:
+                        preid = P115CacheManager._lookup_preid_hint({
+                            'fid': fid,
+                            'parent_id': parent_id,
+                            'name': name,
+                            'sha1': sha1,
+                            'pick_code': pick_code,
+                            'size': size,
+                        })
                     try:
                         washing_level = int(washing_level) if washing_level not in (None, '', [], {}) else None
                     except Exception:
@@ -3660,6 +3860,28 @@ class P115CacheManager:
         if existing:
             return existing
 
+        hinted_preid = P115CacheManager._lookup_preid_hint(
+            item,
+            sha1=sha1,
+            fid=fid,
+            pick_code=pick_code,
+            file_name=file_name,
+        )
+        if hinted_preid:
+            P115CacheManager._update_preid_for_existing_cache(
+                hinted_preid,
+                fid=fid,
+                parent_id=item.get('parent_id') or item.get('pid') or item.get('cid'),
+                name=file_name,
+                sha1=sha1,
+                pick_code=pick_code,
+            )
+            logger.debug(
+                f"  ➜ [115缓存] 命中共享秒传 preid 提示，跳过直链 Range: "
+                f"{file_name or sha1 or pick_code} -> {hinted_preid[:12]}..."
+            )
+            return hinted_preid
+
         P115CacheManager._ensure_preid_column()
         clauses, args = [], []
         if fid:
@@ -3777,7 +3999,7 @@ class P115CacheManager:
             except Exception as e_preid:
                 logger.debug(f"  ➜ [媒体信息缓存] 顺手计算 preid 失败: sha1={sha1[:12]}..., err={e_preid}")
 
-            logger.info(f"  ➜ [媒体信息缓存] 已写入本地 p115_mediainfo_cache -> {sha1[:12]}...")
+            logger.debug(f"  ➜ [媒体信息缓存] 已写入本地 p115_mediainfo_cache -> {sha1[:12]}...")
             return True
 
         except Exception as e:
@@ -7002,6 +7224,29 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             # -----------------------------------------------------------
             if fids_to_delete:
                 logger.warning(f"  ➜ [版本控制] 正在删除 {len(fids_to_delete)} 个被替换的旧版本文件...")
+
+                # === 共享资源主动下架：洗版窗口期内先通知中心端禁用旧源 ===
+                # 维护任务会兜底清理“本地已换版/删除”的共享源，但维护窗口内中心仍可能
+                # 派发 holder 签名任务。这里在物理删除旧 115 文件前精准下架，避免旧源
+                # 已删除后继续参与签名导致贡献点被平白扣除。
+                try:
+                    from tasks import shared_resource_tasks
+                    disable_res = shared_resource_tasks.disable_shared_sources_for_deleted_fids(
+                        list(fids_to_delete),
+                        reason='washing_replaced_old_version',
+                        message='local file replaced by washing; disable old shared source before deleting old version',
+                    )
+                    if disable_res.get('matched'):
+                        logger.info(
+                            "  ➜ [版本控制] 洗版旧共享源主动下架完成：匹配 %s，成功 %s，失败 %s",
+                            disable_res.get('matched', 0),
+                            disable_res.get('disabled', 0),
+                            disable_res.get('failed', 0),
+                        )
+                except Exception as e:
+                    # 下架失败不能阻塞洗版删除；失败源会保留本地 active/reported 锚点，
+                    # 后续共享资源维护任务会继续尝试中心下架。
+                    logger.warning(f"  ➜ [版本控制] 洗版旧共享源主动下架异常，继续删除旧版并等待维护任务兜底: {e}")
                 
                 # === 本地擦屁股逻辑 ===
                 local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
