@@ -451,6 +451,56 @@ def _cleanup_rapid_temp_dir(rapid_target: Dict[str, Any], *, reason: str = '') -
         return {'ok': False, 'error': str(e), 'folder_cid': folder_cid, 'folder_name': folder_name}
 
 
+def _event_transfer_lease_id(payload: Dict[str, Any] = None, event: Dict[str, Any] = None) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    event = event if isinstance(event, dict) else {}
+    for value in (
+        payload.get('rapid_transfer_lease_id'), payload.get('transfer_lease_id'), payload.get('lease_id'),
+        event.get('rapid_transfer_lease_id'), event.get('transfer_lease_id'), event.get('lease_id'),
+    ):
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _client_report_transfer(
+    client: SharedCenterClient,
+    source_kind: str,
+    source_id: str,
+    result: str,
+    *,
+    success_count: int = 0,
+    total_count: int = 0,
+    message: str = '',
+    lease_id: str = '',
+) -> Dict[str, Any]:
+    """上报秒传结果；新版中心用 lease_id 释放秒传许可，旧客户端方法自动兼容。"""
+    lease_id = str(lease_id or '').strip()
+    if lease_id:
+        try:
+            return client.report_transfer(
+                source_kind,
+                source_id,
+                result,
+                success_count=success_count,
+                total_count=total_count,
+                message=message,
+                lease_id=lease_id,
+            ) or {}
+        except TypeError:
+            # 旧 SharedCenterClient.report_transfer 不认识 lease_id；中心端 15 分钟 TTL 仍会兜底释放。
+            pass
+    return client.report_transfer(
+        source_kind,
+        source_id,
+        result,
+        success_count=success_count,
+        total_count=total_count,
+        message=message,
+    ) or {}
+
+
 def _report_transfer_failed_safely(
     client: SharedCenterClient,
     *,
@@ -459,18 +509,21 @@ def _report_transfer_failed_safely(
     files: List[Dict[str, Any]],
     errors: List[Any],
     message: str = '',
+    lease_id: str = '',
 ) -> Dict[str, Any]:
     fail_kind = _normalize_source_kind(source_kind)
     if fail_kind not in ('movie', 'episode', 'completed_season') or not source_id:
         return {'ok': False, 'skipped': True, 'reason': 'unsupported_source_kind'}
     try:
-        return client.report_transfer(
+        return _client_report_transfer(
+            client,
             fail_kind,
             source_id,
             'failed',
             success_count=0,
             total_count=len(files or []),
             message=(message or json.dumps(errors or [], ensure_ascii=False))[:1000],
+            lease_id=lease_id,
         ) or {}
     except Exception as e:
         logger.debug(f"  ➜ [共享资源] 上报秒传失败失败：{fail_kind}:{source_id} -> {e}")
@@ -721,6 +774,56 @@ def _remember_rapid_preid_hint(
     except Exception as e:
         logger.debug(f"  ➜ [共享资源] 缓存共享秒传 preid 提示失败：{file_name} -> {e}")
         return ''
+
+
+def _remember_share_preid_hints(
+    files: List[Dict[str, Any]],
+    *,
+    target_cid: str,
+    source_kind: str = 'completed_season',
+    source_id: str = '',
+    response: Any = None,
+) -> int:
+    """分享转存成功后，把中心 manifest 里的 preid 预登记给整理扫描。
+
+    115 分享转存不会返回每个文件的 preid，后续待整理扫描从 /files 也拿不到 preid；
+    但中心 manifest 已经有 sha1/size/preid。这里复用 Rapid 的 preid hint 机制，
+    让 P115CacheManager.save_file_cache / ensure_file_preid 在扫描新文件时直接命中，
+    避免再取直链 Range 0-131071 在线计算。
+    """
+    count = 0
+    target_cid = str(target_cid or '').strip()
+    for item in files or []:
+        if not isinstance(item, dict):
+            continue
+        info = _normalize_rapid_file_info(item)
+        meta = info.get('rapid_meta_json') if isinstance(info.get('rapid_meta_json'), dict) else {}
+        sha1 = _norm_sha1(info.get('sha1') or meta.get('sha1'))
+        preid = _norm_sha1(info.get('preid') or meta.get('preid') or meta.get('pre_sha1') or meta.get('pre_sha1_128k'))
+        if not sha1 or not preid:
+            continue
+        file_name = str(info.get('file_name') or info.get('name') or meta.get('file_name') or meta.get('name') or sha1).strip()
+        size = _rapid_size_to_int(info.get('size') or info.get('file_size') or meta.get('size'), 0)
+        hint_meta = dict(meta or {})
+        hint_meta.setdefault('preid', preid)
+        hint_meta.setdefault('source_kind', source_kind or info.get('source_kind') or '')
+        hint_meta.setdefault('source_id', source_id or info.get('source_id') or info.get('source_ref_id') or '')
+        if _remember_rapid_preid_hint(
+            info,
+            target_cid=target_cid,
+            sha1=sha1,
+            size=size,
+            file_name=file_name,
+            rapid_meta=hint_meta,
+            response=response,
+        ):
+            count += 1
+    if count:
+        logger.info(
+            f"  ➜ [共享资源] 分享转存已预登记中心 preid 提示："
+            f"{count}/{len(files or [])}，target_cid={target_cid or '-'}"
+        )
+    return count
 
 
 def _json_obj(value) -> Dict[str, Any]:
@@ -1063,7 +1166,7 @@ def _episode_transfer_disabled_guard(source_kind: str, source_id: str = '', payl
         return {'blocked': False, 'source_kind': normalized_kind}
     sid = str(source_id or payload.get('source_id') or payload.get('source_ref_id') or payload.get('hub_id') or payload.get('id') or '').strip()
     title = str(payload.get('title') or payload.get('name') or payload.get('file_name') or sid or '').strip()
-    message = f"已按配置 p115_shared_disable_episode_transfer 跳过单集共享秒传：{title or sid or normalized_kind}"
+    message = f"跳过单集秒传：{title or sid or normalized_kind}"
     return {
         'blocked': True,
         'source_kind': normalized_kind,
@@ -2394,16 +2497,25 @@ def _try_completed_season_share_transfer(
         logger.info(f"  ➜ [共享资源] 完结季优先走 115 分享转存：《{title}》，channel={channel_id or '-'}，target_cid={target_cid}")
         resp = p115.share_import(share_code, receive_code, target_cid)
         if _share_import_success(resp):
-            report = client.report_transfer(
+            preid_hint_count = _remember_share_preid_hints(
+                files,
+                target_cid=target_cid,
+                source_kind='completed_season',
+                source_id=source_id,
+                response=resp,
+            )
+            report = _client_report_transfer(
+                client,
                 'completed_season',
                 source_id,
                 'success',
                 success_count=len(files or []) or int(channel.get('file_count') or 1),
                 total_count=len(files or []) or int(channel.get('file_count') or 1),
                 message=f"本机通过 115 分享转存成功：{len(files or []) or int(channel.get('file_count') or 1)} 个视频；channel={channel_id or '-'}",
+                lease_id=_event_transfer_lease_id(payload),
             )
             _kick_115_organize_detached(reason=f'share:{source_id}')
-            return {'ok': True, 'transfer_mode': 'share', 'channel': channel, 'response': resp, 'report': report}
+            return {'ok': True, 'transfer_mode': 'share', 'channel': channel, 'response': resp, 'report': report, 'preid_hint_count': preid_hint_count}
 
         status = _share_import_failed_status(resp)
         msg = f"115 分享转存失败，准备回退 Rapid：{resp}"
@@ -2463,7 +2575,7 @@ def _handle_pro_quota_auth_event(client: SharedCenterClient, event: Dict[str, An
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {'ok': True, 'event_id': event_id, 'event_type': 'pro_quota_auth_check', 'quota': quota, 'message': message}
     except Exception as e:
         msg = f"Pro额度认证上报失败：{e}"
@@ -2479,6 +2591,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     client = SharedCenterClient()
     event_id = str(event.get('event_id') or '')
     payload = _event_payload(event)
+    lease_id = _event_transfer_lease_id(payload, event)
     event_type = str(event.get('event_type') or payload.get('event_type') or '').strip()
     if event_type == 'pro_quota_auth_check':
         return _handle_pro_quota_auth_event(client, event, ack=ack)
@@ -2488,7 +2601,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
 
     episode_disabled = _event_episode_transfer_disabled_guard(event, payload)
     if episode_disabled.get('blocked'):
-        message = episode_disabled.get('message') or '已按配置跳过单集共享秒传'
+        message = episode_disabled.get('message') or '已按配置跳过单集秒传'
         if ack and event_id:
             try:
                 client.ack_device_events([event_id], result='ok', message=message[:500])
@@ -2512,7 +2625,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     source_kind, source_id, files = _event_sources(event, client)
     episode_disabled = _episode_transfer_disabled_guard(source_kind, source_id, payload)
     if episode_disabled.get('blocked'):
-        message = episode_disabled.get('message') or '已按配置跳过单集共享秒传'
+        message = episode_disabled.get('message') or '已按配置跳过单集秒传'
         if ack and event_id:
             try:
                 client.ack_device_events([event_id], result='ok', message=message[:500])
@@ -2651,7 +2764,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     payload.setdefault('source_kind', source_kind)
     if is_package_transfer and rapid_target.get('temp_dir_required') and not rapid_target.get('season_package_temp_dir'):
         message = f"季包临时接收目录创建失败，放弃本次整季入库：{rapid_target.get('temp_dir_error') or 'unknown'}"
-        _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message)
+        _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message, lease_id=lease_id)
         if ack and event_id:
             try:
                 client.ack_device_events([event_id], result='failed', message=message[:500])
@@ -2724,7 +2837,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 share_transfer['rapid_fallback_target'] = rapid_target
                 if rapid_target.get('temp_dir_required') and not rapid_target.get('season_package_temp_dir'):
                     message = f"分享转存失败后重建 Rapid 临时目录也失败，放弃本次整季入库：{rapid_target.get('temp_dir_error') or 'unknown'}"
-                    _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message)
+                    _report_transfer_failed_safely(client, source_kind=source_kind, source_id=source_id, files=files, errors=[message], message=message, lease_id=lease_id)
                     if ack and event_id:
                         try:
                             client.ack_device_events([event_id], result='failed', message=message[:500])
@@ -2842,6 +2955,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             files=files,
             errors=errors,
             message=message,
+            lease_id=lease_id,
         )
         if ack and event_id:
             try:
@@ -2887,13 +3001,15 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             report_file = group.get('file') or {}
             success_file_count = max(1, int(group.get('count') or 1))
             try:
-                report_resp = client.report_transfer(
+                report_resp = _client_report_transfer(
+                    client,
                     report_kind,
                     report_id,
                     'success',
                     success_count=success_file_count,
                     total_count=success_file_count,
                     message=f'本机秒传成功：{success_file_count} 个视频；{report_file.get("file_name") or report_file.get("sha1") or report_id}',
+                    lease_id=lease_id,
                 )
                 report_results.append({'source_kind': report_kind, 'source_id': report_id, **(report_resp or {})})
                 if report_resp and report_resp.get('inserted') is False:
@@ -2911,6 +3027,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             files=files,
             errors=errors,
             message=json.dumps(errors, ensure_ascii=False)[:1000],
+            lease_id=lease_id,
         )
 
     if ack and event_id:

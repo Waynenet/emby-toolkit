@@ -510,6 +510,7 @@ def _event_source_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 COMPLETED_SEASON_SHARE_CREATE_EVENT_TYPE = 'create_completed_season_share'
+PRO_QUOTA_AUTH_EVENT_TYPE = 'pro_quota_auth_check'
 _COMPLETED_SHARE_SYNC_LOCK = threading.Lock()
 
 
@@ -941,8 +942,10 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
         return {'ok': True, 'skipped': True, 'message': '已有分享状态同步正在运行', 'checked': 0}
     try:
         rows = shared_share_db.list_completed_season_share_channels(
-            # active 状态用于正常审核同步；bad/disabled 状态用于清理历史“已取消”分享记录。
-            statuses=['pending_review', 'valid', 'creating', 'expired', 'review_failed', 'disabled'],
+            # 只同步“未定态/异常态/本地取消态”。
+            # valid 分享不再进入高频维护轮询：正常通道不向中心反复上报，
+            # 失效漏网时由消费端 share_import 失败被动下架对应 channel。
+            statuses=['pending_review', 'creating', 'expired', 'review_failed', 'disabled'],
             limit=limit,
             need_check=True,
         )
@@ -1067,24 +1070,43 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
                     elif delete_resp.get('cancelled_only'):
                         msg = (msg + '；已取消分享但删除记录失败')[:1000]
 
-                center_resp = client.update_completed_season_share_status(channel_id, {
-                    'status': status,
-                    'review_status': status_info.get('review_status') or '',
-                    'status_message': msg,
-                    'raw_json': raw_status_json,
-                })
-                saved = shared_share_db.update_completed_season_share_channel(
-                    channel_id,
-                    status=status,
-                    review_status=status_info.get('review_status') or '',
-                    status_message=msg,
-                    raw_json={**raw_status_json, 'center_status_response': center_resp},
-                    last_checked_at='NOW()',
-                    last_reported_at='NOW()',
-                )
+                # 增量上报：只有状态发生变化，或命中失效/违规终态时，才写中心事件。
+                # 典型噪音是 valid -> valid / pending_review -> pending_review，
+                # 这些只更新本地 last_checked_at，不再制造 completed_season_share_status_update。
+                terminal_status = status in {'expired', 'review_failed'}
+                status_changed = bool(row_status and row_status != status)
+                should_report_center = bool(terminal_status or status_changed)
+
+                if should_report_center:
+                    center_resp = client.update_completed_season_share_status(channel_id, {
+                        'status': status,
+                        'review_status': status_info.get('review_status') or '',
+                        'status_message': msg,
+                        'raw_json': raw_status_json,
+                    })
+                    saved = shared_share_db.update_completed_season_share_channel(
+                        channel_id,
+                        status=status,
+                        review_status=status_info.get('review_status') or '',
+                        status_message=msg,
+                        raw_json={**raw_status_json, 'center_status_response': center_resp},
+                        last_checked_at='NOW()',
+                        last_reported_at='NOW()',
+                    )
+                else:
+                    center_resp = {'ok': True, 'skipped': True, 'reason': 'status_unchanged'}
+                    saved = shared_share_db.update_completed_season_share_channel(
+                        channel_id,
+                        status=status,
+                        review_status=status_info.get('review_status') or '',
+                        status_message=msg,
+                        raw_json={**raw_status_json, 'center_status_skipped': True, 'reason': 'status_unchanged'},
+                        last_checked_at='NOW()',
+                    )
+
                 local_deleted = {}
                 center_ok = not (isinstance(center_resp, dict) and center_resp.get('ok') is False)
-                if status in {'expired', 'review_failed'} and center_ok and delete_resp.get('state') is not False:
+                if terminal_status and should_report_center and center_ok and delete_resp.get('state') is not False:
                     # 失效/违规也是分享通道终态。中心已同步后删除本地缓存，避免下轮继续打 115 API。
                     local_deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
                 items.append({
@@ -1092,6 +1114,8 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
                     'source_id': source_id,
                     'status': status,
                     'ok': True,
+                    'reported_center': bool(should_report_center),
+                    'skipped_center_update': not should_report_center,
                     'deleted_local_channel': bool(local_deleted),
                     'local': local_deleted or saved,
                 })
@@ -1105,6 +1129,170 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
         return {'ok': True, 'checked': len(items), 'items': items}
     finally:
         _COMPLETED_SHARE_SYNC_LOCK.release()
+
+
+
+
+def _event_transfer_lease_identity(event: Dict[str, Any]) -> Dict[str, str]:
+    payload = _event_source_payload(event)
+    source_kind = str(payload.get('source_kind') or (event or {}).get('source_kind') or '').strip()
+    source_id = str(
+        payload.get('source_id')
+        or payload.get('source_ref_id')
+        or (event or {}).get('source_ref_id')
+        or ''
+    ).strip()
+    sha1 = _norm_sha1(payload.get('sha1'))
+    event_type = str((event or {}).get('event_type') or payload.get('event_type') or '').strip()
+    if source_kind not in {'movie', 'episode', 'completed_season'} or not source_id:
+        return {}
+    if event_type in {COMPLETED_SEASON_SHARE_CREATE_EVENT_TYPE, PRO_QUOTA_AUTH_EVENT_TYPE}:
+        return {}
+    return {'source_kind': source_kind, 'source_id': source_id, 'sha1': sha1}
+
+
+def _direct_center_transfer_lease(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """SharedCenterClient 未升级 acquire_transfer_lease 时，直接 POST 中心 lease 接口。
+
+    前端手动秒传和后台监听都走这里兜底，避免客户端文件已打补丁，
+    但 handler.shared_center_client 还没新增方法时静默退回旧链路。
+    """
+    cfg = settings_db.get_shared_resource_config() or {}
+    base_url = str(cfg.get('p115_shared_center_url') or '').strip().rstrip('/')
+    token = str(cfg.get('p115_shared_device_token') or '').strip()
+    if not base_url or not token:
+        raise RuntimeError('共享中心地址或设备 Token 未配置')
+    headers = {
+        'X-Device-Token': token,
+        'Content-Type': 'application/json',
+        'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
+    }
+    kwargs = {'timeout': 30}
+    getter = getattr(config_manager, 'get_proxies_for_requests', None)
+    if callable(getter):
+        proxies = getter()
+        if proxies:
+            kwargs['proxies'] = proxies
+    resp = requests.post(f'{base_url}/api/v1/transfers/lease', headers=headers, json=payload, **kwargs)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {'raw_text': resp.text[:1000]}
+    if resp.status_code >= 400:
+        raise RuntimeError(f'中心秒传许可接口 HTTP {resp.status_code}: {data}')
+    return data if isinstance(data, dict) else {'data': data}
+
+
+
+def _event_transfer_lease_label(event: Dict[str, Any], identity: Dict[str, str] = None) -> str:
+    """生成秒传许可日志里给人看的资源名，不把 payload/source_id 整坨打出来。"""
+    identity = identity if isinstance(identity, dict) else {}
+    payload = _event_source_payload(event)
+    candidates = []
+    for obj in (payload, event if isinstance(event, dict) else {}):
+        if not isinstance(obj, dict):
+            continue
+        for key in ('file_name', 'name', 'title', 'share_title', 'root_name'):
+            value = str(obj.get(key) or '').strip()
+            if value:
+                candidates.append(value)
+    for key in ('files', 'items', 'pack_items', 'children'):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            first = next((x for x in value if isinstance(x, dict)), {}) or {}
+            for sub_key in ('file_name', 'name', 'title'):
+                sub_value = str(first.get(sub_key) or '').strip()
+                if sub_value:
+                    if len(value) > 1:
+                        candidates.append(f"{sub_value} 等 {len(value)} 个文件")
+                    else:
+                        candidates.append(sub_value)
+                    break
+            if candidates:
+                break
+    label = next((x for x in candidates if x), '')
+    if not label:
+        label = f"{identity.get('source_kind') or '-'}:{identity.get('source_id') or '-'}"
+    label = label.replace('\r', ' ').replace('\n', ' ').strip()
+    return label[:180] + ('...' if len(label) > 180 else '')
+
+def _client_call_transfer_lease(client: SharedCenterClient, identity: Dict[str, str], event: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        'source_kind': identity.get('source_kind'),
+        'source_id': identity.get('source_id'),
+        'sha1': identity.get('sha1') or None,
+        'transfer_mode': 'rapid',
+        'request_meta_json': {
+            'event_id': str((event or {}).get('event_id') or ''),
+            'event_type': str((event or {}).get('event_type') or ''),
+            'client_gate': 'shared_resource_tasks_transfer_lease_v1',
+        },
+    }
+    # 兼容不同版本 SharedCenterClient：优先走显式方法，其次走常见私有 request 方法，最后直连中心。
+    method = getattr(client, 'acquire_transfer_lease', None)
+    if callable(method):
+        return method(payload)
+    for name in ('post', '_post'):
+        fn = getattr(client, name, None)
+        if callable(fn):
+            return fn('/api/v1/transfers/lease', payload)
+    for name in ('request', '_request'):
+        fn = getattr(client, name, None)
+        if callable(fn):
+            try:
+                return fn('POST', '/api/v1/transfers/lease', json=payload)
+            except TypeError:
+                return fn('POST', '/api/v1/transfers/lease', payload)
+    return _direct_center_transfer_lease(payload)
+
+
+def _wait_transfer_lease_for_event(event: Dict[str, Any], *, max_wait_seconds: int = 600) -> Dict[str, Any]:
+    identity = _event_transfer_lease_identity(event)
+    if not identity:
+        return {'ok': True, 'skipped': True, 'reason': 'not_rapid_transfer_event'}
+    client = SharedCenterClient()
+    deadline = time.time() + max(30, int(max_wait_seconds or 600))
+    attempts = 0
+    last_resp: Dict[str, Any] = {}
+    while True:
+        attempts += 1
+        try:
+            resp = _client_call_transfer_lease(client, identity, event) or {}
+        except Exception as e:
+            # 中心未升级 lease 接口时，不阻断老链路；只记录 DEBUG，继续原消费流程。
+            logger.debug(f"  ➜ [共享资源] 秒传许可接口不可用，按旧流程继续：{identity}，err={e}")
+            return {'ok': True, 'skipped': True, 'reason': 'lease_api_unavailable', 'error': str(e)}
+        last_resp = resp if isinstance(resp, dict) else {'raw': resp}
+        if last_resp.get('allow') or (last_resp.get('ok') and not last_resp.get('deferred') and not last_resp.get('allow') is False):
+            lease_id = str(last_resp.get('lease_id') or '').strip()
+            if lease_id:
+                payload = _event_source_payload(event)
+                payload['rapid_transfer_lease_id'] = lease_id
+                payload['transfer_lease_id'] = lease_id
+                # 如果原消费端把 event.payload_json 作为 source 使用，这里把 lease_id 写回去；
+                # sign_job request_meta/report_transfer 新版可继续透传。
+                try:
+                    event['payload_json'] = payload
+                except Exception:
+                    pass
+            label = _event_transfer_lease_label(event, identity)
+            logger.info(f"  ➜ [共享资源] 秒传许可已发放：{label}")
+            return {'ok': True, 'lease': last_resp, 'attempts': attempts}
+        retry_after = _safe_int(last_resp.get('retry_after'), 30)
+        retry_after = max(5, min(retry_after, 120))
+        reason = str(last_resp.get('reason') or 'deferred')
+        if time.time() + retry_after > deadline:
+            # 不把事件消费成失败扣点；给原流程一个机会，中心签名并发阀仍会兜底。
+            logger.warning(
+                f"  ➜ [共享资源] 秒传许可等待超时，转入旧流程并交由中心签名阀兜底："
+                f"{identity}，reason={reason}，last={last_resp}"
+            )
+            return {'ok': True, 'lease_timeout': True, 'lease': last_resp, 'attempts': attempts}
+        logger.info(
+            f"  ➜ [共享资源] 中心秒传许可排队中：{_event_transfer_lease_label(event, identity)}，"
+            f"{retry_after}s 后重试，reason={reason}"
+        )
+        time.sleep(retry_after)
 
 
 def _consume_device_event_with_transfer_gate(original_consume, event, *args, **kwargs):
@@ -1123,7 +1311,23 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
             'total': 0,
             'message': gate.get('message') or '该资源已被共享资源配置拦截',
         }
+    _wait_transfer_lease_for_event(event)
     return original_consume(event, *args, **kwargs)
+
+
+def consume_device_event_with_transfer_gate(event, *args, **kwargs):
+    """公开给前端手动秒传路由使用的消费入口。
+
+    后台监听通过 poll_and_consume_once 临时包装 consume_device_event；
+    前端手动秒传是 Flask 路由直接调用消费函数，不经过长轮询包装，
+    所以必须显式走同一层秒传许可/本地门禁。
+    """
+    original = getattr(shared_subscription_service, 'consume_device_event', None)
+    if not callable(original):
+        return {'ok': False, 'message': 'consume_device_event 不可用', 'success_count': 0, 'total': 0, 'errors': []}
+    if getattr(original, '_etk_transfer_gate_wrapped', False):
+        return original(event, *args, **kwargs)
+    return _consume_device_event_with_transfer_gate(original, event, *args, **kwargs)
 
 
 def poll_and_consume_once(*args, **kwargs):
