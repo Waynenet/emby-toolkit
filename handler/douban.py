@@ -423,6 +423,21 @@ class DoubanApi:
             err_msg = response.get("message", "获取演职员信息失败") if response else "获取演职员信息无响应"
             return self._make_error_dict(response.get("error", "api_error") if response else "no_response", err_msg, {"cast": []})
 
+        # =====================================================================
+        # ✨ 终极补丁：强行抓取主页详情，解决 /celebrities 接口不返回“编剧”的残废问题 ✨
+        # =====================================================================
+        try:
+            # 单独请求一次主详情接口（因为主页详情里 100% 包含编剧）
+            main_detail = self._get_subject_details(douban_subject_id, final_mtype)
+            if main_detail and not main_detail.get("error"):
+                # 把主页里的编剧强行塞进 response，供下面原有的解析代码捕获
+                if "writers" in main_detail and isinstance(main_detail["writers"], list):
+                    response.setdefault("writers", []).extend(main_detail["writers"])
+                if "directors" in main_detail and isinstance(main_detail["directors"], list):
+                    response.setdefault("directors", []).extend(main_detail["directors"])
+        except Exception as e:
+            logger.warning(f"  ➜ 尝试从主页详情补全编剧信息时出错: {e}")
+
         data: Dict[str, List[Dict[str, Any]]] = {"cast": []}
         
         # =====================================================================
