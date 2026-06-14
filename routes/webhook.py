@@ -454,14 +454,9 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
 
         # 如果是第二季及以上，或者本地查不到，则去豆瓣精确搜索
         if not douban_id:
-            search_name = target_name
             target_season_name = None
             
             if is_multi_season:
-                # 默认拼接季号："剧名 2"
-                search_name = f"{target_name} {season_idx}"
-                logger.debug(f"  ➜ [豆瓣同步] 识别为多季剧集，将豆瓣基础搜索名称修正为: '{search_name}'")
-                
                 # ★★★ 物理斩断年份：第二季以上同步状态，绝对不带年份 ★★★
                 target_year = None 
                 
@@ -478,14 +473,43 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
                                     target_season_name = row['title']
                     except Exception: pass
 
-            match_res = api.match_info(
-                name=search_name, 
-                year=str(target_year) if target_year else None, # 已经被物理清空
-                mtype=mtype,
-                season_name=target_season_name 
-            )
-            if match_res and match_res.get('id'):
-                douban_id = match_res['id']
+            # ==============================================================
+            # ★★★ 对齐智能追剧：多维度候选词搜索 (特殊季名 > 兜底组合) ★★★
+            # ==============================================================
+            search_candidates = []
+            
+            if is_multi_season:
+                # 1. 优先处理非标准季名 (例如 "重返天南")
+                if target_season_name:
+                    is_generic = bool(re.search(r'(第\s*[\d一二三四五六七八九十]+\s*季|Season\s*\d+)', target_season_name, re.IGNORECASE))
+                    if not is_generic:
+                        search_candidates.append(f"{target_name} {target_season_name}")
+                
+                # 2. 补充标准搜索名称作为兜底
+                search_candidates.append(f"{target_name} {season_idx}")     # 例: 凡人修仙传 2
+                search_candidates.append(f"{target_name}{season_idx}")      # 例: 乡村爱情18
+                search_candidates.append(f"{target_name} 第{season_idx}季") # 例: 权力的游戏 第8季
+            else:
+                search_candidates.append(target_name)
+
+            logger.debug(f"  ➜ [豆瓣同步] 准备查询 《{target_name}》第 {season_idx} 季。候选搜索: {search_candidates}, 年份: {target_year}")
+
+            # 3. 依次使用候选词尝试匹配豆瓣条目
+            for search_string in search_candidates:
+                match_res = api.match_info(
+                    name=search_string, 
+                    year=str(target_year) if target_year else None,
+                    mtype=mtype,
+                    season=season_idx,
+                    season_name=target_season_name 
+                )
+                
+                if match_res and match_res.get('id'):
+                    douban_id = match_res['id']
+                    logger.debug(f"  ➜ [豆瓣同步] 匹配成功: '{search_string}' -> 豆瓣 ID: {douban_id}")
+                    break
+                else:
+                    logger.debug(f"  ➜ [豆瓣同步] 候选词 '{search_string}' 未匹配到条目，尝试下一个...")
 
         if not douban_id:
             logger.warning(f"  ➜ [豆瓣同步] 无法匹配 '{target_name}' (S{season_idx}) 的豆瓣专属 ID，跳过同步。")
