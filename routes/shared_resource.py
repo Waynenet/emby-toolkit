@@ -80,25 +80,6 @@ def _save_shared_config(data: Dict[str, Any]) -> Dict[str, Any]:
     return settings_db.save_shared_resource_config(data)
 
 
-def _center_request_kwargs(timeout: int) -> Dict[str, Any]:
-    import config_manager
-    kwargs = {'timeout': timeout}
-    getter = getattr(config_manager, 'get_proxies_for_requests', None)
-    if callable(getter):
-        proxies = getter()
-        if proxies:
-            kwargs['proxies'] = proxies
-    return kwargs
-
-
-def _center_headers_for_cfg(cfg: Dict[str, Any]) -> Dict[str, str]:
-    return {
-        'X-Device-Token': str((cfg or {}).get('p115_shared_device_token') or '').strip(),
-        'Content-Type': 'application/json',
-        'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
-    }
-
-
 def _fetch_center_credit() -> Dict[str, Any]:
     client = SharedCenterClient()
     pro_report = {}
@@ -119,7 +100,7 @@ def _fetch_center_credit() -> Dict[str, Any]:
         # Rapid v2 入库即共享后，普通缺口数量不再作为首页统计；首页展示主动“求共享”数量。
         'wanted_gaps': int(stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0),
         'share_requests': int(stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0),
-        'shared_sources': int(stats.get('movie_sources') or 0) + int(stats.get('episode_sources') or 0) + int(stats.get('completed_season_sources') or 0),
+        'shared_sources': int(stats.get('movie_sources') or 0) + int(stats.get('episode_sources') or 0),
         'raw_ffprobe': int(stats.get('raw_ffprobe') or 0),
         'display_movie_count': int(stats.get('display_movie_count') or (stats.get('media_stats') or {}).get('movie_count') or stats.get('movie_sources') or 0),
         'display_season_count': int(stats.get('display_season_count') or (stats.get('media_stats') or {}).get('season_count') or 0),
@@ -147,7 +128,7 @@ def _decorate_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
     row.setdefault('share_url', '')
     row['share_type'] = row.get('share_type') or row.get('source_kind')
     row['review_status'] = row.get('status')
-    row['root_is_dir'] = row.get('source_kind') == 'completed_season' or row.get('is_aggregated_season')
+    row['root_is_dir'] = row.get('source_kind') == 'logical_season' or row.get('is_aggregated_season')
     item_count = _safe_int(row.get('item_count') or row.get('file_count'), 0)
     if item_count <= 0:
         item_count = 1 if row.get('center_status') == 'reported' else 0
@@ -176,7 +157,6 @@ def _decorate_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
         'manual_rapid': '手动登记',
         'rapid_auto_library': '入库自动登记',
         'rapid_all_library': '一键全库登记',
-        'rapid_completed_season': '完结季源',
     }.get(provider, provider or '本地秒传源')
     return row
 
@@ -335,7 +315,7 @@ def _batch_lookup_local_season_meta(rows: List[Dict[str, Any]]) -> Dict[tuple, D
             return
         item_type = str(value.get('item_type') or value.get('display_type') or '').strip().lower()
         source_kind = str(value.get('source_kind') or '').strip().lower()
-        if item_type in ('season', 'pack') or source_kind in ('season_hub', 'completed_season'):
+        if item_type in ('season', 'pack') or source_kind in ('season_hub', 'logical_season'):
             tmdb_id = str(value.get('tmdb_id') or '').strip()
             raw_season = value.get('season_number')
             season_no = _safe_int(raw_season, -1)
@@ -390,7 +370,7 @@ def _apply_local_season_meta(row: Dict[str, Any], meta_map: Dict[tuple, Dict[str
     row = dict(row or {})
     item_type = str(row.get('item_type') or row.get('display_type') or '').strip().lower()
     source_kind = str(row.get('source_kind') or '').strip().lower()
-    if item_type not in ('season', 'pack') and source_kind not in ('season_hub', 'completed_season'):
+    if item_type not in ('season', 'pack') and source_kind not in ('season_hub', 'logical_season'):
         return row
     tmdb_id = str(row.get('tmdb_id') or '').strip()
     raw_season = row.get('season_number')
@@ -420,6 +400,49 @@ def _apply_local_season_meta(row: Dict[str, Any], meta_map: Dict[tuple, Dict[str
 
 
 
+def _share_channel_raw_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = (row or {}).get('raw_json') if isinstance(row, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _share_channel_is_logical(row: Dict[str, Any] | None = None, source_id: str = '') -> bool:
+    """判断本地 channel/source 行是否属于逻辑完结季文件列表分享。
+
+    本地表名还沿用历史 completed_season 命名，但业务主线只允许 logical_season：
+    - center_source_id/group_id 以 svg_ 开头；
+    - raw_json.share_kind == logical_season；
+    - raw_json.event/command 是 create_logical_season_filelist_share。
+    """
+    row = row if isinstance(row, dict) else {}
+    raw = _share_channel_raw_json(row)
+    sid = str(source_id or row.get('center_source_id') or row.get('source_id') or row.get('group_id') or '').strip()
+    event_text = ' '.join(
+        str(raw.get(k) or '')
+        for k in ('event', 'event_type', 'command', 'share_kind', 'source_kind')
+    )
+    nested_event = raw.get('event') if isinstance(raw.get('event'), dict) else {}
+    if nested_event:
+        event_text += ' ' + ' '.join(
+            str(nested_event.get(k) or '')
+            for k in ('event_type', 'command', 'share_kind', 'source_kind')
+        )
+    return (
+        sid.startswith('svg_')
+        or str(row.get('source_kind') or '').strip().lower() == 'logical_season'
+        or str(raw.get('share_kind') or '').strip() == 'logical_season'
+        or 'create_logical_season_filelist_share' in event_text
+        or 'logical_season' in event_text
+    )
+
+
 def _local_completed_share_public(channel: Dict[str, Any]) -> Dict[str, Any]:
     channel = dict(channel or {})
     if not channel:
@@ -444,7 +467,7 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
     center_ids = []
     for row in rows:
         kind = str(row.get('source_kind') or '').strip().lower()
-        if kind != 'completed_season':
+        if not _share_channel_is_logical(row):
             continue
         try:
             rid = int(row.get('id') or 0)
@@ -505,7 +528,6 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
         public = _local_completed_share_public(channel)
         status = str(channel.get('status') or '').strip().lower()
         row['completed_share_channel'] = public
-        row['completed_season_share_channel'] = public
         row['has_share_channel'] = True
         row['share_channel_status'] = status
         row['share_review_status'] = channel.get('review_status') or ''
@@ -864,68 +886,7 @@ def _delete_p115_share_record(p115, share_code: str) -> Dict[str, Any]:
 @shared_resource_bp.route('/shares/<int:source_id>/share/cancel', methods=['POST'])
 @admin_required
 def api_cancel_completed_season_share_channel(source_id: int):
-    """取消本机托管的完结季 115 分享；不扫描/影响用户其它 115 私人分享。"""
-    row = shared_share_db.get_local_source(source_id)
-    if not row:
-        return jsonify({'success': False, 'message': '本地共享源不存在'}), 404
-    if str(row.get('source_kind') or '').strip().lower() != 'completed_season':
-        return jsonify({'success': False, 'message': '只有完结季源才有 115 分享通道'}), 400
-    channel = shared_share_db.get_completed_season_share_channel_by_local_source(source_id) or {}
-    if not channel and row.get('center_source_id'):
-        channel = shared_share_db.get_completed_season_share_channel_by_source(row.get('center_source_id')) or {}
-    if not channel:
-        return jsonify({'success': False, 'message': '该本地完结季没有可取消的分享通道'}), 404
-    share_code = str(channel.get('share_code') or '').strip()
-    p115_resp = {'state': True, 'skipped': True, 'message': '无 share_code，仅更新本地/中心状态'}
-    if share_code:
-        try:
-            from handler.p115_service import P115Service
-            p115 = P115Service.get_client()
-            if not p115:
-                raise RuntimeError('115 客户端未初始化')
-            p115_resp = _delete_p115_share_record(p115, share_code)
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'删除 115 分享记录失败：{e}', 'channel': _local_completed_share_public(channel)}), 400
-        if not _p115_share_deleted_ok(p115_resp):
-            text = _p115_response_text(p115_resp)
-            return jsonify({'success': False, 'message': f'删除 115 分享记录失败：{text[:300]}', 'channel': _local_completed_share_public(channel)}), 400
-    status = 'disabled'
-    message = '用户手动删除完结季 115 分享记录'
-    center_resp = {}
-    try:
-        center_resp = SharedCenterClient().update_completed_season_share_status(channel.get('channel_id'), {
-            'status': status,
-            'review_status': 'disabled',
-            'status_message': message,
-            'raw_json': {'p115_delete_response': p115_resp, 'local_source_id': source_id},
-        })
-    except Exception as e:
-        center_resp = {'ok': False, 'message': str(e)}
-    saved = shared_share_db.update_completed_season_share_channel(
-        channel.get('channel_id'),
-        status=status,
-        review_status='disabled',
-        status_message=message,
-        raw_json={'p115_delete_response': p115_resp, 'center_response': center_resp},
-        last_checked_at='NOW()',
-        last_reported_at='NOW()',
-    )
-    local_deleted = {}
-    center_ok = not (isinstance(center_resp, dict) and center_resp.get('ok') is False)
-    if center_ok:
-        # 分享已取消/删除且中心已收到终态后，直接删除本地 channel 缓存。
-        # 否则同步任务会把 disabled 记录反复捞出来，继续调 115 API 删除同一个 share_code。
-        local_deleted = shared_share_db.delete_completed_season_share_channel(channel.get('channel_id'))
-        saved = local_deleted or saved
-
-    return jsonify({
-        'success': True,
-        'message': '已删除完结季 115 分享记录' + ('' if center_ok else '；中心状态上报失败，已保留本地记录等待下轮同步'),
-        'item': {} if local_deleted else _local_completed_share_public(saved),
-        'deleted_local_channel': bool(local_deleted),
-        'center': center_resp,
-        'p115': p115_resp,
-    })
+    return jsonify({'success': False, 'message': '旧 completed_season 分享取消接口已停用；逻辑季分享由中心 logical_season_share_channels 管理。'}), 410
 
 
 @shared_resource_bp.route('/shares/<int:source_id>/cancel', methods=['POST'])
@@ -1077,25 +1038,17 @@ def api_search_shareable_media():
 def api_manual_validate():
     """Rapid v2 手动登记前预校验。
 
-    前端仍沿用 /shares/manual-validate 这个路由名，但这里不再校验 115 分享码/提取码，
-    只确认本地能定位到可秒传文件，并检查 RAW 媒体信息是否可用于中心展示/匹配。
+    新方案不再由客户端做完结季一致性校验，也不再登记 completed_season_source。
+    这里只确认本地能定位到可秒传文件，并检查 RAW/summary_json 是否可上传中心；
+    Season 会拆成分集资产，后续由中心逻辑季包统一凑整季。
     """
     data = shared_tasks._normalize_series_candidate_identity(_request_json())
-    # 手动预校验分两段：
-    # 1) 普通电影/连载季只检查本地是否能定位视频、是否能生成 RAW/summary_json；
-    # 2) 已完结季必须在这里同步执行 completed_season_source 硬门禁，不能等到点“登记共享源”时才报错。
-    #
-    # 注意：collect_files_for_candidate 仍然带 _skip_fingerprint_repair，避免连载季预检误触发一致性/指纹修复；
-    # 真正需要一致性门禁的已完结季，会单独用 gate_candidate 调 _completed_season_consistency_gate。
     data['_skip_fingerprint_repair'] = True
-    consistency = {}
-    completed_consistency_gate = {}
     files = shared_share_db.collect_files_for_candidate(data)
     root = shared_share_db.candidate_root_from_files(files)
     missing_raw = []
     for f in files:
         sha1 = str(f.get('sha1') or '').upper()
-        # 不只检查 RAW 是否存在，还要确认能生成中心资源库展示用 summary_json。
         try:
             entry = shared_tasks._prepare_raw_upload_entry(f)
         except Exception:
@@ -1103,47 +1056,14 @@ def api_manual_validate():
         if sha1 and not entry:
             missing_raw.append({'sha1': sha1, 'file_name': f.get('file_name'), 'reason': 'RAW 或 summary_json 缺失'})
 
-    should_check_completed = False
-    try:
-        gate_candidate = dict(data)
-        gate_candidate.pop('_skip_fingerprint_repair', None)
-        gate_candidate['source_provider'] = 'manual_rapid'
-        should_check_completed = (
-            str(gate_candidate.get('item_type') or '').strip() == 'Season'
-            and shared_tasks._candidate_is_completed_season(gate_candidate, source_provider='manual_rapid', files=files)
-        )
-        if files and should_check_completed:
-            completed_consistency_gate = shared_tasks._completed_season_consistency_gate(gate_candidate, log_result=True) or {}
-            consistency = completed_consistency_gate.get('consistency') or {}
-    except Exception as e:
-        # 如果预检本身异常，已完结季宁可前置拦截，也不要再次放行到“登记共享源”才失败。
-        should_check_completed = should_check_completed or (
-            str(data.get('item_type') or '').strip() == 'Season'
-            and (
-                str(data.get('watching_status') or data.get('season_status') or '').strip().lower() == 'completed'
-                or _boolish(data.get('is_completed'), False)
-            )
-        )
-        completed_consistency_gate = {
-            'ok': False,
-            'reason': 'manual_validate_consistency_error',
-            'message': f'完结季一致性预校验异常，禁止登记中心：{e}',
-            'consistency': {},
-            'final_failure': False,
-        }
-        consistency = {}
-
     if not files:
         message = '没有找到可登记视频文件'
-        valid = False
-    elif should_check_completed and not completed_consistency_gate.get('ok'):
-        message = completed_consistency_gate.get('message') or '完结季一致性校验未通过，不能登记共享源'
         valid = False
     elif missing_raw:
         message = f'找到 {len(files)} 个视频文件，但有 {len(missing_raw)} 个缺少 RAW 媒体信息，暂不登记中心'
         valid = False
     else:
-        message = f'找到 {len(files)} 个可登记视频文件，可登记为 Rapid v2 共享源'
+        message = f'找到 {len(files)} 个可登记视频文件，可登记为 Rapid v2 逻辑季资产'
         valid = True
 
     data_payload = {
@@ -1154,11 +1074,8 @@ def api_manual_validate():
         'files': files,
         'root': root,
         'root_fid': root.get('root_fid') or '',
-        'consistency': consistency or {},
-        # 给前端保留完整门禁结果，用于展示 reason/message，并作为禁用按钮依据。
-        'completed_consistency_gate': completed_consistency_gate or {},
-        'season_pack_consistency': consistency or {},
-        'reason': (completed_consistency_gate or {}).get('reason') or ('raw_missing' if missing_raw else ''),
+        'reason': 'raw_missing' if missing_raw else '',
+        'center_managed_logical_season': True,
     }
     return jsonify({
         'success': True,
@@ -1265,23 +1182,22 @@ def _center_flag_meta(row: Dict[str, Any], flag_key: str, meta_key: str) -> Dict
     return {}
 
 
-def _center_source_is_animation(row: Dict[str, Any]) -> bool:
-    return bool(_center_flag_meta(row, 'is_animation', 'animation_meta_json'))
-
-
 def _center_source_is_completed_certified(row: Dict[str, Any]) -> bool:
-    """中心资源库“已完结认证”只认 available 的 completed_season。
+    """中心资源库“已完结认证”只认中心逻辑季包的 pool_complete。
 
-    不能用 Season 类型、进度满、watching_status=Completed 或 source_kind=completed_season 兜底，
-    否则历史脏数据 status=alive 的 completed_season 也会被前端打上“已完结”。
+    分享通道是否 valid 只影响“转存/秒传”按钮；只要逻辑季包已经通过中心
+    一致性校验，就可以显示已完结标签和缎带。
     """
     row = row if isinstance(row, dict) else {}
     source_kind = str(row.get('source_kind') or '').strip().lower()
     status = str(row.get('status') or '').strip().lower()
-    if source_kind == 'completed_season':
-        return status == 'available'
+    logical_complete = bool(row.get('logical_pool_complete') or row.get('pool_complete') or status == 'pool_complete')
     if source_kind == 'season_hub' or row.get('is_ongoing_hub'):
         return False
+    if source_kind == 'logical_season':
+        return logical_complete
+    if logical_complete:
+        return True
     return bool(_center_flag_meta(row, 'is_completed_certified', 'completed_certified_meta_json'))
 
 
@@ -1294,6 +1210,42 @@ def _center_source_is_short_drama(row: Dict[str, Any]) -> bool:
     if direct is not None:
         return bool(direct)
     return bool(_center_flag_meta(row, 'is_short_drama', 'short_drama_meta_json'))
+
+
+def _center_import_looks_like_logical_group_id(value: Any) -> bool:
+    text = str(value or '').strip().lower()
+    return bool(text and re.match(r'^(svg_|lsg_|logical_season_)', text))
+
+
+def _center_import_logical_group_id(source: Dict[str, Any], fallback: Any = '') -> str:
+    source = source if isinstance(source, dict) else {}
+    logical_group = source.get('logical_group') if isinstance(source.get('logical_group'), dict) else {}
+    for value in (
+        source.get('logical_group_id'),
+        source.get('group_id'),
+        logical_group.get('group_id'),
+        logical_group.get('source_id'),
+        source.get('logical_season_group_id'),
+        source.get('source_id'),
+        source.get('source_ref_id'),
+        fallback,
+    ):
+        text = str(value or '').strip()
+        if _center_import_looks_like_logical_group_id(text):
+            return text
+    for value in (source.get('logical_group_id'), source.get('group_id'), logical_group.get('group_id')):
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _center_import_normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
+    source = dict(source or {})
+    source_kind = str(source.get('source_kind') or source.get('kind') or '').strip().lower().replace('-', '_')
+    if source_kind == 'completed_season':
+        source['_legacy_completed_season_rejected'] = True
+    return source
 
 
 def _center_source_transfer_preflight(source: Dict[str, Any]) -> Dict[str, Any]:
@@ -1434,7 +1386,7 @@ def _strip_center_display_children(row: Dict[str, Any]) -> Dict[str, Any]:
             row['pack_item_count'] = row.get('children_count')
         if not row.get('lazy_children_kind'):
             kind = str(row.get('source_kind') or '').strip().lower()
-            row['lazy_children_kind'] = 'season_hub' if kind == 'season_hub' else 'completed_season'
+            row['lazy_children_kind'] = 'season_hub' if kind == 'season_hub' else 'logical_season'
     return row
 
 @shared_resource_bp.route('/center/sources', methods=['GET'])
@@ -1493,7 +1445,7 @@ def api_center_sources():
                 row['is_completed'] = True
                 row['completed_certified_meta_json'] = completed_meta or {
                     'is_completed_certified': True,
-                    'certified_by': 'completed_season_source',
+                    'certified_by': 'logical_season_pool',
                     'status': row.get('status'),
                 }
             else:
@@ -1573,10 +1525,10 @@ def api_center_source_children():
                 row['is_completed'] = True
                 row['completed_certified_meta_json'] = completed_meta or {
                     'is_completed_certified': True,
-                    'certified_by': 'completed_season_source',
+                    'certified_by': 'logical_season_pool',
                     'status': row.get('status'),
                 }
-            elif row.get('source_kind') != 'completed_season':
+            else:
                 row['is_completed_certified'] = False
                 row['is_completed'] = False
                 row.pop('completed_certified_meta_json', None)
@@ -1620,7 +1572,7 @@ def api_center_source_detail():
             row = row if isinstance(row, dict) else {}
             kind = str(row.get('source_kind') or row.get('lazy_children_kind') or '').strip().lower()
             typ = str(row.get('display_type') or row.get('item_type') or '').strip().lower()
-            return bool(kind in {'season_hub', 'completed_season'} or typ in {'pack', 'season', 'series'})
+            return bool(kind in {'season_hub', 'logical_season'} or typ in {'pack', 'season', 'series'})
 
         def _decorate_detail_row(row):
             if not isinstance(row, dict):
@@ -1643,6 +1595,15 @@ def api_center_source_detail():
                 row['version_summary'] = _center_version_summary(row)
             if not row.get('size') and row.get('total_size'):
                 row['size'] = row.get('total_size')
+            completed_certified = _center_source_is_completed_certified(row)
+            if completed_certified:
+                row['is_completed_certified'] = True
+                row['is_completed'] = True
+                row['completed_certified_meta_json'] = row.get('completed_certified_meta_json') or {
+                    'is_completed_certified': True,
+                    'certified_by': 'logical_season_pool',
+                    'status': row.get('status'),
+                }
             row = _apply_local_season_meta(row)
             return row
 
@@ -1666,6 +1627,9 @@ def api_center_import():
     # 这里给出明确错误，避免前端继续显示“秒传完成 0/0”。
     if not isinstance(source, dict):
         source = {}
+    source = _center_import_normalize_source(source)
+    if source.get('_legacy_completed_season_rejected'):
+        return jsonify({'success': False, 'message': '旧 completed_season 已停用，请刷新中心资源库后使用 logical_season。', 'data': {'ok': False}}), 400
     source_kind = source.get('source_kind') or source.get('kind') or ''
     source_id = source.get('source_id') or source.get('source_ref_id') or ''
     if (not source_kind or not source_id) and data.get('source_ids'):
@@ -1693,6 +1657,19 @@ def api_center_import():
 def api_register_center_device():
     cfg = _shared_resource_config_payload()
     install_id = str(cfg.get('p115_shared_install_id') or '').strip() or uuid.uuid4().hex
+    existing_token = str(cfg.get('p115_shared_device_token') or '').strip()
+    if existing_token:
+        # 这个接口只负责“首次注册”。已注册设备不要再从页面或脚本反复申请 token，
+        # 避免把“重置设备”当成刷基础贡献点入口。token 真损坏时，先在配置里清空 token 再注册。
+        cfg['p115_shared_install_id'] = install_id
+        cfg['p115_shared_resource_enabled'] = True
+        saved = _save_shared_config(cfg)
+        return jsonify({
+            'success': True,
+            'message': '共享中心设备已注册，无需重复注册；如设备 Token 已损坏，请先在配置中清空 Token 后重新注册。',
+            'data': saved,
+            'device': {'device_token': existing_token, 'install_id': install_id, 'already_registered': True},
+        })
     name = socket.gethostname() or 'ETK Device'
     try:
         client = SharedCenterClient()

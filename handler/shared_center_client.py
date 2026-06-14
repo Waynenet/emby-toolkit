@@ -568,64 +568,47 @@ class SharedCenterClient:
     def register_episode_source(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post('/api/v1/sources/episode/register', payload or {}, timeout=35)
 
-    def register_completed_season_source(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._post('/api/v1/sources/completed-season/register', payload or {}, timeout=60)
+    def logical_season_manifest(self, group_id: str) -> Dict[str, Any]:
+        return self._get(f"/api/v1/logical-seasons/{urllib.parse.quote(str(group_id))}/manifest", timeout=30)
 
-    def update_completed_season_status(self, source_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._post(f"/api/v1/sources/completed-season/{urllib.parse.quote(str(source_id))}/status", payload or {}, timeout=25)
-
-    def disable_source(self, source_kind: str, source_id: str, message: str = '') -> Dict[str, Any]:
-        source_kind = str(source_kind or '').strip()
-        source_id = str(source_id or '').strip()
-        return self._post(f"/api/v1/sources/{urllib.parse.quote(source_kind)}/{urllib.parse.quote(source_id)}/disable", {'message': message}, timeout=25)
-
-    def completed_season_manifest(self, source_id: str) -> Dict[str, Any]:
-        return self._get(f"/api/v1/sources/completed-season/{urllib.parse.quote(str(source_id))}/manifest", timeout=30)
-
-    def dispatch_completed_season_share(self, source_id: str, *, force: bool = False, reason: str = '') -> Dict[str, Any]:
+    def dispatch_logical_season_share(self, group_id: str, *, force: bool = False, reason: str = '') -> Dict[str, Any]:
         return self._post(
-            f"/api/v1/sources/completed-season/{urllib.parse.quote(str(source_id))}/share/dispatch",
+            f"/api/v1/logical-seasons/{urllib.parse.quote(str(group_id))}/share/dispatch",
             {'force': bool(force), 'reason': reason or ''},
             timeout=20,
         )
 
-    def report_completed_season_share(self, source_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def report_logical_season_share(self, group_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(
-            f"/api/v1/sources/completed-season/{urllib.parse.quote(str(source_id))}/share/report",
+            f"/api/v1/logical-seasons/{urllib.parse.quote(str(group_id))}/share/report",
             payload or {},
             timeout=25,
         )
 
-    def update_completed_season_share_status(self, channel_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def update_logical_season_share_status(self, channel_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(
-            f"/api/v1/completed-season-share-channels/{urllib.parse.quote(str(channel_id))}/status",
+            f"/api/v1/logical-season-share-channels/{urllib.parse.quote(str(channel_id))}/status",
             payload or {},
             timeout=20,
         )
 
-    def get_completed_season_share_channel(self, source_id: str) -> Dict[str, Any]:
+    def get_logical_season_share_channel(self, group_id: str) -> Dict[str, Any]:
         return self._get(
-            f"/api/v1/sources/completed-season/{urllib.parse.quote(str(source_id))}/share-channel",
+            f"/api/v1/logical-seasons/{urllib.parse.quote(str(group_id))}/share-channel",
             timeout=15,
         )
 
-    def list_completed_season_share_channels(self, *, status: str = '', source_id: str = '', limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        return self._get('/api/v1/completed-season-share-channels', {
-            'status': status or '',
-            'source_id': source_id or '',
-            'limit': max(1, min(int(limit or 100), 500)),
-            'offset': max(0, int(offset or 0)),
-        }, timeout=20)
+
+    def acquire_transfer_lease(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._post('/api/v1/transfers/lease', payload or {}, timeout=30)
 
     def report_transfer(self, source_kind: str, source_id: str, result: str, **kwargs) -> Dict[str, Any]:
         payload = {'source_kind': source_kind, 'source_id': source_id, 'result': result}
         payload.update({k: v for k, v in kwargs.items() if v is not None})
 
-        # 兼容旧的第 4 步客户端：分享转存成功上报里只有 message="本机通过 115 分享转存成功..."，
-        # 没有显式 transfer_mode。中心端第 5 步按 transfer_mode=share 才会启用 10 点封顶结算。
         if not payload.get('transfer_mode'):
             msg = str(payload.get('message') or '')
-            if str(source_kind or '').strip() == 'completed_season' and result == 'success' and (
+            if str(source_kind or '').strip() in ('logical_season',) and result == 'success' and (
                 '分享转存' in msg or '115 分享' in msg or 'share_import' in msg or 'transfer_mode=share' in msg
             ):
                 payload['transfer_mode'] = 'share'
