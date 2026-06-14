@@ -358,6 +358,19 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
             episode_idx = item_details.get("IndexNumber", 1)
             target_name = item_details.get("SeriesName", item_name)
             
+            # =========================================================
+            # ★★★ 核心修复：提前且强制获取主剧的 TMDb ID ★★★
+            # =========================================================
+            try:
+                # emby_parent_id 是从 Webhook 传来的主剧 Emby ID
+                series_details = emby.get_emby_item_details(emby_parent_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id, fields="ProviderIds")
+                if series_details:
+                    actual_series_tmdb_id = series_details.get("ProviderIds", {}).get("Tmdb")
+                    if actual_series_tmdb_id:
+                        tmdb_id = actual_series_tmdb_id  # 直接用主剧的 ID 覆盖掉上面从分集获取到的 ID
+            except Exception as e:
+                logger.warning(f"  ➜ [豆瓣同步] 获取所属主剧信息失败: {e}")
+
             # ★ 如果是分集，将缓存键绑定到该“季(Season)”，实现不同季的防重复分离！
             season_emby_id = item_details.get("SeasonId")
             if season_emby_id:
@@ -375,43 +388,34 @@ def _task_sync_douban_status(item_id, item_type, is_played, user_name, user_id, 
             status = "do"
             
             # ★★★ 智能大结局判断 (深度联动智能追剧数据库) ★★★
-            if is_played:
+            if is_played and tmdb_id:
                 try:
-                    series_tmdb_id = None
-                    # 这里传进来的 emby_parent_id 就是剧集ID
-                    series_details = emby.get_emby_item_details(emby_parent_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id, fields="ProviderIds")
-                    if series_details:
-                        series_tmdb_id = series_details.get("ProviderIds", {}).get("Tmdb")
-
-                    if series_tmdb_id:
-                        real_total_eps = None
-                        
-                        # 1. 优先尝试从智能追剧的“分季锁定配置”中获取最准确的集数 (防 TMDb 乱改)
-                        lock_map = watchlist_db.get_series_seasons_lock_info(str(series_tmdb_id))
-                        if lock_map and season_idx in lock_map:
-                            real_total_eps = lock_map[season_idx].get('count')
-                        
-                        # 2. 如果没获取到锁定信息，回退查本地媒体库的 Season 记录 (获取 TMDb 官方总集数)
-                        if not real_total_eps:
-                            with get_db_connection() as conn:
-                                with conn.cursor() as cursor:
-                                    cursor.execute(
-                                        "SELECT total_episodes FROM media_metadata WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Season'", 
-                                        (str(series_tmdb_id), season_idx)
-                                    )
-                                    row = cursor.fetchone()
-                                    if row and row['total_episodes']:
-                                        real_total_eps = int(row['total_episodes'])
-                        
-                        # 3. 核心判定：只和真正的官方/豆瓣总集数对比
-                        if real_total_eps and real_total_eps > 0:
-                            if episode_idx >= real_total_eps:
-                                logger.info(f"  ➜ [豆瓣同步] 恭喜！通过智能追剧确认《{target_name}》季终 (S{season_idx}E{episode_idx}/{real_total_eps})，将向豆瓣同步 '看过' 状态。")
-                                status = "collect"
-                            else:
-                                logger.debug(f"  ➜ [豆瓣同步] 《{target_name}》S{season_idx} 尚未完结 (当前 E{episode_idx} / 官方总集数 {real_total_eps})，保持 '在看' 状态。")
-                    else:
-                        logger.debug(f"  ➜ [豆瓣同步] 无法获取主剧的 TMDb ID，保持 '在看' 状态。")
+                    real_total_eps = None
+                    
+                    # 1. 优先尝试从智能追剧的“分季锁定配置”中获取最准确的集数 (防 TMDb 乱改)
+                    lock_map = watchlist_db.get_series_seasons_lock_info(str(tmdb_id))
+                    if lock_map and season_idx in lock_map:
+                        real_total_eps = lock_map[season_idx].get('count')
+                    
+                    # 2. 如果没获取到锁定信息，回退查本地媒体库的 Season 记录 (获取 TMDb 官方总集数)
+                    if not real_total_eps:
+                        with get_db_connection() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT total_episodes FROM media_metadata WHERE parent_series_tmdb_id = %s AND season_number = %s AND item_type = 'Season'", 
+                                    (str(tmdb_id), season_idx)
+                                )
+                                row = cursor.fetchone()
+                                if row and row['total_episodes']:
+                                    real_total_eps = int(row['total_episodes'])
+                    
+                    # 3. 核心判定：只和真正的官方/豆瓣总集数对比
+                    if real_total_eps and real_total_eps > 0:
+                        if episode_idx >= real_total_eps:
+                            logger.info(f"  ➜ [豆瓣同步] 恭喜！通过智能追剧确认《{target_name}》季终 (S{season_idx}E{episode_idx}/{real_total_eps})，将向豆瓣同步 '看过' 状态。")
+                            status = "collect"
+                        else:
+                            logger.debug(f"  ➜ [豆瓣同步] 《{target_name}》S{season_idx} 尚未完结 (当前 E{episode_idx} / 官方总集数 {real_total_eps})，保持 '在看' 状态。")
 
                 except Exception as e:
                     logger.warning(f"  ➜ [豆瓣同步] 联动追剧数据库判断大结局时发生错误，退回在看状态: {e}")
