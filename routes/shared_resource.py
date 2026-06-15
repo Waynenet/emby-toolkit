@@ -89,30 +89,78 @@ def _fetch_center_credit() -> Dict[str, Any]:
         logger.debug(f"  ➜ [共享资源] Pro 额度认证上报失败，继续同步贡献点: {e}")
     me = client.me()
     stats = client.stats()
+    display_series = {}
+    try:
+        display_series = client.list_display_sources(item_type='Series', limit=1, offset=0)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 拉取中心剧集展示统计失败: {e}")
     ledger = {}
     try:
         ledger = client.credit_ledger(limit=500)
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 拉取中心贡献点流水失败: {e}")
+    movie_source_count = int(stats.get('movie_sources') or 0)
+    episode_source_count = int(stats.get('episode_sources') or 0)
+    logical_group_count = int(stats.get('logical_season_groups') or 0)
+    video_count = movie_source_count + episode_source_count
+    raw_media_stats = (stats.get('media_stats') or {}) if isinstance(stats.get('media_stats'), dict) else {}
+    display_movie_count = int(stats.get('display_movie_count') or raw_media_stats.get('movie_count') or movie_source_count)
+    display_series_count = int(
+        display_series.get('total')
+        or stats.get('display_series_count')
+        or raw_media_stats.get('series_count')
+        or stats.get('display_season_count')
+        or raw_media_stats.get('season_count')
+        or logical_group_count
+        or 0
+    )
+    display_season_count = int(stats.get('display_season_count') or raw_media_stats.get('season_count') or display_series_count or logical_group_count)
+    media_stats = {
+        **raw_media_stats,
+        'movie_count': display_movie_count,
+        'series_count': display_series_count,
+        'season_count': display_season_count,
+        'video_count': video_count,
+    }
+    enriched_stats = {
+        **stats,
+        'display_movie_count': display_movie_count,
+        'display_series_count': display_series_count,
+        'display_season_count': display_season_count,
+        'video_count': video_count,
+        'media_stats': media_stats,
+    }
     snapshot = {
         'device_id': me.get('id'),
         'credit': int(me.get('credit') or 0),
         # Rapid v2 入库即共享后，普通缺口数量不再作为首页统计；首页展示主动“求共享”数量。
-        'wanted_gaps': int(stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0),
-        'share_requests': int(stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0),
-        'shared_sources': int(stats.get('movie_sources') or 0) + int(stats.get('episode_sources') or 0),
+        'wanted_gaps': int(
+            stats.get('share_requests')
+            if stats.get('share_requests') is not None
+            else (stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0)
+        ),
+        'share_requests': int(
+            stats.get('share_requests')
+            if stats.get('share_requests') is not None
+            else (stats.get('active_share_requests') if stats.get('active_share_requests') is not None else stats.get('active_gap_devices') or 0)
+        ),
+        'shared_sources': video_count,
         'raw_ffprobe': int(stats.get('raw_ffprobe') or 0),
-        'display_movie_count': int(stats.get('display_movie_count') or (stats.get('media_stats') or {}).get('movie_count') or stats.get('movie_sources') or 0),
-        'display_season_count': int(stats.get('display_season_count') or (stats.get('media_stats') or {}).get('season_count') or 0),
-        'video_count': int(stats.get('video_count') or (stats.get('media_stats') or {}).get('video_count') or stats.get('raw_ffprobe') or 0),
-        'media_stats': stats.get('media_stats') or {
-            'movie_count': int(stats.get('display_movie_count') or stats.get('movie_sources') or 0),
-            'season_count': int(stats.get('display_season_count') or 0),
-            'video_count': int(stats.get('video_count') or stats.get('raw_ffprobe') or 0),
-        },
+        'display_movie_count': display_movie_count,
+        'display_series_count': display_series_count,
+        'display_season_count': display_season_count,
+        'video_count': video_count,
+        'media_stats': media_stats,
         'pro_quota': (pro_report.get('pro_quota') or pro_report.get('quota') or stats.get('pro_quota') or me.get('pro_quota') or {}),
-        'remote_devices': int(stats.get('devices') or 0),
-        'raw_json': {'me': me, 'stats': stats},
+        'remote_devices': int(stats.get('online_devices') if stats.get('online_devices') is not None else stats.get('devices') or 0),
+        'raw_json': {
+            'me': me,
+            'stats': {
+                **enriched_stats,
+                'online_devices': int(stats.get('online_devices') if stats.get('online_devices') is not None else stats.get('devices') or 0),
+                'devices': int(stats.get('devices') or 0),
+            },
+        },
     }
     saved = shared_credit_db.upsert_credit_snapshot(snapshot)
     center_ledger_items = ledger.get('items') or []
@@ -201,6 +249,7 @@ def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 g.update({
                     'id': row.get('id'),
                     'source_ids': [],
+                    'center_source_ids': [],
                     'source_kind': 'episode_group',
                     'share_type': 'season_pack',
                     'item_type': 'Season',
@@ -224,6 +273,9 @@ def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             sid = row.get('id')
             if sid not in g['source_ids']:
                 g['source_ids'].append(sid)
+            center_source_id = str(row.get('center_source_id') or '').strip()
+            if center_source_id and center_source_id not in g['center_source_ids']:
+                g['center_source_ids'].append(center_source_id)
             ep_no = row.get('episode_number')
             if ep_no not in (None, ''):
                 g['episode_numbers'].append(_safe_int(ep_no, 0))
@@ -443,6 +495,51 @@ def _share_channel_is_logical(row: Dict[str, Any] | None = None, source_id: str 
     )
 
 
+def _share_channel_tmdb_season_key(row: Dict[str, Any]) -> tuple[str, int] | None:
+    """从本地逻辑季分享通道缓存里取 tmdb_id + season_number 兜底关联键。"""
+    row = row if isinstance(row, dict) else {}
+    raw = _share_channel_raw_json(row)
+    event = raw.get('event') if isinstance(raw.get('event'), dict) else {}
+    payload = raw.get('payload') if isinstance(raw.get('payload'), dict) else {}
+    tmdb_id = str(
+        row.get('tmdb_id')
+        or event.get('tmdb_id')
+        or payload.get('tmdb_id')
+        or raw.get('tmdb_id')
+        or ''
+    ).strip()
+    season = (
+        row.get('season_number')
+        if row.get('season_number') not in (None, '')
+        else event.get('season_number')
+        if event.get('season_number') not in (None, '')
+        else payload.get('season_number')
+        if payload.get('season_number') not in (None, '')
+        else raw.get('season_number')
+    )
+    season_no = _safe_int(season, -1)
+    if not tmdb_id or season_no < 0:
+        return None
+    return (tmdb_id, season_no)
+
+
+def _share_channel_hub_id(row: Dict[str, Any]) -> str:
+    row = row if isinstance(row, dict) else {}
+    raw = _share_channel_raw_json(row)
+    event = raw.get('event') if isinstance(raw.get('event'), dict) else {}
+    payload = raw.get('payload') if isinstance(raw.get('payload'), dict) else {}
+    center_item = raw.get('center_response') if isinstance(raw.get('center_response'), dict) else {}
+    center_item = center_item.get('item') if isinstance(center_item.get('item'), dict) else {}
+    return str(
+        row.get('hub_id')
+        or center_item.get('hub_id')
+        or event.get('hub_id')
+        or payload.get('hub_id')
+        or raw.get('hub_id')
+        or ''
+    ).strip()
+
+
 def _local_completed_share_public(channel: Dict[str, Any]) -> Dict[str, Any]:
     channel = dict(channel or {})
     if not channel:
@@ -465,9 +562,14 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
     rows = [r for r in (rows or []) if isinstance(r, dict)]
     local_ids = []
     center_ids = []
+    hub_ids = []
+    tmdb_ids = []
+    row_pairs = {}
     for row in rows:
         kind = str(row.get('source_kind') or '').strip().lower()
-        if not _share_channel_is_logical(row):
+        is_logical = _share_channel_is_logical(row)
+        source_ids = row.get('source_ids') if isinstance(row.get('source_ids'), list) else []
+        if not is_logical and not source_ids and kind not in {'episode_group', 'completed_season'}:
             continue
         try:
             rid = int(row.get('id') or 0)
@@ -475,10 +577,29 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
                 local_ids.append(rid)
         except Exception:
             pass
-        cid = str(row.get('center_source_id') or '').strip()
-        if cid and cid not in center_ids:
-            center_ids.append(cid)
-    if not local_ids and not center_ids:
+        for sid in source_ids:
+            try:
+                sid_int = int(sid or 0)
+            except Exception:
+                sid_int = 0
+            if sid_int > 0 and sid_int not in local_ids:
+                local_ids.append(sid_int)
+        center_candidates = [row.get('center_source_id')]
+        if isinstance(row.get('center_source_ids'), list):
+            center_candidates.extend(row.get('center_source_ids') or [])
+        for cid_value in center_candidates:
+            cid = str(cid_value or '').strip()
+            if cid and cid not in center_ids:
+                center_ids.append(cid)
+        hub_id = _share_channel_hub_id(row)
+        if hub_id and hub_id not in hub_ids:
+            hub_ids.append(hub_id)
+        pair = _share_channel_tmdb_season_key(row)
+        if pair:
+            row_pairs[id(row)] = pair
+            if pair[0] not in tmdb_ids:
+                tmdb_ids.append(pair[0])
+    if not local_ids and not center_ids and not hub_ids and not tmdb_ids:
         return
     try:
         with get_db_connection() as conn:
@@ -490,6 +611,20 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
                 if center_ids:
                     clauses.append('center_source_id = ANY(%s)')
                     args.append(center_ids)
+                if hub_ids:
+                    clauses.append('hub_id = ANY(%s)')
+                    args.append(hub_ids)
+                if tmdb_ids:
+                    clauses.append(
+                        """
+                        (
+                            raw_json->'event'->>'tmdb_id' = ANY(%s)
+                            OR raw_json->'payload'->>'tmdb_id' = ANY(%s)
+                            OR raw_json->>'tmdb_id' = ANY(%s)
+                        )
+                        """
+                    )
+                    args.extend([tmdb_ids, tmdb_ids, tmdb_ids])
                 cur.execute(
                     f"""
                     SELECT *
@@ -506,6 +641,8 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
         return
     by_local = {}
     by_center = {}
+    by_hub = {}
+    by_pair = {}
     for ch in channels:
         lid = ch.get('local_source_id')
         if lid not in (None, '') and int(lid) not in by_local:
@@ -513,14 +650,37 @@ def _attach_completed_share_channels_to_local_rows(rows: List[Dict[str, Any]]) -
         cid = str(ch.get('center_source_id') or '').strip()
         if cid and cid not in by_center:
             by_center[cid] = ch
+        hub_id = _share_channel_hub_id(ch)
+        if hub_id and hub_id not in by_hub:
+            by_hub[hub_id] = ch
+        pair = _share_channel_tmdb_season_key(ch)
+        if pair and pair not in by_pair:
+            by_pair[pair] = ch
     for row in rows:
         channel = None
         try:
             channel = by_local.get(int(row.get('id') or 0))
         except Exception:
             channel = None
+        if not channel and isinstance(row.get('source_ids'), list):
+            for sid in row.get('source_ids') or []:
+                try:
+                    channel = by_local.get(int(sid or 0))
+                except Exception:
+                    channel = None
+                if channel:
+                    break
         if not channel:
             channel = by_center.get(str(row.get('center_source_id') or '').strip())
+        if not channel and isinstance(row.get('center_source_ids'), list):
+            for cid in row.get('center_source_ids') or []:
+                channel = by_center.get(str(cid or '').strip())
+                if channel:
+                    break
+        if not channel:
+            channel = by_hub.get(_share_channel_hub_id(row))
+        if not channel:
+            channel = by_pair.get(row_pairs.get(id(row)) or _share_channel_tmdb_season_key(row))
         if not channel:
             row['has_share_channel'] = False
             row['share_channel_status'] = 'none'
@@ -651,7 +811,13 @@ def api_list_local_sources():
                 SELECT 
                     id, source_kind, item_type, tmdb_id, season_number, episode_number, 
                     status, center_status, center_source_id, created_at, updated_at, 
-                    file_count, title, file_name, source_provider
+                    file_count, title, file_name, source_provider,
+                    COALESCE(
+                        raw_json->'center_response'->'item'->>'hub_id',
+                        raw_json->'event'->>'hub_id',
+                        raw_json->'payload'->>'hub_id',
+                        raw_json->>'hub_id'
+                    ) AS hub_id
                 FROM shared_rapid_sources 
                 {where_sql} 
                 ORDER BY {order_sql} 
@@ -1014,8 +1180,7 @@ def api_delete_local_sources_batch():
 def api_search_shareable_media():
     keyword = request.args.get('keyword') or request.args.get('q') or ''
     limit = int(request.args.get('limit') or 100)
-    # 手动添加共享源的最小粒度是“电影 / 季”。
-    # 单集可作为连载季公共包下的子项登记，但不再出现在搜索候选里，避免用户选择单集后无法追踪整季。
+    # 客户端只登记视频资源；Season 候选只是本地批量登记入口，最终仍会拆成分集上传中心。
     rows = shared_share_db.search_shareable_media(keyword, search_limit=max(limit * 6, 200), result_limit=max(limit * 4, 100))
     items = []
     for row in rows or []:
@@ -1024,9 +1189,7 @@ def api_search_shareable_media():
         row = _apply_local_season_meta(row)
         item_type = str(row.get('share_item_type') or row.get('item_type') or '').strip().lower()
         share_type = str(row.get('share_type') or '').strip().lower()
-        if item_type in ('episode', 'episode_file') or share_type == 'episode_file' or row.get('episode_number') not in (None, '', 0):
-            continue
-        if item_type in ('movie', 'season', 'series') or share_type in ('movie_file', 'movie_folder', 'season_pack', 'series_pack'):
+        if item_type in ('movie', 'season', 'episode', 'series') or share_type in ('movie_file', 'movie_folder', 'season_pack', 'episode_file', 'series_pack'):
             items.append(row)
         if len(items) >= limit:
             break
@@ -1452,13 +1615,7 @@ def api_center_sources():
                 row['is_completed_certified'] = False
                 row['is_completed'] = False
                 row.pop('completed_certified_meta_json', None)
-            # 连载季公共包没有统一版本参数；完结季包/电影/展开后的集才展示。
-            if row.get('is_ongoing_hub') or row.get('source_kind') == 'season_hub':
-                row['version_summary'] = {}
-                row['summary_json'] = {}
-                row['media_signature_json'] = {}
-            else:
-                row['version_summary'] = _center_version_summary(row)
+            row['version_summary'] = _center_version_summary(row)
             if not row.get('size') and row.get('total_size'):
                 row['size'] = row.get('total_size')
             if local_season_meta_map:
@@ -1587,12 +1744,7 @@ def api_center_source_detail():
                 for key in ('versions', 'children', 'pack_items', 'resources'):
                     if isinstance(row.get(key), list):
                         row[key] = [_decorate_detail_row(x) for x in row.get(key) if isinstance(x, dict)]
-            if row.get('is_ongoing_hub') or row.get('source_kind') == 'season_hub':
-                row['version_summary'] = {}
-                row.setdefault('summary_json', {})
-                row.setdefault('media_signature_json', {})
-            else:
-                row['version_summary'] = _center_version_summary(row)
+            row['version_summary'] = _center_version_summary(row)
             if not row.get('size') and row.get('total_size'):
                 row['size'] = row.get('total_size')
             completed_certified = _center_source_is_completed_certified(row)
@@ -1891,14 +2043,22 @@ def _ledger_media_context(row: Dict[str, Any]) -> Dict[str, Any]:
     sha1 = _ledger_extract_sha1(row)
     raw = _ledger_json(row.get('raw_json'))
     center_ledger = raw.get('center_ledger') if isinstance(raw.get('center_ledger'), dict) else {}
+    media = raw.get('media') if isinstance(raw.get('media'), dict) else {}
+    source = raw.get('source') if isinstance(raw.get('source'), dict) else {}
+    shared_source = raw.get('shared_source') if isinstance(raw.get('shared_source'), dict) else {}
+    job = raw.get('job') if isinstance(raw.get('job'), dict) else {}
     out: Dict[str, Any] = {}
 
     # 贡献点明细的媒体名应优先来自中心 /credit/ledger 的 join 结果。
     # 本地库只做最后兜底，避免本地重组/重命名导致“标题 S03 S03E08”这种重复拼接。
-    for source in (center_ledger, row):
-        for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind', 'title', 'file_name', 'release_year', 'file_count'):
-            if source.get(key) not in (None, ''):
-                out[key] = source.get(key)
+    for source_obj in (center_ledger, row, media, source, shared_source, job):
+        for key in (
+            'tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind',
+            'title', 'file_name', 'release_year', 'file_count',
+            'series_title', 'series_original_title', 'series_release_year',
+        ):
+            if source_obj.get(key) not in (None, ''):
+                out[key] = source_obj.get(key)
 
     for key in ('title', 'file_name', 'name'):
         if out.get('title') in (None, '') and raw.get(key):
@@ -1906,7 +2066,16 @@ def _ledger_media_context(row: Dict[str, Any]) -> Dict[str, Any]:
 
     if out.get('title') in (None, '') and sha1:
         local = _ledger_local_media_by_sha1(sha1)
-        for key in ('tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind', 'title', 'file_name', 'release_year'):
+        for key in (
+            'tmdb_id', 'item_type', 'season_number', 'episode_number', 'source_kind',
+            'title', 'file_name', 'release_year',
+            'series_title', 'series_original_title', 'series_release_year',
+        ):
+            if out.get(key) in (None, '') and local.get(key) not in (None, ''):
+                out[key] = local.get(key)
+    elif sha1:
+        local = _ledger_local_media_by_sha1(sha1)
+        for key in ('series_title', 'series_original_title', 'series_release_year'):
             if out.get(key) in (None, '') and local.get(key) not in (None, ''):
                 out[key] = local.get(key)
 

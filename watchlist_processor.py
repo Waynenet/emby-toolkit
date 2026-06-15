@@ -209,7 +209,13 @@ class WatchlistProcessor:
             logger.error(f"自动添加剧集 '{item_name}' 时出错: {e}")
 
     # --- 核心任务启动器  ---
-    def run_regular_processing_task_concurrent(self, progress_callback: callable, tmdb_id: Optional[str] = None, new_episode_ids: Optional[List[str]] = None):
+    def run_regular_processing_task_concurrent(
+        self,
+        progress_callback: callable,
+        tmdb_id: Optional[str] = None,
+        new_episode_ids: Optional[List[str]] = None,
+        skip_logical_share_dispatch: bool = False,
+    ):
         """核心任务启动器，只处理活跃剧集。"""
         self.progress_callback = progress_callback
         task_name = "并发追剧更新"
@@ -286,6 +292,7 @@ class WatchlistProcessor:
                             series,
                             allow_airing_episode_share=bool(tmdb_id and precise_new_episode_ids),
                             airing_episode_emby_ids=precise_new_episode_ids,
+                            skip_logical_share_dispatch=skip_logical_share_dispatch,
                         )
                         return "处理成功"
                     except Exception as e:
@@ -638,7 +645,13 @@ class WatchlistProcessor:
             return int(text[:4])
         return None
 
-    def _post_shared_center_display_metadata(self, items: List[Dict[str, Any]], *, reason: str = 'watchlist_series_metadata') -> Dict[str, Any]:
+    def _post_shared_center_display_metadata(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        reason: str = 'watchlist_series_metadata',
+        skip_logical_share_dispatch: bool = False,
+    ) -> Dict[str, Any]:
         """向中心端补传公共剧元数据/季总集数。
 
         这是 watchlist_processor 专用的 metadata-only 通道：不创建 source，
@@ -674,10 +687,12 @@ class WatchlistProcessor:
                 pass
 
             payload = {
+                'skip_logical_share_dispatch': bool(skip_logical_share_dispatch),
                 'items': [{
                     'display_meta_items_json': clean_items,
                     'display_meta_json': clean_items[-1] if clean_items else {},
                     '_reason': reason,
+                    'skip_logical_share_dispatch': bool(skip_logical_share_dispatch),
                 }]
             }
             resp = requests.post(
@@ -706,6 +721,7 @@ class WatchlistProcessor:
         item_name: str,
         latest_series_data: Dict[str, Any],
         final_status: str,
+        episodes: List[Dict[str, Any]] = None,
         seasons_lock_map: Dict[Any, Any] = None,
         latest_season_num: int = 0,
         auto_pending_cfg: Dict[str, Any] = None,
@@ -809,6 +825,23 @@ class WatchlistProcessor:
                 'watchlist_tmdb_status': series.get('status') or '',
                 'metadata_source': 'watchlist_processor',
             })
+        for ep in episodes or []:
+            if not isinstance(ep, dict):
+                continue
+            s_num = self._watchlist_safe_int(ep.get('season_number'), -1)
+            e_num = self._watchlist_safe_int(ep.get('episode_number'), -1)
+            runtime = self._normalize_tmdb_runtime_minutes(ep.get('runtime'))
+            if s_num <= 0 or e_num <= 0 or runtime is None:
+                continue
+            items.append({
+                'tmdb_id': tmdb_id,
+                'item_type': 'Episode',
+                'season_number': s_num,
+                'episode_number': e_num,
+                'runtime_minutes': runtime,
+                'runtime_source': 'tmdb_episode_runtime',
+                'metadata_source': 'watchlist_processor',
+            })
         return items
 
     def _upload_shared_series_metadata_after_watchlist_decision_detached(
@@ -818,9 +851,11 @@ class WatchlistProcessor:
         item_name: str,
         latest_series_data: Dict[str, Any],
         final_status: str,
+        episodes: List[Dict[str, Any]] = None,
         seasons_lock_map: Dict[Any, Any] = None,
         latest_season_num: int = 0,
         auto_pending_cfg: Dict[str, Any] = None,
+        skip_logical_share_dispatch: bool = False,
     ) -> None:
         """追更判定完成后补传中心剧元数据和可信季总集数。"""
         if not _shared_resource_auto_share_enabled():
@@ -833,6 +868,7 @@ class WatchlistProcessor:
             tmdb_id=parent_tmdb_id,
             item_name=item_name,
             latest_series_data=latest_series_data,
+            episodes=episodes or [],
             final_status=final_status,
             seasons_lock_map=seasons_lock_map or {},
             latest_season_num=latest_season_num,
@@ -860,6 +896,7 @@ class WatchlistProcessor:
             season_result = self._post_shared_center_display_metadata(
                 items,
                 reason='watchlist_series_metadata_with_episode_total',
+                skip_logical_share_dispatch=skip_logical_share_dispatch,
             )
             logger.info(
                 "  ➜ [共享资源] 追剧判定后已补传中心剧元数据：%s，items=%s，display_ok=%s，season_total_ok=%s",
@@ -2059,7 +2096,13 @@ class WatchlistProcessor:
             return None
     
     # ★★★ 核心处理逻辑：单个剧集的所有操作在此完成 ★★★
-    def _process_one_series(self, series_data: Dict[str, Any], allow_airing_episode_share: bool = False, airing_episode_emby_ids: Optional[List[str]] = None):
+    def _process_one_series(
+        self,
+        series_data: Dict[str, Any],
+        allow_airing_episode_share: bool = False,
+        airing_episode_emby_ids: Optional[List[str]] = None,
+        skip_logical_share_dispatch: bool = False,
+    ):
         tmdb_id = series_data.get('tmdb_id')
         if not tmdb_id:
             logger.warning(f"  ➜ 追剧记录缺少 tmdb_id，跳过。数据: {series_data}")
@@ -2599,10 +2642,12 @@ class WatchlistProcessor:
             tmdb_id=tmdb_id,
             item_name=item_name,
             latest_series_data=latest_series_data,
+            episodes=all_tmdb_episodes,
             final_status=final_status,
             seasons_lock_map=seasons_lock_map,
             latest_season_num=latest_s_num,
             auto_pending_cfg=auto_pending_cfg,
+            skip_logical_share_dispatch=skip_logical_share_dispatch,
         )
 
         # ======================================================================
@@ -2791,7 +2836,11 @@ class WatchlistProcessor:
                 progress = 10 + int(((i + 1) / total) * 90)
                 self.progress_callback(progress, f"正在处理: {series['item_name'][:20]}... ({i+1}/{total})")
 
-            self._process_one_series(series, allow_airing_episode_share=False)
+            self._process_one_series(
+                series,
+                allow_airing_episode_share=False,
+                skip_logical_share_dispatch=not bool(item_id),
+            )
             time.sleep(1)
 
         logger.info("--- 追剧列表更新任务结束 ---")
