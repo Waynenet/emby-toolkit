@@ -1752,25 +1752,7 @@ class MediaProcessor:
             douban_id_override=douban_id, 
             mtype=douban_type
         )
-        
-        # ★★★ 修复点 1：不能只拿 cast(演员)！TMDb 传进来的有导演和编剧，必须把豆瓣的幕后也合并进来，否则匹配不到！
         douban_cast_raw = cast_data.get("cast", [])
-        for crew_key in ["directors", "writers", "creators"]:
-            if crew_key in cast_data and isinstance(cast_data[crew_key], list):
-                douban_cast_raw.extend(cast_data[crew_key])
-                
-        # 简单去重 (防止豆瓣接口返回身兼数职的重复人员)
-        seen_douban_ids = set()
-        unique_douban_cast = []
-        for d in douban_cast_raw:
-            did = d.get("id") or d.get("DoubanCelebrityId") or d.get("name") # 没 ID 的按名字去重
-            if did:
-                if did not in seen_douban_ids:
-                    unique_douban_cast.append(d)
-                    seen_douban_ids.add(did)
-            else:
-                unique_douban_cast.append(d)
-        douban_cast_raw = unique_douban_cast
 
         # =================================================================
         # 优先级 4: 将 API 成功获取的数据写入 PostgreSQL 缓存 (不污染本地神医目录)
@@ -2522,7 +2504,7 @@ class MediaProcessor:
                     if len(p1) == 2 and len(p2) == 2:
                         if p1[0] == p2[1] and p1[1] == p2[0]: return True
 
-                    # ★★★ 修复点 2：终极拼音兜底匹配 (解决豆瓣缺失英文名，只有中文名的情况) ★★★
+                    # ★★★ 终极拼音兜底匹配 (解决豆瓣缺失英文名，只有中文名的情况) ★★★
                     try:
                         import pypinyin
                         def _check_pinyin(zh_name, en_name_clean):
