@@ -182,6 +182,91 @@ def _norm_preid(value: str) -> str:
     return _norm_sha1(value)
 
 
+def _json_object(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _row_has_adult_rating(row: Dict[str, Any]) -> bool:
+    row = dict(row or {})
+    if str(row.get('custom_rating') or '').strip().upper() == 'XXX':
+        return True
+    ratings = _json_object(row.get('official_rating_json'))
+    return str(ratings.get('US') or ratings.get('us') or '').strip().upper() == 'XXX'
+
+
+def _adult_rating_block_reason(candidate: Dict[str, Any]) -> str:
+    candidate = dict(candidate or {})
+    for row in (candidate, _json_object(candidate.get('raw_json'))):
+        if _row_has_adult_rating(row):
+            title = row.get('title') or candidate.get('title') or row.get('tmdb_id') or candidate.get('tmdb_id') or ''
+            return f'adult rating XXX: {title}'.strip()
+
+    item_type = str(candidate.get('item_type') or '').strip()
+    season = _safe_int_or_none(candidate.get('season_number'))
+    episode = _safe_int_or_none(candidate.get('episode_number'))
+    parent_tmdb_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
+    movie_tmdb_id = str(candidate.get('tmdb_id') or '').strip()
+    if item_type not in ('Movie', 'Season', 'Episode'):
+        return ''
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT title, tmdb_id
+                    FROM media_metadata
+                    WHERE (
+                            (%s='Movie' AND item_type='Movie' AND tmdb_id=%s)
+                         OR (%s<>'Movie' AND (
+                                (item_type='Series' AND tmdb_id=%s)
+                             OR (item_type IN ('Season','Episode')
+                                 AND COALESCE(NULLIF(parent_series_tmdb_id, ''), tmdb_id)=%s
+                                 AND (%s IS NULL OR season_number=%s)
+                                 AND (%s IS NULL OR item_type<>'Episode' OR episode_number=%s))
+                            ))
+                    )
+                      AND (
+                            UPPER(COALESCE(NULLIF(custom_rating, ''), ''))='XXX'
+                         OR UPPER(COALESCE(official_rating_json->>'US', official_rating_json->>'us', ''))='XXX'
+                      )
+                    LIMIT 1
+                    """,
+                    (item_type, movie_tmdb_id, item_type, parent_tmdb_id, parent_tmdb_id, season, season, episode, episode),
+                )
+                row = dict(cur.fetchone() or {})
+                if row:
+                    title = row.get('title') or candidate.get('title') or row.get('tmdb_id') or parent_tmdb_id or movie_tmdb_id
+                    return f'adult rating XXX: {title}'.strip()
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 成人分级登记前检查失败，按非成人继续: {candidate.get('title') or candidate.get('tmdb_id')} -> {e}")
+    return ''
+
+
+def _adult_block_result(candidate: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    title = (candidate or {}).get('title') or (candidate or {}).get('tmdb_id') or 'unknown'
+    return {
+        'ok': False,
+        'message': f'成人资源不参与共享登记：{title}',
+        'adult_blocked': True,
+        'reason': reason,
+        'registered_count': 0,
+        'raw_uploaded_count': 0,
+        'raw_ready_count': 0,
+        'raw_skipped_existing': 0,
+        'errors': [],
+        'fingerprint_repair': {},
+    }
+
+
 def _rapid_size_to_int(value, default=0) -> int:
     """把 size / file_size / 27.9 GB 这类值统一转成字节数。"""
     try:
@@ -683,7 +768,7 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
     """
     text = json.dumps(resp if isinstance(resp, dict) else {'value': str(resp)}, ensure_ascii=False, default=str).lower()
     message = _p115_error(resp)
-    if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '禁止分享', '封禁', 'risk', 'violation', 'forbidden')):
+    if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
         return {'status': 'review_failed', 'review_status': 'failed', 'message': message or '115 分享审核失败/违规', 'explicit': True}
     if any(x in text for x in ('审核中', '待审核', '处理中', '正在处理', 'reviewing', 'pending_review', 'pending review', 'processing')):
         return {'status': 'pending_review', 'review_status': 'pending', 'message': message or '115 分享审核中/处理中', 'explicit': True}
@@ -696,6 +781,23 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
     if _p115_ok(resp):
         return {'status': 'pending_review', 'review_status': 'pending', 'message': '115 分享已创建，等待 115 审核', 'explicit': False}
     return {'status': 'failed', 'review_status': 'unknown', 'message': message or '115 分享状态未知', 'explicit': False}
+
+
+def _logical_share_provider_forbidden_status(value: Any) -> Dict[str, Any]:
+    text = json.dumps(value if isinstance(value, (dict, list)) else {'value': str(value)}, ensure_ascii=False, default=str).lower()
+    if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
+        return {
+            'status': 'review_failed',
+            'review_status': 'failed',
+            'message': _p115_error(value) or '115 判定该账号不可分享此资源',
+            'share_forbidden_by_provider': True,
+        }
+    return {
+        'status': 'failed',
+        'review_status': 'failed',
+        'message': _p115_error(value) or '115 分享创建失败',
+        'share_forbidden_by_provider': False,
+    }
 
 
 def _completed_share_list_items(resp: Any) -> List[Dict[str, Any]]:
@@ -1311,9 +1413,14 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：{title}，items={len(share_ids)}，channel={channel_id}")
         create_resp = p115.share_create(share_ids, share_duration=-1, receive_code=receive_code)
     except Exception as e:
-        message = f'创建逻辑季 115 分享异常：{e}'
-        report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status='failed', message=message,
-                                               raw_json={'exception': str(e), 'share_ids': share_ids}, event_id=event_id, payload=payload)
+        failure_status = _logical_share_provider_forbidden_status(str(e))
+        message = f"创建逻辑季 115 分享异常：{failure_status['message']}"
+        report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status=failure_status['status'], message=message,
+                                               raw_json={
+                                                   'exception': str(e),
+                                                   'share_ids': share_ids,
+                                                   'share_forbidden_by_provider': failure_status['share_forbidden_by_provider'],
+                                               }, event_id=event_id, payload=payload)
         if ack and event_id:
             client.ack_device_events([event_id], result='ok', message=message[:500])
         return {'ok': False, 'event_id': event_id, 'message': message, 'report': report}
@@ -1340,9 +1447,14 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
             })
     recovered_from_share_list = bool((share_payload.get('raw_json') or {}).get('recovered_from_share_list')) if isinstance(share_payload.get('raw_json'), dict) else False
     if (not _p115_ok(create_resp) and not recovered_from_share_list) or not share_payload.get('share_code'):
-        message = f"创建逻辑季 115 分享失败：{_p115_error(create_resp)}"
-        report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status='failed', message=message,
-                                               raw_json={'create_response': create_resp, 'share_ids': share_ids}, event_id=event_id, payload=payload)
+        failure_status = _logical_share_provider_forbidden_status(create_resp)
+        message = f"创建逻辑季 115 分享失败：{failure_status['message']}"
+        report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status=failure_status['status'], message=message,
+                                               raw_json={
+                                                   'create_response': create_resp,
+                                                   'share_ids': share_ids,
+                                                   'share_forbidden_by_provider': failure_status['share_forbidden_by_provider'],
+                                               }, event_id=event_id, payload=payload)
         if ack and event_id:
             client.ack_device_events([event_id], result='ok', message=message[:500])
         return {'ok': False, 'event_id': event_id, 'message': message, 'report': report, 'create_response': create_resp}
@@ -1375,6 +1487,7 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
             'share_ids': share_ids,
             'create_response': create_resp,
             'share_info_response': info_resp,
+            'share_forbidden_by_provider': status_info.get('status') == 'review_failed',
         },
     }
     try:
@@ -4299,7 +4412,7 @@ def _local_display_meta_rows_for_candidate(candidate: Dict[str, Any]) -> Dict[st
     tmdb_id = str(candidate.get('tmdb_id') or '').strip()
     series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or tmdb_id).strip()
     season_no = _safe_int_or_none(candidate.get('season_number'))
-    out = {'movie': {}, 'season': {}, 'series': {}}
+    out = {'movie': {}, 'season': {}, 'series': {}, 'episode': {}}
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -4319,6 +4432,22 @@ def _local_display_meta_rows_for_candidate(candidate: Dict[str, Any]) -> Dict[st
                     return out
 
                 if item_type in ('Season', 'Episode') and series_id:
+                    if item_type == 'Episode' and season_no is not None and _safe_int_or_none(candidate.get('episode_number')) is not None:
+                        cur.execute(
+                            """
+                            SELECT * FROM media_metadata
+                            WHERE item_type='Episode'
+                              AND parent_series_tmdb_id=%s
+                              AND season_number=%s
+                              AND episode_number=%s
+                            ORDER BY last_updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (series_id, season_no, _safe_int_or_none(candidate.get('episode_number'))),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            out['episode'] = dict(row)
                     if season_no is not None:
                         cur.execute(
                             """
@@ -4358,13 +4487,11 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
     口径：
     - Movie：创建/补充 Movie 壳，演职员挂 Movie 壳。
     - Season：仅兼容旧完结季源/手动季源登记。
-    - Episode：不上传公共展示元数据；剧元数据和可信总集数由 watchlist_processor 在追更判定后单独补传。
+    - Episode：只补 TMDb 官方集时长 runtime_minutes，不上传标题/海报/简介。
     - 中心端负责按“缺失才补、中文优先”合并，不让某个客户端拥有壳的所有权。
     """
     candidate = candidate if isinstance(candidate, dict) else {}
     item_type = str(candidate.get('item_type') or '').strip()
-    if item_type == 'Episode':
-        return {}
     rows = _local_display_meta_rows_for_candidate(candidate)
 
     def compact(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -4426,6 +4553,52 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
         bundle.update(_build_display_credits_bundle(movie_row) if movie_row else {'people_json': [], 'credits_json': []})
         return bundle
 
+    if item_type == 'Episode':
+        series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
+        season_no = _safe_int_or_none(candidate.get('season_number'))
+        episode_no = _safe_int_or_none(candidate.get('episode_number'))
+        episode_row = rows.get('episode') or {}
+        runtime = _safe_int_or_none(episode_row.get('runtime_minutes'))
+        if not series_id or season_no is None:
+            return {}
+        season_row = rows.get('season') or {}
+        series_row = rows.get('series') or {}
+        series_meta = meta_from_row(
+            tmdb_id=series_id,
+            item_type='Series',
+            season_number=None,
+            row=series_row,
+            fallback_title=candidate.get('title'),
+            fallback_year=candidate.get('release_year'),
+            include_series_fields=True,
+        ) if (series_row or series_id) else {}
+        season_meta = meta_from_row(
+            tmdb_id=series_id,
+            item_type='Season',
+            season_number=season_no,
+            row=season_row,
+            fallback_title=(season_row or {}).get('title') or candidate.get('title'),
+            fallback_year=(season_row or {}).get('release_year') or candidate.get('release_year'),
+            include_series_fields=False,
+        )
+        episode_meta = {}
+        if episode_no is not None and runtime is not None:
+            episode_meta = {
+                'tmdb_id': series_id,
+                'item_type': 'Episode',
+                'season_number': season_no,
+                'episode_number': episode_no,
+                'runtime_minutes': runtime,
+            }
+        items = [x for x in (series_meta, season_meta, episode_meta) if x]
+        bundle = {
+            'display_meta_json': season_meta or series_meta or episode_meta,
+            'display_meta_items_json': items,
+        }
+        # 演职员始终只从 Series 条目取，避免季/集演员污染整剧壳。
+        bundle.update(_build_display_credits_bundle(series_row) if series_row else {'people_json': [], 'credits_json': []})
+        return bundle
+
     series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
     season_no = _safe_int_or_none(candidate.get('season_number'))
     if not series_id:
@@ -4481,6 +4654,11 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
     item_type = str(candidate.get('item_type') or '').strip()
     effective_provider = 'rapid_logical_season' if str(source_provider or '').strip().lower() == 'rapid_completed_season' else source_provider
 
+    adult_reason = _adult_rating_block_reason(candidate)
+    if adult_reason:
+        logger.warning(f"  ➜ [共享资源] 跳过成人资源登记: {candidate.get('title') or candidate.get('tmdb_id') or 'unknown'}，reason={adult_reason}")
+        return _adult_block_result(candidate, adult_reason)
+
     files = shared_share_db.collect_files_for_candidate(candidate)
     if not files:
         return {
@@ -4522,7 +4700,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             'fingerprint_repair': {},
         }
 
-    display_meta_bundle = _center_display_meta_bundle_for_candidate(candidate) if item_type in ('Movie', 'Season') else {}
+    display_meta_bundle = _center_display_meta_bundle_for_candidate(candidate) if item_type in ('Movie', 'Season', 'Episode') else {}
     results = []
     tmdb_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
     if item_type == 'Movie':
@@ -4653,6 +4831,8 @@ def _library_register_candidate_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str,
         'watching_status': kwargs.get('watching_status') or db_row.get('watching_status'),
         'total_episodes': kwargs.get('total_episodes') or db_row.get('total_episodes'),
         'expected_episode_count': kwargs.get('expected_episode_count') or db_row.get('total_episodes'),
+        'official_rating_json': kwargs.get('official_rating_json') or db_row.get('official_rating_json'),
+        'custom_rating': kwargs.get('custom_rating') or db_row.get('custom_rating'),
     }
     if candidate.get('item_type') == 'Episode' and db_row.get('tmdb_id'):
         candidate['tmdb_id'] = db_row.get('tmdb_id')
@@ -4672,6 +4852,14 @@ def trigger_shared_rapid_register_batch_for_library_items(processor=None, regist
     for raw_item in items:
         candidate = _library_register_candidate_from_kwargs(raw_item)
         candidate = _normalize_series_candidate_identity(dict(candidate or {}))
+        adult_reason = _adult_rating_block_reason(candidate)
+        if adult_reason:
+            prepared.append({
+                'item': raw_item,
+                'candidate': candidate,
+                'blocked_result': _adult_block_result(candidate, adult_reason),
+            })
+            continue
         files = shared_share_db.collect_files_for_candidate(candidate)
         files = _prime_candidate_files_for_registration(candidate, files)
         prepared.append({'item': raw_item, 'candidate': candidate, 'has_files': bool(files)})
@@ -4692,6 +4880,15 @@ def trigger_shared_rapid_register_batch_for_library_items(processor=None, regist
     failed_total = 0
     results = []
     for entry in prepared:
+        if entry.get('blocked_result'):
+            result = entry['blocked_result']
+            failed_total += 1
+            results.append({
+                'item': entry['item'],
+                'candidate': entry['candidate'],
+                'result': result,
+            })
+            continue
         try:
             result = register_candidate_to_center(
                 entry['candidate'],
@@ -5909,12 +6106,21 @@ def _display_meta_key(meta: Dict[str, Any]) -> tuple:
     meta = meta if isinstance(meta, dict) else {}
     typ = str(meta.get('item_type') or '').strip()
     tmdb = str(meta.get('tmdb_id') or '').strip()
+    if typ == 'Episode':
+        return (
+            tmdb,
+            typ,
+            _safe_int_or_none(meta.get('season_number')),
+            _safe_int_or_none(meta.get('episode_number')),
+        )
     season = _safe_int_or_none(meta.get('season_number')) if typ == 'Season' else None
-    return (tmdb, typ, season)
+    return (tmdb, typ, season, None)
 
 
 def _display_meta_has_useful_payload(meta: Dict[str, Any]) -> bool:
     meta = meta if isinstance(meta, dict) else {}
+    if str(meta.get('item_type') or '').strip() == 'Episode':
+        return meta.get('runtime_minutes') not in (None, '', [], {})
     for key in (
         'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
         'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
@@ -5963,21 +6169,24 @@ def _list_display_meta_backfill_source_rows(limit: int = 500) -> List[Dict[str, 
     for item in fetched.get('items') or []:
         item_type = str(item.get('item_type') or '').strip()
         tmdb_id = str(item.get('tmdb_id') or '').strip()
-        if item_type not in ('Movie', 'Season') or not tmdb_id:
+        if item_type not in ('Movie', 'Season', 'Episode') or not tmdb_id:
             continue
-        season_no = _safe_int_or_none(item.get('season_number')) if item_type == 'Season' else None
-        if item_type == 'Season' and season_no is None:
+        season_no = _safe_int_or_none(item.get('season_number')) if item_type in ('Season', 'Episode') else None
+        episode_no = _safe_int_or_none(item.get('episode_number')) if item_type == 'Episode' else None
+        if item_type in ('Season', 'Episode') and season_no is None:
+            continue
+        if item_type == 'Episode' and episode_no is None:
             continue
         rows.append({
-            'id': item.get('media_key') or f"center-missing:{item_type}:{tmdb_id}:{season_no or ''}",
-            'source_kind': 'movie' if item_type == 'Movie' else 'season_hub',
+            'id': item.get('media_key') or f"center-missing:{item_type}:{tmdb_id}:{season_no or ''}:{episode_no or ''}",
+            'source_kind': 'movie' if item_type == 'Movie' else ('episode' if item_type == 'Episode' else 'season_hub'),
             'center_source_id': '',
             'tmdb_id': tmdb_id,
-            'parent_series_tmdb_id': tmdb_id if item_type == 'Season' else '',
-            'series_tmdb_id': tmdb_id if item_type == 'Season' else '',
+            'parent_series_tmdb_id': tmdb_id if item_type in ('Season', 'Episode') else '',
+            'series_tmdb_id': tmdb_id if item_type in ('Season', 'Episode') else '',
             'item_type': item_type,
             'season_number': season_no,
-            'episode_number': None,
+            'episode_number': episode_no,
             'title': item.get('title') or item.get('fallback_title') or '',
             'release_year': item.get('release_year'),
             'missing_fields': item.get('missing_fields') or [],
@@ -6003,6 +6212,7 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
     movie = rows.get('movie') or {}
     series = rows.get('series') or {}
     season = rows.get('season') or {}
+    episode = rows.get('episode') or {}
 
     if missing:
         if item_type == 'Movie':
@@ -6016,6 +6226,11 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
                     'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
                     'actors_json', 'directors_json',
                 )),
+            }
+        elif item_type == 'Episode':
+            checks = {
+                'episode_runtime': has_any(episode, ('runtime_minutes',)),
+                'runtime_minutes': has_any(episode, ('runtime_minutes',)),
             }
         else:
             checks = {
@@ -6041,11 +6256,11 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
             }
         return any(checks.get(field, False) for field in missing)
 
-    candidates = [movie] if item_type == 'Movie' else [series, season]
+    candidates = [movie] if item_type == 'Movie' else ([episode] if item_type == 'Episode' else [series, season])
     useful_keys = (
         'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
         'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
-        'actors_json', 'directors_json',
+        'actors_json', 'directors_json', 'runtime_minutes',
     )
     return any(has_any(row, useful_keys) for row in candidates)
 
@@ -6085,7 +6300,7 @@ def _build_display_meta_backfill_bundles(limit: int = 500) -> Dict[str, Any]:
             if not isinstance(meta, dict):
                 continue
             key = _display_meta_key(meta)
-            if not key[0] or key[1] not in ('Movie', 'Series', 'Season'):
+            if not key[0] or key[1] not in ('Movie', 'Series', 'Season', 'Episode'):
                 continue
             scanned_meta_items += 1
             if key in seen_meta_keys:
@@ -6137,7 +6352,7 @@ def _post_center_display_meta_backfill(bundles: List[Dict[str, Any]], *, batch_s
             resp = requests.post(
                 url,
                 headers=headers,
-                json={'items': batch},
+                json={'items': batch, 'skip_logical_share_dispatch': True},
                 **_center_request_kwargs_for_display_meta(timeout=90),
             )
             posted_batches += 1
