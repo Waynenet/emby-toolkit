@@ -524,7 +524,7 @@ def _ensure_file_preid(file_info: Dict[str, Any]) -> str:
         if chunk:
             preid = hashlib.sha1(chunk).hexdigest().upper()
             _save_preid_to_p115_cache(file_info, preid)
-            logger.info(f"  ➜ [共享资源] 已计算并缓存 preid: {file_info.get('file_name') or file_info.get('name') or file_info.get('sha1')} -> {preid[:12]}...")
+            logger.info(f"  ➜ [共享资源] 已缓存秒传校验片段：{file_info.get('file_name') or file_info.get('name') or file_info.get('sha1')}")
     if preid:
         file_info['preid'] = preid
         meta = file_info.get('rapid_meta_json') if isinstance(file_info.get('rapid_meta_json'), dict) else {}
@@ -646,6 +646,8 @@ COMPLETED_SEASON_SHARE_CREATE_EVENT_TYPE = 'create_completed_season_share'
 LOGICAL_SEASON_SHARE_CREATE_EVENT_TYPE = 'create_logical_season_filelist_share'
 PRO_QUOTA_AUTH_EVENT_TYPE = 'pro_quota_auth_check'
 _COMPLETED_SHARE_SYNC_LOCK = threading.Lock()
+_COMPLETED_SHARE_DELETE_RETRY_SECONDS = 300
+_COMPLETED_SHARE_DELETE_ATTEMPTS: Dict[str, float] = {}
 
 
 def _completed_share_event_type(event: Dict[str, Any]) -> str:
@@ -730,6 +732,231 @@ def _delete_completed_share_from_115(p115, share_code: str) -> Dict[str, Any]:
 
     cancel_ok = any(_completed_share_delete_ok(a.get('response')) for a in attempts if a.get('method') == 'share_cancel')
     return {'state': bool(cancel_ok), 'deleted': False, 'cancelled_only': bool(cancel_ok), 'attempts': attempts}
+
+
+def _delete_completed_share_channels_for_source(row: Dict[str, Any], reason: str, *, client: SharedCenterClient = None) -> Dict[str, Any]:
+    row = dict(row or {})
+    local_id = int(row.get('id') or 0)
+    center_source_id = str(row.get('center_source_id') or '').strip()
+    channels = shared_share_db.list_completed_season_share_channels_by_source(
+        local_source_id=local_id,
+        center_source_id=center_source_id,
+    )
+    if not channels:
+        return {'ok': True, 'checked': 0, 'deleted_115': 0, 'deleted_local': 0, 'kept_audit': 0, 'items': []}
+
+    p115 = None
+    deleted_115 = 0
+    deleted_local = 0
+    kept_audit = 0
+    failed = 0
+    items = []
+    for channel in channels:
+        channel_id = str(channel.get('channel_id') or '').strip()
+        share_code = str(channel.get('share_code') or '').strip()
+        item = {
+            'channel_id': channel_id,
+            'center_source_id': channel.get('center_source_id'),
+            'share_code': share_code,
+        }
+        if not channel_id:
+            continue
+        if not share_code:
+            if _keep_missing_share_code_channel(channel):
+                kept_audit += 1
+                item.update({'ok': True, 'kept_audit': True, 'reason': 'missing_share_code_audit'})
+                items.append(item)
+                continue
+            deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
+            deleted_local += 1 if deleted else 0
+            item.update({'ok': True, 'deleted_local_channel': bool(deleted), 'reason': 'missing_share_code_no_115_share'})
+            items.append(item)
+            continue
+
+        if p115 is None:
+            try:
+                from handler.p115_service import P115Service
+                p115 = P115Service.get_client()
+            except Exception as e:
+                p115 = None
+                item.update({'ok': False, 'error': f'115 客户端初始化失败: {e}'})
+                items.append(item)
+                failed += 1
+                continue
+        if not p115:
+            item.update({'ok': False, 'error': '115 客户端未初始化，无法删除旧版分享'})
+            items.append(item)
+            failed += 1
+            continue
+
+        now_ts = time.time()
+        last_attempt = float(_COMPLETED_SHARE_DELETE_ATTEMPTS.get(share_code) or 0)
+        if last_attempt and now_ts - last_attempt < _COMPLETED_SHARE_DELETE_RETRY_SECONDS:
+            wait_seconds = int(_COMPLETED_SHARE_DELETE_RETRY_SECONDS - (now_ts - last_attempt))
+            item.update({'ok': False, 'error': f'115 分享删除刚失败过，{wait_seconds}s 后再重试', 'retry_after': wait_seconds})
+            items.append(item)
+            failed += 1
+            continue
+
+        delete_resp = _delete_completed_share_from_115(p115, share_code)
+        item['share_delete_response'] = delete_resp
+        if delete_resp.get('state') is False:
+            _COMPLETED_SHARE_DELETE_ATTEMPTS[share_code] = now_ts
+            msg = f'删除旧版共享源前删除 115 分享失败: {delete_resp}'
+            try:
+                shared_share_db.update_completed_season_share_channel(
+                    channel_id,
+                    status_message=msg[:1000],
+                    raw_json={'share_delete_response': delete_resp, 'cleanup_reason': reason},
+                    last_checked_at='NOW()',
+                )
+            except Exception:
+                pass
+            item.update({'ok': False, 'error': msg})
+            items.append(item)
+            failed += 1
+            continue
+
+        _COMPLETED_SHARE_DELETE_ATTEMPTS.pop(share_code, None)
+        deleted_115 += 1 if delete_resp.get('deleted') or delete_resp.get('cancelled_only') or delete_resp.get('skipped') else 0
+        center_resp = {}
+        try:
+            client = client or SharedCenterClient()
+            center_resp = _update_center_share_channel_status(client, channel, channel_id, {
+                'status': 'disabled',
+                'review_status': 'disabled',
+                'status_message': reason,
+                'raw_json': {'share_delete_response': delete_resp, 'cleanup_reason': reason},
+            })
+        except Exception as e:
+            center_resp = {'ok': False, 'error': str(e)}
+        if isinstance(center_resp, dict) and center_resp.get('ok') is False:
+            item.update({'ok': False, 'error': f'中心分享通道状态同步失败: {center_resp}', 'center': center_resp})
+            items.append(item)
+            failed += 1
+            continue
+
+        deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
+        deleted_local += 1 if deleted else 0
+        item.update({'ok': True, 'deleted_115_share': True, 'deleted_local_channel': bool(deleted), 'center': center_resp})
+        items.append(item)
+
+    return {
+        'ok': failed == 0,
+        'checked': len(channels),
+        'deleted_115': deleted_115,
+        'deleted_local': deleted_local,
+        'kept_audit': kept_audit,
+        'failed': failed,
+        'items': items,
+    }
+
+
+def _delete_logical_share_channels_for_fids(fid_list: List[str], reason: str, *, client: SharedCenterClient = None) -> Dict[str, Any]:
+    fid_set = {str(x).strip() for x in (fid_list or []) if str(x).strip()}
+    if not fid_set:
+        return {'ok': True, 'checked': 0, 'deleted_115': 0, 'deleted_local': 0, 'failed': 0, 'items': []}
+    statuses = ['valid', 'pending_review', 'creating']
+    channels = shared_share_db.list_completed_season_share_channels(statuses=statuses, limit=1000, need_check=False)
+    matched = []
+    for channel in channels or []:
+        if not _share_channel_is_logical(channel):
+            continue
+        share_ids = _logical_share_row_file_ids(channel)
+        hit_fids = sorted(fid_set.intersection({str(x).strip() for x in share_ids if str(x).strip()}))
+        if hit_fids:
+            matched.append((channel, hit_fids))
+    if not matched:
+        return {'ok': True, 'checked': 0, 'deleted_115': 0, 'deleted_local': 0, 'failed': 0, 'items': []}
+
+    p115 = None
+    deleted_115 = 0
+    deleted_local = 0
+    failed = 0
+    items = []
+    for channel, hit_fids in matched:
+        channel_id = str(channel.get('channel_id') or '').strip()
+        share_code = str(channel.get('share_code') or '').strip()
+        item = {
+            'channel_id': channel_id,
+            'center_source_id': channel.get('center_source_id'),
+            'share_code': share_code,
+            'matched_fids': hit_fids[:20],
+        }
+        if not channel_id:
+            continue
+        if not share_code:
+            deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
+            deleted_local += 1 if deleted else 0
+            item.update({'ok': True, 'deleted_local_channel': bool(deleted), 'reason': 'missing_share_code_no_115_share'})
+            items.append(item)
+            continue
+
+        if p115 is None:
+            try:
+                from handler.p115_service import P115Service
+                p115 = P115Service.get_client()
+            except Exception as e:
+                p115 = None
+                item.update({'ok': False, 'error': f'115 客户端初始化失败: {e}'})
+                items.append(item)
+                failed += 1
+                continue
+        if not p115:
+            item.update({'ok': False, 'error': '115 客户端未初始化，无法删除旧版逻辑季分享'})
+            items.append(item)
+            failed += 1
+            continue
+
+        delete_resp = _delete_completed_share_from_115(p115, share_code)
+        item['share_delete_response'] = delete_resp
+        if delete_resp.get('state') is False:
+            msg = f'删除旧版逻辑季分享失败: {delete_resp}'
+            try:
+                shared_share_db.update_completed_season_share_channel(
+                    channel_id,
+                    status_message=msg[:1000],
+                    raw_json={'share_delete_response': delete_resp, 'cleanup_reason': reason, 'matched_fids': hit_fids[:50]},
+                    last_checked_at='NOW()',
+                )
+            except Exception:
+                pass
+            item.update({'ok': False, 'error': msg})
+            items.append(item)
+            failed += 1
+            continue
+
+        deleted_115 += 1 if delete_resp.get('deleted') or delete_resp.get('cancelled_only') or delete_resp.get('skipped') else 0
+        center_resp = {}
+        try:
+            client = client or SharedCenterClient()
+            center_resp = _update_center_share_channel_status(client, channel, channel_id, {
+                'status': 'disabled',
+                'review_status': 'disabled',
+                'status_message': reason,
+                'raw_json': {'share_delete_response': delete_resp, 'cleanup_reason': reason, 'matched_fids': hit_fids[:50]},
+            })
+        except Exception as e:
+            center_resp = {'ok': False, 'error': str(e)}
+        if isinstance(center_resp, dict) and center_resp.get('ok') is False:
+            item.update({'ok': False, 'error': f'中心逻辑季分享通道状态同步失败: {center_resp}', 'center': center_resp})
+            items.append(item)
+            failed += 1
+            continue
+
+        deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
+        deleted_local += 1 if deleted else 0
+        item.update({'ok': True, 'deleted_115_share': True, 'deleted_local_channel': bool(deleted), 'center': center_resp})
+        items.append(item)
+
+    return {
+        'ok': failed == 0,
+        'checked': len(matched),
+        'deleted_115': deleted_115,
+        'deleted_local': deleted_local,
+        'failed': failed,
+        'items': items,
+    }
 
 
 def _extract_completed_share_payload(resp: Dict[str, Any], *, receive_code: str = '') -> Dict[str, Any]:
@@ -1057,21 +1284,54 @@ def _find_completed_share_list_item_by_receive_and_count(p115, *, receive_code: 
     return matches[0] if len(matches) == 1 else {}
 
 
-def _local_existing_logical_share_for_create(group_id: str, manifest_hash: str = '') -> Dict[str, Any]:
+def _logical_share_row_file_ids(row: Dict[str, Any]) -> List[str]:
+    raw = _share_channel_raw_json(row)
+    share_ids = raw.get('share_ids')
+    if isinstance(share_ids, list):
+        return [str(x).strip() for x in share_ids if str(x).strip()]
+    event = raw.get('event') if isinstance(raw.get('event'), dict) else {}
+    ids = []
+    for value in event.get('file_ids') or []:
+        fid = str(value).strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    best_asset_map = event.get('best_asset_map') if isinstance(event.get('best_asset_map'), dict) else {}
+    for ep in sorted(best_asset_map.keys(), key=lambda x: _safe_int(x, 0)):
+        item = best_asset_map.get(ep) if isinstance(best_asset_map.get(ep), dict) else {}
+        fid = str(item.get('file_id') or item.get('fid') or '').strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _same_logical_share_file_ids(left: List[str], right: List[str]) -> bool:
+    left_ids = [str(x).strip() for x in (left or []) if str(x).strip()]
+    right_ids = [str(x).strip() for x in (right or []) if str(x).strip()]
+    return bool(left_ids and right_ids and len(left_ids) == len(right_ids) and set(left_ids) == set(right_ids))
+
+
+def _local_existing_logical_share_for_create(group_id: str, manifest_hash: str = '', share_ids: List[str] = None) -> Dict[str, Any]:
     statuses = ['valid', 'pending_review', 'creating']
-    row = shared_share_db.get_completed_season_share_channel_by_source(group_id, statuses=statuses)
-    if row and str(row.get('share_code') or '').strip():
-        return row
+    share_ids = [str(x).strip() for x in (share_ids or []) if str(x).strip()]
     manifest_hash = str(manifest_hash or '').strip()
-    if not manifest_hash:
+    rows = shared_share_db.list_completed_season_share_channels_by_source(center_source_id=group_id, statuses=statuses)
+    for item in rows or []:
+        if not _share_channel_is_logical(item):
+            continue
+        item_manifest = str(item.get('manifest_hash') or '').strip()
+        if manifest_hash and item_manifest == manifest_hash:
+            return item
+        if _same_logical_share_file_ids(_logical_share_row_file_ids(item), share_ids):
+            return item
+    if not manifest_hash and not share_ids:
         return {}
     rows = shared_share_db.list_completed_season_share_channels(statuses=statuses, limit=1000, need_check=False)
     for item in rows or []:
         if not _share_channel_is_logical(item):
             continue
-        if str(item.get('manifest_hash') or '').strip() != manifest_hash:
-            continue
-        if str(item.get('share_code') or '').strip():
+        if manifest_hash and str(item.get('manifest_hash') or '').strip() == manifest_hash:
+            return item
+        if _same_logical_share_file_ids(_logical_share_row_file_ids(item), share_ids):
             return item
     return {}
 
@@ -1318,10 +1578,14 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         return {'ok': False, 'event_id': event_id, 'message': message}
 
     manifest_hash = str(payload.get('package_fingerprint') or payload.get('manifest_hash') or '').strip()
-    existing_share = _local_existing_logical_share_for_create(group_id, manifest_hash)
+    share_ids = _logical_share_file_ids_from_payload(client, group_id, payload)
+    existing_share = _local_existing_logical_share_for_create(group_id, manifest_hash, share_ids)
     if existing_share:
         status = str(existing_share.get('status') or 'pending_review').strip().lower()
-        message = f'本地已存在逻辑季 115 分享，复用已有 share_code：{title}'
+        has_share_code = bool(str(existing_share.get('share_code') or '').strip())
+        message = f'本地已存在逻辑季 115 分享，跳过重复创建：{title}'
+        if has_share_code:
+            message = f'本地已存在逻辑季 115 分享，复用已有分享：{title}'
         report_payload = {
             'status': status if status in {'valid', 'pending_review', 'creating'} else 'pending_review',
             'review_status': existing_share.get('review_status') or ('passed' if status == 'valid' else 'pending'),
@@ -1368,7 +1632,11 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         })
         if ack and event_id:
             client.ack_device_events([event_id], result='ok' if reported else 'failed', message=message[:500])
-        logger.info(f"  ➜ [共享资源] 复用已有逻辑季文件列表分享：{title}，channel={channel_id}，existing={existing_share.get('channel_id')}")
+        logger.info(f"  ➜ [共享资源] 复用已有 115 文件列表分享：《{title}》。")
+        logger.debug(
+            f"  ➜ [共享资源] 复用文件列表分享详情：channel={channel_id}, "
+            f"existing={existing_share.get('channel_id')}"
+        )
         return {
             'ok': bool(reported),
             'event_id': event_id,
@@ -1379,7 +1647,6 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
             'report': report_resp,
         }
 
-    share_ids = _logical_share_file_ids_from_payload(client, group_id, payload)
     expected_count = _safe_int(payload.get('file_count') or payload.get('episode_total'), 0)
     if not share_ids or (expected_count > 0 and len(share_ids) < expected_count):
         message = f'逻辑季分享缺少完整 file_id 列表：{len(share_ids)}/{expected_count or "?"}，无法创建 115 分享：{title}'
@@ -1410,7 +1677,8 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         p115 = P115Service.get_client()
         if not p115:
             raise RuntimeError('115 客户端未初始化')
-        logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：{title}，items={len(share_ids)}，channel={channel_id}")
+        logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：《{title}》，共 {len(share_ids)} 个文件。")
+        logger.debug(f"  ➜ [共享资源] 文件列表分享通道：{channel_id}")
         create_resp = p115.share_create(share_ids, share_duration=-1, receive_code=receive_code)
     except Exception as e:
         failure_status = _logical_share_provider_forbidden_status(str(e))
@@ -1520,7 +1788,14 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
 
     if ack and event_id:
         client.ack_device_events([event_id], result='ok' if reported else 'failed', message=(report_payload['status_message'] or '')[:500])
-    logger.info(f"  ➜ [共享资源] 创建文件列表分享完成：{title}，status={report_payload['status']}，channel={channel_id}")
+    status_text = {
+        'valid': '已生效',
+        'pending_review': '等待 115 审核',
+        'review_failed': '审核未通过',
+        'failed': '创建失败',
+    }.get(report_payload['status'], report_payload['status'] or '状态未知')
+    logger.info(f"  ➜ [共享资源] 115 文件列表分享已创建：《{title}》，状态：{status_text}。")
+    logger.debug(f"  ➜ [共享资源] 文件列表分享上报详情：status={report_payload['status']}, channel={channel_id}")
     return {
         'ok': bool(reported),
         'event_id': event_id,
@@ -3237,6 +3512,32 @@ def _raw_batch_missing_for_files(files: List[Dict[str, Any]], uploaded_sha1s: Di
     return missing
 
 
+def _files_missing_pick_code(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    missing = []
+    for f in files or []:
+        pc = str((f or {}).get('pick_code') or (f or {}).get('pickcode') or (f or {}).get('pc') or '').strip()
+        if pc:
+            continue
+        missing.append({
+            'sha1': _norm_sha1((f or {}).get('sha1')),
+            'file_name': (f or {}).get('file_name') or (f or {}).get('name') or '',
+        })
+    return missing
+
+
+def _missing_pick_code_reject_result(files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    missing = _files_missing_pick_code(files)
+    names = '、'.join([str(x.get('file_name') or x.get('sha1') or 'unknown') for x in missing[:5]])
+    if len(missing) > 5:
+        names += f" 等 {len(missing)} 个"
+    return {
+        'ok': False,
+        'message': f'缺少 115 pick_code，已拒绝登记中心：{names}',
+        'missing_pick_code': missing,
+        'fingerprint_repair': {},
+    }
+
+
 def _file_payload_common(file_info: Dict[str, Any], raw_uploaded: bool = False, animation_meta: Dict[str, Any] = None) -> Dict[str, Any]:
     raw = _raw_for_file(file_info) if raw_uploaded else {}
     sig = _media_signature(raw, file_info) if raw else {}
@@ -4033,7 +4334,8 @@ def _disable_local_episode_sources_for_completed_season(parent_series_tmdb_id: s
             logger.debug(f"  ➜ [共享资源] 本地停用单集源失败: id={row.get('id')}, err={e}")
 
     if disabled:
-        logger.info(f"  ➜ [共享资源] 完结季包已可用，已停用同季单集源: tmdb={parent}, S{season_no:02d}, count={disabled}")
+        logger.info(f"  ➜ [共享资源] 完结季包已可用，已停用第 {season_no} 季的 {disabled} 个单集共享源。")
+        logger.debug(f"  ➜ [共享资源] 停用单集源详情：tmdb={parent}, season={season_no}, count={disabled}")
     return disabled
 
 
@@ -4271,14 +4573,51 @@ def _lookup_people_for_display(person_ids: List[int]) -> Dict[int, Dict[str, Any
     return out
 
 
-def _build_display_credits_bundle(meta_row: Dict[str, Any]) -> Dict[str, Any]:
-    """从本地媒体元数据提取“前 6 位主演 + 1 位导演”。
+def _tmdb_display_credits_for_meta(meta_row: Dict[str, Any]) -> tuple[list, list]:
+    meta_row = meta_row if isinstance(meta_row, dict) else {}
+    tmdb_id = _safe_int(meta_row.get('tmdb_id'), 0)
+    item_type = str(meta_row.get('item_type') or '').strip()
+    api_key = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY) or '').strip()
+    if not tmdb_id or not api_key or item_type not in ('Movie', 'Series'):
+        return [], []
+    try:
+        if item_type == 'Movie':
+            data = tmdb_handler.get_movie_details(tmdb_id, api_key, append_to_response='credits') or {}
+        else:
+            data = tmdb_handler.get_tv_details(
+                tmdb_id,
+                api_key,
+                append_to_response='credits,aggregate_credits',
+                allow_english_fallback=False,
+            ) or {}
+        credits = data.get('credits') or data.get('aggregate_credits') or data.get('casts') or {}
+        return _safe_json_list(credits.get('cast')), _safe_json_list(credits.get('crew'))
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 从 TMDb 补齐展示演员失败: tmdb={tmdb_id}, type={item_type}, err={e}")
+        return [], []
+
+
+def _build_display_credits_bundle(meta_row: Dict[str, Any], *, allow_tmdb_refresh: bool = False) -> Dict[str, Any]:
+    """从本地媒体元数据提取“前 9 位主演 + 1 位导演”。
 
     中心端只存轻量展示缓存：人物基础信息进 center_person_metadata，
     角色名/排序进 center_media_credits，不镜像完整 TMDb cast。
     """
     actors_raw = _safe_json_list((meta_row or {}).get('actors_json'))
     directors_raw = _safe_json_list((meta_row or {}).get('directors_json'))
+    if allow_tmdb_refresh:
+        actor_ids = {_person_id_from_credit(x) for x in actors_raw if isinstance(x, dict)}
+        actor_ids.discard(None)
+        actor_ids.discard(0)
+        if len(actor_ids) < 9:
+            tmdb_actors, tmdb_crew = _tmdb_display_credits_for_meta(meta_row)
+            if len(tmdb_actors) > len(actors_raw):
+                actors_raw = tmdb_actors
+            if tmdb_crew and len(directors_raw) < 1:
+                directors_raw = [
+                    x for x in tmdb_crew
+                    if isinstance(x, dict) and str(x.get('job') or '').strip() in ('Director', 'Series Director')
+                ]
 
     actor_items = []
     for idx, raw in enumerate(actors_raw):
@@ -4293,7 +4632,7 @@ def _build_display_credits_bundle(meta_row: Dict[str, Any]) -> Dict[str, Any]:
             raw,
         ))
     actor_items.sort(key=lambda x: x[0])
-    actor_items = actor_items[:6]
+    actor_items = actor_items[:9]
 
     director_items = []
     for idx, raw in enumerate(directors_raw):
@@ -4431,6 +4770,21 @@ def _local_display_meta_rows_for_candidate(candidate: Dict[str, Any]) -> Dict[st
                         out['movie'] = dict(row)
                     return out
 
+                if item_type == 'Series' and series_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM media_metadata
+                        WHERE item_type='Series' AND tmdb_id=%s
+                        ORDER BY last_updated_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (series_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        out['series'] = dict(row)
+                    return out
+
                 if item_type in ('Season', 'Episode') and series_id:
                     if item_type == 'Episode' and season_no is not None and _safe_int_or_none(candidate.get('episode_number')) is not None:
                         cur.execute(
@@ -4492,6 +4846,8 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
     """
     candidate = candidate if isinstance(candidate, dict) else {}
     item_type = str(candidate.get('item_type') or '').strip()
+    missing_fields = {str(x or '').strip() for x in (candidate.get('missing_fields') or []) if str(x or '').strip()}
+    refresh_credits = 'credits' in missing_fields
     rows = _local_display_meta_rows_for_candidate(candidate)
 
     def compact(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -4524,6 +4880,23 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
             'release_year': _safe_int_or_none(row.get('release_year')) or _safe_int_or_none(fallback_year),
             'release_date': str(row.get('release_date') or '') or None,
         }
+        if item_type == 'Season':
+            expected = _safe_int_or_none(row.get('total_episodes') or candidate.get('expected_episode_count') or candidate.get('total_episodes'))
+            if expected and expected > 0:
+                meta.update({
+                    'expected_episode_count': expected,
+                    'total_episodes': expected,
+                    'episode_count': expected,
+                })
+            for src_key, dst_key in (
+                ('watching_status', 'watching_status'),
+                ('season_status', 'watching_status'),
+                ('watchlist_tmdb_status', 'watchlist_tmdb_status'),
+                ('total_episodes_locked', 'episode_count_locked'),
+            ):
+                value = row.get(src_key) if row.get(src_key) not in (None, '', [], {}) else candidate.get(src_key)
+                if value not in (None, '', [], {}):
+                    meta[dst_key] = value
         if include_series_fields:
             meta.update({
                 'rating': row.get('rating'),
@@ -4550,7 +4923,7 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
             'display_meta_json': movie_meta,
             'display_meta_items_json': [movie_meta] if movie_meta else [],
         }
-        bundle.update(_build_display_credits_bundle(movie_row) if movie_row else {'people_json': [], 'credits_json': []})
+        bundle.update(_build_display_credits_bundle(movie_row, allow_tmdb_refresh=refresh_credits) if movie_row else {'people_json': [], 'credits_json': []})
         return bundle
 
     if item_type == 'Episode':
@@ -4596,7 +4969,7 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
             'display_meta_items_json': items,
         }
         # 演职员始终只从 Series 条目取，避免季/集演员污染整剧壳。
-        bundle.update(_build_display_credits_bundle(series_row) if series_row else {'people_json': [], 'credits_json': []})
+        bundle.update(_build_display_credits_bundle(series_row, allow_tmdb_refresh=refresh_credits) if series_row else {'people_json': [], 'credits_json': []})
         return bundle
 
     series_id = str(candidate.get('parent_series_tmdb_id') or candidate.get('series_tmdb_id') or candidate.get('tmdb_id') or '').strip()
@@ -4637,7 +5010,7 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
         'display_meta_items_json': items,
     }
     # 演职员只从 Series 条目取；没有 Series 行就不上传，避免 Season/分集演员污染整剧壳。
-    bundle.update(_build_display_credits_bundle(series_row) if series_row else {'people_json': [], 'credits_json': []})
+    bundle.update(_build_display_credits_bundle(series_row, allow_tmdb_refresh=refresh_credits) if series_row else {'people_json': [], 'credits_json': []})
     return bundle
 
 def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: str = 'manual_rapid', preuploaded_raw_state: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -4669,6 +5042,13 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
 
     # RAW 摘要生成发生在正式登记前，先把候选类型补进 file_info。
     files = _prime_candidate_files_for_registration(candidate, files)
+    missing_pick_code = _files_missing_pick_code(files)
+    if missing_pick_code:
+        logger.warning(
+            "  ➜ [共享资源] 跳过缺少 115 pick_code 的资源登记: %s",
+            '、'.join([str(x.get('file_name') or x.get('sha1') or 'unknown') for x in missing_pick_code[:5]]),
+        )
+        return _missing_pick_code_reject_result(files)
 
     root = shared_share_db.candidate_root_from_files(files)
     client = SharedCenterClient()
@@ -4862,6 +5242,13 @@ def trigger_shared_rapid_register_batch_for_library_items(processor=None, regist
             continue
         files = shared_share_db.collect_files_for_candidate(candidate)
         files = _prime_candidate_files_for_registration(candidate, files)
+        if files and _files_missing_pick_code(files):
+            prepared.append({
+                'item': raw_item,
+                'candidate': candidate,
+                'blocked_result': _missing_pick_code_reject_result(files),
+            })
+            continue
         prepared.append({'item': raw_item, 'candidate': candidate, 'has_files': bool(files)})
         all_files.extend(files)
 
@@ -5610,6 +5997,29 @@ def _delete_bad_completed_source_from_center_and_local(row: Dict[str, Any], gate
     reason = str(gate.get('message') or gate.get('reason') or '完结季一致性校验未通过').strip()
     center_resp = {}
 
+    share_cleanup = _delete_completed_share_channels_for_source(row, reason, client=client)
+    if not share_cleanup.get('ok'):
+        try:
+            shared_share_db.update_local_source(local_id, last_error=f'旧版 115 分享删除失败: {share_cleanup}')
+        except Exception:
+            pass
+        logger.warning(
+            "  ➜ [共享资源维护] 删除旧版共享源前清理 115 分享失败，保留本地记录等待下次重试：%s，id=%s，center=%s，share_cleanup=%s",
+            label,
+            local_id,
+            center_source_id or '-',
+            share_cleanup,
+        )
+        return {
+            'ok': False,
+            'id': local_id,
+            'title': label,
+            'center_source_id': center_source_id,
+            'message': '旧版 115 分享删除失败',
+            'reason': reason,
+            'share_cleanup': share_cleanup,
+        }
+
     if center_source_id:
         try:
             client = client or SharedCenterClient()
@@ -5656,6 +6066,7 @@ def _delete_bad_completed_source_from_center_and_local(row: Dict[str, Any], gate
         'center_source_id': center_source_id,
         'reason': reason,
         'center_response': center_resp,
+        'share_cleanup': share_cleanup,
         'deleted': deleted,
     }
 
@@ -5865,6 +6276,25 @@ def disable_shared_sources_for_deleted_fids(
     if not fid_list:
         return {'ok': True, 'matched': 0, 'disabled': 0, 'failed': 0, 'items': []}
 
+    reason_text = str(reason or 'washing_replaced_old_version').strip()
+    center_message = str(message or '').strip() or f'local file deleted by washing: {reason_text}'
+    disabled = 0
+    failed = 0
+    items: List[Dict[str, Any]] = []
+    logical_share_cleanup = _delete_logical_share_channels_for_fids(fid_list, reason_text)
+    if not logical_share_cleanup.get('ok'):
+        failed += int(logical_share_cleanup.get('failed') or 1)
+        items.append({
+            'ok': False,
+            'error': '旧版逻辑季 115 分享删除失败',
+            'logical_share_cleanup': logical_share_cleanup,
+        })
+    elif logical_share_cleanup.get('checked'):
+        items.append({
+            'ok': True,
+            'logical_share_cleanup': logical_share_cleanup,
+        })
+
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -5893,14 +6323,16 @@ def disable_shared_sources_for_deleted_fids(
         return {'ok': False, 'matched': 0, 'disabled': 0, 'failed': 1, 'error': str(e), 'items': []}
 
     if not rows:
-        return {'ok': True, 'matched': 0, 'disabled': 0, 'failed': 0, 'items': []}
+        return {
+            'ok': failed == 0,
+            'matched': 0,
+            'disabled': 0,
+            'failed': failed,
+            'logical_share_cleanup': logical_share_cleanup,
+            'items': items[:50],
+        }
 
-    reason_text = str(reason or 'washing_replaced_old_version').strip()
-    center_message = str(message or '').strip() or f'local file deleted by washing: {reason_text}'
     client = None
-    disabled = 0
-    failed = 0
-    items: List[Dict[str, Any]] = []
 
     for row in rows:
         local_id = int(row.get('id') or 0)
@@ -5909,6 +6341,33 @@ def disable_shared_sources_for_deleted_fids(
         title = str(row.get('title') or row.get('file_name') or row.get('tmdb_id') or local_id)
         matched_file_fids = [str(x) for x in (row.get('matched_file_fids') or []) if str(x or '').strip()]
         center_resp: Dict[str, Any] = {}
+
+        share_cleanup = _delete_completed_share_channels_for_source(row, reason_text, client=client)
+        if not share_cleanup.get('ok'):
+            failed += 1
+            try:
+                shared_share_db.update_local_source(local_id, last_error=f'洗版旧版 115 分享删除失败: {share_cleanup}')
+            except Exception:
+                pass
+            logger.warning(
+                "  ➜ [共享资源] 洗版旧源 115 分享删除失败，保留本地 active 等维护任务重试: "
+                "id=%s, kind=%s, center=%s, title=%s, share_cleanup=%s",
+                local_id,
+                source_kind,
+                center_source_id or '-',
+                title,
+                share_cleanup,
+            )
+            items.append({
+                'id': local_id,
+                'source_kind': source_kind,
+                'center_source_id': center_source_id,
+                'title': title,
+                'ok': False,
+                'error': '旧版 115 分享删除失败',
+                'share_cleanup': share_cleanup,
+            })
+            continue
 
         if center_source_id:
             try:
@@ -5964,6 +6423,7 @@ def disable_shared_sources_for_deleted_fids(
                 'ok': True,
                 'matched_file_fids': matched_file_fids,
                 'root_fid_matched': str(row.get('root_fid') or '') in fid_list,
+                'share_cleanup': share_cleanup,
             }
             items.append(item)
             logger.info(
@@ -5998,6 +6458,7 @@ def disable_shared_sources_for_deleted_fids(
         'matched': len(rows),
         'disabled': disabled,
         'failed': failed,
+        'logical_share_cleanup': logical_share_cleanup,
         'items': items[:50],
     }
 
@@ -6024,6 +6485,34 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
         reason = str(row.get('offline_reason') or 'sha1_not_in_library')
         msg = f'local library removed or replaced: {reason}'
         center_resp = {}
+        share_cleanup = _delete_completed_share_channels_for_source(row, reason, client=client)
+
+        # share_cleanup 已在中心下架前完成，这里只复用结果，避免维护重试时重复删除 115 分享。
+        if not share_cleanup.get('ok'):
+            failed += 1
+            try:
+                shared_share_db.update_local_source(local_id, last_error=f'失效源 115 分享删除失败: {share_cleanup}')
+            except Exception:
+                pass
+            logger.warning(
+                "  ➜ [共享资源维护] 本机失效共享源 115 分享删除失败，保留 active 等下次重试: "
+                "id=%s, kind=%s, center=%s, title=%s, share_cleanup=%s",
+                local_id,
+                source_kind,
+                center_source_id or '-',
+                title,
+                share_cleanup,
+            )
+            items.append({
+                'id': local_id,
+                'source_kind': source_kind,
+                'center_source_id': center_source_id,
+                'title': title,
+                'ok': False,
+                'error': '失效源 115 分享删除失败',
+                'share_cleanup': share_cleanup,
+            })
+            continue
 
         if center_source_id:
             try:
@@ -6057,6 +6546,7 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
             'reason': reason,
             'total_files': int(row.get('total_files') or 0),
             'live_files': int(row.get('live_files') or 0),
+            'share_cleanup': share_cleanup,
         }
         items.append(item)
         logger.info(
@@ -6124,6 +6614,7 @@ def _display_meta_has_useful_payload(meta: Dict[str, Any]) -> bool:
     for key in (
         'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
         'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
+        'expected_episode_count', 'total_episodes', 'episode_count',
     ):
         if meta.get(key) not in (None, '', [], {}):
             return True
@@ -6169,7 +6660,7 @@ def _list_display_meta_backfill_source_rows(limit: int = 500) -> List[Dict[str, 
     for item in fetched.get('items') or []:
         item_type = str(item.get('item_type') or '').strip()
         tmdb_id = str(item.get('tmdb_id') or '').strip()
-        if item_type not in ('Movie', 'Season', 'Episode') or not tmdb_id:
+        if item_type not in ('Movie', 'Series', 'Season', 'Episode') or not tmdb_id:
             continue
         season_no = _safe_int_or_none(item.get('season_number')) if item_type in ('Season', 'Episode') else None
         episode_no = _safe_int_or_none(item.get('episode_number')) if item_type == 'Episode' else None
@@ -6179,7 +6670,7 @@ def _list_display_meta_backfill_source_rows(limit: int = 500) -> List[Dict[str, 
             continue
         rows.append({
             'id': item.get('media_key') or f"center-missing:{item_type}:{tmdb_id}:{season_no or ''}:{episode_no or ''}",
-            'source_kind': 'movie' if item_type == 'Movie' else ('episode' if item_type == 'Episode' else 'season_hub'),
+            'source_kind': 'movie' if item_type == 'Movie' else ('series' if item_type == 'Series' else ('episode' if item_type == 'Episode' else 'season_hub')),
             'center_source_id': '',
             'tmdb_id': tmdb_id,
             'parent_series_tmdb_id': tmdb_id if item_type in ('Season', 'Episode') else '',
@@ -6226,6 +6717,7 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
                     'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
                     'actors_json', 'directors_json',
                 )),
+                'credits': has_any(movie, ('actors_json', 'directors_json')),
             }
         elif item_type == 'Episode':
             checks = {
@@ -6249,10 +6741,14 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
                     'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
                     'actors_json', 'directors_json',
                 )),
+                'credits': has_any(series, ('actors_json', 'directors_json')),
                 'season_meta': has_any(season, (
                     'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
                     'release_year', 'release_date',
                 )),
+                'season_total': has_any(season, ('total_episodes',)),
+                'expected_episode_count': has_any(season, ('total_episodes',)),
+                'total_episodes': has_any(season, ('total_episodes',)),
             }
         return any(checks.get(field, False) for field in missing)
 
@@ -6372,6 +6868,36 @@ def _post_center_display_meta_backfill(bundles: List[Dict[str, Any]], *, batch_s
         'accepted_meta_items': accepted_meta_items,
         'accepted_bundles': accepted_bundles,
         'errors': errors[:20],
+    }
+
+
+def upload_center_display_metadata_for_library_item(processor=None, **kwargs) -> Dict[str, Any]:
+    """补传单个媒体壳展示元数据，供追剧刷新等链路复用。"""
+    candidate = _normalize_series_candidate_identity(_library_register_candidate_from_kwargs(kwargs))
+    item_type = str(candidate.get('item_type') or '').strip()
+    if item_type not in ('Movie', 'Series', 'Season', 'Episode'):
+        return {'ok': False, 'message': f'unsupported item_type: {item_type or "-"}'}
+
+    bundle = _center_display_meta_bundle_for_candidate(candidate)
+    meta_items = bundle.get('display_meta_items_json') if isinstance(bundle.get('display_meta_items_json'), list) else []
+    if not meta_items and isinstance(bundle.get('display_meta_json'), dict):
+        meta_items = [bundle.get('display_meta_json')]
+    filtered_items = [x for x in meta_items if isinstance(x, dict) and _display_meta_has_useful_payload(x)]
+    if not filtered_items:
+        return {'ok': False, 'message': 'no local display metadata'}
+
+    out = dict(bundle)
+    out['display_meta_items_json'] = filtered_items
+    out['display_meta_json'] = filtered_items[-1]
+    if kwargs.get('reason'):
+        out['_reason'] = str(kwargs.get('reason'))
+
+    posted = _post_center_display_meta_backfill([out], batch_size=1)
+    return {
+        'ok': bool(posted.get('ok')),
+        'uploaded_meta_items': _safe_int(posted.get('accepted_meta_items'), 0),
+        'uploaded_bundles': _safe_int(posted.get('accepted_bundles'), 0),
+        'errors': posted.get('errors') or [],
     }
 
 

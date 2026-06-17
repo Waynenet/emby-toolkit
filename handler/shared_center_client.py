@@ -414,9 +414,10 @@ class SharedCenterClient:
             'offset': max(0, int(offset or 0)),
         }, timeout=30)
 
-    def list_display_home(self, *, limit_per_section: int = 10, **_ignored) -> Dict[str, Any]:
+    def list_display_home(self, *, limit_per_section: int = 10, force_refresh: bool = False, **_ignored) -> Dict[str, Any]:
         return self._get('/api/v1/sources/display-home', {
             'limit_per_section': max(1, min(int(limit_per_section or 10), 20)),
+            'force_refresh': 1 if force_refresh else 0,
         }, timeout=15)
 
 
@@ -566,10 +567,10 @@ class SharedCenterClient:
         if compressed_count and raw_bytes_total and compressed_bytes_total:
             ratio = compressed_bytes_total / max(raw_bytes_total, 1)
             logger.info(
-                f"  ➜ [共享资源] RAW 批量压缩上传准备完成："
-                f"zstd={compressed_count}/{len(payload_items)}, "
-                f"{raw_bytes_total / 1024 / 1024:.1f}MB -> {compressed_bytes_total / 1024 / 1024:.1f}MB, "
-                f"ratio={ratio:.2%}"
+                f"  ➜ [共享资源] 媒体信息已压缩，准备批量上传："
+                f"{compressed_count}/{len(payload_items)} 个文件，"
+                f"{raw_bytes_total / 1024 / 1024:.1f}MB 压缩到 {compressed_bytes_total / 1024 / 1024:.1f}MB，"
+                f"压缩后约为原来的 {ratio:.0%}。"
             )
 
         try:
