@@ -5190,6 +5190,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             rule_actor_ids = [int(a['id']) for a in rule['actors'] if 'id' in a]
             _evaluate(any(aid in self.raw_metadata.get('actor_ids', []) for aid in rule_actor_ids))
 
+        # 2.11 文件扩展名
+        if rule.get('file_extensions'):
+            source_name = getattr(self, 'current_sorting_filename', '') or ''
+            current_ext = os.path.splitext(str(source_name))[1].lower().lstrip('.')
+            rule_exts = {
+                str(ext).strip().lower().lstrip('.')
+                for ext in rule.get('file_extensions') or []
+                if str(ext).strip()
+            }
+            _evaluate(bool(current_ext and current_ext in rule_exts))
+
         # ==========================================
         # 3. 最终结果判定
         # ==========================================
@@ -5213,6 +5224,24 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 if str(r.get('cid')) == str(check_cid) and r.get('enabled', True):
                     return True
             return False
+
+        # 文件扩展名是文件级分类条件，必须优先于同 TMDb 的历史整理记忆。
+        current_ext = os.path.splitext(str(getattr(self, 'current_sorting_filename', '') or ''))[1].lower().lstrip('.')
+        if current_ext:
+            for rule in self.rules:
+                if not rule.get('enabled', True) or not rule.get('file_extensions'):
+                    continue
+                rule_exts = {
+                    str(ext).strip().lower().lstrip('.')
+                    for ext in rule.get('file_extensions') or []
+                    if str(ext).strip()
+                }
+                if current_ext in rule_exts and self._match_rule(rule):
+                    logger.info(
+                        f"  ➜ [115整理] 命中文件扩展名规则“{rule.get('name')}”，"
+                        f"扩展名：{current_ext}，目标目录：{rule.get('dir_name')}"
+                    )
+                    return rule.get('cid')
 
         # ★★★ 1. 查历史记录 (记忆功能 - 升级为分季隔离 + 规则校验版) ★★★
         if not ignore_memory:
@@ -6323,8 +6352,42 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if extracted_season is not None:
                 self.forced_season = extracted_season
 
+        # 同一 TMDb 批次里可能同时有 mkv / iso 等不同文件级分类。
+        # 这种情况必须先按目标分类拆批，否则会被后续电影洗版逻辑当成同目录多版本互相淘汰。
+        if is_batch and not getattr(self, '_disable_extension_batch_split', False):
+            split_groups = {}
+            original_sorting_filename = getattr(self, 'current_sorting_filename', '')
+            original_memory_flag = getattr(self, 'is_from_memory', False)
+            try:
+                for item in candidates:
+                    item_name = item.get('fn') or item.get('n') or item.get('file_name', '')
+                    self.current_sorting_filename = item_name
+                    item_target_cid = self.get_target_cid(season_num=getattr(self, 'forced_season', None)) or target_cid
+                    group_key = str(item_target_cid or '')
+                    split_groups.setdefault(group_key, {'target_cid': item_target_cid, 'items': []})['items'].append(item)
+            finally:
+                self.current_sorting_filename = original_sorting_filename
+                self.is_from_memory = original_memory_flag
+
+            if len(split_groups) > 1:
+                logger.info(f"  ➜ [智能分类] 同批文件命中 {len(split_groups)} 个不同分类，按分类拆分整理。")
+                ok = True
+                self._disable_extension_batch_split = True
+                try:
+                    for group in split_groups.values():
+                        ok = self.execute(
+                            group['items'],
+                            group['target_cid'],
+                            progress_callback=progress_callback,
+                            skip_gc=skip_gc
+                        ) and ok
+                finally:
+                    self._disable_extension_batch_split = False
+                return ok
+
         # ★ 统一在这里获取最终的 target_cid！(因为 details 已经补齐了时长，media_type 也可能被纠错了，season 也提取了)
         if not getattr(self, 'is_manual_correct', False):
+            self.current_sorting_filename = parse_name
             new_target_cid = self.get_target_cid(season_num=getattr(self, 'forced_season', None))
             if new_target_cid and str(new_target_cid) != str(target_cid):
                 logger.info(f"  ➜ [智能分类] 目标目录已根据最新元数据(时长/类型/连载状态)修正！")
