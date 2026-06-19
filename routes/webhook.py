@@ -68,6 +68,24 @@ MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
 
 
+def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
+    """Webhook 只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
+    if str(item_type or '') not in {'Movie', 'Episode'}:
+        return False
+    path = str(item_path or '').strip()
+    if not path.lower().endswith('.strm'):
+        return False
+    try:
+        from monitor_service import _is_etk_standard_strm
+        if _is_etk_standard_strm(path):
+            return False
+    except Exception as e:
+        logger.warning(f"  ➜ [Webhook] STRM 标准校验失败，已跳过：{item_name or os.path.basename(path)}，原因：{e}")
+        return True
+    logger.warning(f"  ➜ [Webhook] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
+    return True
+
+
 def _submit_webhook_media_task(
     task_name,
     *,
@@ -1166,8 +1184,8 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
     if not p115_generate_mediainfo:
         try:
             # =========================================================
-            # 1. 统一调用核心处理器的双指纹提取方法 
-            # (内部已自动处理：HTTP直链 -> 物理STRM -> 挂载路径匹配)
+            # 1. 统一调用核心处理器的双指纹提取方法
+            # 只支持 ETK 官方 STRM/HTTP PC 播放地址。
             # =========================================================
             pc, sha1 = processor._extract_115_fingerprints(file_path)
             
@@ -1418,21 +1436,7 @@ def emby_webhook():
                 item_path = path_match.group(1).strip() if path_match else ""
 
                 pickcodes = []
-                processor = extensions.media_processor_instance
-                
-                # ★★★ 核心重构：提取 Mount Paths，直接喂给万能提取器！★★★
-                if "Mount Paths:\n" in description:
-                    mount_paths_str = description.split("Mount Paths:\n")[-1]
-                    urls = [line.strip() for line in mount_paths_str.split('\n') if line.strip()]
-                    
-                    for url in urls:
-                        if processor:
-                            # 无论是 HTTP 直链 还是 挂载的物理路径，万能提取器通吃！
-                            pc, _ = processor._extract_115_fingerprints(url)
-                            if pc:
-                                pickcodes.append(pc)
-
-                # ★ 数据库兜底：如果万能提取器没拿到，查库 (此时数据库还没被删，完美拿到 PC！)
+                # 数据库兜底：此时数据库还没被删，可以直接通过 Emby ID 取 PC。
                 if not pickcodes and original_item_id:
                     logger.debug(f"  ➜ [深度删除] 未从描述中提取到 PC 码，尝试通过 Emby ID ({original_item_id}) 查库...")
                     db_pc = media_db.get_pickcode_by_emby_id(original_item_id)
@@ -1858,6 +1862,9 @@ def emby_webhook():
             if lib_id not in allowed_libs and original_item_type != "Audio":
                 logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
                 return jsonify({"status": "ignored_library"}), 200
+
+        if _should_skip_non_etk_strm_webhook(original_item_type, original_item_name, original_item_path):
+            return jsonify({"status": "ignored_non_etk_strm"}), 200
 
     # ======================================================================
     # ★★★ 处理音乐 (Audio) 入库事件 ★★★

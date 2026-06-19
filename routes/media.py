@@ -14,7 +14,7 @@ import extensions
 from database import custom_collection_db, media_db, user_db, request_db, settings_db
 import handler.moviepilot as moviepilot
 from extensions import admin_required, processor_ready_required
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 
 # --- 蓝图 1：用于所有 /api/... 的路由 ---
 media_api_bp = Blueprint('media_api', __name__, url_prefix='/api')
@@ -23,6 +23,17 @@ media_api_bp = Blueprint('media_api', __name__, url_prefix='/api')
 media_proxy_bp = Blueprint('media_proxy', __name__)
 
 logger = logging.getLogger(__name__)
+
+def _mask_url_query_secret(url: str) -> str:
+    try:
+        parts = urlsplit(str(url or ''))
+        query = urlencode(
+            [(key, '********' if key.lower() in {'api_key', 'x-emby-token'} else value)
+             for key, value in parse_qsl(parts.query, keep_blank_values=True)]
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except Exception:
+        return str(url or '').replace('api_key=', 'api_key=********')
 
 @media_api_bp.route('/search_emby_library', methods=['GET'])
 @processor_ready_required
@@ -206,7 +217,7 @@ def proxy_emby_image(image_path):
         separator = '&' if '?' in target_url else '?'
         target_url_with_key = f"{target_url}{separator}api_key={emby_api_key}"
         
-        logger.trace(f"代理图片请求 (最终URL): {target_url_with_key}")
+        logger.trace(f"代理图片请求 (最终URL): {_mask_url_query_secret(target_url_with_key)}")
 
         # 3. 发送请求
         emby_response = requests.get(target_url_with_key, stream=True, timeout=20)
@@ -348,8 +359,15 @@ def api_get_emby_user_views(user_id):
         logger.warning("/api/emby/user/<user_id>/views: Emby配置不完整或服务未就绪。")
         return jsonify({"error": "Emby配置不完整或服务未就绪"}), 500
     
-    # 尝试从请求头和查询参数获取用户令牌
-    user_token = request.headers.get('X-Emby-Token') or request.args.get('api_key')
+    # 尝试从请求头和查询参数获取用户令牌。配置页拿到的敏感字段可能是脱敏占位符，
+    # 这种情况下必须回退到服务端真实配置，不能把 ******** 透传给 Emby。
+    user_token = str(request.headers.get('X-Emby-Token') or request.args.get('api_key') or '').strip()
+    if user_token and set(user_token) == {'*'}:
+        user_token = ''
+    if not user_token:
+        user_token = str(getattr(extensions.media_processor_instance, 'emby_api_key', '') or '').strip()
+    if not user_token:
+        user_token = str((config_manager.APP_CONFIG or {}).get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
     
     if not user_token:
         return jsonify({"error": "缺少用户访问令牌(api_key或X-Emby-Token)"}), 400

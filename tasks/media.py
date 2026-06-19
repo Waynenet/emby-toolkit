@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Any, Tuple
 import concurrent.futures
 from collections import defaultdict
 from gevent import spawn_later
+from datetime import datetime, timezone, timedelta
 # 导入需要的底层模块和共享实例
 import task_manager
 import utils
@@ -21,11 +22,57 @@ import config_manager
 import handler.tmdb as tmdb
 import handler.emby as emby
 import handler.telegram as telegram
-from database import connection, settings_db, media_db, queries_db
+from database import connection, settings_db, media_db, queries_db, maintenance_db
 from .helpers import parse_full_asset_details, reconstruct_metadata_from_db, translate_tmdb_metadata_recursively
 from extensions import UPDATING_METADATA
 
 logger = logging.getLogger(__name__)
+
+SMART_DEEP_METADATA_REFRESH_DAYS = 30
+
+def _restore_resolve_writable_path(processor, raw_path: str, pickcodes: Optional[List[str]] = None) -> str:
+    """
+    恢复 NFO/图片时必须写到本地 STRM 目录。
+    只支持通过 115 提取码反查本地 STRM 路径。
+    """
+    raw_path = str(raw_path or '').strip()
+    if not raw_path:
+        return ''
+
+    local_root = str(processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) or '').strip()
+    if not local_root:
+        return raw_path
+
+    video_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.wmv', '.mov', '.m2ts', '.webm'}
+
+    def _to_strm_path(local_path: str) -> str:
+        full_path = os.path.join(local_root, str(local_path or '').lstrip('/\\'))
+        stem, ext = os.path.splitext(full_path)
+        if ext.lower() in video_exts:
+            return stem + '.strm'
+        return full_path
+
+    for pc in pickcodes or []:
+        pc = str(pc or '').strip()
+        if not pc:
+            continue
+        try:
+            db_local_path = processor._get_local_path_by_pickcode(pc)
+            if db_local_path:
+                return _to_strm_path(db_local_path)
+        except Exception as e:
+            logger.debug(f"  ➜ [NFO恢复] 通过提取码反查 STRM 路径失败: {e}")
+
+    try:
+        pc, _sha1 = processor._extract_115_fingerprints(raw_path)
+        if pc:
+            db_local_path = processor._get_local_path_by_pickcode(pc)
+            if db_local_path:
+                return _to_strm_path(db_local_path)
+    except Exception as e:
+        logger.debug(f"  ➜ [NFO恢复] 从资产路径反查 STRM 路径失败: {e}")
+
+    return ''
 
 # --- 辅助函数：严格校验 TMDb ID ---
 def is_valid_tmdb_id(tmdb_id) -> bool:
@@ -43,6 +90,45 @@ def is_valid_tmdb_id(tmdb_id) -> bool:
     if int(id_str) <= 0:
         return False
     return True
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    """把 Emby/Postgres 时间统一解析成 UTC 时间，供同步差异判断使用。"""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith('Z'):
+            text = f"{text[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+def _emby_item_changed_since_sync(item: Dict[str, Any], db_state: Optional[Dict[str, Any]]) -> bool:
+    if not db_state:
+        return True
+    emby_modified = _parse_timestamp(item.get("DateModified"))
+    last_synced = _parse_timestamp(db_state.get("last_synced_at"))
+    if not last_synced:
+        return True
+    if not emby_modified:
+        return False
+    return emby_modified > last_synced
+
+def _is_recently_synced(db_state: Optional[Dict[str, Any]], days: int = SMART_DEEP_METADATA_REFRESH_DAYS) -> bool:
+    if not db_state:
+        return False
+    last_synced = _parse_timestamp(db_state.get("last_synced_at"))
+    if not last_synced:
+        return False
+    return last_synced >= datetime.now(timezone.utc) - timedelta(days=days)
 
 # --- 中文化角色名 ---
 def task_role_translation(processor, force_full_update: bool = False):
@@ -670,13 +756,15 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         known_online_emby_ids = set() 
         emby_sid_to_tmdb_id = {}    # {emby_series_id: tmdb_id}
         tmdb_key_to_emby_ids = defaultdict(set) 
+        top_level_sync_state = {}
+        emby_sync_state = {}
         
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
             
             # A. 预加载映射
             cursor.execute("""
-                SELECT tmdb_id, item_type, jsonb_array_elements_text(emby_item_ids_json) as eid 
+                SELECT tmdb_id, item_type, last_synced_at, jsonb_array_elements_text(emby_item_ids_json) as eid
                 FROM media_metadata 
                 WHERE item_type IN ('Movie', 'Series')
             """)
@@ -686,15 +774,28 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     emby_sid_to_tmdb_id[e_id] = t_id
                 if t_id:
                     tmdb_key_to_emby_ids[(t_id, i_type)].add(e_id)
+                    top_level_sync_state[e_id] = {
+                        'tmdb_id': t_id,
+                        'item_type': i_type,
+                        'last_synced_at': row.get('last_synced_at')
+                    }
 
             # B. 获取在线状态 (★ 修复：无论是否全量更新，都必须获取在线状态，否则无法检测离线)
             cursor.execute("""
-                SELECT jsonb_array_elements_text(emby_item_ids_json) AS emby_id
+                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at,
+                       jsonb_array_elements_text(emby_item_ids_json) AS emby_id
                 FROM media_metadata 
                 WHERE in_library = TRUE
             """)
             for row in cursor.fetchall():
-                known_online_emby_ids.add(row['emby_id'])
+                e_id = row['emby_id']
+                known_online_emby_ids.add(e_id)
+                emby_sync_state[e_id] = {
+                    'tmdb_id': row.get('tmdb_id'),
+                    'item_type': row.get('item_type'),
+                    'parent_series_tmdb_id': row.get('parent_series_tmdb_id'),
+                    'last_synced_at': row.get('last_synced_at')
+                }
             
             cursor.execute("""
                 SELECT COUNT(*) as total, SUM(CASE WHEN in_library THEN 1 ELSE 0 END) as online 
@@ -741,6 +842,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         skipped_no_tmdb = 0
         skipped_other_type = 0
         skipped_clean = 0
+        skipped_unchanged_deep = 0
+        changed_existing = 0
 
         req_fields = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId"
 
@@ -791,7 +894,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             if not force_full_update:
                 # ★★★ 内存优化 1: 使用 Set 查找 ★★★
                 if item_id in known_online_emby_ids:
-                    is_clean = True
+                    db_state = emby_sync_state.get(item_id)
+                    is_clean = not _emby_item_changed_since_sync(item, db_state)
             
             if is_clean:
                 skipped_clean += 1
@@ -804,6 +908,16 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             if item_type in ["Movie", "Series"]:
                 if tmdb_id:
                     composite_key = (str(tmdb_id), item_type)
+                    db_state = top_level_sync_state.get(item_id)
+                    if force_full_update and db_state:
+                        if (
+                            not _emby_item_changed_since_sync(item, db_state)
+                            and _is_recently_synced(db_state)
+                        ):
+                            skipped_unchanged_deep += 1
+                            continue
+                    if db_state:
+                        changed_existing += 1
                     # top_level_items_map[composite_key].append(item) # <--- 删除这行
                     dirty_keys.add(composite_key)
                 else:
@@ -816,6 +930,17 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 # series_to_seasons_map/series_to_episode_map 也不需要了，因为后面会重新 fetch
                 
                 if s_id and s_id in emby_sid_to_tmdb_id:
+                    if force_full_update:
+                        db_state = top_level_sync_state.get(s_id)
+                        if (
+                            db_state
+                            and not _emby_item_changed_since_sync(item, db_state)
+                            and _is_recently_synced(db_state)
+                        ):
+                            skipped_unchanged_deep += 1
+                            continue
+                        if db_state:
+                            changed_existing += 1
                     dirty_keys.add((emby_sid_to_tmdb_id[s_id], 'Series'))
                 elif s_id:
                     pending_children.append((s_id, item_type))
@@ -844,7 +969,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 
                 # 1. 查出包含这些消失 ID 的所有记录
                 cursor.execute("""
-                    SELECT tmdb_id, item_type, parent_series_tmdb_id, 
+                    SELECT tmdb_id, item_type, title, original_language, countries_json, parent_series_tmdb_id,
                            emby_item_ids_json, asset_details_json, file_sha1_json, file_pickcode_json
                     FROM media_metadata 
                     WHERE in_library = TRUE 
@@ -859,6 +984,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 
                 # 分类收集处理结果
                 partial_update_records = [] # 还有其他版本存活的记录
+                cleanup_sync_records = [] # 同步修剪媒体去重索引
+                cleanup_delete_scopes = [] # 死绝媒体需要删除去重索引
                 dead_movies_and_series = [] # 彻底死绝的顶层项目
                 dead_seasons_and_episodes = [] # 彻底死绝的子集项目
                 affected_parent_ids = set() # 需要重刷的父剧集
@@ -901,12 +1028,22 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                             json.dumps(pcs, ensure_ascii=False),
                             r_tmdb, r_type
                         ))
+                        cleanup_sync_records.append((
+                            r_tmdb,
+                            r_type,
+                            row.get('title') or str(r_tmdb),
+                            assets,
+                            row.get('original_language'),
+                            row.get('countries_json'),
+                        ))
                     else:
                         # 死绝了，分类加入死亡名单
                         if r_type in ['Movie', 'Series']:
                             dead_movies_and_series.append(r_tmdb)
+                            cleanup_delete_scopes.append((r_tmdb, r_type))
                         elif r_type in ['Season', 'Episode']:
                             dead_seasons_and_episodes.append(r_tmdb)
+                            cleanup_delete_scopes.append((r_tmdb, r_type))
                             if r_parent:
                                 affected_parent_ids.add(r_parent)
 
@@ -927,6 +1064,25 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         WHERE m.tmdb_id = v.tmdb_id AND m.item_type = v.item_type
                     """
                     execute_values(cursor, update_sql, partial_update_records)
+                    cleanup_sync_stats = {'updated': 0, 'deleted': 0}
+                    for sync_record in cleanup_sync_records:
+                        result = maintenance_db._sync_cleanup_index_for_media_row(
+                            cursor,
+                            tmdb_id=sync_record[0],
+                            item_type=sync_record[1],
+                            item_name=sync_record[2],
+                            asset_details_json=sync_record[3],
+                            original_language=sync_record[4],
+                            countries_json=sync_record[5],
+                        )
+                        cleanup_sync_stats['updated'] += result.get('updated', 0)
+                        cleanup_sync_stats['deleted'] += result.get('deleted', 0)
+                    if cleanup_sync_stats['updated'] or cleanup_sync_stats['deleted']:
+                        logger.info(
+                            "  ➜ [媒体去重] 已同步修剪失效版本索引: 更新 %s 条，删除 %s 条。",
+                            cleanup_sync_stats['updated'],
+                            cleanup_sync_stats['deleted'],
+                        )
 
                 # B. 彻底枪毙死绝的顶层项目 (Movie, Series)
                 if dead_movies_and_series:
@@ -967,6 +1123,13 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         WHERE tmdb_id = ANY(%s) AND item_type IN ('Season', 'Episode')
                     """, (dead_seasons_and_episodes,))
                     total_offline_count += cursor.rowcount
+
+                if cleanup_delete_scopes:
+                    deleted_cleanup_indexes = 0
+                    for tmdb_id, item_type in cleanup_delete_scopes:
+                        deleted_cleanup_indexes += maintenance_db._delete_cleanup_index_for_media_scope(cursor, tmdb_id, item_type)
+                    if deleted_cleanup_indexes > 0:
+                        logger.info(f"  ➜ [媒体去重] 已删除离线媒体失效索引 {deleted_cleanup_indexes} 条。")
                     
                 # D. 善后：如果子集死了，但父剧集还活着，让父剧集刷新一下状态
                 if affected_parent_ids:
@@ -983,6 +1146,10 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         logger.info(f"  ➜ Emby 扫描完成，共扫描 {scan_count} 个项。")
         logger.info(f"    - 已入库: {skipped_clean}")
         logger.info(f"    - 已跳过: {skipped_no_tmdb + skipped_other_type} (含 {skipped_no_tmdb} 个无ID, {skipped_other_type} 个非媒体)")
+        if force_full_update and skipped_unchanged_deep:
+            logger.info(f"    - 深度智能跳过: {skipped_unchanged_deep} 个未变化/近期已同步项")
+        if changed_existing:
+            logger.info(f"    - 检测到已入库变更: {changed_existing} 个")
         logger.info(f"    - 需同步: {len(dirty_keys)}")
 
         # --- 4. 确定处理队列 (无需猜测类型) ---
@@ -2104,7 +2271,7 @@ def task_backup_mediainfo(processor):
                     current_sha1 = sha1s[idx] if idx < len(sha1s) else None
                     current_pc = pcs[idx] if idx < len(pcs) else None
                     
-                    # ★★★ 核心修复：直接调用核心处理器的万能双指纹提取器 (完美兼容 STRM 和 挂载模式) ★★★
+                    # 只从 ETK 官方 STRM/HTTP PC 地址提取 115 指纹。
                     extracted_pc, extracted_sha1 = processor._extract_115_fingerprints(current_path)
                             
                     # 兜底安检：确保提取出来的是合法的 PC 码 (纯字母数字且长度合理)
@@ -2119,14 +2286,14 @@ def task_backup_mediainfo(processor):
                         pcs[idx] = extracted_pc
                         needs_db_update = True
                         
-                    # ★★★ 意外惊喜：如果万能提取器(通过挂载路径匹配)顺手把 SHA1 也查出来了，直接用！★★★
+                    # 如果通过 ETK PC 地址顺手查到 SHA1，直接回填。
                     if extracted_sha1 and not current_sha1:
                         current_sha1 = extracted_sha1
                         while len(sha1s) <= idx: sha1s.append(None)
                         sha1s[idx] = current_sha1
                         needs_db_update = True
                         sha1_fixed_count += 1
-                        logger.info(f"  ➜ 成功通过本地路径匹配获取 SHA1: {current_sha1}")
+                        logger.info(f"  ➜ 成功通过 ETK PC 地址获取 SHA1: {current_sha1}")
                     
                     # 阶段 1: 补齐缺失的 SHA1 (如果万能提取器没拿到 SHA1，再调 API)
                     if not current_sha1 and actual_pc:
@@ -2165,8 +2332,7 @@ def task_backup_mediainfo(processor):
                         local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, '')
                         mediainfo_path = None
                         
-                        # ★★★ 核心修复：解决挂载模式下找不到 JSON 的问题 ★★★
-                        # Emby 的 current_path 可能是挂载路径，而 JSON 实际在本地 STRM 目录
+                        # 通过 PC/SHA1 回到本地 STRM 目录查找 JSON。
                         if current_sha1 or actual_pc:
                             query_val = current_sha1 if current_sha1 else actual_pc
                             query_col = "sha1" if current_sha1 else "pick_code"
@@ -2268,7 +2434,7 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
             if not isinstance(emby_ids, list):
                 emby_ids = []
 
-            # 转换路径为本地路径 (兼容 HTTP 挂载模式)
+            # ETK HTTP PC 地址转换为本地 STRM 路径。
             local_path = path
             if path.startswith('http'):
                 pc, _ = processor._extract_115_fingerprints(path)
@@ -2461,17 +2627,22 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
             # 3. 对受影响的媒体库触发刷新
             if affected_lib_ids:
                 logger.info(f"  ➜ 匹配到 {len(affected_lib_ids)} 个受影响的媒体库，正在触发扫描...")
-                for lib_id in affected_lib_ids:
-                    refresh_url = f"{processor.emby_url.rstrip('/')}/Items/{lib_id}/Refresh"
-                    params = {
-                        "api_key": processor.emby_api_key,
-                        "Recursive": "true",
-                        "MetadataRefreshMode": "Default",
-                        "ImageRefreshMode": "Default",
-                        "ReplaceAllImages": "false",
-                        "ReplaceAllMetadata": "false"
-                    }
-                    emby.emby_client.post(refresh_url, params=params)
+                ignore_features = emby.enable_strm_assistant_ignore_file_change(processor.emby_url, processor.emby_api_key)
+                try:
+                    for lib_id in affected_lib_ids:
+                        refresh_url = f"{processor.emby_url.rstrip('/')}/Items/{lib_id}/Refresh"
+                        params = {
+                            "api_key": processor.emby_api_key,
+                            "Recursive": "true",
+                            "MetadataRefreshMode": "Default",
+                            "ImageRefreshMode": "Default",
+                            "ReplaceAllImages": "false",
+                            "ReplaceAllMetadata": "false"
+                        }
+                        emby.emby_client.post(refresh_url, params=params)
+                finally:
+                    if ignore_features is not None:
+                        emby.disable_strm_assistant_ignore_file_change(processor.emby_url, processor.emby_api_key, ignore_features)
                 logger.info("  ➜ 已成功触发受影响媒体库的扫描任务！")
             else:
                 logger.warning("  ➜ 未能将生成的文件匹配到任何 Emby 媒体库，跳过扫描。")
@@ -2669,9 +2840,28 @@ def task_restore_nfo_and_images(processor):
                     logger.warning(f"  ➜ 无法从数据库获取项目 '{title}' 的物理路径，跳过。")
                     continue
                 
+                pickcodes = []
+                raw_pickcodes = item.get('file_pickcode_json')
+                if raw_pickcodes:
+                    try:
+                        pickcodes = json.loads(raw_pickcodes) if isinstance(raw_pickcodes, str) else raw_pickcodes
+                    except Exception:
+                        pickcodes = []
+                if not isinstance(pickcodes, list):
+                    pickcodes = []
+
+                raw_asset_path = assets[0].get('path')
+                writable_path = _restore_resolve_writable_path(processor, raw_asset_path, pickcodes)
+                if not writable_path:
+                    logger.warning(f"  ➜ 无法解析项目 '{title}' 的可写入路径，跳过。")
+                    continue
+
+                if writable_path != raw_asset_path:
+                    logger.info(f"  ➜ [NFO恢复] 已定位本地 STRM 路径：{writable_path}")
+
                 # 构造一个伪装的 item_details 供后续生成函数使用
                 item_details = {
-                    "Path": assets[0].get('path'),
+                    "Path": writable_path,
                     "Type": item_type
                 }
 

@@ -465,7 +465,7 @@
                     <n-form-item label="STRM 链接地址" path="etk_server_url">
                         <n-input v-model:value="configModel.etk_server_url" placeholder="http://192.168.X.X:5257" />
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">支持http或挂载路径。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">仅支持 http(s) 访问地址，用于生成 PC 播放模式 STRM。</n-text>
                         </template>
                     </n-form-item>
 
@@ -491,6 +491,17 @@
                         <template #feedback>
                             <n-text depth="3" style="font-size:0.8em;">支持普通字符串替换和正则表达式替换。</n-text>
                         </template>
+                    </n-form-item>
+                    <n-form-item label="基础部署">
+                      <n-space vertical :size="8" style="width: 100%;">
+                        <n-button type="primary" ghost :loading="quickDeployLoading" @click="handleQuickDeploy115">
+                          <template #icon><n-icon :component="FlashIcon" /></template>
+                          115 网盘一键部署
+                        </n-button>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          先完成本卡片授权、接口和 STRM 链接地址等基础项并保存，再一键创建目录、分类、重命名和洗版配置。
+                        </n-text>
+                      </n-space>
                     </n-form-item>
                   </n-card>
                 </n-gi>
@@ -772,24 +783,6 @@
                       </template>
                       <n-alert type="success" :show-icon="true">
                         简单音乐管理器，支持直接上传文件夹、自动创建 115 目录并同步生成本地 STRM 文件，全量生成音乐库STRM。
-                      </n-alert>
-                    </n-card>
-
-                    <!-- ★ 卡片 6：第三方 STRM 兼容 -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">第三方 STRM 兼容</span>
-                          <n-button secondary type="primary" @click="openCustomRegexModal">
-                            <template #icon>
-                              <n-icon :component="BuildIcon" />
-                            </template>
-                            配置提取正则
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="info" :show-icon="true">
-                        支持第三方工具生成的 STRM 文件，通过自定义正则表达式，让 ETK 实时拦截并提取 PC 码实现302播放。内置已支持CMS、MH、MP115strm。
                       </n-alert>
                     </n-card>
 
@@ -1589,6 +1582,38 @@
         </n-space>
       </n-spin>
     </n-modal>
+
+    <n-modal v-model:show="showQuickDeployResult" preset="card" title="115 网盘一键部署完成" :style="modalStyle(620)" class="custom-modal glass-modal">
+      <n-space vertical :size="16">
+        <n-alert type="success" :show-icon="true">
+          已自动创建基础目录，并写入目录配置、分类配置、重命名配置和洗版配置。
+        </n-alert>
+        <div class="quick-deploy-tree">
+          <div class="quick-deploy-tree-title">115 目录树</div>
+          <ul v-if="quickDeployTree">
+            <li>
+              {{ quickDeployTree.media_root?.name || 'ETK媒体库' }}
+              <ul>
+                <li v-for="parent in quickDeployTree.media_root?.children || []" :key="parent.cid">
+                  {{ parent.name }}
+                  <ul>
+                    <li v-for="child in parent.children || []" :key="child.cid">{{ child.name }}</li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li>{{ quickDeployTree.save_root?.name || 'ETK待整理' }}</li>
+            <li>{{ quickDeployTree.unrecognized_root?.name || 'ETK未识别' }}</li>
+          </ul>
+        </div>
+        <n-alert type="warning" :show-icon="true">
+          本地 STRM 根目录无法自动判断，请继续手动设置“本地 STRM 根目录”，否则只完成网盘侧部署。
+        </n-alert>
+        <n-space justify="end">
+          <n-button @click="showQuickDeployResult = false">知道了</n-button>
+        </n-space>
+      </n-space>
+    </n-modal>
     
     <!-- ★ 引入自定义重命名模态框 -->
     <RenameConfigModal ref="renameModalRef" />
@@ -1709,42 +1734,6 @@
       <n-button type="error" @click="handleClearTables" :disabled="tablesToClear.length === 0" :loading="isClearing">确认清空</n-button>
     </template>
   </n-modal>
-
-  <!-- ★★★ 自定义 STRM 正则模态框 ★★★ -->
-    <n-modal v-model:show="showCustomRegexModal" preset="card" title="配置自定义提取正则" :style="modalStyle(650)" class="custom-modal glass-modal">
-      <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px;">
-        <b>正则编写规则：</b><br/>
-        必须使用小括号 <code>()</code> 将 115 的 PC 码包裹起来作为<b>第一个捕获组</b>。<br/>
-        例如，链接为 <code>http://xxx/play?id=abcde123</code>，正则应写为：<code>id=([a-zA-Z0-9]+)</code>
-      </n-alert>
-
-      <n-dynamic-input 
-        v-model:value="customRegexRules" 
-        placeholder="输入正则表达式" 
-        :min="0"
-        style="margin-bottom: 24px;"
-      />
-
-      <n-divider title-placement="left" style="font-size: 12px; color: #999;">实时效果测试</n-divider>
-      
-      <n-form label-placement="left" label-width="100">
-        <n-form-item label="测试链接">
-          <n-input v-model:value="regexTestUrl" placeholder="输入一个未知的第三方 STRM 链接" />
-        </n-form-item>
-        <n-form-item label="提取结果">
-          <n-alert :type="regexTestResult.type" :show-icon="true" style="width: 100%;">
-            {{ regexTestResult.text }}
-          </n-alert>
-        </n-form-item>
-      </n-form>
-
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showCustomRegexModal = false">取消</n-button>
-          <n-button type="primary" @click="saveCustomRegex" :loading="isSavingRegex">保存配置</n-button>
-        </n-space>
-      </template>
-    </n-modal>
 
   <!-- ★★★ 批量替换 STRM 模态框 ★★★ -->
     <n-modal v-model:show="showReplaceStrmModal" preset="card" title="批量替换本地 STRM 链接" :style="modalStyle(650)" class="custom-modal glass-modal">
@@ -2776,6 +2765,9 @@ const newFolderName = ref('');
 const showCreateFolderInput = ref(false);
 const selectorContext = ref(''); 
 const searchKeyword = ref('');
+const quickDeployLoading = ref(false);
+const showQuickDeployResult = ref(false);
+const quickDeployTree = ref(null);
 
 // ★★★ Cookie 扫码获取逻辑 ★★★
 const showCookieModal = ref(false);
@@ -3100,78 +3092,6 @@ const startWebAuth = () => {
   }, 180000);
 };
 
-// ★★★ 自定义 STRM 正则状态与逻辑 ★★★
-const showCustomRegexModal = ref(false);
-const customRegexRules = ref([]);
-const regexTestUrl = ref('');
-const isSavingRegex = ref(false);
-
-const openCustomRegexModal = async () => {
-  try {
-    const res = await axios.get('/api/p115/custom_strm_regex');
-    if (res.data.success) {
-      customRegexRules.value = res.data.data || [];
-    }
-  } catch (e) {
-    message.error('加载正则配置失败');
-  }
-  showCustomRegexModal.value = true;
-};
-
-const saveCustomRegex = async () => {
-  isSavingRegex.value = true;
-  try {
-    const res = await axios.post('/api/p115/custom_strm_regex', {
-      rules: customRegexRules.value
-    });
-    if (res.data.success) {
-      message.success(res.data.message);
-      showCustomRegexModal.value = false;
-    }
-  } catch (e) {
-    message.error('保存失败');
-  } finally {
-    isSavingRegex.value = false;
-  }
-};
-
-// 实时测试计算属性
-const regexTestResult = computed(() => {
-  const url = regexTestUrl.value.trim();
-  if (!url) return { type: 'default', text: '请输入测试链接' };
-
-  // 1. 模拟内置规则测试
-  if (url.includes('/p115/play/')) {
-    const pc = url.split('/p115/play/').pop().split('/')[0].split('?')[0].trim();
-    return { type: 'success', text: `[内置 ETK 规则命中] 提取到 PC 码: ${pc}` };
-  }
-  let match = url.match(/pick_?code=([a-zA-Z0-9]+)/i);
-  if (match) return { type: 'success', text: `[内置 MP 规则命中] 提取到 PC 码: ${match[1]}` };
-  
-  match = url.match(/\/d\/([a-zA-Z0-9]+)[.?/]/) || url.match(/\/d\/([a-zA-Z0-9]+)$/);
-  if (match) return { type: 'success', text: `[内置 CMS 规则命中] 提取到 PC 码: ${match[1]}` };
-  
-  match = url.match(/fileid=([a-zA-Z0-9]+)/i);
-  if (match) return { type: 'success', text: `[内置 MH 规则命中] 提取到 PC 码: ${match[1]}` };
-
-  // 2. 模拟用户自定义规则测试
-  for (let i = 0; i < customRegexRules.value.length; i++) {
-    const rule = customRegexRules.value[i];
-    if (!rule) continue;
-    try {
-      const regex = new RegExp(rule, 'i');
-      const customMatch = url.match(regex);
-      if (customMatch && customMatch[1]) {
-        return { type: 'success', text: `[自定义规则 ${i + 1} 命中] 提取到 PC 码: ${customMatch[1]}` };
-      }
-    } catch (e) {
-      return { type: 'error', text: `规则 ${i + 1} 语法错误: ${e.message}` };
-    }
-  }
-
-  return { type: 'warning', text: '未命中任何规则，提取失败。请检查正则是否包含 () 捕获组。' };
-});
-
 const formatSpeedTestBytes = (value) => {
   const bytes = Number(value || 0);
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -3275,6 +3195,35 @@ const handleCreateFolder = async () => {
   } catch (e) {
     message.error("请求失败: " + e.message);
   }
+};
+
+const handleQuickDeploy115 = () => {
+  dialog.warning({
+    title: '一键部署 115 基础配置',
+    content: '将自动在 115 根目录创建 ETK媒体库、ETK待整理、ETK未识别，并覆盖当前分类规则、重命名规则和洗版规则。确认继续？',
+    positiveText: '开始部署',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      quickDeployLoading.value = true;
+      try {
+        const res = await axios.post('/api/p115/quick_deploy');
+        if (!res.data?.success) {
+          message.error(res.data?.message || '一键部署失败');
+          return;
+        }
+        const data = res.data.data || {};
+        const cfg = data.config || {};
+        Object.assign(configModel.value, cfg);
+        quickDeployTree.value = data.tree || null;
+        showQuickDeployResult.value = true;
+        message.success(res.data.message || '115 网盘基础配置已部署完成');
+      } catch (e) {
+        message.error('一键部署失败: ' + (e.response?.data?.message || e.message));
+      } finally {
+        quickDeployLoading.value = false;
+      }
+    }
+  });
 };
 
 const confirmFolderSelection = () => {
@@ -3749,6 +3698,27 @@ onUnmounted(() => {
 .folder-item:hover { background-color: var(--n-hover-color); }
 .folder-icon-wrapper { display: flex; align-items: center; margin-right: 12px; }
 .folder-name { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--n-text-color-1); }
+
+.quick-deploy-tree {
+  border: 1px solid var(--n-border-color);
+  border-radius: 6px;
+  padding: 12px 14px;
+  color: var(--n-text-color-1);
+}
+
+.quick-deploy-tree-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.quick-deploy-tree ul {
+  margin: 4px 0 4px 18px;
+  padding: 0;
+}
+
+.quick-deploy-tree li {
+  line-height: 1.8;
+}
 .browser-footer {
   padding: 12px 16px; border-top: 1px solid var(--n-divider-color);
   display: flex; justify-content: space-between; align-items: center;

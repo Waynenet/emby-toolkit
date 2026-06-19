@@ -69,11 +69,14 @@ def p115_fp_read_strm_target(path: str) -> Optional[str]:
         return None
 
 
-def p115_fp_build_local_path_candidates(path: str, strm_target: Optional[str], local_root: str = '') -> List[str]:
+def p115_fp_build_local_path_candidates(
+    path: str,
+    strm_target: Optional[str],
+    local_root: str = '',
+) -> List[str]:
     """
-    为挂载模式/STRM 模式构造 p115_filesystem_cache.local_path 候选值。
-    - 标准 STRM：asset path 是 .strm，本地缓存是同目录真实视频扩展名。
-    - 挂载模式：STRM 内容可能没有 PC，只能靠路径映射到 local_path。
+    为 STRM 模式构造 p115_filesystem_cache.local_path 候选值。
+    标准 STRM：asset path 是 .strm，本地缓存是同目录真实视频扩展名。
     """
     candidates = []
 
@@ -85,12 +88,14 @@ def p115_fp_build_local_path_candidates(path: str, strm_target: Optional[str], l
             return
 
         variants = [cleaned]
-        if local_root:
+        for root in (local_root,):
+            if not root:
+                continue
             try:
-                root_norm = os.path.normpath(local_root).replace('\\', '/').rstrip('/')
+                root_norm = os.path.normpath(str(root)).replace('\\', '/').rstrip('/')
                 path_norm = os.path.normpath(cleaned).replace('\\', '/')
                 if path_norm == root_norm:
-                    return
+                    continue
                 if path_norm.startswith(root_norm + '/'):
                     variants.append(path_norm[len(root_norm):].lstrip('/'))
             except Exception:
@@ -182,6 +187,42 @@ def _merge_cache_row(cache_row, values: Dict[str, Any]) -> bool:
             values[dst_key] = str(val) if dst_key != 'size' else val
             changed = True
     return changed
+
+
+def _p115_fp_cache_values_complete(values: Dict[str, Any]) -> bool:
+    return bool(
+        values.get('fid')
+        and values.get('parent_id')
+        and values.get('name')
+        and values.get('sha1')
+        and values.get('pc')
+        and values.get('size')
+    )
+
+
+def _p115_fp_lookup_cache(P115CacheManager, values: Dict[str, Any], local_candidates: List[str]):
+    if not P115CacheManager:
+        return None
+
+    if values.get('pc'):
+        cache_row = P115CacheManager.get_file_cache_by_pickcode(values['pc'])
+        if cache_row:
+            return cache_row
+    if values.get('sha1'):
+        cache_row = P115CacheManager.get_file_cache_by_sha1(values['sha1'])
+        if cache_row:
+            return cache_row
+    if values.get('fid'):
+        cache_row = P115CacheManager.get_file_cache_by_id(values['fid'])
+        if cache_row:
+            return cache_row
+
+    for local_candidate in local_candidates:
+        cache_row = P115CacheManager.get_file_cache_by_local_path(local_candidate)
+        if cache_row:
+            return cache_row
+
+    return None
 
 
 def _row_to_dict(row) -> Dict[str, Any]:
@@ -340,7 +381,11 @@ def repair_p115_fingerprints_for_rows(
                 stats['missing_assets'] += 1
 
             strm_target = p115_fp_read_strm_target(clean_path)
-            local_candidates = p115_fp_build_local_path_candidates(clean_path, strm_target, local_root)
+            local_candidates = p115_fp_build_local_path_candidates(
+                clean_path,
+                strm_target,
+                local_root,
+            )
             
             # ★ 优化 2：防止 .strm 污染 115 真实文件名
             base_name = os.path.basename(clean_path) if clean_path else None
@@ -350,11 +395,25 @@ def repair_p115_fingerprints_for_rows(
             # ★ 核心修复：防止绝对路径污染 local_path
             # 仅当明确配置了 local_root 且成功剥离出相对路径时，才作为候选写入
             best_local_path = None
-            if local_root and local_candidates:
-                shortest = min(local_candidates, key=len)
-                # 如果最短的候选路径比原始路径短，说明成功剥离了 local_root
-                if len(shortest) < len(clean_path):
-                    best_local_path = shortest
+            if local_candidates:
+                absolute_path = p115_fp_clean_path(strm_target or clean_path) or clean_path
+                relative_candidates = []
+                for candidate in local_candidates:
+                    if not candidate:
+                        continue
+                    if not os.path.isabs(candidate) and not re.match(r'^[a-zA-Z]:/', candidate):
+                        relative_candidates.append(candidate)
+                if relative_candidates:
+                    video_candidates = [
+                        candidate for candidate in relative_candidates
+                        if os.path.splitext(candidate)[1].lower() in (video_exts - {'.strm'})
+                    ]
+                    best_local_path = min(video_candidates or relative_candidates, key=len)
+                elif local_root:
+                    shortest = min(local_candidates, key=len)
+                    # 如果最短的候选路径比原始路径短，说明成功剥离了 local_root
+                    if len(shortest) < len(absolute_path):
+                        best_local_path = shortest
 
             values = {
                 'fid': None,
@@ -366,8 +425,21 @@ def repair_p115_fingerprints_for_rows(
                 'size': _get_asset_size(asset),
             }
 
-            # 1) 走已有万能提取器 (仅在缺失 PC/SHA1 时调用)
-            if need_pc or need_sha1:
+            # 1) 优先从 p115_filesystem_cache 反查；外部/CD2 STRM 命中缓存时不需要访问 115。
+            cache_hit = False
+            cache_is_complete = False # ★ 新增：标记缓存是否完整
+            if P115CacheManager:
+                try:
+                    cache_row = _p115_fp_lookup_cache(P115CacheManager, values, local_candidates)
+                    if cache_row:
+                        cache_hit = True
+                        _merge_cache_row(cache_row, values)
+                        cache_is_complete = _p115_fp_cache_values_complete(values)
+                except Exception as e:
+                    logger.debug(f"  ➜ [{log_prefix}] 查询 p115_filesystem_cache 失败: {e}")
+
+            # 2) 缓存仍未补齐 PC/SHA1 时，再走已有万能提取器。
+            if (need_pc and not values.get('pc')) or (need_sha1 and not values.get('sha1')):
                 extractor = getattr(processor, '_extract_115_fingerprints', None) if processor else None
                 if callable(extractor):
                     for probe_path in [clean_path, strm_target]:
@@ -382,36 +454,15 @@ def repair_p115_fingerprints_for_rows(
                         except Exception as e:
                             logger.debug(f"  ➜ [{log_prefix}] 指纹提取器跳过异常路径: {probe_path} -> {e}")
 
-            # 2) 从 p115_filesystem_cache 反查
-            cache_hit = False
-            cache_is_complete = False # ★ 新增：标记缓存是否完整
-            if P115CacheManager:
-                try:
-                    cache_row = None
-                    if values.get('pc'):
-                        cache_row = P115CacheManager.get_file_cache_by_pickcode(values['pc'])
-                    if not cache_row and values.get('sha1'):
-                        cache_row = P115CacheManager.get_file_cache_by_sha1(values['sha1'])
-                    if not cache_row and values.get('fid'):
-                        cache_row = P115CacheManager.get_file_cache_by_id(values['fid'])
-
-                    if not cache_row:
-                        for local_candidate in local_candidates:
-                            cache_row = P115CacheManager.get_file_cache_by_local_path(local_candidate)
-                            if cache_row:
-                                break
-
-                    if cache_row:
-                        cache_hit = True
-                        _merge_cache_row(cache_row, values)
-                        
-                        # ★ 核心修改 2：检查缓存六芒星是否齐全
-                        if (values.get('fid') and values.get('parent_id') and 
-                            values.get('name') and values.get('sha1') and 
-                            values.get('pc') and values.get('size')):
-                            cache_is_complete = True
-                except Exception as e:
-                    logger.debug(f"  ➜ [{log_prefix}] 查询 p115_filesystem_cache 失败: {e}")
+                if P115CacheManager and not cache_is_complete:
+                    try:
+                        cache_row = _p115_fp_lookup_cache(P115CacheManager, values, local_candidates)
+                        if cache_row:
+                            cache_hit = True
+                            _merge_cache_row(cache_row, values)
+                            cache_is_complete = _p115_fp_cache_values_complete(values)
+                    except Exception as e:
+                        logger.debug(f"  ➜ [{log_prefix}] 查询 p115_filesystem_cache 失败: {e}")
 
             # 3) 仍然缺字段时，现场按 PC 计算 FID，再查 115 详情。
             # ★ 核心修改 3：只要缓存不完整，也触发 API 查询

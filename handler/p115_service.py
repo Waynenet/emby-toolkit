@@ -11,6 +11,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from gevent import spawn_later
+from typing import Any, Dict
 import time
 import config_manager
 import constants
@@ -2376,10 +2377,109 @@ class P115Service:
             def fs_search(self, payload):
                 return self._call_api('fs_search', payload, normalizer=_p115_normalize_list_response)
             
+            def _fill_info_parent_from_cache(self, resp, file_id):
+                """Cookie 详情接口不稳定返回父目录 ID，缺失时从本地文件系统缓存反推。"""
+                if not isinstance(resp, dict) or not _p115_success(resp):
+                    return resp
+                data = resp.get('data')
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                    resp['data'] = data
+                if not isinstance(data, dict):
+                    return resp
+
+                if str(data.get('parent_id') or data.get('pid') or '').strip():
+                    return resp
+
+                fid = str(data.get('fid') or data.get('file_id') or data.get('id') or file_id or '').strip()
+                pick_code = str(data.get('pick_code') or data.get('pc') or data.get('pickcode') or '').strip()
+                sha1 = str(data.get('sha1') or data.get('sha') or data.get('file_sha1') or '').strip().upper()
+
+                for path_key in ('path', 'paths', 'breadcrumb'):
+                    path_nodes = resp.get(path_key) or data.get(path_key)
+                    if not isinstance(path_nodes, list):
+                        continue
+                    for node in reversed(path_nodes):
+                        node = _p115_normalize_item(node) if isinstance(node, dict) else {}
+                        node_id = str(node.get('fid') or node.get('file_id') or node.get('id') or node.get('cid') or '').strip()
+                        node_fc = str(node.get('fc') or node.get('file_category') or '').strip()
+                        if node_id and node_id != fid and (not node_fc or node_fc == '0'):
+                            data['parent_id'] = node_id
+                            data['pid'] = node_id
+                            data.setdefault('_parent_id_source', path_key)
+                            return resp
+
+                row = None
+                try:
+                    if fid:
+                        row = P115CacheManager.get_file_cache_by_id(fid)
+                    if not row and pick_code:
+                        row = P115CacheManager.get_file_cache_by_pickcode(pick_code)
+                    if not row and sha1:
+                        row = P115CacheManager.get_file_cache_by_sha1(sha1)
+                except Exception as e:
+                    logger.debug(f"  ➜ [115] Cookie 文件详情父目录推导失败: fid={fid or file_id}, err={e}")
+                    return resp
+
+                if not row:
+                    logger.debug(f"  ➜ [115] Cookie 文件详情缺少父目录，且本地缓存未命中: fid={fid or file_id}")
+                    return resp
+
+                parent_id = str(row.get('parent_id') or '').strip()
+                if parent_id:
+                    data['parent_id'] = parent_id
+                    data['pid'] = parent_id
+                    data.setdefault('_parent_id_source', 'p115_filesystem_cache')
+                cached_id = str(row.get('id') or fid or '').strip()
+                cached_name = row.get('name')
+                cached_pc = row.get('pick_code')
+                cached_sha1 = row.get('sha1')
+                cached_size = row.get('size')
+                if cached_id:
+                    data.setdefault('fid', cached_id)
+                    data.setdefault('file_id', cached_id)
+                if cached_name:
+                    data.setdefault('name', cached_name)
+                    data.setdefault('file_name', cached_name)
+                    data.setdefault('fn', cached_name)
+                if cached_pc:
+                    data.setdefault('pick_code', cached_pc)
+                    data.setdefault('pc', cached_pc)
+                if cached_sha1:
+                    data.setdefault('sha1', cached_sha1)
+                    data.setdefault('sha', cached_sha1)
+                if cached_size:
+                    data.setdefault('size', cached_size)
+                    data.setdefault('fs', cached_size)
+                return resp
+
             def fs_get_info(self, file_id):
-                # 强制使用 OpenAPI 获取详情，因为 Cookie 接口存在不返回父目录 ID 的缺陷
-                self._check_openapi()
-                return self._call_api('fs_get_info', file_id, normalizer=_p115_normalize_info_response, force_openapi=True)
+                # 详情优先走 OpenAPI 获取完整父目录；访问上限/失败时用 Cookie 备用，再从本地缓存反推 parent_id。
+                openapi_resp = None
+                if self._openapi:
+                    openapi_resp = self._call_api(
+                        'fs_get_info',
+                        file_id,
+                        normalizer=_p115_normalize_info_response,
+                        force_openapi=True,
+                    )
+                    if _p115_success(openapi_resp):
+                        return openapi_resp
+
+                if self._cookie:
+                    cookie_resp = self._call_api(
+                        'fs_get_info',
+                        file_id,
+                        normalizer=_p115_normalize_info_response,
+                        force_cookie=True,
+                    )
+                    if _p115_success(cookie_resp):
+                        return self._fill_info_parent_from_cache(cookie_resp, file_id)
+                    return cookie_resp
+
+                if openapi_resp is not None:
+                    return openapi_resp
+                return {'state': False, 'error_msg': '未配置可用的 115 OpenAPI 或 Cookie，无法查询文件详情'}
 
             def _is_exists_error(self, resp):
                 text = json.dumps(resp, ensure_ascii=False).lower() if resp is not None else ""
@@ -2858,7 +2958,7 @@ class P115Service:
                                     if path_name: display_name = path_name
                             except: pass
 
-                            logger.info(f"  ➜ [115直链] 已获取下载直链：{display_name}")
+                            logger.info(f"  ➜ [115直链] 已通过 Cookie 获取下载直链：{display_name}")
 
                             # ★ 将文件名一起存入缓存
                             _DIRECT_URL_CACHE[cache_key] = {
@@ -2867,9 +2967,14 @@ class P115Service:
                                 'expire_at': time.time() + 300
                             }
                             return direct_url
-                        return None
+                        repaired = self._repair_stale_pick_code_downurl(pick_code, user_agent, backend='cookie')
+                        return repaired.get('url') if isinstance(repaired, dict) else None
                     except Exception as e:
                         err_str = str(e)
+                        if '405' not in err_str and 'Method Not Allowed' not in err_str:
+                            repaired = self._repair_stale_pick_code_downurl(pick_code, user_agent, backend='cookie')
+                            if isinstance(repaired, dict) and repaired.get('url'):
+                                return repaired['url']
                         if '405' in err_str or 'Method Not Allowed' in err_str:
                             logger.error("  🛑 [熔断] 获取直链触发 115 WAF 风控 (405)，强制休眠 10 秒...")
                             P115Service._last_downurl_time = time.time() + 10
@@ -2908,10 +3013,82 @@ class P115Service:
                                     'expire_at': time.time() + 300 
                                 }
                                 return direct_url
-                        return None
+                        repaired = self._repair_stale_pick_code_downurl(pick_code, user_agent, backend='openapi')
+                        return repaired.get('url') if isinstance(repaired, dict) else None
                     except Exception as e:
+                        repaired = self._repair_stale_pick_code_downurl(pick_code, user_agent, backend='openapi')
+                        if isinstance(repaired, dict) and repaired.get('url'):
+                            return repaired['url']
                         logger.warning(f"  ➜ [115 OpenAPI] 获取直链异常: {e}")
                         return None
+
+            def _repair_stale_pick_code_downurl(self, old_pick_code, user_agent=None, backend='openapi'):
+                """旧 PC 取不到直链时，用本地缓存中的 FID 重新获取当前 PC 并回写。"""
+                old_pc = str(old_pick_code or '').strip()
+                if not old_pc:
+                    return {}
+                try:
+                    cache_row = P115CacheManager.get_file_cache_by_pickcode(old_pc)
+                    if not cache_row or not cache_row.get('id'):
+                        return {}
+                    fid = str(cache_row.get('id') or '').strip()
+                    info_res = self.fs_get_info(fid)
+                    if not info_res or not info_res.get('state') or not isinstance(info_res.get('data'), dict):
+                        logger.debug(f"  ➜ [115直链] 旧 PC 补救失败：无法通过 FID={fid} 获取文件详情")
+                        return {}
+                    info = info_res.get('data') or {}
+                    new_pc = str(info.get('pick_code') or info.get('pc') or info.get('pickcode') or '').strip()
+                    if not new_pc or new_pc == old_pc:
+                        return {}
+
+                    if backend == 'cookie':
+                        if not self._cookie:
+                            return {}
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                        executor = ThreadPoolExecutor(max_workers=1)
+                        future = executor.submit(self._cookie.download_url, new_pc, user_agent)
+                        try:
+                            direct_url = _p115_extract_down_url(future.result(timeout=15))
+                        except TimeoutError:
+                            executor.shutdown(wait=False)
+                            P115Service.reset_cookie_client()
+                            return {}
+                        finally:
+                            try:
+                                executor.shutdown(wait=False)
+                            except Exception:
+                                pass
+                    else:
+                        if not self._openapi:
+                            return {}
+                        direct_url = _p115_extract_down_url(self._openapi.fs_downurl(new_pc, user_agent))
+
+                    if not direct_url:
+                        return {}
+
+                    P115CacheManager.replace_pick_code_references(
+                        old_pc,
+                        new_pc,
+                        fid=fid,
+                        info_data=info,
+                        source='playback_downurl_repair',
+                    )
+                    display_name = info.get('name') or info.get('file_name') or cache_row.get('name') or new_pc
+                    _DIRECT_URL_CACHE[(new_pc if backend == 'cookie' else f"openapi_{new_pc}", user_agent)] = {
+                        'url': direct_url,
+                        'name': display_name,
+                        'expire_at': time.time() + 300,
+                    }
+                    logger.info(
+                        "  ➜ [115直链] 旧 PC 已自动修复：%s -> %s，文件=%s",
+                        old_pc[:8] + "...",
+                        new_pc[:8] + "...",
+                        display_name,
+                    )
+                    return {'url': direct_url, 'pick_code': new_pc, 'fid': fid}
+                except Exception as e:
+                    logger.warning(f"  ➜ [115直链] 旧 PC 自动修复失败: pc={old_pc[:8]}..., err={e}")
+                    return {}
 
             def request(self, *args, **kwargs):
                 self._rate_limit()
@@ -3478,6 +3655,186 @@ class P115CacheManager:
         except Exception as e:
             logger.debug(f"  ➜ 读取 115 文件缓存失败(pc={pick_code}): {e}")
             return None
+
+    @staticmethod
+    def replace_pick_code_references(old_pick_code, new_pick_code, *, fid='', info_data=None, source='') -> Dict[str, Any]:
+        """PC 过期后的统一回写：缓存表、整理记录、媒体元数据和 HTTP STRM。"""
+        old_pc = str(old_pick_code or '').strip()
+        new_pc = str(new_pick_code or '').strip()
+        if not old_pc or not new_pc or old_pc == new_pc:
+            return {'updated': False, 'reason': 'invalid_pick_code'}
+
+        fid = str(fid or '').strip()
+        info = info_data if isinstance(info_data, dict) else {}
+        stats = {
+            'updated': False,
+            'filesystem_cache': 0,
+            'organize_records': 0,
+            'media_metadata': 0,
+            'strm_files': 0,
+        }
+
+        def _first(*values):
+            for value in values:
+                text = str(value or '').strip()
+                if text:
+                    return text
+            return ''
+
+        try:
+            old_row = None
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    if fid:
+                        cursor.execute(
+                            """
+                            SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                            FROM p115_filesystem_cache
+                            WHERE id = %s OR pick_code = %s
+                            ORDER BY CASE WHEN id = %s THEN 0 ELSE 1 END
+                            LIMIT 1
+                            """,
+                            (fid, old_pc, fid),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT id, parent_id, name, sha1, pick_code, local_path, size
+                            FROM p115_filesystem_cache
+                            WHERE pick_code = %s
+                            LIMIT 1
+                            """,
+                            (old_pc,),
+                        )
+                    old_row = P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone()) or {}
+
+                    final_fid = _first(fid, old_row.get('id'), info.get('fid'), info.get('file_id'), info.get('id'))
+                    parent_id = _first(info.get('parent_id'), info.get('pid'), info.get('cid'), old_row.get('parent_id'))
+                    name = _first(info.get('name'), info.get('file_name'), info.get('fn'), old_row.get('name'))
+                    sha1 = _first(info.get('sha1'), info.get('sha'), info.get('file_sha1'), old_row.get('sha1')).upper()
+                    local_path = _first(old_row.get('local_path'))
+                    try:
+                        size = int(float(info.get('size') or info.get('fs') or info.get('file_size') or old_row.get('size') or 0))
+                    except Exception:
+                        size = 0
+
+                    if final_fid:
+                        cursor.execute(
+                            "UPDATE p115_filesystem_cache SET pick_code = NULL, updated_at = NOW() WHERE pick_code = %s AND id <> %s",
+                            (new_pc, final_fid),
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE p115_filesystem_cache
+                            SET parent_id = COALESCE(%s, parent_id),
+                                name = COALESCE(%s, name),
+                                sha1 = COALESCE(%s, sha1),
+                                pick_code = %s,
+                                local_path = COALESCE(%s, local_path),
+                                size = CASE WHEN %s > 0 THEN %s ELSE size END,
+                                updated_at = NOW()
+                            WHERE id = %s OR pick_code = %s
+                            """,
+                            (parent_id or None, name or None, sha1 or None, new_pc, local_path or None, size, size, final_fid, old_pc),
+                        )
+                        stats['filesystem_cache'] = cursor.rowcount or 0
+
+                    cursor.execute(
+                        "UPDATE p115_organize_records SET pick_code = NULL WHERE pick_code = %s AND (%s = '' OR file_id <> %s)",
+                        (new_pc, final_fid, final_fid),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE p115_organize_records
+                        SET pick_code = %s
+                        WHERE pick_code = %s OR (%s <> '' AND file_id = %s)
+                        """,
+                        (new_pc, old_pc, final_fid, final_fid),
+                    )
+                    stats['organize_records'] = cursor.rowcount or 0
+
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata
+                        SET file_pickcode_json = (
+                            SELECT COALESCE(jsonb_agg(
+                                CASE WHEN elem.value = to_jsonb(%s::text) THEN to_jsonb(%s::text) ELSE elem.value END
+                                ORDER BY elem.ord
+                            ), '[]'::jsonb)
+                            FROM jsonb_array_elements(file_pickcode_json) WITH ORDINALITY AS elem(value, ord)
+                        ),
+                        last_updated_at = NOW()
+                        WHERE file_pickcode_json ? %s
+                        """,
+                        (old_pc, new_pc, old_pc),
+                    )
+                    stats['media_metadata'] = cursor.rowcount or 0
+                conn.commit()
+
+            stats['strm_files'] = P115CacheManager._replace_pick_code_in_strm_file(old_pc, new_pc, old_row)
+            stats['updated'] = any(stats.get(k, 0) for k in ('filesystem_cache', 'organize_records', 'media_metadata', 'strm_files'))
+            logger.info(
+                "  ➜ [115缓存] 已回写最新 PC：%s -> %s，缓存=%s，整理记录=%s，媒体元数据=%s，STRM=%s，来源=%s",
+                old_pc[:8] + "...",
+                new_pc[:8] + "...",
+                stats['filesystem_cache'],
+                stats['organize_records'],
+                stats['media_metadata'],
+                stats['strm_files'],
+                source or '-',
+            )
+            return stats
+        except Exception as e:
+            logger.warning(f"  ➜ [115缓存] 回写最新 PC 失败: {old_pc[:8]}... -> {new_pc[:8]}..., err={e}")
+            return {**stats, 'error': str(e)}
+
+    @staticmethod
+    def _replace_pick_code_in_strm_file(old_pick_code, new_pick_code, cache_row=None) -> int:
+        old_pc = str(old_pick_code or '').strip()
+        new_pc = str(new_pick_code or '').strip()
+        row = cache_row if isinstance(cache_row, dict) else {}
+        local_path = str(row.get('local_path') or '').strip()
+        if not old_pc or not new_pc or not local_path:
+            return 0
+        try:
+            cfg = get_config() or {}
+            local_root = str(cfg.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) or cfg.get('local_strm_root') or '').strip()
+            if not local_root:
+                return 0
+            rel = local_path.replace('\\', '/').lstrip('/\\')
+            strm_rel = os.path.splitext(rel)[0] + '.strm'
+            strm_path = os.path.join(local_root, *strm_rel.split('/'))
+            if not os.path.exists(strm_path):
+                return 0
+            with open(strm_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            pattern = re.compile(r'(/api/p115/play/)' + re.escape(old_pc) + r'(?=([/?#]|$))')
+            new_content, count = pattern.subn(lambda m: m.group(1) + new_pc, content)
+            if count <= 0 or new_content == content:
+                return 0
+            emby_url = str(cfg.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or '').strip()
+            emby_api_key = str(cfg.get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
+            ignore_features = None
+            if emby_url and emby_api_key:
+                try:
+                    from handler import emby
+                    ignore_features = emby.enable_strm_assistant_ignore_file_change(emby_url, emby_api_key)
+                except Exception as e:
+                    logger.debug(f"  ➜ [115缓存] 开启神医忽略文件变更失败: {e}")
+            try:
+                with open(strm_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+            finally:
+                if ignore_features is not None:
+                    try:
+                        from handler import emby
+                        emby.disable_strm_assistant_ignore_file_change(emby_url, emby_api_key, ignore_features)
+                    except Exception as e:
+                        logger.debug(f"  ➜ [115缓存] 恢复神医忽略文件变更失败: {e}")
+            return 1
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 更新 STRM 中的 PC 失败: {e}")
+            return 0
 
     @staticmethod
     def get_file_cache_by_sha1(sha1):
@@ -7499,7 +7856,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 f"  ➜ [重命名失败] {x['old_name']} -> {x['new_name']}, "
                                 f"原因: {_p115_error_text(fail_res)}"
                             )
-                            # ★ 核心修复：如果 115 API 重命名失败，强制退回原名，确保后续生成的 STRM 挂载路径 100% 准确！
+                            # 如果 115 API 重命名失败，强制退回原名，确保后续生成的 STRM 指向正确文件。
                             x['item']['_new_filename'] = x['old_name']
                         else:
                             logger.debug(f"  ➜ [重命名] {x['old_name']} -> {x['new_name']}")
@@ -7552,6 +7909,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "http://127.0.0.1:5257").rstrip('/')
                     
                     if pick_code and local_root and os.path.exists(local_root):
+                        if not etk_url.startswith('http'):
+                            logger.error("  ➜ 请配置 http(s) 开头的 ETK 访问地址。")
+                            return False
                         try:
                             category_name = None
                             for rule in self.rules:
@@ -7619,18 +7979,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             if is_video:
                                 strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                                 strm_filepath = os.path.join(local_dir, strm_filename)
-                                if not etk_url.startswith('http'):
-                                    mount_prefix = etk_url
-                                    # ★ 保留原名只影响 new_filename，挂载路径仍走标准目录
-                                    if self.media_type == 'tv' and season_num is not None and s_name:
-                                        mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, s_name, new_filename)
-                                    else:
-                                        mount_path = os.path.join(mount_prefix, relative_category_path, std_root_name, new_filename)
-                                    strm_content = mount_path.replace('\\', '/')
-                                else:
-                                    strm_content = f"{etk_url}/api/p115/play/{pick_code}"
-                                    if cfg.get('strm_url_fmt') == 'with_name':
-                                        strm_content = f"{strm_content}/{new_filename}"
+                                strm_content = f"{etk_url}/api/p115/play/{pick_code}"
+                                if cfg.get('strm_url_fmt') == 'with_name':
+                                    strm_content = f"{strm_content}/{new_filename}"
                                 
                                 with open(strm_filepath, 'w', encoding='utf-8') as f:
                                     f.write(strm_content)
@@ -7823,8 +8174,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         etk_url = (config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or "").rstrip("/")
         media_root_name = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME) or "").strip("/")
 
-        if not local_root or not etk_url:
-            logger.warning("  ➜ [MP直出] 未配置本地 STRM 根目录或 ETK 地址，跳过。")
+        if not local_root or not etk_url or not etk_url.startswith("http"):
+            logger.warning("  ➜ [MP直出] 请配置 http(s) 开头的 ETK 访问地址。")
             return False
 
         os.makedirs(local_root, exist_ok=True)
@@ -7912,13 +8263,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 strm_filename = os.path.splitext(original_name)[0] + ".strm"
                 strm_filepath = os.path.join(local_dir, strm_filename)
 
-                if not etk_url.startswith("http"):
-                    # 挂载模式
-                    mount_path = os.path.join(etk_url, parent_rel_path, original_name).replace("\\", "/")
-                    strm_content = mount_path
-                else:
-                    # API 模式
-                    strm_content = f"{etk_url}/api/p115/play/{pick_code}/{original_name}"
+                strm_content = f"{etk_url}/api/p115/play/{pick_code}/{original_name}"
 
                 with open(strm_filepath, "w", encoding="utf-8") as f:
                     f.write(strm_content)

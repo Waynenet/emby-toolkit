@@ -56,6 +56,27 @@ KNOWN_SKIP_EXTS = {'clpi', 'mpls', 'bdmv', 'jar', 'bup', 'ifo'}
 MIN_BIG_PACKAGE_VIDEO_SIZE = 50 * 1024 * 1024
 
 
+def _p115_response_path_contains_cid(response, target_cid):
+    path_nodes = response.get('path') if isinstance(response, dict) else None
+    if not path_nodes:
+        return True
+
+    target = str(target_cid or '')
+    for node in path_nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(
+            node.get('cid')
+            or node.get('file_id')
+            or node.get('id')
+            or node.get('parent_id')
+            or ''
+        )
+        if node_id == target:
+            return True
+    return False
+
+
 def _normalize_batch_recognition_hints(hints, *, is_tv=False, preserve_episode=False):
     """
     批量整理时，组级 hints 只能安全复用标题/TMDb/季级信息。
@@ -913,6 +934,166 @@ def task_scan_and_organize_115(processor=None):
         logger.error(f"  ➜ 115 扫描任务异常: {e}", exc_info=True)
         update_progress(100, f"扫描异常结束: {e}")
 
+def task_move_root_files_to_115_inbox(processor=None):
+    """把 115 根目录里的幽灵媒体文件移回待整理目录。"""
+    logger.info("=== 开始修复 115 根目录异常文件 ===")
+
+    try:
+        import task_manager
+    except ImportError:
+        task_manager = None
+
+    def update_progress(prog, msg):
+        if task_manager:
+            task_manager.update_status_from_thread(prog, msg)
+        logger.info(msg)
+
+    config = get_config()
+    save_cid = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID) or '').strip()
+    save_name = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_NAME) or '待整理').strip()
+    if not save_cid or save_cid == '0':
+        update_progress(100, "  ➜ 未配置 115 待整理目录，无法移动根目录异常文件。")
+        return
+
+    client = P115Service.get_client()
+    if not client:
+        update_progress(100, "  ➜ 无法初始化 115 客户端。")
+        return
+
+    configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
+    allowed_exts = {str(e).lower().lstrip('.') for e in configured_exts if str(e).strip()}
+    if not allowed_exts:
+        allowed_exts = KNOWN_VIDEO_EXTS | {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+
+    def first_present(*values):
+        for value in values:
+            if value is not None and str(value).strip() != '':
+                return value
+        return None
+
+    def collect_if_root_file(item, source_name):
+        item_id = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
+        name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
+        fc_val = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+        is_folder = fc_val == '0'
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        if not item_id or is_folder or ext not in allowed_exts:
+            return
+        if str(item_id) in root_file_id_set:
+            return
+        root_file_id_set.add(str(item_id))
+        root_file_ids.append(str(item_id))
+        root_file_names.append(str(name))
+        logger.warning(f"  ➜ [根目录修复] 发现根目录异常文件：{name}，来源={source_name}")
+
+    update_progress(5, "  ➜ 正在扫描 115 根目录一级文件...")
+    root_file_ids = []
+    root_file_id_set = set()
+    root_file_names = []
+    offset = 0
+    limit = 1000
+    while True:
+        if processor and getattr(processor, 'is_stop_requested', lambda: False)():
+            update_progress(100, "  ➜ 用户已中止根目录异常文件修复。")
+            return
+
+        res = client.fs_files({'cid': 0, 'limit': limit, 'offset': offset, 'record_open_time': 0, 'count_folders': 0})
+        if not res.get('state') and res.get('code'):
+            update_progress(100, f"  ➜ 拉取 115 根目录失败：{res}")
+            return
+
+        data = res.get('data') or []
+        if not data:
+            break
+
+        for item in data:
+            collect_if_root_file(item, "根目录一级列表")
+
+        if len(data) < limit:
+            break
+        offset += limit
+
+    raw_rules = settings_db.get_setting('p115_sorting_rules')
+    rules = json.loads(raw_rules) if raw_rules and isinstance(raw_rules, str) else (raw_rules or [])
+    target_dirs = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        cid = str(rule.get('cid') or '').strip()
+        if rule.get('enabled', True) and cid and cid not in ('0', save_cid):
+            target_dirs.append((cid, rule.get('category_path') or rule.get('dir_name') or f"CID:{cid}"))
+
+    fetch_types = []
+    if allowed_exts & KNOWN_VIDEO_EXTS:
+        fetch_types.append((4, "视频"))
+    if allowed_exts & {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}:
+        fetch_types.append((1, "字幕"))
+
+    if target_dirs and fetch_types:
+        update_progress(15, f"  ➜ 正在从 {len(target_dirs)} 个分类目录递归查找根目录幽灵文件...")
+    for idx, (target_cid, category_name) in enumerate(target_dirs):
+        if processor and getattr(processor, 'is_stop_requested', lambda: False)():
+            update_progress(100, "  ➜ 用户已中止根目录异常文件修复。")
+            return
+        base_prog = 15 + int((idx / max(len(target_dirs), 1)) * 25)
+        for f_type, type_name in fetch_types:
+            offset = 0
+            while True:
+                try:
+                    res = client.fs_files({
+                        'cid': target_cid,
+                        'type': f_type,
+                        'limit': limit,
+                        'offset': offset,
+                        'record_open_time': 0,
+                    })
+                except Exception as e:
+                    logger.warning(f"  ➜ [根目录修复] 递归扫描失败：{category_name} / {type_name}，err={e}")
+                    break
+
+                data = res.get('data') or []
+                if not data:
+                    break
+
+                for item in data:
+                    pid = first_present(item.get('pid'), item.get('cid'), item.get('parent_id'))
+                    if pid is not None and str(pid).strip() == '0':
+                        collect_if_root_file(item, category_name)
+
+                if len(data) < limit:
+                    break
+                offset += limit
+        update_progress(base_prog, f"  ➜ 已检查分类目录：{category_name}")
+
+    if not root_file_ids:
+        update_progress(100, "  ➜ 没有发现需要移动的 115 根目录异常媒体文件。")
+        return
+
+    update_progress(40, f"  ➜ 发现 {len(root_file_ids)} 个根目录媒体文件，准备移动到 [{save_name}]。")
+    moved_ids = []
+    failed_batches = 0
+    batch_size = 100
+    for start in range(0, len(root_file_ids), batch_size):
+        batch = root_file_ids[start:start + batch_size]
+        try:
+            resp = client.fs_move(batch, save_cid)
+            if resp.get('state'):
+                moved_ids.extend(batch)
+            else:
+                failed_batches += 1
+                logger.warning(f"  ➜ [根目录修复] 移动失败：{resp}")
+        except Exception as e:
+            failed_batches += 1
+            logger.warning(f"  ➜ [根目录修复] 移动异常：{e}")
+
+    sample_names = "、".join(root_file_names[:3])
+    if len(root_file_names) > 3:
+        sample_names += " ..."
+    update_progress(
+        100,
+        f"  ➜ 根目录异常文件修复完成：移动 {len(moved_ids)} 个，失败批次 {failed_batches} 个。示例：{sample_names}"
+    )
+
 def task_sync_115_directory_tree(processor=None):
     """
     主动同步 115 分类目录下的所有子目录到本地 DB 缓存。
@@ -1093,8 +1274,8 @@ def task_full_sync_strm_and_subs(processor=None):
         if not allowed_exts:
             allowed_exts = known_video_exts | known_sub_exts
         
-        if not local_root or not etk_url:
-            update_progress(100, "错误：未配置本地 STRM 根目录或 ETK 访问地址！")
+        if not local_root or not etk_url or not etk_url.startswith('http'):
+            update_progress(100, "错误：请配置 http(s) 开头的 ETK 访问地址。")
             return
 
         client = P115Service.get_client()
@@ -1141,6 +1322,12 @@ def task_full_sync_strm_and_subs(processor=None):
 
         # 动态 API 路径缓存池 (防止重复请求 115 接口)
         dynamic_path_cache = {}
+
+        def first_present(*values):
+            for value in values:
+                if value is not None and str(value).strip() != '':
+                    return value
+            return None
 
         # 内存路径推导函数 (★ 终极修复版：DB缓存 + API动态溯源)
         def resolve_local_dir(pid, target_cid):
@@ -1194,18 +1381,31 @@ def task_full_sync_strm_and_subs(processor=None):
             return None
 
         def process_full_sync_items(items, target_cid, category_name):
-            nonlocal files_generated, subs_downloaded
+            nonlocal files_generated, subs_downloaded, root_anomaly_skipped
             for item in items:
                 # 兼容 OpenAPI、Cookie 和 p115client 标准化字段
-                name = item.get('fn') or item.get('n') or item.get('file_name') or item.get('name', '')
+                name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
                 ext = name.split('.')[-1].lower() if '.' in name else ''
                 if ext not in allowed_exts:
                     continue
 
-                pc = item.get('pc') or item.get('pick_code') or item.get('pickcode')
+                pc = first_present(item.get('pc'), item.get('pick_code'), item.get('pickcode'))
                 # 115 返回的文件数据中，pid/cid/parent_id 代表它所在的父目录 ID
-                pid = item.get('pid') or item.get('cid') or item.get('parent_id')
-                if not pc or not pid:
+                pid = first_present(item.get('pid'), item.get('cid'), item.get('parent_id'))
+                if not pc or pid is None:
+                    continue
+                pid_text = str(pid).strip()
+                if not pid_text:
+                    continue
+                if pid_text == '0' and not item.get('_etk_rel_dir'):
+                    root_anomaly_skipped += 1
+                    fid = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
+                    logger.warning(
+                        "  ➜ [全量同步] 跳过 115 根目录异常文件：%s（fid=%s，pc=%s）。请在 115 网盘手动删除或重新移动。",
+                        name,
+                        fid or '-',
+                        str(pc)[:8] if pc else '-',
+                    )
                     continue
 
                 rel_dir = item.get('_etk_rel_dir') or resolve_local_dir(pid, target_cid)
@@ -1229,15 +1429,9 @@ def task_full_sync_strm_and_subs(processor=None):
                     strm_name = os.path.splitext(name)[0] + ".strm"
                     strm_path = os.path.join(current_local_path, strm_name)
 
-                    # 动态计算 STRM 内容 (支持挂载模式与直链模式)
-                    if not etk_url.startswith('http'):
-                        mount_prefix = etk_url
-                        mount_path = os.path.join(mount_prefix, rel_dir, name)
-                        content = mount_path.replace('\\', '/')
-                    else:
-                        content = f"{etk_url}/api/p115/play/{pc}"
-                        if rename_config.get('strm_url_fmt') == 'with_name':
-                            content = f"{content}/{name}"
+                    content = f"{etk_url}/api/p115/play/{pc}"
+                    if rename_config.get('strm_url_fmt') == 'with_name':
+                        content = f"{content}/{name}"
 
                     need_write = True
                     if os.path.exists(strm_path):
@@ -1252,10 +1446,31 @@ def task_full_sync_strm_and_subs(processor=None):
                             pass
 
                     if need_write:
-                        with open(strm_path, 'w', encoding='utf-8') as f:
-                            f.write(content)
-                        if not os.path.exists(strm_path):
-                            logger.debug(f"  ➜ [新增] 生成 STRM: {strm_name}")
+                        was_existing_strm = os.path.exists(strm_path)
+                        ignore_features = None
+                        if was_existing_strm:
+                            try:
+                                from handler import emby
+                                emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+                                emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+                                if emby_url and emby_api_key:
+                                    ignore_features = emby.enable_strm_assistant_ignore_file_change(emby_url, emby_api_key)
+                            except Exception as e:
+                                logger.debug(f"  ➜ [全量同步] 开启神医忽略文件变更失败: {e}")
+                        try:
+                            with open(strm_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            if not was_existing_strm:
+                                logger.debug(f"  ➜ [新增] 生成 STRM: {strm_name}")
+                            else:
+                                changed_strm_files.add(os.path.abspath(strm_path))
+                        finally:
+                            if ignore_features is not None:
+                                try:
+                                    from handler import emby
+                                    emby.disable_strm_assistant_ignore_file_change(emby_url, emby_api_key, ignore_features)
+                                except Exception as e:
+                                    logger.debug(f"  ➜ [全量同步] 恢复神医忽略文件变更失败: {e}")
                         files_generated += 1
 
                     valid_local_files.add(os.path.abspath(strm_path))
@@ -1398,6 +1613,8 @@ def task_full_sync_strm_and_subs(processor=None):
         valid_local_files = set()
         files_generated = 0
         subs_downloaded = 0
+        root_anomaly_skipped = 0
+        changed_strm_files = set()
         
         fetch_types = [4] # 4=视频
         if download_subs: fetch_types.append(1) # 1=文档(含字幕)
@@ -1407,6 +1624,7 @@ def task_full_sync_strm_and_subs(processor=None):
         for idx, target_cid in enumerate(target_cids):
             category_name = cid_to_rel_path.get(target_cid, "未知分类")
             base_prog = 10 + int((idx / total_targets) * 80)
+            target_invalid = False
             fast_count = run_cookie_fast_sync(target_cid, category_name, base_prog)
             if processor and getattr(processor, 'is_stop_requested', lambda: False)():
                 return
@@ -1434,6 +1652,14 @@ def task_full_sync_strm_and_subs(processor=None):
                             logger.error(f"  ➜ API 返回异常状态 (可能触发流控): {res}")
                             sync_has_errors = True
                             break
+                        if not _p115_response_path_contains_cid(res, target_cid):
+                            logger.warning(
+                                f"  ➜ [{category_name}] OpenAPI 返回路径不包含目标 cid={target_cid}，"
+                                "可能远端目录已删除或本地缓存过期，已跳过该分类的兜底同步。"
+                            )
+                            sync_has_errors = True
+                            target_invalid = True
+                            break
                         data = res.get('data', [])
                         if not data: break
                         
@@ -1448,9 +1674,15 @@ def task_full_sync_strm_and_subs(processor=None):
                         logger.error(f"  ➜ 全局拉取异常 (cid={target_cid}, type={f_type}): {e}")
                         sync_has_errors = True
                         break
+                if target_invalid:
+                    break
 
         logger.info(f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
-
+        if root_anomaly_skipped:
+            logger.warning(
+                "  ➜ [全量同步] 已跳过 %s 个 115 根目录异常文件，未生成 STRM，也未写入本地缓存。",
+                root_anomaly_skipped,
+            )
         # =================================================================
         # 阶段 3: 本地失效文件清理 (耗时: 秒级)
         # =================================================================
@@ -1554,6 +1786,24 @@ def task_full_sync_strm_and_subs(processor=None):
                             
                 logger.info(f"  ➜ 清理完成: 删除了 {cleaned_files} 个失效/孤儿文件, {cleaned_dirs} 个无STRM的空壳目录。")
 
+        if changed_strm_files:
+            try:
+                from handler import emby
+                emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+                emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+                if emby_url and emby_api_key:
+                    update_progress(98, f"  ➜ 正在通知 Emby 扫描 {len(changed_strm_files)} 个已更新 STRM...")
+                    emby.notify_emby_file_changes(
+                        list(changed_strm_files),
+                        emby_url,
+                        emby_api_key,
+                        update_type="Modified",
+                    )
+                else:
+                    logger.warning("  ➜ 未配置 Emby 地址或 API Key，跳过全量生成 STRM 后的 Emby 扫描。")
+            except Exception as e:
+                logger.warning(f"  ➜ 通知 Emby 扫描全量生成 STRM 变更失败: {e}")
+
         update_progress(100, "=== 全量生成STRM任务结束 ===")
 
     except Exception as e:
@@ -1601,8 +1851,8 @@ def task_sync_music_library(processor=None):
         update_progress(100, msg)
         return
         
-    if not local_root or not etk_url:
-        msg = "未配置本地 STRM 根目录或 ETK 访问地址！"
+    if not local_root or not etk_url or not etk_url.startswith('http'):
+        msg = "请配置 http(s) 开头的 ETK 访问地址。"
         logger.error(msg)
         update_progress(100, msg)
         return
@@ -1683,12 +1933,7 @@ def task_sync_music_library(processor=None):
                             strm_name = os.path.splitext(name)[0] + ".strm"
                             strm_path = os.path.join(current_local_path, strm_name)
                             
-                            if not etk_url.startswith('http'):
-                                rel_p = os.path.relpath(strm_path, local_root)
-                                content = os.path.join(etk_url, rel_p).replace('\\', '/')
-                                content = content[:-5] + f".{ext}" 
-                            else:
-                                content = f"{etk_url}/api/p115/play/{pc}/{name}"
+                            content = f"{etk_url}/api/p115/play/{pc}/{name}"
                                 
                             need_write = True
                             if os.path.exists(strm_path):
@@ -1846,6 +2091,10 @@ def task_monitor_115_life_events(processor=None):
     known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
     allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
     if not allowed_exts: allowed_exts = known_video_exts | known_sub_exts
+
+    if not local_root or not etk_url or not etk_url.startswith('http'):
+        logger.warning("  ➜ [事件] 未配置 http(s) 开头的 ETK 访问地址，跳过 STRM 增量生成。")
+        return
 
     raw_rules = settings_db.get_setting('p115_sorting_rules')
     if not raw_rules: return
@@ -2090,14 +2339,9 @@ def task_monitor_115_life_events(processor=None):
                     strm_name = os.path.splitext(file_name)[0] + ".strm"
                     strm_path = os.path.join(current_local_path, strm_name)
                     
-                    if not etk_url.startswith('http'):
-                        rel_p = os.path.relpath(strm_path, local_root)
-                        content = os.path.join(etk_url, rel_p).replace('\\', '/')
-                        content = content[:-5] + f".{ext}"
-                    else:
-                        content = f"{etk_url}/api/p115/play/{pick_code}"
-                        if rename_config.get('strm_url_fmt') == 'with_name':
-                            content = f"{content}/{file_name}"
+                    content = f"{etk_url}/api/p115/play/{pick_code}"
+                    if rename_config.get('strm_url_fmt') == 'with_name':
+                        content = f"{content}/{file_name}"
                             
                     with open(strm_path, 'w', encoding='utf-8') as f:
                         f.write(content)
