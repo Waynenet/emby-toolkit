@@ -396,22 +396,30 @@ class SharedCenterClient:
 
     def list_display_sources(self, *, q: str = '', status: str = 'alive,available,updating,inconsistent,incomplete',
                              item_type: str = '', tmdb_id: str = '', order_by: str = 'latest',
+                             genre_id: str = '', release_year=None,
                              limit: int = 200, offset: int = 0, force_refresh: bool = False, **_ignored) -> Dict[str, Any]:
         """中心资源库展示口径：由中心端分页、筛选、聚合。
 
         默认只返回电影和季容器；连载季返回公共 season_hub，单集只作为 children/pack_items。
         force_refresh=True 时绕过中心端展示缓存并重建缓存。
         """
-        return self._get('/api/v1/sources/display-list', {
+        params = {
             'q': q or '',
             'status': status or 'alive,available,updating,inconsistent,incomplete',
             'item_type': item_type or '',
             'tmdb_id': tmdb_id or '',
             'order_by': order_by or 'latest',
+            'genre_id': genre_id or '',
             'limit': max(1, min(int(limit or 200), 1000)),
             'offset': max(0, int(offset or 0)),
             'force_refresh': 1 if force_refresh else 0,
-        }, timeout=30)
+        }
+        if release_year:
+            params['release_year'] = release_year
+        return self._get('/api/v1/sources/display-list', params, timeout=30)
+
+    def list_display_tags(self) -> Dict[str, Any]:
+        return self._get('/api/v1/sources/display-tags', {}, timeout=15)
 
     def list_cloud_search_sources(self, *, q: str = '', status: str = 'alive,available,updating,inconsistent,incomplete',
                                   item_type: str = '', tmdb_id: str = '', order_by: str = 'latest',
@@ -427,11 +435,13 @@ class SharedCenterClient:
             'offset': max(0, int(offset or 0)),
         }, timeout=30)
 
-    def list_display_home(self, *, limit_per_section: int = 10, force_refresh: bool = False, **_ignored) -> Dict[str, Any]:
+    def list_display_home(self, *, limit_per_section: int = 10, force_refresh: bool = False,
+                          sections: List[Dict[str, Any]] | None = None, **_ignored) -> Dict[str, Any]:
         return self._get('/api/v1/sources/display-home', {
             'limit_per_section': max(1, min(int(limit_per_section or 10), 20)),
             'force_refresh': 1 if force_refresh else 0,
-        }, timeout=15)
+            'sections_json': json.dumps(sections or [], ensure_ascii=False),
+        }, timeout=45)
 
 
     def list_display_children(self, *, source_kind: str = '', source_id: str = '', source_ids: List[str] | None = None,
@@ -596,6 +606,12 @@ class SharedCenterClient:
 
     def raw_batch(self, sha1_list: List[str]) -> Dict[str, Any]:
         return self._post('/api/v1/rawffprobe/batch', {'sha1_list': list(sha1_list or [])}, timeout=25)
+
+    def scan_raw_repair_queue(self, limit: int = 200000) -> Dict[str, Any]:
+        return self._post('/api/v1/rawffprobe/repair-queue/scan', {'limit': int(limit or 200000)}, timeout=30)
+
+    def my_raw_repair_queue(self, limit: int = 200) -> Dict[str, Any]:
+        return self._get('/api/v1/rawffprobe/repair-queue/mine', {'limit': int(limit or 200)}, timeout=25)
 
     def get_raw_ffprobe(self, sha1: str) -> Dict[str, Any]:
         return self._get(f"/api/v1/rawffprobe/{urllib.parse.quote(str(sha1 or '').strip())}", timeout=25)

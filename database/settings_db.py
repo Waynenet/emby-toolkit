@@ -2,6 +2,7 @@
 import psycopg2
 import logging
 import json
+import re
 import pytz
 from typing import Optional, Any, Dict
 from datetime import datetime
@@ -211,6 +212,7 @@ DEFAULT_SHARED_RESOURCE_CONFIG = {
     'p115_shared_block_short_drama_transfer': False,
     'p115_shared_auto_share_requests_enabled': False,
     'p115_shared_install_id': '',
+    'p115_shared_center_home_sections': [],
 }
 
 
@@ -235,6 +237,51 @@ def _shared_int(value, default: int = 0, minimum: int = None, maximum: int = Non
     if maximum is not None:
         n = min(int(maximum), n)
     return n
+
+
+def _shared_center_home_sections(value) -> list:
+    default_sections = [
+        {'key': 'latest', 'title': '最新资源', 'display_type': 'all', 'order_by': 'pool_time', 'limit': 10, 'enabled': True},
+        {'key': 'popular', 'title': '热门共享', 'display_type': 'all', 'order_by': 'popular', 'limit': 10, 'enabled': True},
+        {'key': 'movies', 'title': '电影', 'display_type': 'movie', 'order_by': 'pool_time', 'limit': 10, 'enabled': True},
+        {'key': 'series', 'title': '剧集', 'display_type': 'tv', 'order_by': 'pool_time', 'limit': 10, 'enabled': True},
+    ]
+    raw = value if isinstance(value, list) else default_sections
+    out = []
+    for index, item in enumerate(raw[:20]):
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get('key') or f'custom_{index + 1}').strip()[:64] or f'custom_{index + 1}'
+        title = str(item.get('title') or key).strip()[:40] or key
+        display_type = str(item.get('display_type') or item.get('item_type') or 'all').strip().lower()
+        if display_type not in ('all', 'movie', 'tv', 'series', 'season', 'pack'):
+            display_type = 'all'
+        order_by = str(item.get('order_by') or 'latest').strip().lower()
+        if order_by == 'latest':
+            order_by = 'pool_time'
+        if order_by not in ('pool_time', 'release_year', 'popular', 'size', 'name'):
+            order_by = 'pool_time'
+        genre_id = str(item.get('genre_id') or '').strip()[:40]
+        tags = item.get('tags')
+        if not isinstance(tags, list):
+            tags = str(item.get('status') or '').split(',')
+        tag_values = []
+        for tag in tags:
+            text = str(tag or '').strip()
+            if re.fullmatch(r'[A-Za-z0-9_:-]{1,40}', text) and text not in tag_values:
+                tag_values.append(text)
+        out.append({
+            'key': key,
+            'title': title,
+            'display_type': display_type,
+            'order_by': order_by,
+            'status': ','.join(['alive', 'available', *tag_values]),
+            'genre_id': genre_id,
+            'tags': tag_values,
+            'limit': _shared_int(item.get('limit'), 10, 1, 20),
+            'enabled': _shared_bool(item.get('enabled'), True),
+        })
+    return out or default_sections
 
 
 def normalize_shared_resource_config(value: Optional[Dict[str, Any]] = None, base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -270,6 +317,7 @@ def normalize_shared_resource_config(value: Optional[Dict[str, Any]] = None, bas
         ),
         'p115_shared_auto_share_requests_enabled': _shared_bool(merged.get('p115_shared_auto_share_requests_enabled'), False),
         'p115_shared_install_id': str(merged.get('p115_shared_install_id') or '').strip(),
+        'p115_shared_center_home_sections': _shared_center_home_sections(merged.get('p115_shared_center_home_sections')),
     }
 
 

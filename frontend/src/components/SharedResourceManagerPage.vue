@@ -90,6 +90,10 @@
                 <template #prefix><n-icon :component="SearchIcon" /></template>
               </n-input>
               <n-button type="primary" :loading="centerLoading" @click="resetCenterSources()">查询中心</n-button>
+              <n-button v-if="centerHomeMode" secondary @click="openCenterHomeSettingsModal">
+                <template #icon><n-icon :component="SettingsIcon" /></template>
+                列表设置
+              </n-button>
               <n-button secondary :loading="maintenanceSubmitting" @click="triggerSharedMaintenance">执行维护任务</n-button>
             </n-space>
             <n-spin :show="centerLoading && !centerAppendLoading">
@@ -97,10 +101,6 @@
                 <div v-for="section in centerHomeSections" :key="section.key" class="center-home-section">
                   <div class="center-home-section-head">
                     <div class="center-home-section-title">{{ section.title }}</div>
-                    <n-space size="small">
-                      <n-button size="tiny" quaternary :disabled="centerHomeSectionIndex(section.key) <= 0" @click.stop="moveCenterHomeSection(section.key, -1)">上移</n-button>
-                      <n-button size="tiny" quaternary :disabled="centerHomeSectionIndex(section.key) >= centerHomeSections.length - 1" @click.stop="moveCenterHomeSection(section.key, 1)">下移</n-button>
-                    </n-space>
                   </div>
                   <div class="center-card-grid">
                     <div
@@ -282,6 +282,47 @@
       </template>
     </n-modal>
 
+    <n-modal v-model:show="showCenterHomeSettingsModal" preset="card" title="中心资源库列表设置" style="width: 1080px; max-width: 96vw;" class="custom-modal glass-modal">
+      <n-alert type="info" :bordered="false" style="margin-bottom: 12px;">
+        列表配置会保存到共享资源配置库；拖动调整顺序，关闭后中心端不会查询该列表。筛选项留空就是不限。
+      </n-alert>
+      <draggable
+        v-model="centerHomeSettingSections"
+        item-key="key"
+        handle=".center-home-setting-drag"
+        animation="180"
+        class="center-home-setting-list"
+      >
+        <template #item="{ element, index }">
+          <div class="center-home-setting-item">
+            <n-icon class="center-home-setting-drag" :component="MenuIcon" size="18" />
+            <n-input v-model:value="element.title" size="small" placeholder="列表标题" class="center-home-setting-title-input" />
+            <n-select v-model:value="element.display_type" size="small" :options="centerHomeDisplayTypeOptions" class="center-home-setting-select" />
+            <n-select v-model:value="element.genre_id" size="small" :options="centerHomeGenreOptions(element.display_type)" clearable filterable placeholder="TMDb 类型" class="center-home-setting-select" />
+            <n-select v-model:value="element.tags" size="small" :options="centerHomeTagOptions" multiple clearable placeholder="标签" class="center-home-setting-tags" />
+            <n-select v-model:value="element.order_by" size="small" :options="centerHomeOrderOptions" class="center-home-setting-select" />
+            <n-select v-model:value="element.limit" size="small" :options="centerHomeLimitOptions" class="center-home-setting-limit" />
+            <n-switch v-model:value="element.enabled" size="small">
+              <template #checked>显示</template>
+              <template #unchecked>隐藏</template>
+            </n-switch>
+            <n-button size="tiny" quaternary circle type="error" @click="removeCenterHomeSettingSection(index)">
+              <template #icon><n-icon :component="CancelIcon" /></template>
+            </n-button>
+          </div>
+        </template>
+      </draggable>
+      <template #footer>
+        <n-space justify="space-between">
+          <n-button secondary @click="addCenterHomeSettingSection">新增列表</n-button>
+          <n-space>
+            <n-button @click="showCenterHomeSettingsModal = false">取消</n-button>
+            <n-button type="primary" :loading="sharedConfigSaving" @click="saveCenterHomeSettings">保存</n-button>
+          </n-space>
+        </n-space>
+      </template>
+    </n-modal>
+
     <n-modal v-model:show="showManualShareModal" preset="card" :title="manualShareModalTitle" style="width: 920px; max-width: 96vw;" class="custom-modal glass-modal">
       <n-alert v-if="activeCenterReplenishSource" type="success" :bordered="false" style="margin-bottom: 12px;">
         正在补充中心待补充资源：{{ appendYear(centerTitleText(activeCenterReplenishSource), activeCenterReplenishSource.release_year) }}。系统已按中心 SHA1 精确匹配本机完全相同资源，并自动填入下方手动共享表单；确认无误后点击“登记共享源”。
@@ -410,6 +451,7 @@
               </div>
               <div class="center-version-action" @click.stop>
                 <n-button
+                  class="center-version-transfer-button"
                   size="small"
                   type="primary"
                   round
@@ -434,6 +476,7 @@
 <script setup>
 import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import axios from 'axios';
+import draggable from 'vuedraggable';
 import {
   NAlert, NButton, NCard, NDataTable, NDivider, NForm, NFormItem, NGi, NGrid, NIcon, NInput,
   NInputGroup, NModal, NSelect, NSpace, NSpin, NSwitch,
@@ -444,6 +487,7 @@ import {
   SearchOutline as SearchIcon,
   SyncOutline as SyncIcon,
   SettingsOutline as SettingsIcon,
+  MenuOutline as MenuIcon,
   ShareSocialOutline as ShareIcon,
   CloseCircleOutline as CancelIcon
 } from '@vicons/ionicons5';
@@ -482,6 +526,7 @@ const sharedConfigForm = reactive({
   p115_shared_block_clean_version_transfer: false,
   p115_shared_block_short_drama_transfer: false,
   p115_shared_auto_share_requests_enabled: false,
+  p115_shared_center_home_sections: [],
 });
 const showManualShareModal = ref(false);
 const showShareRequestModal = ref(false);
@@ -498,7 +543,16 @@ const shareItems = ref([]);
 const ledgerItems = ref([]);
 const centerSources = ref([]);
 const centerHomeSections = ref([]);
-const CENTER_HOME_SECTION_ORDER_KEY = 'etk.center.home.section.order.v1';
+const CENTER_HOME_SECTION_DEFAULTS = [
+  { key: 'latest', title: '最新资源', display_type: 'all', order_by: 'pool_time', genre_id: '', tags: [], limit: 10, enabled: true },
+  { key: 'popular', title: '热门共享', display_type: 'all', order_by: 'popular', genre_id: '', tags: [], limit: 10, enabled: true },
+  { key: 'movies', title: '电影', display_type: 'movie', order_by: 'pool_time', genre_id: '', tags: [], limit: 10, enabled: true },
+  { key: 'series', title: '剧集', display_type: 'tv', order_by: 'pool_time', genre_id: '', tags: [], limit: 10, enabled: true },
+];
+const showCenterHomeSettingsModal = ref(false);
+const centerHomeSettingSections = ref([]);
+const centerHomeMovieGenres = ref([]);
+const centerHomeTvGenres = ref([]);
 const centerBackendGrouped = ref(false);
 const centerExpandedRowKeys = ref([]);
 const centerChildrenLoading = reactive({});
@@ -648,6 +702,78 @@ const shareTypeOptions = [
   { label: '剧集资源', value: 'season_pack' },
   { label: '分集资源', value: 'episode_file' },
 ];
+const centerHomeDisplayTypeOptions = [
+  { label: '全部', value: 'all' },
+  { label: '电影', value: 'movie' },
+  { label: '剧集', value: 'tv' },
+];
+const centerHomeOrderOptions = [
+  { label: '入池时间', value: 'pool_time' },
+  { label: '发行日期', value: 'release_year' },
+  { label: '热门', value: 'popular' },
+  { label: '体积', value: 'size' },
+  { label: '名称', value: 'name' },
+];
+const CENTER_HOME_TAG_FALLBACK_OPTIONS = [
+  { label: '已完结', value: 'completed_certified' },
+  { label: '连载中', value: 'ongoing' },
+  { label: '短剧', value: 'short_drama' },
+  { label: '纯净版', value: 'clean_version' },
+  { label: '原盘', value: 'original_disc' },
+  { label: '国语', value: 'mandarin_audio' },
+  { label: '中字', value: 'chinese_subtitle' },
+  { label: '特效', value: 'effect_subtitle' },
+];
+const centerHomeTagOptions = ref([...CENTER_HOME_TAG_FALLBACK_OPTIONS]);
+const centerHomeLimitOptions = [6, 8, 10, 12, 16, 20].map(value => ({ label: `${value} 个`, value }));
+const normalizeCenterHomeTagOptions = (items) => {
+  const seen = new Set();
+  return (Array.isArray(items) ? items : [])
+    .map(item => ({
+      label: String(item?.label || item?.name || '').trim(),
+      value: String(item?.value || item?.key || '').trim(),
+    }))
+    .filter(item => {
+      if (!item.label || !/^[A-Za-z0-9_:-]{1,40}$/.test(item.value) || seen.has(item.value)) return false;
+      seen.add(item.value);
+      return true;
+    });
+};
+const loadCenterHomeTagOptions = async () => {
+  try {
+    const res = await axios.get('/api/shared/resources/center/sources/tags');
+    const options = normalizeCenterHomeTagOptions(res.data?.items);
+    centerHomeTagOptions.value = options.length ? options : [...CENTER_HOME_TAG_FALLBACK_OPTIONS];
+  } catch (e) {
+    centerHomeTagOptions.value = [...CENTER_HOME_TAG_FALLBACK_OPTIONS];
+  }
+};
+const normalizeCenterHomeGenreOptions = (items) => (Array.isArray(items) ? items : [])
+  .map(item => ({
+    label: String(item?.name || item?.label || '').trim(),
+    value: String(item?.id || item?.value || '').trim(),
+  }))
+  .filter(item => item.label && item.value);
+const loadCenterHomeGenreOptions = async () => {
+  if (centerHomeMovieGenres.value.length && centerHomeTvGenres.value.length) return;
+  const [movieRes, tvRes] = await Promise.allSettled([
+    axios.get('/api/custom_collections/config/tmdb_movie_genres'),
+    axios.get('/api/custom_collections/config/tmdb_tv_genres'),
+  ]);
+  if (movieRes.status === 'fulfilled') centerHomeMovieGenres.value = normalizeCenterHomeGenreOptions(movieRes.value.data);
+  if (tvRes.status === 'fulfilled') centerHomeTvGenres.value = normalizeCenterHomeGenreOptions(tvRes.value.data);
+};
+const centerHomeGenreOptions = (displayType) => {
+  const type = String(displayType || '').toLowerCase();
+  if (type === 'movie') return centerHomeMovieGenres.value;
+  if (['tv', 'series', 'season', 'pack'].includes(type)) return centerHomeTvGenres.value;
+  const seen = new Set();
+  return [...centerHomeMovieGenres.value, ...centerHomeTvGenres.value].filter(item => {
+    if (seen.has(item.value)) return false;
+    seen.add(item.value);
+    return true;
+  });
+};
 const resourceTypeLabel = (value) => ({
   movie_file: '电影', movie_folder: '电影', Movie: '电影', movie: '电影', movies: '电影',
   season_pack: '剧集资源', series_pack: '全剧包', Season: '季入口', Series: '全剧包', season: '季入口', series: '全剧包', Pack: '季入口', pack: '季入口',
@@ -1670,13 +1796,26 @@ const centerStatusText = (row) => String(
   || ''
 ).trim();
 const centerStatusCode = (row) => String(
-  row?.season_status
+  row?.season_resource_status
+  || row?.season_status
   || row?.display_status
   || row?.watching_status
   || ''
 ).trim().toLowerCase();
+const centerSeasonResourceStatus = (row) => {
+  const code = centerStatusCode(row);
+  if (['consistent', 'completed', 'ongoing'].includes(code)) return code;
+  const label = centerStatusText(row);
+  if (/一致版/.test(label)) return 'consistent';
+  if (/已完结|完结/.test(label)) return 'completed';
+  if (/连载中|更新中|未完结/.test(label)) return 'ongoing';
+  return '';
+};
 const centerIsCompletedByServer = (row) => {
   if (!row || typeof row !== 'object' || centerSeasonIsSpecialNumber(row)) return false;
+  const resourceStatus = centerSeasonResourceStatus(row);
+  if (resourceStatus === 'consistent' || resourceStatus === 'completed') return true;
+  if (resourceStatus === 'ongoing') return false;
   const label = centerStatusText(row);
   const code = centerStatusCode(row);
   return Boolean(
@@ -1689,6 +1828,9 @@ const centerIsCompletedByServer = (row) => {
 };
 const centerIsOngoingHub = (row) => {
   if (!row || typeof row !== 'object' || centerIsSpecialSeason(row)) return false;
+  const resourceStatus = centerSeasonResourceStatus(row);
+  if (resourceStatus === 'ongoing') return true;
+  if (resourceStatus === 'consistent' || resourceStatus === 'completed') return false;
   if (centerIsCompletedByServer(row)) return false;
   const label = centerStatusText(row);
   const code = centerStatusCode(row);
@@ -1734,6 +1876,12 @@ const centerNestedParts = (row) => {
       });
     }
   }
+  const bestAssetMap = row?.best_asset_map;
+  if (bestAssetMap && typeof bestAssetMap === 'object' && !Array.isArray(bestAssetMap)) {
+    Object.values(bestAssetMap).forEach(x => {
+      if (x && typeof x === 'object') parts.push(x);
+    });
+  }
   return parts;
 };
 const centerCompletedCertifiedMeta = (row) => {
@@ -1762,6 +1910,7 @@ const centerShortDramaMeta = (row) => {
   return {};
 };
 const isCenterShortDrama = (row) => Boolean(centerShortDramaMeta(row).is_short_drama || row?.is_short_drama);
+const isCenterOriginalDisc = (row) => Boolean(row?.is_original_disc || centerNestedParts(row).some(part => /\.iso(?:$|[\s?#])/i.test(String(part?.file_name || part?.filename || part?.name || ''))));
 const centerShareChannel = (row) => row?.share_channel
   || row?.logical_season_share_channel
  
@@ -2595,6 +2744,10 @@ const onCenterPosterError = (event) => {
 };
 const centerRibbonText = (row) => {
   if (isCenterReplenishRow(row)) return '待补充';
+  const resourceStatus = centerSeasonResourceStatus(row);
+  if (resourceStatus === 'consistent') return '一致版';
+  if (resourceStatus === 'completed') return '已完结';
+  if (resourceStatus === 'ongoing') return '连载中';
   if (isCenterCompletedCertified(row)) return '一致版';
   if (centerIsCompletedByServer(row)) return '已完结';
   if (centerIsOngoingHub(row)) return '连载中';
@@ -2602,6 +2755,10 @@ const centerRibbonText = (row) => {
 };
 const centerRibbonClass = (row) => {
   if (isCenterReplenishRow(row)) return 'center-ribbon-warning';
+  const resourceStatus = centerSeasonResourceStatus(row);
+  if (resourceStatus === 'consistent') return 'center-ribbon-green';
+  if (resourceStatus === 'completed') return 'center-ribbon-dark';
+  if (resourceStatus === 'ongoing') return 'center-ribbon-blue';
   if (isCenterCompletedCertified(row)) return 'center-ribbon-green';
   if (centerIsCompletedByServer(row)) return 'center-ribbon-dark';
   if (centerIsOngoingHub(row)) return 'center-ribbon-blue';
@@ -2935,6 +3092,7 @@ const centerVersionTags = (row) => {
     if (centerIsOngoingHub(row)) centerTagPush(tags, '连载中', 'info', 'ongoing');
     if (isCenterAnimation(row)) centerTagPush(tags, '动漫', 'info', 'animation');
     if (isCenterCleanVersion(row)) centerTagPush(tags, '纯净版', 'warning', 'clean');
+    if (isCenterOriginalDisc(row)) centerTagPush(tags, '原盘', 'warning', 'original-disc');
     if (isCenterShortDrama(row)) centerTagPush(tags, '短剧', 'success', 'short');
     centerTrackFeatureTags(row).forEach(t => centerTagPush(tags, t.label, t.type, t.key));
   }
@@ -3131,6 +3289,7 @@ const applySharedConfig = (data = {}) => {
     p115_shared_block_clean_version_transfer: Boolean(data.p115_shared_block_clean_version_transfer),
     p115_shared_block_short_drama_transfer: Boolean(data.p115_shared_block_short_drama_transfer),
     p115_shared_auto_share_requests_enabled: Boolean(data.p115_shared_auto_share_requests_enabled),
+    p115_shared_center_home_sections: normalizeCenterHomeSections(data.p115_shared_center_home_sections),
   });
 };
 
@@ -3169,40 +3328,50 @@ const saveSharedConfig = async () => {
 
 const loadSummary = async () => { const res = await axios.get('/api/shared/resources/summary'); summary.value = res.data?.data || { shares: {}, credit: {} }; };
 const loadShares = async () => { sharesLoading.value = true; try { const res = await axios.get('/api/shared/resources/shares', { params: { ...shareFilters, page: sharePagination.page, page_size: sharePagination.pageSize } }); shareItems.value = res.data?.items || []; sharePagination.itemCount = Number(res.data?.total || 0); } catch (e) { message.error(e.response?.data?.message || '加载我的共享源失败'); } finally { sharesLoading.value = false; } };
-const centerHomeSectionOrder = () => {
+const normalizeCenterHomeSection = (section = {}, index = 0) => ({
+  key: String(section.key || `custom_${Date.now()}_${index}`).trim() || `custom_${Date.now()}_${index}`,
+  title: String(section.title || '自定义列表').trim() || '自定义列表',
+  display_type: ['all', 'movie', 'tv', 'series', 'season', 'pack'].includes(String(section.display_type || '').toLowerCase()) ? String(section.display_type).toLowerCase() : 'all',
+  order_by: (() => {
+    const value = String(section.order_by || 'pool_time').toLowerCase();
+    return value === 'latest' ? 'pool_time' : (['pool_time', 'release_year', 'popular', 'size', 'name'].includes(value) ? value : 'pool_time');
+  })(),
+  genre_id: String(section.genre_id || '').trim(),
+  tags: Array.isArray(section.tags)
+    ? section.tags.map(tag => String(tag || '').trim()).filter(tag => /^[A-Za-z0-9_:-]{1,40}$/.test(tag))
+    : String(section.status || '').split(',').map(tag => String(tag || '').trim()).filter(tag => /^[A-Za-z0-9_:-]{1,40}$/.test(tag) && !['alive', 'available'].includes(tag)),
+  limit: Math.max(1, Math.min(Number(section.limit || 10), 20)),
+  enabled: section.enabled !== false,
+});
+const normalizeCenterHomeSections = (sections) => {
+  const list = Array.isArray(sections) && sections.length ? sections : CENTER_HOME_SECTION_DEFAULTS;
+  return list.map((section, index) => normalizeCenterHomeSection(section, index));
+};
+const openCenterHomeSettingsModal = async () => {
+  await Promise.allSettled([loadSharedConfig(), loadCenterHomeGenreOptions(), loadCenterHomeTagOptions()]);
+  centerHomeSettingSections.value = normalizeCenterHomeSections(sharedConfigForm.p115_shared_center_home_sections).map(section => ({ ...section }));
+  showCenterHomeSettingsModal.value = true;
+};
+const addCenterHomeSettingSection = () => {
+  centerHomeSettingSections.value.push(normalizeCenterHomeSection({ key: `custom_${Date.now()}`, title: '自定义列表' }, centerHomeSettingSections.value.length));
+};
+const removeCenterHomeSettingSection = (index) => {
+  centerHomeSettingSections.value.splice(index, 1);
+};
+const saveCenterHomeSettings = async () => {
+  sharedConfigSaving.value = true;
   try {
-    const parsed = JSON.parse(localStorage.getItem(CENTER_HOME_SECTION_ORDER_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
-  } catch (_) {
-    return [];
+    sharedConfigForm.p115_shared_center_home_sections = normalizeCenterHomeSections(centerHomeSettingSections.value);
+    const res = await axios.post('/api/shared/resources/config', { ...sharedConfigForm });
+    applySharedConfig(res.data?.data || sharedConfigForm);
+    message.success('列表设置已保存');
+    showCenterHomeSettingsModal.value = false;
+    resetCenterSources(false).catch(e => message.error(e.response?.data?.message || '刷新中心资源库失败'));
+  } catch (e) {
+    message.error(e.response?.data?.message || '保存列表设置失败');
+  } finally {
+    sharedConfigSaving.value = false;
   }
-};
-const saveCenterHomeSectionOrder = () => {
-  try {
-    localStorage.setItem(CENTER_HOME_SECTION_ORDER_KEY, JSON.stringify(centerHomeSections.value.map(s => String(s?.key || '')).filter(Boolean)));
-  } catch (_) {}
-};
-const applyCenterHomeSectionOrder = (sections = []) => {
-  const list = Array.isArray(sections) ? [...sections] : [];
-  const order = centerHomeSectionOrder();
-  if (!order.length) return list;
-  const index = new Map(order.map((key, i) => [key, i]));
-  return list.sort((a, b) => {
-    const ai = index.has(String(a?.key || '')) ? index.get(String(a?.key || '')) : Number.MAX_SAFE_INTEGER;
-    const bi = index.has(String(b?.key || '')) ? index.get(String(b?.key || '')) : Number.MAX_SAFE_INTEGER;
-    return ai - bi;
-  });
-};
-const centerHomeSectionIndex = (key) => centerHomeSections.value.findIndex(section => String(section?.key || '') === String(key || ''));
-const moveCenterHomeSection = (key, delta) => {
-  const idx = centerHomeSectionIndex(key);
-  const next = idx + delta;
-  if (idx < 0 || next < 0 || next >= centerHomeSections.value.length) return;
-  const list = [...centerHomeSections.value];
-  const [item] = list.splice(idx, 1);
-  list.splice(next, 0, item);
-  centerHomeSections.value = list;
-  saveCenterHomeSectionOrder();
 };
 const loadCenterSources = async (forceRefresh = false, append = false) => {
   if (append) centerAppendLoading.value = true;
@@ -3218,7 +3387,7 @@ const loadCenterSources = async (forceRefresh = false, append = false) => {
       const params = { limit_per_section: 10 };
       if (forceRefresh) params.force_refresh = 1;
       const res = await axios.get('/api/shared/resources/center/sources/home', { params });
-      centerHomeSections.value = applyCenterHomeSectionOrder(Array.isArray(res.data?.sections) ? res.data.sections : []);
+      centerHomeSections.value = Array.isArray(res.data?.sections) ? res.data.sections : [];
       centerSources.value = [];
       centerBackendGrouped.value = true;
       centerPagination.itemCount = Number(res.data?.total || 0);
@@ -3236,7 +3405,7 @@ const loadCenterSources = async (forceRefresh = false, append = false) => {
     if (forceRefresh) params.force_refresh = 1;
     const res = await axios.get('/api/shared/resources/center/sources', { params });
     const items = res.data?.items || [];
-    centerBackendGrouped.value = Boolean(res.data?.backend_grouped || res.data?.series_grouped || res.data?.source_schema === 'logical_only_series_grouped');
+    centerBackendGrouped.value = Boolean(res.data?.backend_grouped || res.data?.series_grouped);
     centerSources.value = append ? [...(centerSources.value || []), ...items] : items;
     centerPagination.itemCount = Number(res.data?.total || 0);
     const total = Number(centerPagination.itemCount || 0);
@@ -4062,6 +4231,23 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
 }
+.center-home-setting-list { display: flex; flex-direction: column; gap: 8px; }
+.center-home-setting-item {
+  display: grid;
+  grid-template-columns: 24px minmax(150px, 1.4fr) 96px 150px minmax(180px, 1.4fr) 96px 82px 68px 32px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(128,128,128,.18);
+  border-radius: 8px;
+  background: rgba(128,128,128,.055);
+}
+.center-home-setting-drag { cursor: grab; color: var(--n-text-color-3, rgba(128,128,128,.72)); }
+.center-home-setting-drag:active { cursor: grabbing; }
+.center-home-setting-title-input,
+.center-home-setting-select,
+.center-home-setting-tags,
+.center-home-setting-limit { min-width: 0; }
 .poster-wall-card {
   border-radius: calc(12px * var(--card-scale, 1)) !important;
   background: rgba(9, 16, 42, .78) !important;
@@ -4106,6 +4292,17 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) { .page-header { flex-direction: column; } }
+@media (max-width: 768px) {
+  .center-home-setting-item {
+    grid-template-columns: 24px 1fr auto;
+  }
+  .center-home-setting-title-input,
+  .center-home-setting-select,
+  .center-home-setting-tags,
+  .center-home-setting-limit {
+    grid-column: 2 / -1;
+  }
+}
 
 .share-request-grid {
   box-sizing: border-box;
@@ -4448,6 +4645,20 @@ onUnmounted(() => {
   word-break: break-all;
 }
 .center-version-action { flex: 0 0 auto; display: flex; align-items: center; }
+.center-version-action :deep(.center-version-transfer-button) {
+  --n-color: var(--n-primary-color);
+  --n-color-hover: var(--n-primary-color-hover);
+  --n-color-pressed: var(--n-primary-color-pressed);
+  --n-color-focus: var(--n-primary-color-hover);
+  --n-border: 1px solid var(--n-primary-color);
+  --n-border-hover: 1px solid var(--n-primary-color-hover);
+  --n-border-pressed: 1px solid var(--n-primary-color-pressed);
+  --n-border-focus: 1px solid var(--n-primary-color-hover);
+  --n-text-color: var(--n-text-color-primary);
+  --n-text-color-hover: var(--n-text-color-primary);
+  --n-text-color-pressed: var(--n-text-color-primary);
+  --n-text-color-focus: var(--n-text-color-primary);
+}
 .center-version-detail-card-expandable { cursor: pointer; }
 .center-version-detail-card-expandable:hover {
   border-color: var(--n-primary-color, var(--accent-color, var(--center-detail-border)));

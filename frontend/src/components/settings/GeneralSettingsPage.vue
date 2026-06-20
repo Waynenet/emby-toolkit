@@ -558,6 +558,33 @@
                       </template>
                     </n-form-item>
 
+                    <n-form-item label="复制播放" path="p115_copy_play_enabled">
+                        <n-switch v-model:value="configModel.p115_copy_play_enabled">
+                            <template #checked>先复制再播放</template>
+                            <template #unchecked>直接播放源文件</template>
+                        </n-switch>
+                        <template #feedback>
+                            <n-text depth="3" style="font-size:0.8em;">实验功能：点播前复制到临时目录，停止播放后自动删除临时克隆文件。</n-text>
+                        </template>
+                    </n-form-item>
+
+                    <n-form-item v-if="configModel.p115_copy_play_enabled" label="复制播放临时目录" path="p115_copy_play_temp_cid">
+                      <n-input-group>
+                        <n-input
+                          :value="configModel.p115_copy_play_temp_name || configModel.p115_copy_play_temp_cid"
+                          placeholder="选择临时克隆目录"
+                          readonly
+                          @click="openFolderSelector('copy_play_temp', configModel.p115_copy_play_temp_cid)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button type="primary" ghost @click="openFolderSelector('copy_play_temp', configModel.p115_copy_play_temp_cid)">选择</n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">建议单独建一个空目录，ETK 会清理自己创建的临时克隆文件。</n-text>
+                      </template>
+                    </n-form-item>
+
                     <n-form-item label="本地 STRM 根目录" path="local_strm_root">
                       <n-input-group>
                         <n-input 
@@ -911,26 +938,6 @@
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
 
-                      <!-- 第三方302 URL -->
-                      <n-form-item-grid-item span="1 m:2" label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>第三方302</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" style="margin-left: 4px;" />
-                              </template>
-                              需重启容器生效
-                            </n-tooltip>
-                          </div>
-                        </template>
-                        <n-input 
-                          v-model:value="configModel.proxy_302_redirect_url" 
-                          placeholder="例如: http://192.168.31.177:9096" 
-                          :disabled="!configModel.proxy_enabled"
-                        />
-                      </n-form-item-grid-item>
-                      
                       <!-- 3. 缺失占位符 (占满一行，因为说明文字较长) -->
                       <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" span="1 m:2" label-width="100">
                          <n-space align="center">
@@ -3239,6 +3246,9 @@ const confirmFolderSelection = () => {
   } else if (selectorContext.value === 'media_root') {
     configModel.value.p115_media_root_cid = cid;
     configModel.value.p115_media_root_name = name;
+  } else if (selectorContext.value === 'copy_play_temp') {
+    configModel.value.p115_copy_play_temp_cid = cid;
+    configModel.value.p115_copy_play_temp_name = name;
   } else if (selectorContext.value === 'shared_cache_path') {
     configModel.value.p115_shared_cache_cid = cid;
     configModel.value.p115_shared_cache_name = name;

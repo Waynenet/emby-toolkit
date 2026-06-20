@@ -14,6 +14,12 @@ from flask import Blueprint, jsonify, request, redirect, Response, stream_with_c
 from extensions import admin_required
 from database import settings_db
 from handler.p115_service import P115Service, get_config, get_115_api_priority
+from handler.p115_copy_play import (
+    discard_copy_play_clone,
+    is_copy_play_missing_error,
+    prepare_copy_play_pick_code,
+    recycle_clone_after_direct_url,
+)
 import constants
 import config_manager
 from functools import lru_cache, wraps
@@ -1340,22 +1346,50 @@ def play_115_video(pick_code, filename=None):
         client = P115Service.get_client()
         if not client:
             return "115 Client not initialized", 500
-            
+
+        copy_play_kwargs = {
+            "file_name": filename or "",
+            "item_id": request.args.get("ItemId") or request.args.get("item_id") or "",
+            "play_session_id": request.args.get("PlaySessionId") or "",
+            "user_id": request.args.get("UserId") or "",
+            "source": "/api/p115/play",
+            "client_key": "|".join([
+                request.args.get("DeviceId") or request.args.get("X-Emby-Device-Id") or request.headers.get("X-Emby-Device-Id") or request.args.get("PlaySessionId") or request.remote_addr or "",
+                request.args.get("UserId") or "",
+                request.args.get("ItemId") or request.args.get("item_id") or "",
+            ]),
+            "client_name": request.headers.get("X-Emby-Client") or request.headers.get("User-Agent") or "",
+        }
+        play_pick_code = prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
+        if not play_pick_code:
+            return "Copy play failed", 503
+
         max_retries = 4
         real_url = None
         api_priority = get_115_api_priority('openapi')
         use_openapi = (api_priority != 'cookie')
+        rebuilt_copy_play = False
         
         for i in range(max_retries):
             try:
                 if use_openapi:
-                    real_url = client.openapi_downurl(pick_code, user_agent=request_ua)
+                    real_url = client.openapi_downurl(play_pick_code, user_agent=request_ua)
                 else:
-                    real_url = client.download_url(pick_code, user_agent=request_ua)
+                    real_url = client.download_url(play_pick_code, user_agent=request_ua)
                     
                 if real_url:
                     break
             except Exception as e:
+                if str(play_pick_code) != str(pick_code) and is_copy_play_missing_error(e):
+                    discard_copy_play_clone(play_pick_code)
+                    if rebuilt_copy_play:
+                        return "Copy play clone expired", 503
+                    play_pick_code = prepare_copy_play_pick_code(pick_code, force_new=True, **copy_play_kwargs)
+                    rebuilt_copy_play = True
+                    if not play_pick_code:
+                        return "Copy play failed", 503
+                    use_openapi = (api_priority != 'cookie')
+                    continue
                 logger.warning(f"  ➜ [直链解析] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
             
             use_openapi = not use_openapi
@@ -1363,6 +1397,8 @@ def play_115_video(pick_code, filename=None):
         
         if not real_url:
             return "Failed to get download URL or Rate Limited", 404
+
+        recycle_clone_after_direct_url(play_pick_code, "起播后清理")
 
         # =================================================================
         # ★★★ 核心分流逻辑 ★★★

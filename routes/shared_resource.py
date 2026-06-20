@@ -102,6 +102,7 @@ def _shared_resource_config_payload() -> Dict[str, Any]:
     payload.setdefault('p115_shared_block_clean_version_transfer', False)
     payload.setdefault('p115_shared_block_short_drama_transfer', False)
     payload.setdefault('p115_shared_auto_share_requests_enabled', False)
+    payload.setdefault('p115_shared_center_home_sections', [])
     return payload
 
 
@@ -116,6 +117,8 @@ def _save_shared_config(data: Dict[str, Any]) -> Dict[str, Any]:
     data['p115_shared_block_clean_version_transfer'] = _boolish(data.get('p115_shared_block_clean_version_transfer'), False)
     data['p115_shared_block_short_drama_transfer'] = _boolish(data.get('p115_shared_block_short_drama_transfer'), False)
     data['p115_shared_auto_share_requests_enabled'] = _boolish(data.get('p115_shared_auto_share_requests_enabled'), False)
+    sections = data.get('p115_shared_center_home_sections')
+    data['p115_shared_center_home_sections'] = sections if isinstance(sections, list) else []
     install_id = str(data.get('p115_shared_install_id') or '').strip()
     data['p115_shared_install_id'] = install_id
     return settings_db.save_shared_resource_config(data)
@@ -1611,16 +1614,13 @@ def api_center_sources():
             'limit': int(request.args.get('limit') or request.args.get('page_size') or 200),
             'offset': int(request.args.get('offset') or 0),
         }
-        if str(q or '').strip() or str(tmdb_id or '').strip():
-            resp = client.list_cloud_search_sources(**params)
-        else:
-            resp = client.list_display_sources(
-                **params,
-                force_refresh=_boolish(
-                    request.args.get('force_refresh') or request.args.get('refresh') or request.args.get('no_cache'),
-                    False,
-                ),
-            )
+        resp = client.list_display_sources(
+            **params,
+            force_refresh=_boolish(
+                request.args.get('force_refresh') or request.args.get('refresh') or request.args.get('no_cache'),
+                False,
+            ),
+        )
 
         raw_items = [row for row in (resp.get('items') or []) if isinstance(row, dict)]
         # 中心资源库首屏必须保持“中心端已聚合壳”直出。
@@ -1682,6 +1682,27 @@ def api_center_sources():
         return jsonify({'success': False, 'message': str(e), 'items': [], 'total': 0}), 500
 
 
+@shared_resource_bp.route('/center/sources/tags', methods=['GET'])
+@admin_required
+def api_center_source_tags():
+    fallback_items = [
+        {'label': '已完结', 'value': 'completed_certified'},
+        {'label': '连载中', 'value': 'ongoing'},
+        {'label': '短剧', 'value': 'short_drama'},
+        {'label': '纯净版', 'value': 'clean_version'},
+        {'label': '原盘', 'value': 'original_disc'},
+        {'label': '国语', 'value': 'mandarin_audio'},
+        {'label': '中字', 'value': 'chinese_subtitle'},
+        {'label': '特效', 'value': 'effect_subtitle'},
+    ]
+    try:
+        resp = SharedCenterClient().list_display_tags()
+        items = [row for row in (resp.get('items') or []) if isinstance(row, dict)]
+        return jsonify({'success': True, 'items': items or fallback_items})
+    except Exception as e:
+        return jsonify({'success': True, 'items': fallback_items, 'message': str(e)})
+
+
 @shared_resource_bp.route('/center/sources/home', methods=['GET'])
 @admin_required
 def api_center_sources_home():
@@ -1692,13 +1713,18 @@ def api_center_sources_home():
             request.args.get('force_refresh') or request.args.get('refresh') or request.args.get('no_cache'),
             False,
         )
-        cache_key = (client.base_url, client.device_token, limit_per_section)
+        home_sections = _shared_resource_config_payload().get('p115_shared_center_home_sections') or []
+        cache_key = (client.base_url, client.device_token, json.dumps(home_sections, sort_keys=True, ensure_ascii=False))
         if not force_refresh:
             cached = _center_home_proxy_cache_get(cache_key)
             if cached:
                 return jsonify(cached)
 
-        resp = client.list_display_home(limit_per_section=limit_per_section, force_refresh=force_refresh)
+        resp = client.list_display_home(
+            limit_per_section=limit_per_section,
+            force_refresh=force_refresh,
+            sections=home_sections,
+        )
 
         def _decorate_center_row(row):
             if not isinstance(row, dict):

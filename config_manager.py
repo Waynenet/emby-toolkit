@@ -154,7 +154,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
     constants.CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', False),
-    constants.CONFIG_OPTION_PROXY_302_REDIRECT_URL: (constants.CONFIG_SECTION_REVERSE_PROXY, 'string', ""),
 
     # [TMDB]
     constants.CONFIG_OPTION_TMDB_API_KEY: (constants.CONFIG_SECTION_TMDB, 'string', ""),
@@ -197,6 +196,9 @@ DYNAMIC_CONFIG_DEF = {
     ]),
     constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
     constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "媒体库"),
+    constants.CONFIG_OPTION_115_COPY_PLAY_ENABLED: (constants.CONFIG_SECTION_115, 'boolean', False),
+    constants.CONFIG_OPTION_115_COPY_PLAY_TEMP_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_COPY_PLAY_TEMP_NAME: (constants.CONFIG_SECTION_115, 'string', "复制播放临时目录"),
     constants.CONFIG_OPTION_LOCAL_STRM_ROOT: (constants.CONFIG_SECTION_115, 'string', "/mnt/media"),
     constants.CONFIG_OPTION_ETK_SERVER_URL: (constants.CONFIG_SECTION_115, 'string', "http://192.168.1.X:5257"),
     constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE: (constants.CONFIG_SECTION_115, 'boolean', False),
