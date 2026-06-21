@@ -21,6 +21,7 @@ import handler.tmdb as tmdb
 from tasks import helpers
 import utils
 from handler.p115_media_analyzer import P115MediaAnalyzerMixin
+from handler.p115_rename import P115RenameRenderer
 from handler.tg_media_candidate import candidate_to_recognition_hints, is_recognition_hint_eligible, lookup_candidate_hint_for_name, normalize_title_for_match
 try:
     from p115client import P115Client
@@ -365,9 +366,6 @@ _RULE_PARSE_CACHE = LimitedCache(maxsize=2000)
 # 全局直链缓存池，供反向代理和Web路由共享 
 _DIRECT_URL_CACHE = LimitedCache(maxsize=2000)
 
-# 全局目录缓存池
-_GLOBAL_DIR_CACHE = LimitedCache(maxsize=5000)
-_GLOBAL_DIR_LOCK = threading.Lock()
 _TRANSFER_CONTEXTS_KEY = "p115_transfer_contexts"
 _TRANSFER_CONTEXT_LIMIT = 200
 _AUTHORITY_RECOGNITION_SOURCES = frozenset({
@@ -2570,10 +2568,9 @@ class P115Service:
             def fs_mkdir(self, name, pid):
                 """
                 创建目录：
-                1. 先查内存缓存
-                2. 再查 DB 缓存
-                3. API 创建
-                4. 如果 API 返回“已存在”，不切备用接口，直接回查同级目录并写缓存
+                1. 先查 DB 缓存
+                2. API 创建
+                3. 如果 API 返回“已存在”，不切备用接口，直接回查同级目录并写缓存
                 """
                 parent_cid = str(pid)
                 folder_name = str(name).strip()
@@ -2581,29 +2578,10 @@ class P115Service:
                 if not folder_name:
                     return {"state": False, "message": "目录名称不能为空"}
 
-                cache_key = f"{parent_cid}_{folder_name}"
-
-                # 1. 全局内存缓存
-                try:
-                    with _GLOBAL_DIR_LOCK:
-                        cached_cid = _GLOBAL_DIR_CACHE.get(cache_key)
-                    if cached_cid and cached_cid != "FAILED":
-                        return {
-                            "state": True,
-                            "cid": str(cached_cid),
-                            "data": {"file_id": str(cached_cid), "cid": str(cached_cid)},
-                            "_from_cache": "memory"
-                        }
-                except Exception:
-                    pass
-
-                # 2. DB 缓存
+                # 1. DB 缓存
                 try:
                     cached_cid = P115CacheManager.get_cid(parent_cid, folder_name)
                     if cached_cid:
-                        with _GLOBAL_DIR_LOCK:
-                            _GLOBAL_DIR_CACHE[cache_key] = str(cached_cid)
-
                         return {
                             "state": True,
                             "cid": str(cached_cid),
@@ -2621,8 +2599,6 @@ class P115Service:
                     existed_cid = self._find_child_dir(parent_cid, folder_name)
                     if existed_cid:
                         P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
-                        with _GLOBAL_DIR_LOCK:
-                            _GLOBAL_DIR_CACHE[cache_key] = existed_cid
 
                         logger.info(f"  ➜ [115整理] 本地目录缓存未命中，但远程目录已存在，已回填：{folder_name}")
                         logger.debug(f"  ➜ [115整理] 回填远程目录 CID：{existed_cid}")
@@ -2664,8 +2640,6 @@ class P115Service:
                             if new_cid:
                                 new_cid = str(new_cid)
                                 P115CacheManager.save_cid(new_cid, parent_cid, folder_name)
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = new_cid
 
                                 resp["cid"] = new_cid
                                 resp.setdefault("data", {})
@@ -2679,8 +2653,6 @@ class P115Service:
                             existed_cid = self._find_child_dir(parent_cid, folder_name)
                             if existed_cid:
                                 P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = existed_cid
 
                                 logger.info(f"  ➜ [115整理] 目录已存在，已复用并回收本次新建目录：{folder_name}")
                                 logger.debug(f"  ➜ [115整理] 已存在目录 CID：{existed_cid}")
@@ -2712,8 +2684,6 @@ class P115Service:
                             existed_cid = self._find_child_dir(parent_cid, folder_name)
                             if existed_cid:
                                 P115CacheManager.save_cid(existed_cid, parent_cid, folder_name)
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = existed_cid
 
                                 return {
                                     "state": True,
@@ -3371,11 +3341,12 @@ class P115CacheManager:
     def delete_cid(cid):
         """从缓存中物理删除该目录及其子目录的记录"""
         if not cid: return
+        cid_text = str(cid)
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     # 删除自身以及以它为父目录的子项
-                    cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = %s OR parent_id = %s", (str(cid), str(cid)))
+                    cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = %s OR parent_id = %s", (cid_text, cid_text))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 清理 115 DB 缓存失败: {e}")
@@ -3848,25 +3819,8 @@ class P115CacheManager:
             new_content, count = pattern.subn(lambda m: m.group(1) + new_pc, content)
             if count <= 0 or new_content == content:
                 return 0
-            emby_url = str(cfg.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or '').strip()
-            emby_api_key = str(cfg.get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
-            ignore_features = None
-            if emby_url and emby_api_key:
-                try:
-                    from handler import emby
-                    ignore_features = emby.enable_strm_assistant_ignore_file_change(emby_url, emby_api_key)
-                except Exception as e:
-                    logger.debug(f"  ➜ [115缓存] 开启神医忽略文件变更失败: {e}")
-            try:
-                with open(strm_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
-            finally:
-                if ignore_features is not None:
-                    try:
-                        from handler import emby
-                        emby.disable_strm_assistant_ignore_file_change(emby_url, emby_api_key, ignore_features)
-                    except Exception as e:
-                        logger.debug(f"  ➜ [115缓存] 恢复神医忽略文件变更失败: {e}")
+            with open(strm_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
             return 1
         except Exception as e:
             logger.debug(f"  ➜ [115缓存] 更新 STRM 中的 PC 失败: {e}")
@@ -5154,8 +5108,6 @@ def get_config():
 
 
 class SmartOrganizer(P115MediaAnalyzerMixin):
-    _P115_INVALID_NAME_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
-
     def __init__(self, client, tmdb_id, media_type, original_title, ai_translator=None, use_ai=False, recognition_hints=None):
         self.client = client
         self.tmdb_id = tmdb_id
@@ -5178,6 +5130,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         self.rename_config = settings_db.get_setting('p115_rename_config') or {
             "main_title_lang": "zh", "main_year_en": True, "main_tmdb_fmt": "{tmdb=ID}",
             "season_fmt": "Season {02}", "file_title_lang": "zh", "file_year_en": False,
+            "main_dir_template": "{{title}}{% if year %} ({{year}}){% endif %} {tmdb={{tmdbid}}}",
+            "season_dir_template": "Season {{season_no}}",
+            "file_template": "{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}",
             "file_tmdb_fmt": "none", "file_params_en": True, "file_sep": " - ",
             "strm_url_fmt": "standard"
         }
@@ -5618,6 +5573,20 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     return True
             return False
 
+        def _memory_cid_matches_current_file(check_cid, current_ext):
+            if not check_cid:
+                return False
+            for r in self.rules:
+                if str(r.get('cid')) != str(check_cid) or not r.get('enabled', True):
+                    continue
+                rule_exts = {
+                    str(ext).strip().lower().lstrip('.')
+                    for ext in r.get('file_extensions') or []
+                    if str(ext).strip()
+                }
+                return not rule_exts or (current_ext and current_ext in rule_exts)
+            return False
+
         # 文件扩展名是文件级分类条件，必须优先于同 TMDb 的历史整理记忆。
         current_ext = os.path.splitext(str(getattr(self, 'current_sorting_filename', '') or ''))[1].lower().lstrip('.')
         if current_ext:
@@ -5665,11 +5634,14 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 if s_val == season_num:
                                     history_cid = str(row['target_cid'])
                                     # ★ 核心修复：校验记忆是否失效
-                                    if _is_cid_valid_in_rules(history_cid):
+                                    if _is_cid_valid_in_rules(history_cid) and _memory_cid_matches_current_file(history_cid, current_ext):
                                         logger.info(f"  ➜ [分季记忆体] 第 {season_num} 季曾整理到“{row['category_name']}”，本次沿用该分类。")
                                         logger.debug(f"  ➜ [分季记忆体] 沿用历史目录：CID={history_cid}")
                                         self.is_from_memory = True # 打上记忆命中标记
                                         return history_cid
+                                    elif _is_cid_valid_in_rules(history_cid):
+                                        logger.info(f"  ➜ [分季记忆体] 历史分类“{row['category_name']}”为文件级分类，当前扩展名不匹配，交由规则引擎重新分配。")
+                                        break
                                     else:
                                         logger.warning(f"  ➜ [分季记忆体] 历史分类 (CID: {history_cid}) 已不在当前规则中，记忆失效，交由规则引擎重新分配。")
                                         break # 记忆失效，跳出循环走规则
@@ -5687,11 +5659,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             if row and row['target_cid']:
                                 history_cid = str(row['target_cid'])
                                 # ★ 核心修复：校验记忆是否失效
-                                if _is_cid_valid_in_rules(history_cid):
+                                if _is_cid_valid_in_rules(history_cid) and _memory_cid_matches_current_file(history_cid, current_ext):
                                     logger.info(f"  ➜ [记忆体] 该媒体曾整理到“{row['category_name']}”，本次沿用该分类。")
                                     logger.debug(f"  ➜ [记忆体] 沿用历史目录：CID={history_cid}")
                                     self.is_from_memory = True # 打上记忆命中标记
                                     return history_cid
+                                elif _is_cid_valid_in_rules(history_cid):
+                                    logger.info(f"  ➜ [记忆体] 历史分类“{row['category_name']}”为文件级分类，当前扩展名不匹配，交由规则引擎重新分配。")
                                 else:
                                     logger.warning(f"  ➜ [记忆体] 历史分类 (CID: {history_cid}) 已不在当前规则中，记忆失效，交由规则引擎重新分配。")
             except Exception as e:
@@ -5752,87 +5726,30 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         return None
 
-    def _build_name_from_format(self, format_array, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None):
-        """解析乐高轨道生成名称 (支持目录和文件，自动过滤特殊字符)"""
-        if not format_array: return ""
-        
-        evaluated = []
-        for raw_id in format_array:
-            block = raw_id.rsplit('_', 1)[0] if re.search(r'_\d+$', raw_id) else raw_id
-            val = None
-            is_sep = False
-            
-            # 标题块统一做 115 非法字符清洗，避免目录/文件名因原文标题中的引号等字符创建失败。
-            if block == 'title_zh':
-                raw_title = safe_title if safe_title else (self.details.get('title') or self.original_title)
-                val = self._sanitize_115_name_component(raw_title)
-            elif block == 'title_en':
-                raw_title = self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title
-                val = self._sanitize_115_name_component(raw_title)
-            elif block == 'title_orig':
-                raw_title = original_title or self.details.get('original_title') or self.original_title
-                val = self._sanitize_115_name_component(raw_title)
-            elif block == 'year': val = f"({self.details.get('date', '')[:4]})" if self.details.get('date') else None
-            elif block == 'year_pure': val = self.details.get('date', '')[:4] if self.details.get('date') else None
-            elif block == 'tmdb_bracket': val = f"{{tmdb={self.tmdb_id}}}"
-            elif block == 'tmdb_square': val = f"[tmdbid={self.tmdb_id}]"
-            elif block == 'tmdb_dash': val = f"tmdb-{self.tmdb_id}"
-            elif block == 's_e' and is_tv: 
-                s_val = season_num if season_num is not None else 1
-                e_val = episode_num if episode_num is not None else 1
-                val = f"S{s_val:02d}E{e_val:02d}" 
-            elif block in ('episode_name_zh', 'episode_no_zh') and is_tv:
-                e_val = episode_num if episode_num is not None else 1
-                val = f"第 {e_val} 集"
-            elif block in ('s_e_zh', 'season_episode_zh') and is_tv:
-                s_val = season_num if season_num is not None else 1
-                e_val = episode_num if episode_num is not None else 1
-                val = f"第 {s_val} 季 {e_val} 集"
-            elif block == 'season_name_en' and is_tv:
-                val = f"Season {season_num:02d}" if season_num is not None else None
-            elif block == 'season_name_en_no0' and is_tv:
-                val = f"Season {season_num}" if season_num is not None else None
-            elif block == 'season_name_zh' and is_tv:
-                val = f"第 {season_num} 季" if season_num is not None else None
-            elif block == 'season_name_s' and is_tv:
-                val = f"S{season_num:02d}" if season_num is not None else None
-            elif block == 'season_name_s_no0' and is_tv:
-                val = f"S{season_num}" if season_num is not None else None
-            elif video_info and block in video_info: val = video_info.get(block)
-            elif block.startswith('sep_'):
-                is_sep = True
-                if block == 'sep_slash': val = '/'
-                elif block.startswith('sep_dash_space'): val = ' - '
-                elif block.startswith('sep_middot_space'): val = ' · '
-                elif block.startswith('sep_middot'): val = '·'
-                elif block.startswith('sep_dot'): val = '.'
-                elif block.startswith('sep_dash'): val = '-'
-                elif block.startswith('sep_underline'): val = '_'
-                elif block.startswith('sep_space'): val = ' '
+    def _rename_renderer(self):
+        return P115RenameRenderer(self.details, self.tmdb_id, self.original_title)
 
-            if val: evaluated.append({'val': str(val).strip() if not is_sep else val, 'is_sep': is_sep})
+    def _get_rename_format(self, kind, fallback):
+        return P115RenameRenderer.get_format(self.rename_config, kind, fallback)
 
-        # 智能消除多余分隔符
-        final_parts = []
-        for i, item in enumerate(evaluated):
-            if item['is_sep']:
-                has_content_before = any(not x['is_sep'] for x in evaluated[:i])
-                has_content_after = any(not x['is_sep'] for x in evaluated[i+1:])
-                is_last_sep_in_group = True
-                if i + 1 < len(evaluated) and evaluated[i+1]['is_sep']:
-                    is_last_sep_in_group = False
-                if has_content_before and has_content_after and is_last_sep_in_group:
-                    final_parts.append(item['val'])
-            else:
-                final_parts.append(item['val'])
+    def _template_uses_file_ext(self, format_value):
+        return P115RenameRenderer.template_uses_file_ext(format_value)
 
-        return "".join(final_parts)
+    def _build_name_from_format(self, format_array, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None, file_ext=""):
+        return self._rename_renderer().build_name(
+            format_array,
+            is_tv=is_tv,
+            season_num=season_num,
+            episode_num=episode_num,
+            original_title=original_title,
+            video_info=video_info,
+            safe_title=safe_title,
+            file_ext=file_ext,
+        )
 
     @classmethod
     def _sanitize_115_name_component(cls, text):
-        cleaned = utils.clean_invisible_chars(text)
-        cleaned = cls._P115_INVALID_NAME_CHARS_RE.sub('', cleaned).strip()
-        return cleaned
+        return P115RenameRenderer.sanitize_name_component(text)
 
     def _get_episode_regex_rules(self):
         """懒加载自定义季集号识别规则，避免每个文件都查数据库"""
@@ -5964,8 +5881,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 episode_num = file_node.get('_forced_episode')
                 s_name = None
                 if is_tv and season_num is not None:
-                    cfg = self.rename_config
-                    season_format = cfg.get('season_dir_format', ['season_name_en'])
+                    season_format = self._get_rename_format('season_dir', ['season_name_en'])
                     s_name = self._build_name_from_format(
                         season_format, 
                         is_tv=True, 
@@ -6240,7 +6156,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         # ★★★ 核心升级：直接调用统一乐高引擎生成文件名 ★★★
         default_format = ['title_zh', 'sep_dash_space', 'year', 'sep_middot_space', 's_e', 'sep_middot_space', 'resolution', 'sep_middot_space', 'codec', 'sep_middot_space', 'audio', 'sep_middot_space', 'group']
-        file_format = cfg.get('file_format', default_format)
+        file_format = self._get_rename_format('file', default_format)
 
         core_name = self._build_name_from_format(
             file_format, 
@@ -6249,7 +6165,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             episode_num=episode_num, 
             original_title=original_title, 
             video_info=video_info,
-            safe_title=new_base_name # 传入过滤过特殊字符的标题
+            safe_title=new_base_name, # 传入过滤过特殊字符的标题
+            file_ext=ext,
         )
 
         # 兜底：如果轨道配空了，用原名
@@ -6263,12 +6180,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             part_num = int(part_match.group(2))
             part_suffix = f" - pt{part_num}"
 
-        new_name = f"{core_name}{part_suffix}{lang_suffix}.{ext}"
+        if self._template_uses_file_ext(file_format) or core_name.lower().endswith(f".{ext.lower()}"):
+            core_base, core_ext = os.path.splitext(core_name)
+            new_name = f"{core_base}{part_suffix}{lang_suffix}{core_ext or f'.{ext}'}"
+        else:
+            new_name = f"{core_name}{part_suffix}{lang_suffix}.{ext}"
         
         # ★★★ 核心修复：在这里利用齐全的 video_info 生成季目录名称 ★★★
         s_name = None
         if is_tv and season_num is not None:
-            season_format = cfg.get('season_dir_format', ['season_name_en'])
+            season_format = self._get_rename_format('season_dir', ['season_name_en'])
             s_name = self._build_name_from_format(
                 season_format, 
                 is_tv=True, 
@@ -6777,10 +6698,28 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 finally:
                     self._disable_extension_batch_split = False
                 return ok
+            elif len(split_groups) == 1:
+                only_group = next(iter(split_groups.values()))
+                group_target_cid = only_group.get('target_cid')
+                if group_target_cid and str(group_target_cid) != str(target_cid):
+                    logger.info(f"  ➜ [智能分类] 单文件目录按文件级规则修正目标目录：{target_cid} -> {group_target_cid}")
+                    target_cid = group_target_cid
+                    dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else source_root_id
 
         # ★ 统一在这里获取最终的 target_cid！(因为 details 已经补齐了时长，media_type 也可能被纠错了，season 也提取了)
         if not getattr(self, 'is_manual_correct', False):
-            self.current_sorting_filename = parse_name
+            final_sorting_filename = parse_name
+            if is_batch:
+                classify_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+                video_names_for_classify = []
+                for item in candidates:
+                    item_name = item.get('fn') or item.get('n') or item.get('file_name', '')
+                    ext = item_name.split('.')[-1].lower() if '.' in item_name else ''
+                    if ext in classify_video_exts:
+                        video_names_for_classify.append(item_name)
+                if len(video_names_for_classify) == 1:
+                    final_sorting_filename = video_names_for_classify[0]
+            self.current_sorting_filename = final_sorting_filename
             new_target_cid = self.get_target_cid(season_num=getattr(self, 'forced_season', None))
             if new_target_cid and str(new_target_cid) != str(target_cid):
                 logger.info(f"  ➜ [智能分类] 目标目录已根据最新元数据(时长/类型/连载状态)修正！")
@@ -6804,7 +6743,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         # ★ 保留原名只影响文件名，不影响主目录
         # batch 模式 root_name 可能是“批量文件”，绝不能拿它当目标主目录
-        main_format = cfg.get('main_dir_format', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
+        main_format = self._get_rename_format('main_dir', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
         std_root_name = self._build_name_from_format(
             main_format,
             is_tv=(self.media_type == 'tv'),
@@ -6844,6 +6783,47 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         
         # ★★★ 核心升级：支持 / 分层创建多级目录 ★★★
         dir_parts = [p.strip() for p in std_root_name.split('/') if p.strip()]
+
+        def _is_visible_child_dir(parent_cid, dir_name, cid):
+            """确认目录 CID 真实挂在指定父目录下，避免复用回收站残留的幽灵目录。"""
+            if not parent_cid or not dir_name or not cid:
+                return False
+            if not isinstance(cid, (str, int)):
+                return True
+            try:
+                offset = 0
+                limit = 1000
+                while offset < 5000:
+                    res = self.client.fs_files({
+                        'cid': parent_cid,
+                        'limit': limit,
+                        'offset': offset,
+                        'show_dir': 1,
+                        'record_open_time': 0
+                    })
+                    if not isinstance(res, dict) or not res.get('state'):
+                        return True
+                    data = res.get('data')
+                    if not isinstance(data, list):
+                        return True
+                    for item in data:
+                        item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                        item_cid = (
+                            item.get('fid')
+                            or item.get('file_id')
+                            or item.get('id')
+                            or item.get('cid')
+                        )
+                        if item_fc == '0' and item_name == dir_name and str(item_cid) == str(cid):
+                            return True
+                    if len(data) < limit:
+                        return False
+                    offset += limit
+                return False
+            except Exception as e:
+                logger.debug(f"  ➜ 目录可见性校验失败，保守沿用 CID: parent={parent_cid}, cid={cid}, err={e}")
+                return True
         
         # 提前计算基础相对路径，用于逐级修复 local_path
         category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
@@ -6855,24 +6835,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             
             # 逐级检查/创建目录
             for part_name in dir_parts:
-                cache_key = f"{temp_parent_cid}_{part_name}"
-                
-                # 1. 优先查全局内存缓存 (抵抗并发)
-                with _GLOBAL_DIR_LOCK:
-                    part_cid = _GLOBAL_DIR_CACHE.get(cache_key)
-                
-                # 2. 查数据库缓存
-                if not part_cid:
-                    part_cid = P115CacheManager.get_cid(temp_parent_cid, part_name)
-                    if part_cid:
-                        with _GLOBAL_DIR_LOCK:
-                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
+                # 查数据库缓存；跨任务目录状态不再使用进程内缓存。
+                part_cid = P115CacheManager.get_cid(temp_parent_cid, part_name)
 
                 # 缓存自愈检查
                 if part_cid and str(part_cid) == str(source_root_id) and str(temp_parent_cid) != str(root_item.get('pid') or root_item.get('parent_id')):
                     P115CacheManager.delete_cid(part_cid)
-                    with _GLOBAL_DIR_LOCK:
-                        _GLOBAL_DIR_CACHE.pop(cache_key, None)
                     part_cid = None
 
                 if not part_cid:
@@ -6880,8 +6848,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     if mk_res.get('state'):
                         part_cid = mk_res.get('cid')
                         P115CacheManager.save_cid(part_cid, temp_parent_cid, part_name)
-                        with _GLOBAL_DIR_LOCK:
-                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
                     else:
                         err_text = json.dumps(mk_res, ensure_ascii=False)
                         should_search_after_mkdir_fail = any(
@@ -6911,10 +6877,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     )
                                     
                                     if item_fc == '0' and item_name == part_name and item_cid:
+                                        if not _is_visible_child_dir(temp_parent_cid, part_name, item_cid):
+                                            logger.warning(f"  ➜ [目录自愈] 同名搜索返回不可见目录，已忽略幽灵 CID: {part_name} ({item_cid})")
+                                            P115CacheManager.delete_cid(item_cid)
+                                            continue
                                         part_cid = item_cid
                                         P115CacheManager.save_cid(part_cid, temp_parent_cid, part_name)
-                                        with _GLOBAL_DIR_LOCK:
-                                            _GLOBAL_DIR_CACHE[cache_key] = part_cid
                                         break
                             except Exception as e:
                                 logger.debug(f"  ➜ 目录精准定位失败: {e}")
@@ -7181,61 +7149,52 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # 剧集仍然进入标准季目录
                 if self.media_type == 'tv' and season_num is not None and s_name:
                     cache_key = f"{final_home_cid}_{s_name}"
+                    s_cid = memory_dir_cache.get(cache_key)
 
-                    with _GLOBAL_DIR_LOCK:
-                        s_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+                    if not s_cid:
+                        s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
 
-                    if s_cid == 'FAILED':
-                        real_target_cid = final_home_cid
+                    if s_cid:
+                        real_target_cid = s_cid
+                        memory_dir_cache[cache_key] = s_cid
                     else:
+                        s_mk = self.client.fs_mkdir(s_name, final_home_cid)
+                        s_cid = s_mk.get('cid') if s_mk.get('state') else None
+
                         if not s_cid:
-                            s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
+                            try:
+                                s_search = self.client.fs_files({
+                                    'cid': final_home_cid,
+                                    'search_value': s_name,
+                                    'limit': 100,
+                                    'show_dir': 1,
+                                    'record_open_time': 0
+                                })
+                                for item in s_search.get('data', []):
+                                    item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                                    item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                                    item_cid = (
+                                        item.get('fid')
+                                        or item.get('file_id')
+                                        or item.get('id')
+                                        or item.get('cid')
+                                    )
+
+                                    if item_fc == '0' and item_name == s_name and item_cid:
+                                        s_cid = item_cid
+                                        break
+                            except Exception:
+                                pass
 
                         if s_cid:
+                            P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
+                            memory_dir_cache[cache_key] = s_cid
                             real_target_cid = s_cid
-                            with _GLOBAL_DIR_LOCK:
-                                _GLOBAL_DIR_CACHE[cache_key] = s_cid
+
+                            season_rel_path = f"{base_rel_path}/{s_name}"
+                            P115CacheManager.update_local_path(s_cid, season_rel_path)
                         else:
-                            s_mk = self.client.fs_mkdir(s_name, final_home_cid)
-                            s_cid = s_mk.get('cid') if s_mk.get('state') else None
-
-                            if not s_cid:
-                                try:
-                                    s_search = self.client.fs_files({
-                                        'cid': final_home_cid,
-                                        'search_value': s_name,
-                                        'limit': 100,
-                                        'show_dir': 1,
-                                        'record_open_time': 0
-                                    })
-                                    for item in s_search.get('data', []):
-                                        item_name = item.get('fn') or item.get('n') or item.get('file_name')
-                                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                                        item_cid = (
-                                            item.get('fid')
-                                            or item.get('file_id')
-                                            or item.get('id')
-                                            or item.get('cid')
-                                        )
-
-                                        if item_fc == '0' and item_name == s_name and item_cid:
-                                            s_cid = item_cid
-                                            break
-                                except Exception:
-                                    pass
-
-                            if s_cid:
-                                P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = s_cid
-                                real_target_cid = s_cid
-
-                                season_rel_path = f"{base_rel_path}/{s_name}"
-                                P115CacheManager.update_local_path(s_cid, season_rel_path)
-                            else:
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = 'FAILED'
-                                real_target_cid = final_home_cid
+                            real_target_cid = final_home_cid
 
             else:
                 new_filename, season_num, episode_num, s_name, video_info, has_real_info, part_num = self._rename_file_node(
@@ -7250,62 +7209,53 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # ★ 直接使用返回的 s_name 创建/查找季目录
                 if self.media_type == 'tv' and season_num is not None and s_name:
                     cache_key = f"{final_home_cid}_{s_name}"
+                    s_cid = memory_dir_cache.get(cache_key)
                     
-                    with _GLOBAL_DIR_LOCK:
-                        s_cid = _GLOBAL_DIR_CACHE.get(cache_key)
+                    if not s_cid:
+                        s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
                     
-                    if s_cid == 'FAILED':
-                        real_target_cid = final_home_cid
+                    if s_cid:
+                        real_target_cid = s_cid
+                        memory_dir_cache[cache_key] = s_cid
                     else:
-                        if not s_cid:
-                            s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
-                        
-                        if s_cid:
-                            real_target_cid = s_cid
-                            with _GLOBAL_DIR_LOCK:
-                                _GLOBAL_DIR_CACHE[cache_key] = s_cid
-                        else:
-                            s_mk = self.client.fs_mkdir(s_name, final_home_cid)
-                            s_cid = s_mk.get('cid') if s_mk.get('state') else None
+                        s_mk = self.client.fs_mkdir(s_name, final_home_cid)
+                        s_cid = s_mk.get('cid') if s_mk.get('state') else None
                             
-                            if not s_cid: 
-                                try:
-                                    # ★ 核心修复：使用 fs_files + search_value 精准定位
-                                    s_search = self.client.fs_files({
-                                        'cid': final_home_cid, 
-                                        'search_value': s_name,
-                                        'limit': 100, 
-                                        'show_dir': 1,
-                                        'record_open_time': 0
-                                    })
-                                    for item in s_search.get('data', []):
-                                        item_name = item.get('fn') or item.get('n') or item.get('file_name')
-                                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                                        item_cid = (
-                                            item.get('fid')
-                                            or item.get('file_id')
-                                            or item.get('id')
-                                            or item.get('cid')
-                                        )
+                        if not s_cid: 
+                            try:
+                                # ★ 核心修复：使用 fs_files + search_value 精准定位
+                                s_search = self.client.fs_files({
+                                    'cid': final_home_cid, 
+                                    'search_value': s_name,
+                                    'limit': 100, 
+                                    'show_dir': 1,
+                                    'record_open_time': 0
+                                })
+                                for item in s_search.get('data', []):
+                                    item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                                    item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                                    item_cid = (
+                                        item.get('fid')
+                                        or item.get('file_id')
+                                        or item.get('id')
+                                        or item.get('cid')
+                                    )
                                         
-                                        if item_fc == '0' and item_name == s_name and item_cid:
-                                            s_cid = item_cid
-                                            break
-                                except Exception: pass
+                                    if item_fc == '0' and item_name == s_name and item_cid:
+                                        s_cid = item_cid
+                                        break
+                            except Exception: pass
                             
-                            if s_cid:
-                                P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = s_cid
-                                real_target_cid = s_cid
+                        if s_cid:
+                            P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
+                            memory_dir_cache[cache_key] = s_cid
+                            real_target_cid = s_cid
                                 
-                                # ★ 同步更新季目录的 local_path
-                                season_rel_path = f"{base_rel_path}/{s_name}"
-                                P115CacheManager.update_local_path(s_cid, season_rel_path)
-                            else:
-                                with _GLOBAL_DIR_LOCK:
-                                    _GLOBAL_DIR_CACHE[cache_key] = 'FAILED'
-                                real_target_cid = final_home_cid
+                            # ★ 同步更新季目录的 local_path
+                            season_rel_path = f"{base_rel_path}/{s_name}"
+                            P115CacheManager.update_local_path(s_cid, season_rel_path)
+                        else:
+                            real_target_cid = final_home_cid
 
             # =================================================================
             # ★★★ 核心修复：严格去重逻辑 (防多版本/洗版残留冲突) ★★★
@@ -9291,7 +9241,7 @@ class WebhookDeleteBuffer:
                         resp = client.fs_delete(final_api_ids)
                         
                         if resp.get('state'):
-                            logger.info(f"  ➜ [深度删除] 115 网盘文件/空目录物理销毁成功！")
+                            logger.info(f"  ➜ [深度删除] 115 网盘文件/空目录已移入回收站。")
                         else:
                             logger.error(f"  ➜ [深度删除] 115 API 删除失败: {resp}")
                             return # API 失败则不清理本地库，保持一致性
@@ -9314,7 +9264,7 @@ class WebhookDeleteBuffer:
         except Exception as e:
             logger.error(f"  ➜ [深度删除] 执行异常: {e}", exc_info=True)
 
-def delete_115_files_by_webhook(item_path, pickcodes):
+def delete_115_files_by_webhook(pickcodes):
     """
     【V6 终极缓冲版】接收神医 Webhook 传来的提取码，加入缓冲队列。
     """

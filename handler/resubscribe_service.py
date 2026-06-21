@@ -168,6 +168,9 @@ class WashingService:
 
     @classmethod
     def _official_episode_runtime(cls, tmdb_id: str, season_num: int, episode_num: int) -> tuple[float, str]:
+        def missing_fallback() -> tuple[float, str]:
+            return cls._average_local_episode_tmdb_runtime(tmdb_id, season_num)
+
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
@@ -198,14 +201,40 @@ class WashingService:
 
             api_key = (config_manager.APP_CONFIG or {}).get(constants.CONFIG_OPTION_TMDB_API_KEY)
             if not api_key:
-                return 0.0, "missing_official_runtime"
+                return missing_fallback()
             data = tmdb_handler.get_season_details_tmdb(int(float(tmdb_id)), season_num, str(api_key), append_to_response=None)
             for ep in (data or {}).get("episodes") or []:
                 if isinstance(ep, dict) and int(ep.get("episode_number") or 0) == episode_num:
                     runtime = float(ep.get("runtime") or 0)
-                    return runtime, "tmdb_realtime" if runtime > 0 else "missing_official_runtime"
+                    return (runtime, "tmdb_realtime") if runtime > 0 else missing_fallback()
         except Exception as e:
             logger.debug("  ➜ [洗版] 实时查询 TMDb 分集时长失败: tmdb=%s, S%sE%s, err=%s", tmdb_id, season_num, episode_num, e)
+        return missing_fallback()
+
+    @classmethod
+    def _average_local_episode_tmdb_runtime(cls, tmdb_id: str, season_num: int) -> tuple[float, str]:
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT AVG(runtime_minutes) AS avg_runtime
+                        FROM media_metadata
+                        WHERE item_type = 'Episode'
+                          AND parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND in_library = TRUE
+                          AND runtime_minutes IS NOT NULL
+                          AND runtime_minutes > 0
+                        """,
+                        (str(tmdb_id), season_num),
+                    )
+                    row = cursor.fetchone()
+                    avg_runtime = float((row or {}).get("avg_runtime") or 0)
+                    if avg_runtime > 0:
+                        return avg_runtime, "local_media_metadata_average"
+        except Exception as e:
+            logger.debug("  ➜ [洗版] 读取本地 TMDb 分集平均时长失败: tmdb=%s, S%s, err=%s", tmdb_id, season_num, e)
         return 0.0, "missing_official_runtime"
 
     @classmethod
@@ -708,6 +737,7 @@ class WashingService:
         cls,
         db_media_type: str,
         tmdb_id: str,
+        target_cid: Optional[str] = None,
         season_num: Optional[int] = None,
         episode_num: Optional[int] = None,
         current_sha1: Optional[str] = None,
@@ -722,6 +752,7 @@ class WashingService:
         rows = []
         seen_sha1s = set()
         current_sha1 = str(current_sha1 or "").strip().upper()
+        target_cid = str(target_cid or "").strip()
 
         try:
             with get_db_connection() as conn:
@@ -754,6 +785,26 @@ class WashingService:
                         """
                         params = (str(tmdb_id),)
 
+                    library_target_filter = ""
+                    library_target_params = []
+                    if target_cid:
+                        library_target_filter = """
+                            AND EXISTS (
+                                SELECT 1
+                                FROM p115_filesystem_cache pfc_scope
+                                JOIN p115_organize_records por_scope
+                                  ON por_scope.file_id = pfc_scope.id
+                                  OR (
+                                      NULLIF(por_scope.pick_code, '') IS NOT NULL
+                                      AND por_scope.pick_code = pfc_scope.pick_code
+                                  )
+                                WHERE UPPER(pfc_scope.sha1) = UPPER(pmc.sha1)
+                                  AND por_scope.status = 'success'
+                                  AND por_scope.target_cid = %s
+                            )
+                        """
+                        library_target_params.append(target_cid)
+
                     sql = f"""
                         SELECT DISTINCT pmc.sha1, pmc.mediainfo_json
                         FROM media_metadata mm
@@ -768,9 +819,10 @@ class WashingService:
                         JOIN p115_mediainfo_cache pmc
                           ON pmc.sha1 = sha.sha1
                         WHERE {where_sql}
+                        {library_target_filter}
                     """
 
-                    cursor.execute(sql, params)
+                    cursor.execute(sql, tuple(params) + tuple(library_target_params))
                     library_rows = cursor.fetchall() or []
                     for row in library_rows:
                         row_sha1 = str(row.get("sha1") or "").strip().upper()
@@ -797,6 +849,24 @@ class WashingService:
                     if current_sha1:
                         etk_where.append("UPPER(pmc.sha1) <> %s")
                         etk_params.append(current_sha1)
+
+                    if target_cid:
+                        etk_where.append("""
+                            EXISTS (
+                                SELECT 1
+                                FROM p115_organize_records por_scope
+                                WHERE (
+                                      por_scope.file_id = pfc.id
+                                      OR (
+                                          NULLIF(por_scope.pick_code, '') IS NOT NULL
+                                          AND por_scope.pick_code = pfc.pick_code
+                                      )
+                                  )
+                                  AND por_scope.status = 'success'
+                                  AND por_scope.target_cid = %s
+                            )
+                        """)
+                        etk_params.append(target_cid)
 
                     if db_media_type == "Movie":
                         etk_where.append(f"{etk_type_expr} IN ('movie', 'movies', 'film')")
@@ -959,7 +1029,7 @@ class WashingService:
         
         # 拦截逻辑：如果没有获取到媒体信息，直接视为不达标 (即使有特权也不能放行坏文件)
         if not raw_info:
-            return "REJECT", "无法获取媒体流信息(可能是不支持的格式如ISO或文件损坏)"
+            return "REJECT", "无法获取媒体流信息(可能是不支持的格式或文件损坏)"
         
         # ★★★ 核心修改：完结洗版特权通道 ★★★
         if is_active_washing:
@@ -1008,6 +1078,7 @@ class WashingService:
         existing_raw_infos = cls._load_existing_raw_infos(
             db_media_type=db_media_type,
             tmdb_id=tmdb_id,
+            target_cid=target_cid,
             season_num=season_num,
             episode_num=episode_num,
             current_sha1=sha1,

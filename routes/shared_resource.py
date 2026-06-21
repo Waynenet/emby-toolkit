@@ -18,7 +18,7 @@ import config_manager
 from extensions import admin_required
 from database import shared_credit_db, shared_share_db, settings_db
 from database.connection import get_db_connection
-from handler.shared_center_client import SharedCenterClient
+from handler.shared_center_client import SharedCenterClient, _current_server_id_hash
 from handler.shared_subscription_service import consume_device_event
 from handler import tmdb as tmdb_handler
 import tasks.shared_resource_tasks as shared_tasks
@@ -66,6 +66,11 @@ def _center_home_proxy_cache_get(cache_key) -> Dict[str, Any] | None:
 
 def _center_home_proxy_cache_set(cache_key, payload: Dict[str, Any]) -> None:
     _center_proxy_cache_set(_CENTER_HOME_PROXY_CACHE, cache_key, payload)
+
+
+def _center_home_proxy_cache_clear() -> None:
+    with _CENTER_HOME_PROXY_CACHE_LOCK:
+        _CENTER_HOME_PROXY_CACHE.clear()
 
 
 def _boolish(value, default=False):
@@ -820,6 +825,7 @@ def api_shared_resource_config():
     if request.method == 'GET':
         return jsonify({'success': True, 'data': _shared_resource_config_payload()})
     payload = _save_shared_config(_request_json())
+    _center_home_proxy_cache_clear()
     return jsonify({'success': True, 'message': '共享资源配置已保存（Rapid v2：中心不存 CK、不创建 115 分享）', 'data': payload})
 
 
@@ -1542,39 +1548,6 @@ def _strip_center_display_children(row: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     row = dict(row)
-    kind = str(row.get('source_kind') or '').strip().lower()
-    typ = str(row.get('item_type') or row.get('display_type') or '').strip().lower()
-    if kind == 'series_group' or typ in {'series', 'tv'}:
-        nums = []
-        def _push_season_num(value):
-            try:
-                raw = value.get('season_number') if isinstance(value, dict) else value
-                if raw in (None, ''):
-                    return
-                n = int(float(raw))
-            except Exception:
-                return
-            if n not in nums:
-                nums.append(n)
-        for value in row.get('available_season_numbers') or []:
-            _push_season_num(value)
-        for value in row.get('season_numbers') or []:
-            _push_season_num(value)
-        for value in row.get('seasons') or []:
-            _push_season_num(value)
-        nums.sort(key=lambda n: -1 if n == 0 else n)
-        if nums:
-            row.setdefault('available_season_numbers', nums)
-            row.setdefault('season_numbers', nums)
-            row['season_count'] = row.get('season_count') or len(nums)
-            row['number_of_seasons'] = row.get('number_of_seasons') or len(nums)
-        row['seasons'] = []
-        row['resources'] = []
-        row['versions'] = []
-        row['children'] = []
-        row['pack_items'] = []
-        row['season_list_deferred'] = True
-        return row
     for key in ('versions',):
         if isinstance(row.get(key), list):
             row[key] = [_strip_center_display_children(x) for x in row.get(key) if isinstance(x, dict)]
@@ -1714,7 +1687,8 @@ def api_center_sources_home():
             False,
         )
         home_sections = _shared_resource_config_payload().get('p115_shared_center_home_sections') or []
-        cache_key = (client.base_url, client.device_token, json.dumps(home_sections, sort_keys=True, ensure_ascii=False))
+        identity_key = _current_server_id_hash() or client.device_token
+        cache_key = (client.base_url, identity_key, limit_per_section, json.dumps(home_sections, sort_keys=True, ensure_ascii=False))
         if not force_refresh:
             cached = _center_home_proxy_cache_get(cache_key)
             if cached:
@@ -1752,6 +1726,10 @@ def api_center_sources_home():
             sections.append({**section, 'items': items})
         resp['sections'] = sections
         resp['items'] = []
+        center_cache_hit = bool(resp.get('cache_hit'))
+        if 'cache_hit' in resp:
+            resp['center_cache_hit'] = center_cache_hit
+            resp['cache_hit'] = center_cache_hit
         payload = {'success': True, **resp}
         _center_home_proxy_cache_set(cache_key, payload)
         return jsonify(payload)
@@ -1846,6 +1824,7 @@ def api_center_source_detail():
         include_people = str(request.args.get('include_people') or '0').strip().lower() not in {'0', 'false', 'no', 'off'}
         limit = int(request.args.get('limit') or 200)
         cache_key = (
+            'detail:v2',
             client.base_url,
             client.device_token,
             request.args.get('source_kind') or '',

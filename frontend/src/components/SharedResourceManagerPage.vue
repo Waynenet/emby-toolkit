@@ -454,6 +454,8 @@
                   class="center-version-transfer-button"
                   size="small"
                   type="primary"
+                  :color="centerTransferButtonColor"
+                  text-color="#fff"
                   round
                   :loading="importingMap[version.source_id] === 'permanent'"
                   :disabled="centerVersionActionDisabled(version) || isCenterReplenishRow(version) || Boolean(importingMap[version.source_id])"
@@ -496,6 +498,7 @@ import ShareRequestCreateModal from './ShareRequestCreateModal.vue';
 const message = useMessage();
 const dialog = useDialog();
 const themeVars = useThemeVars();
+const centerTransferButtonColor = computed(() => themeVars.value.primaryColor || '#e91e63');
 
 const isMobile = ref(false);
 const checkMobile = () => { isMobile.value = window.innerWidth <= 768; };
@@ -939,7 +942,7 @@ const tmdbMediaKind = (row) => {
   if (type.includes('movie') || type === 'film' || type === '电影') return 'movie';
   return 'tv';
 };
-const centerRowTypeSafe = (row) => row?.display_type || (row?.source_kind === 'series_group' ? 'Series' : (row?.source_kind === 'season_hub' ? 'Pack' : (row?.is_collapsed_pack || row?.pack_item_count ? 'Pack' : row?.item_type)));
+const centerRowTypeSafe = (row) => row?.display_type || (row?.source_kind === 'season_hub' ? 'Pack' : (row?.is_collapsed_pack || row?.pack_item_count ? 'Pack' : row?.item_type));
 const tmdbHref = (row) => {
   const id = tmdbIdForRow(row);
   if (!id) return '';
@@ -1731,12 +1734,7 @@ const centerSeasonNumber = (row) => {
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 };
-const centerIsSeriesGroup = (row) => {
-  const label = centerTypeLabel(centerRowType(row));
-  const kind = String(row?.source_kind || '').trim().toLowerCase();
-  const type = String(row?.item_type || row?.display_type || '').trim().toLowerCase();
-  return label === '剧集' || kind === 'series_group' || ['series', 'tv'].includes(type);
-};
+const centerIsSeriesGroup = () => false;
 const centerIsSeasonLike = (row) => {
   if (centerIsSeriesGroup(row)) return false;
   const label = centerTypeLabel(centerRowType(row));
@@ -2943,6 +2941,12 @@ const centerVersionBestAssetMap = (row) => {
   if (Object.keys(direct).length) return direct;
   return parseCenterJsonObject(row?.logical_group?.best_asset_map);
 };
+const centerVersionAssetAvailable = (asset) => {
+  if (!asset || typeof asset !== 'object') return false;
+  if (!asset.asset_id) return false;
+  const status = String(asset.status || asset.source_status || asset.backing_status || 'alive').toLowerCase();
+  return ['alive', 'available', 'updating', 'incomplete', 'pool_complete', 'pool_partial'].includes(status);
+};
 const centerVersionEpisodeItems = (row) => {
   const assetMap = centerVersionBestAssetMap(row);
   const total = Number(row?.episode_total || row?.progress_total || row?.logical_group?.episode_total || 0);
@@ -2954,7 +2958,8 @@ const centerVersionEpisodeItems = (row) => {
   const pad = maxEp >= 10 ? 2 : 1;
   const items = [];
   for (let ep = 1; ep <= maxEp; ep += 1) {
-    const asset = assetMap[String(ep)] || assetMap[ep] || null;
+    const rawAsset = assetMap[String(ep)] || assetMap[ep] || null;
+    const asset = centerVersionAssetAvailable(rawAsset) ? rawAsset : null;
     items.push({
       episode_number: ep,
       label: String(ep).padStart(pad, '0'),
@@ -3173,15 +3178,14 @@ const mergeCenterDetailPayload = (base, payload) => {
 };
 
 const centerDetailParams = (row, seasonOverride = null) => {
-  const isSeries = centerIsSeriesGroup(row);
   const overrideProvided = seasonOverride !== null && seasonOverride !== undefined && seasonOverride !== '';
-  const season = centerSeasonTabNumber(overrideProvided ? seasonOverride : (isSeries ? centerDefaultDetailSeason(row) : centerSeasonNumber(row)));
+  const season = centerSeasonTabNumber(overrideProvided ? seasonOverride : centerSeasonNumber(row));
   return {
-    source_kind: isSeries ? 'series_group' : (row?.source_kind || row?.lazy_children_kind || ''),
-    source_id: isSeries ? (row?.source_id || row?.source_ref_id || `series:${tmdbIdForRow(row)}`) : (row?.source_id || row?.source_ref_id || ''),
-    hub_id: isSeries ? '' : (row?.hub_id || ''),
+    source_kind: row?.source_kind || row?.lazy_children_kind || '',
+    source_id: row?.source_id || row?.source_ref_id || '',
+    hub_id: row?.hub_id || '',
     tmdb_id: tmdbIdForRow(row) || row?.tmdb_id || '',
-    item_type: isSeries ? 'Series' : (centerRowType(row) || row?.item_type || ''),
+    item_type: centerRowType(row) || row?.item_type || '',
     season_number: season ?? '',
     // 详情页只取展示元数据 + 版本壳；包内集列表在秒传确认后再请求。
     limit: 120,
@@ -3405,7 +3409,7 @@ const loadCenterSources = async (forceRefresh = false, append = false) => {
     if (forceRefresh) params.force_refresh = 1;
     const res = await axios.get('/api/shared/resources/center/sources', { params });
     const items = res.data?.items || [];
-    centerBackendGrouped.value = Boolean(res.data?.backend_grouped || res.data?.series_grouped);
+    centerBackendGrouped.value = Boolean(res.data?.backend_grouped);
     centerSources.value = append ? [...(centerSources.value || []), ...items] : items;
     centerPagination.itemCount = Number(res.data?.total || 0);
     const total = Number(centerPagination.itemCount || 0);
@@ -4645,20 +4649,6 @@ onUnmounted(() => {
   word-break: break-all;
 }
 .center-version-action { flex: 0 0 auto; display: flex; align-items: center; }
-.center-version-action :deep(.center-version-transfer-button) {
-  --n-color: var(--n-primary-color);
-  --n-color-hover: var(--n-primary-color-hover);
-  --n-color-pressed: var(--n-primary-color-pressed);
-  --n-color-focus: var(--n-primary-color-hover);
-  --n-border: 1px solid var(--n-primary-color);
-  --n-border-hover: 1px solid var(--n-primary-color-hover);
-  --n-border-pressed: 1px solid var(--n-primary-color-pressed);
-  --n-border-focus: 1px solid var(--n-primary-color-hover);
-  --n-text-color: var(--n-text-color-primary);
-  --n-text-color-hover: var(--n-text-color-primary);
-  --n-text-color-pressed: var(--n-text-color-primary);
-  --n-text-color-focus: var(--n-text-color-primary);
-}
 .center-version-detail-card-expandable { cursor: pointer; }
 .center-version-detail-card-expandable:hover {
   border-color: var(--n-primary-color, var(--accent-color, var(--center-detail-border)));

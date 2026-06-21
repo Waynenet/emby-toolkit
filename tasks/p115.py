@@ -934,166 +934,6 @@ def task_scan_and_organize_115(processor=None):
         logger.error(f"  ➜ 115 扫描任务异常: {e}", exc_info=True)
         update_progress(100, f"扫描异常结束: {e}")
 
-def task_move_root_files_to_115_inbox(processor=None):
-    """把 115 根目录里的幽灵媒体文件移回待整理目录。"""
-    logger.info("=== 开始修复 115 根目录异常文件 ===")
-
-    try:
-        import task_manager
-    except ImportError:
-        task_manager = None
-
-    def update_progress(prog, msg):
-        if task_manager:
-            task_manager.update_status_from_thread(prog, msg)
-        logger.info(msg)
-
-    config = get_config()
-    save_cid = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID) or '').strip()
-    save_name = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_NAME) or '待整理').strip()
-    if not save_cid or save_cid == '0':
-        update_progress(100, "  ➜ 未配置 115 待整理目录，无法移动根目录异常文件。")
-        return
-
-    client = P115Service.get_client()
-    if not client:
-        update_progress(100, "  ➜ 无法初始化 115 客户端。")
-        return
-
-    configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
-    allowed_exts = {str(e).lower().lstrip('.') for e in configured_exts if str(e).strip()}
-    if not allowed_exts:
-        allowed_exts = KNOWN_VIDEO_EXTS | {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
-
-    def first_present(*values):
-        for value in values:
-            if value is not None and str(value).strip() != '':
-                return value
-        return None
-
-    def collect_if_root_file(item, source_name):
-        item_id = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
-        name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
-        fc_val = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-        is_folder = fc_val == '0'
-        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
-        if not item_id or is_folder or ext not in allowed_exts:
-            return
-        if str(item_id) in root_file_id_set:
-            return
-        root_file_id_set.add(str(item_id))
-        root_file_ids.append(str(item_id))
-        root_file_names.append(str(name))
-        logger.warning(f"  ➜ [根目录修复] 发现根目录异常文件：{name}，来源={source_name}")
-
-    update_progress(5, "  ➜ 正在扫描 115 根目录一级文件...")
-    root_file_ids = []
-    root_file_id_set = set()
-    root_file_names = []
-    offset = 0
-    limit = 1000
-    while True:
-        if processor and getattr(processor, 'is_stop_requested', lambda: False)():
-            update_progress(100, "  ➜ 用户已中止根目录异常文件修复。")
-            return
-
-        res = client.fs_files({'cid': 0, 'limit': limit, 'offset': offset, 'record_open_time': 0, 'count_folders': 0})
-        if not res.get('state') and res.get('code'):
-            update_progress(100, f"  ➜ 拉取 115 根目录失败：{res}")
-            return
-
-        data = res.get('data') or []
-        if not data:
-            break
-
-        for item in data:
-            collect_if_root_file(item, "根目录一级列表")
-
-        if len(data) < limit:
-            break
-        offset += limit
-
-    raw_rules = settings_db.get_setting('p115_sorting_rules')
-    rules = json.loads(raw_rules) if raw_rules and isinstance(raw_rules, str) else (raw_rules or [])
-    target_dirs = []
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        cid = str(rule.get('cid') or '').strip()
-        if rule.get('enabled', True) and cid and cid not in ('0', save_cid):
-            target_dirs.append((cid, rule.get('category_path') or rule.get('dir_name') or f"CID:{cid}"))
-
-    fetch_types = []
-    if allowed_exts & KNOWN_VIDEO_EXTS:
-        fetch_types.append((4, "视频"))
-    if allowed_exts & {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}:
-        fetch_types.append((1, "字幕"))
-
-    if target_dirs and fetch_types:
-        update_progress(15, f"  ➜ 正在从 {len(target_dirs)} 个分类目录递归查找根目录幽灵文件...")
-    for idx, (target_cid, category_name) in enumerate(target_dirs):
-        if processor and getattr(processor, 'is_stop_requested', lambda: False)():
-            update_progress(100, "  ➜ 用户已中止根目录异常文件修复。")
-            return
-        base_prog = 15 + int((idx / max(len(target_dirs), 1)) * 25)
-        for f_type, type_name in fetch_types:
-            offset = 0
-            while True:
-                try:
-                    res = client.fs_files({
-                        'cid': target_cid,
-                        'type': f_type,
-                        'limit': limit,
-                        'offset': offset,
-                        'record_open_time': 0,
-                    })
-                except Exception as e:
-                    logger.warning(f"  ➜ [根目录修复] 递归扫描失败：{category_name} / {type_name}，err={e}")
-                    break
-
-                data = res.get('data') or []
-                if not data:
-                    break
-
-                for item in data:
-                    pid = first_present(item.get('pid'), item.get('cid'), item.get('parent_id'))
-                    if pid is not None and str(pid).strip() == '0':
-                        collect_if_root_file(item, category_name)
-
-                if len(data) < limit:
-                    break
-                offset += limit
-        update_progress(base_prog, f"  ➜ 已检查分类目录：{category_name}")
-
-    if not root_file_ids:
-        update_progress(100, "  ➜ 没有发现需要移动的 115 根目录异常媒体文件。")
-        return
-
-    update_progress(40, f"  ➜ 发现 {len(root_file_ids)} 个根目录媒体文件，准备移动到 [{save_name}]。")
-    moved_ids = []
-    failed_batches = 0
-    batch_size = 100
-    for start in range(0, len(root_file_ids), batch_size):
-        batch = root_file_ids[start:start + batch_size]
-        try:
-            resp = client.fs_move(batch, save_cid)
-            if resp.get('state'):
-                moved_ids.extend(batch)
-            else:
-                failed_batches += 1
-                logger.warning(f"  ➜ [根目录修复] 移动失败：{resp}")
-        except Exception as e:
-            failed_batches += 1
-            logger.warning(f"  ➜ [根目录修复] 移动异常：{e}")
-
-    sample_names = "、".join(root_file_names[:3])
-    if len(root_file_names) > 3:
-        sample_names += " ..."
-    update_progress(
-        100,
-        f"  ➜ 根目录异常文件修复完成：移动 {len(moved_ids)} 个，失败批次 {failed_batches} 个。示例：{sample_names}"
-    )
-
 def task_sync_115_directory_tree(processor=None):
     """
     主动同步 115 分类目录下的所有子目录到本地 DB 缓存。
@@ -1239,6 +1079,8 @@ def task_full_sync_strm_and_subs(processor=None):
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     enable_cleanup = config.get(constants.CONFIG_OPTION_115_LOCAL_CLEANUP, False)
+    save_cid = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID) or '').strip()
+    save_name = str(config.get(constants.CONFIG_OPTION_115_SAVE_PATH_NAME) or '待整理').strip()
     min_size_mb = int(config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10))
     MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
     
@@ -1322,12 +1164,84 @@ def task_full_sync_strm_and_subs(processor=None):
 
         # 动态 API 路径缓存池 (防止重复请求 115 接口)
         dynamic_path_cache = {}
+        remote_file_ids = set()
+        synced_cache_file_ids = set()
+        synced_cache_dir_ids = set()
+        successful_target_cids = set()
+        remote_dir_local_path = {}
+        remote_dir_cache_rows = {}
+        path_anomaly_file_ids = []
+        path_anomaly_file_id_set = set()
+        path_anomaly_names = []
+        path_anomaly_move_failed = 0
 
         def first_present(*values):
             for value in values:
                 if value is not None and str(value).strip() != '':
                     return value
             return None
+
+        def node_id(node):
+            if not isinstance(node, dict):
+                return ''
+            return str(
+                node.get('id') or node.get('cid') or node.get('file_id') or
+                node.get('fid') or node.get('parent_id') or ''
+            ).strip()
+
+        def node_name(node):
+            if not isinstance(node, dict):
+                return ''
+            return str(node.get('name') or node.get('file_name') or node.get('fn') or node.get('n') or '').strip()
+
+        def remember_remote_dir(dir_id, parent_id, name, rel_path):
+            dir_id = str(dir_id or '').strip()
+            parent_id = str(parent_id or '').strip()
+            name = str(name or '').strip()
+            rel_path = str(rel_path or '').strip()
+            if not dir_id or not parent_id or not name or not rel_path:
+                return
+            synced_cache_dir_ids.add(dir_id)
+            remote_dir_local_path[dir_id] = rel_path
+            remote_dir_cache_rows[dir_id] = {
+                'parent_id': parent_id,
+                'name': name,
+                'local_path': rel_path.replace('\\', '/')
+            }
+            dir_cache[dir_id] = {'pid': parent_id, 'name': name, 'local_path': rel_path}
+
+        def remember_ancestor_dirs(ancestors, target_cid, category_name, file_id=None):
+            if not isinstance(ancestors, (list, tuple)):
+                return None
+
+            target = str(target_cid)
+            file_id = str(file_id or '').strip()
+            start_idx = -1
+            for i, anc in enumerate(ancestors):
+                if node_id(anc) == target:
+                    start_idx = i + 1
+                    break
+            if start_idx == -1:
+                return None
+
+            parent_id = target
+            parts = []
+            rel_dir = category_name
+            for anc in ancestors[start_idx:]:
+                current_id = node_id(anc)
+                current_name = node_name(anc)
+                if not current_id or not current_name:
+                    continue
+                if file_id and current_id == file_id:
+                    break
+
+                parts.append(current_name)
+                rel_path = os.path.join(category_name, *parts)
+                remember_remote_dir(current_id, parent_id, current_name, rel_path)
+                parent_id = current_id
+                rel_dir = rel_path
+
+            return rel_dir
 
         # 内存路径推导函数 (★ 终极修复版：DB缓存 + API动态溯源)
         def resolve_local_dir(pid, target_cid):
@@ -1336,15 +1250,33 @@ def task_full_sync_strm_and_subs(processor=None):
             if pid in cid_to_rel_path:
                 return cid_to_rel_path[pid]
                 
-            # 2. 如果刚才已经通过 API 查过这个目录了，直接秒回
+            # 2. 如果本次远端扫描已经带出了目录链，优先使用远端真实路径
+            if pid in remote_dir_local_path:
+                return remote_dir_local_path[pid]
+
+            # 3. 如果刚才已经通过 API 查过这个目录了，直接秒回
             if pid in dynamic_path_cache:
                 return dynamic_path_cache[pid]
 
-            # 3. 尝试使用数据库中已有的 local_path
+            # 4. 优先向 115 请求真实路径，避免旧 p115_filesystem_cache 把 STRM 继续生成到脏路径
+            try:
+                dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                path_nodes = dir_info.get('path', [])
+                if path_nodes:
+                    base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
+                    resolved_path = remember_ancestor_dirs(path_nodes, target_cid, base_cat_path)
+                    if resolved_path:
+                        dynamic_path_cache[pid] = resolved_path # 存入内存池，同目录文件不再请求
+                        logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
+                        return resolved_path
+            except Exception as e:
+                logger.debug(f"  ➜ 动态查询目录路径失败 (pid: {pid}): {e}")
+
+            # 5. 远端路径不可用时，才使用数据库缓存兜底
             if pid in dir_cache and dir_cache[pid].get('local_path'):
                 return dir_cache[pid]['local_path']
                 
-            # 4. 尝试在数据库缓存中向上追溯
+            # 6. 最后尝试在数据库缓存中向上追溯
             parts = []
             curr = pid
             while curr and curr in dir_cache:
@@ -1358,27 +1290,53 @@ def task_full_sync_strm_and_subs(processor=None):
                     dynamic_path_cache[pid] = resolved_path # 存入内存池
                     return resolved_path
 
-            # 5. ★ 终极兜底：缓存穿透时，主动向 115 请求该目录的真实路径
-            try:
-                dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-                path_nodes = dir_info.get('path', [])
-                if path_nodes:
-                    start_idx = -1
-                    for i, p_node in enumerate(path_nodes):
-                        if str(p_node.get('cid') or p_node.get('file_id')) == target_cid:
-                            start_idx = i + 1
-                            break
-                    if start_idx != -1:
-                        sub_folders = [str(p.get('name') or p.get('file_name')).strip() for p in path_nodes[start_idx:]]
-                        base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
-                        resolved_path = os.path.join(base_cat_path, *sub_folders) if sub_folders else base_cat_path
-                        dynamic_path_cache[pid] = resolved_path # 存入内存池，同目录文件不再请求
-                        logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
-                        return resolved_path
-            except Exception as e:
-                logger.debug(f"  ➜ 动态查询目录路径失败 (pid: {pid}): {e}")
-
             return None
+
+        def queue_path_anomaly_file(fid, name, reason):
+            fid = str(fid or '').strip()
+            if not fid:
+                logger.warning(
+                    f"  ➜ [全量同步] 发现无法推导路径的 115 文件，但缺少 fid，无法自动移动：{name or '-'}，原因={reason}"
+                )
+                return False
+            if fid in path_anomaly_file_id_set:
+                return False
+            path_anomaly_file_id_set.add(fid)
+            path_anomaly_file_ids.append(fid)
+            path_anomaly_names.append(str(name or fid))
+            remote_file_ids.discard(fid)
+            logger.warning(
+                f"  ➜ [全量同步] 发现无法推导路径的 115 文件，已加入待整理移动队列：{name or fid}，原因={reason}"
+            )
+            return True
+
+        def move_path_anomaly_files_to_inbox():
+            nonlocal path_anomaly_move_failed
+            if not path_anomaly_file_ids:
+                return 0
+            if not save_cid or save_cid == '0':
+                logger.warning(
+                    f"  ➜ [全量同步] 已发现 {len(path_anomaly_file_ids)} 个无法推导路径的 115 文件，"
+                    "但未配置待整理目录 CID，无法自动移动。"
+                )
+                return 0
+
+            moved_count = 0
+            batch_size = 100
+            update_progress(88, f"  ➜ 正在把 {len(path_anomaly_file_ids)} 个路径异常文件移动到 [{save_name}]...")
+            for start in range(0, len(path_anomaly_file_ids), batch_size):
+                batch = path_anomaly_file_ids[start:start + batch_size]
+                try:
+                    resp = client.fs_move(batch, save_cid)
+                    if resp.get('state'):
+                        moved_count += len(batch)
+                    else:
+                        path_anomaly_move_failed += len(batch)
+                        logger.warning(f"  ➜ [全量同步] 路径异常文件移动失败：{resp}")
+                except Exception as e:
+                    path_anomaly_move_failed += len(batch)
+                    logger.warning(f"  ➜ [全量同步] 路径异常文件移动异常：{e}")
+            return moved_count
 
         def process_full_sync_items(items, target_cid, category_name):
             nonlocal files_generated, subs_downloaded, root_anomaly_skipped
@@ -1392,25 +1350,26 @@ def task_full_sync_strm_and_subs(processor=None):
                 pc = first_present(item.get('pc'), item.get('pick_code'), item.get('pickcode'))
                 # 115 返回的文件数据中，pid/cid/parent_id 代表它所在的父目录 ID
                 pid = first_present(item.get('pid'), item.get('cid'), item.get('parent_id'))
+                fid = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
+                if fid:
+                    remote_file_ids.add(str(fid))
+                ancestors = item.get('ancestors') or item.get('paths') or item.get('path')
+                ancestor_rel_dir = remember_ancestor_dirs(ancestors, target_cid, category_name, fid)
                 if not pc or pid is None:
                     continue
                 pid_text = str(pid).strip()
                 if not pid_text:
                     continue
                 if pid_text == '0' and not item.get('_etk_rel_dir'):
-                    root_anomaly_skipped += 1
                     fid = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
-                    logger.warning(
-                        "  ➜ [全量同步] 跳过 115 根目录异常文件：%s（fid=%s，pc=%s）。请在 115 网盘手动删除或重新移动。",
-                        name,
-                        fid or '-',
-                        str(pc)[:8] if pc else '-',
-                    )
+                    if queue_path_anomaly_file(fid, name, "父目录为根目录"):
+                        root_anomaly_skipped += 1
                     continue
 
-                rel_dir = item.get('_etk_rel_dir') or resolve_local_dir(pid, target_cid)
+                rel_dir = item.get('_etk_rel_dir') or ancestor_rel_dir or resolve_local_dir(pid, target_cid)
                 if not rel_dir:
-                    logger.warning(f"  ➜ 彻底无法推导路径，跳过文件: {name} (pid: {pid})")
+                    if queue_path_anomaly_file(fid, name, f"无法推导本地路径(pid={pid})"):
+                        root_anomaly_skipped += 1
                     continue
 
                 current_local_path = os.path.join(local_root, rel_dir)
@@ -1447,35 +1406,16 @@ def task_full_sync_strm_and_subs(processor=None):
 
                     if need_write:
                         was_existing_strm = os.path.exists(strm_path)
-                        ignore_features = None
-                        if was_existing_strm:
-                            try:
-                                from handler import emby
-                                emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
-                                emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
-                                if emby_url and emby_api_key:
-                                    ignore_features = emby.enable_strm_assistant_ignore_file_change(emby_url, emby_api_key)
-                            except Exception as e:
-                                logger.debug(f"  ➜ [全量同步] 开启神医忽略文件变更失败: {e}")
-                        try:
-                            with open(strm_path, 'w', encoding='utf-8') as f:
-                                f.write(content)
-                            if not was_existing_strm:
-                                logger.debug(f"  ➜ [新增] 生成 STRM: {strm_name}")
-                            else:
-                                changed_strm_files.add(os.path.abspath(strm_path))
-                        finally:
-                            if ignore_features is not None:
-                                try:
-                                    from handler import emby
-                                    emby.disable_strm_assistant_ignore_file_change(emby_url, emby_api_key, ignore_features)
-                                except Exception as e:
-                                    logger.debug(f"  ➜ [全量同步] 恢复神医忽略文件变更失败: {e}")
+                        with open(strm_path, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        if not was_existing_strm:
+                            logger.debug(f"  ➜ [新增] 生成 STRM: {strm_name}")
+                        else:
+                            changed_strm_files.add(os.path.abspath(strm_path))
                         files_generated += 1
 
                     valid_local_files.add(os.path.abspath(strm_path))
 
-                    fid = item.get('fid') or item.get('file_id') or item.get('id')
                     sha1 = item.get('sha1') or item.get('sha')
 
                     # 生成 Mediainfo (等同 MP 直出逻辑)
@@ -1516,6 +1456,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     # 写入本地数据库缓存 (p115_filesystem_cache)
                     if pc and fid:
                         file_local_path = os.path.join(rel_dir, name).replace('\\', '/')
+                        synced_cache_file_ids.add(str(fid))
                         P115CacheManager.save_file_cache(
                             fid=fid, parent_id=pid, name=name,
                             sha1=sha1, pick_code=pc,
@@ -1574,23 +1515,14 @@ def task_full_sync_strm_and_subs(processor=None):
                     if not fid or is_dir:
                         continue
 
-                    ancestors = info.get('ancestors') or info.get('paths') or info.get('path')
-                    if isinstance(ancestors, (list, tuple)):
-                        start_idx = -1
-                        for i, anc in enumerate(ancestors):
-                            if isinstance(anc, dict):
-                                anc_id = str(anc.get('id') or anc.get('cid') or anc.get('file_id') or anc.get('parent_id') or '')
-                                if anc_id == str(target_cid):
-                                    start_idx = i + 1
-                                    break
-                        if start_idx != -1:
-                            sub_folders = []
-                            for anc in ancestors[start_idx:-1]:
-                                if isinstance(anc, dict):
-                                    n = anc.get('name') or anc.get('file_name') or anc.get('fn')
-                                    if n:
-                                        sub_folders.append(str(n).strip())
-                            info['_etk_rel_dir'] = os.path.join(category_name, *sub_folders) if sub_folders else category_name
+                    rel_dir = remember_ancestor_dirs(
+                        info.get('ancestors') or info.get('paths') or info.get('path'),
+                        target_cid,
+                        category_name,
+                        fid,
+                    )
+                    if rel_dir:
+                        info['_etk_rel_dir'] = rel_dir
 
                     process_full_sync_items((info,), target_cid, category_name)
                     count += 1
@@ -1630,6 +1562,7 @@ def task_full_sync_strm_and_subs(processor=None):
                 return
             if fast_count:
                 update_progress(base_prog, f"  ➜ [{category_name}] Cookie 极速遍历完成：{fast_count} 个文件")
+                successful_target_cids.add(target_cid)
                 continue
             if fast_count == 0:
                 logger.warning(f"  ➜ [{category_name}] Cookie 极速遍历没有返回文件，改用 OpenAPI 复查。")
@@ -1676,13 +1609,129 @@ def task_full_sync_strm_and_subs(processor=None):
                         break
                 if target_invalid:
                     break
+            if not target_invalid:
+                successful_target_cids.add(target_cid)
 
         logger.info(f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
+        moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
         if root_anomaly_skipped:
+            sample_names = "、".join(path_anomaly_names[:3])
+            if len(path_anomaly_names) > 3:
+                sample_names += " ..."
             logger.warning(
-                "  ➜ [全量同步] 已跳过 %s 个 115 根目录异常文件，未生成 STRM，也未写入本地缓存。",
-                root_anomaly_skipped,
+                f"  ➜ [全量同步] 已处理 {root_anomaly_skipped} 个 115 路径异常文件："
+                f"移动到 [{save_name}] {moved_path_anomaly_count} 个，失败 {path_anomaly_move_failed} 个。示例：{sample_names}"
             )
+
+        # =================================================================
+        # 阶段 2.5: 对账并清理 p115_filesystem_cache 与本地 STRM，使其收敛到远端当前状态
+        # =================================================================
+        if sync_has_errors:
+            logger.warning("  ➜ [三方对账] 本次远端同步存在异常，跳过缓存与本地 STRM 清理以避免误删。")
+        else:
+            try:
+                target_cid_list = list(successful_target_cids)
+                deleted_cache_files = 0
+                deleted_cache_dirs = 0
+                cleaned_strm_files = 0
+
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        for dir_id, row in remote_dir_cache_rows.items():
+                            cursor.execute("""
+                                INSERT INTO p115_filesystem_cache (id, parent_id, name, local_path)
+                                VALUES (%s, %s, %s, %s)
+                                ON CONFLICT (parent_id, name)
+                                DO UPDATE SET
+                                    id = EXCLUDED.id,
+                                    local_path = EXCLUDED.local_path,
+                                    updated_at = NOW()
+                            """, (dir_id, row['parent_id'], row['name'], row['local_path']))
+
+                        if target_cid_list:
+                            cursor.execute("""
+                                WITH RECURSIVE managed_tree(id) AS (
+                                    SELECT id
+                                    FROM p115_filesystem_cache
+                                    WHERE parent_id = ANY(%s)
+                                    UNION
+                                    SELECT c.id
+                                    FROM p115_filesystem_cache c
+                                    JOIN managed_tree mt ON c.parent_id = mt.id
+                                )
+                                DELETE FROM p115_filesystem_cache d
+                                USING managed_tree mt
+                                WHERE d.id = mt.id
+                                  AND NOT (d.id = ANY(%s))
+                                  AND NOT (d.id = ANY(%s))
+                                  AND (
+                                      COALESCE(d.pick_code, '') <> ''
+                                      OR COALESCE(d.sha1, '') <> ''
+                                      OR COALESCE(d.size, 0) > 0
+                                  )
+                            """, (target_cid_list, target_cid_list, list(remote_file_ids)))
+                            deleted_cache_files = cursor.rowcount or 0
+
+                            while True:
+                                cursor.execute("""
+                                    WITH RECURSIVE managed_tree(id) AS (
+                                        SELECT id
+                                        FROM p115_filesystem_cache
+                                        WHERE parent_id = ANY(%s)
+                                        UNION
+                                        SELECT c.id
+                                        FROM p115_filesystem_cache c
+                                        JOIN managed_tree mt ON c.parent_id = mt.id
+                                    )
+                                    DELETE FROM p115_filesystem_cache d
+                                    USING managed_tree mt
+                                    WHERE d.id = mt.id
+                                      AND NOT (d.id = ANY(%s))
+                                      AND NOT (d.id = ANY(%s))
+                                      AND COALESCE(d.pick_code, '') = ''
+                                      AND COALESCE(d.sha1, '') = ''
+                                      AND COALESCE(d.size, 0) = 0
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM p115_filesystem_cache child WHERE child.parent_id = d.id
+                                      )
+                                    RETURNING d.id
+                                """, (target_cid_list, target_cid_list, list(synced_cache_dir_ids)))
+                                batch_deleted = len(cursor.fetchall())
+                                if not batch_deleted:
+                                    break
+                                deleted_cache_dirs += batch_deleted
+
+                        conn.commit()
+
+                valid_strm_paths = {p for p in valid_local_files if p.lower().endswith('.strm')}
+                for cid in target_cid_list:
+                    rel_path = cid_to_rel_path.get(cid)
+                    if not rel_path:
+                        continue
+                    target_local_dir = os.path.join(local_root, rel_path)
+                    if not os.path.exists(target_local_dir):
+                        continue
+                    for root_dir, _, files in os.walk(target_local_dir):
+                        for filename in files:
+                            if not filename.lower().endswith('.strm'):
+                                continue
+                            strm_path = os.path.abspath(os.path.join(root_dir, filename))
+                            if strm_path in valid_strm_paths:
+                                continue
+                            try:
+                                os.remove(strm_path)
+                                cleaned_strm_files += 1
+                                logger.debug(f"  ➜ [三方对账] 删除远端已不存在的 STRM: {strm_path}")
+                            except Exception as e:
+                                logger.warning(f"  ➜ [三方对账] 删除失效 STRM 失败 {strm_path}: {e}")
+
+                logger.info(
+                    f"  ➜ [三方对账] 缓存新增/更新目录 {len(remote_dir_cache_rows)} 条，"
+                    f"清理失踪文件缓存 {deleted_cache_files} 条、空目录缓存 {deleted_cache_dirs} 条、"
+                    f"本地失效 STRM {cleaned_strm_files} 个。"
+                )
+            except Exception as e:
+                logger.error(f"  ➜ [三方对账] 缓存/STRM 对账失败: {e}", exc_info=True)
         # =================================================================
         # 阶段 3: 本地失效文件清理 (耗时: 秒级)
         # =================================================================
