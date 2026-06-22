@@ -53,9 +53,27 @@ class P115RenameRenderer:
     def sanitize_rendered_template(text):
         cleaned = utils.clean_invisible_chars(text).replace("\\", "/")
         cleaned = re.sub(r'[\r\n\t]+', ' ', cleaned)
-        return re.sub(r'[:*?"<>|]', '', cleaned).strip()
+        cleaned = re.sub(r'[:*?"<>|]', '', cleaned).strip()
+        cleaned = P115RenameRenderer.cleanup_empty_separators(cleaned)
+        return cleaned
 
-    def build_template_context(self, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None, file_ext=""):
+    @staticmethod
+    def cleanup_empty_separators(text):
+        cleaned = re.sub(r'\s+', ' ', str(text or '')).strip()
+        for _ in range(4):
+            next_text = re.sub(r'\s*([·•])\s*(?:\1\s*)+', r' \1 ', cleaned)
+            next_text = re.sub(r'\s+-\s*(?:-\s*)+', ' - ', next_text)
+            next_text = re.sub(r'\s+\.\s*(?:\.\s*)+', ' . ', next_text)
+            next_text = re.sub(r'\s+([·•.-])\s+([·•.-])\s+', r' \2 ', next_text)
+            next_text = re.sub(r'\s+[·•-]\s*(\.[A-Za-z0-9]{1,8})$', r'\1', next_text)
+            next_text = re.sub(r'\s+\.\s+(\.[A-Za-z0-9]{1,8})$', r'\1', next_text)
+            next_text = next_text.strip(' ·•-')
+            if next_text == cleaned:
+                break
+            cleaned = next_text
+        return cleaned
+
+    def build_template_context(self, is_tv=False, season_num=None, episode_num=None, original_title=None, original_name=None, video_info=None, safe_title=None, file_ext=""):
         video_info = video_info or {}
         date_text = str(self.details.get('date') or '')
         year = date_text[:4] if date_text else ''
@@ -67,6 +85,10 @@ class P115RenameRenderer:
         season_no = f"{season_val:02d}" if season_val is not None else ""
         episode_no = f"{episode_val:02d}" if episode_val is not None else ""
         season_episode = f"S{season_no}E{episode_no}" if is_tv and season_no and episode_no else ""
+        season_name_en = f"Season {season_no}" if is_tv and season_no else ""
+        season_name_en_no0 = f"Season {season_val}" if is_tv and season_val is not None else ""
+        season_name_s = f"S{season_no}" if is_tv and season_no else ""
+        season_name_s_no0 = f"S{season_val}" if is_tv and season_val is not None else ""
         season_name_zh = f"第 {season_val} 季" if is_tv and season_val is not None else ""
         episode_name_zh = f"第 {episode_val} 集" if is_tv and episode_val is not None else ""
         season_episode_zh = f"第 {season_val} 季 {episode_val} 集" if is_tv and season_val is not None and episode_val is not None else ""
@@ -76,25 +98,78 @@ class P115RenameRenderer:
         audio = video_info.get('audio') or ''
         group = video_info.get('group') or ''
         ext_with_dot = f".{str(file_ext).lstrip('.')}" if file_ext else ""
+        title_year = f"{title_zh} ({year})" if title_zh and year else title_zh
+        media_type = "电视剧" if is_tv else "电影"
+        poster = self.details.get('poster') or self.details.get('poster_path') or ''
+        backdrop = self.details.get('backdrop') or self.details.get('backdrop_path') or ''
+        overview = self.details.get('overview') or ''
+        actors_raw = self.details.get('actors') or self.details.get('cast') or []
+        if isinstance(actors_raw, str):
+            actors = actors_raw
+        elif isinstance(actors_raw, list):
+            actor_names = []
+            for actor in actors_raw[:5]:
+                if isinstance(actor, dict):
+                    actor_name = actor.get('name') or actor.get('original_name')
+                else:
+                    actor_name = actor
+                if actor_name:
+                    actor_names.append(str(actor_name))
+            actors = "、".join(actor_names)
+        else:
+            actors = ""
+        edition = video_info.get('edition') or " ".join([v for v in [source, effect] if v])
+        resource_term = video_info.get('resource_term') or " ".join([v for v in [source, effect, video_info.get('resolution') or ''] if v])
+        original_name_text = utils.clean_invisible_chars(original_name or safe_title or title_zh)
+        name_from_file = os.path.splitext(os.path.basename(original_name_text))[0] if original_name_text else title_zh
+        part_match = re.search(r'(?i)(?:^|[ ._\-\[\(])(?:part|pt|cd)[ ._\-]*(\d{1,2})(?=$|[ ._\-\]\)])', original_name_text)
+        part = str(video_info.get('part') or (part_match.group(1) if part_match else '') or '')
+        episode_title = video_info.get('episode_title') or self.details.get('episode_title') or ''
+        episode_date = video_info.get('episode_date') or self.details.get('episode_date') or ''
+        season_year = str(video_info.get('season_year') or self.details.get('season_year') or year or '')
 
         return {
             # ETK names
             'title': title_zh,
             'title_zh': title_zh,
             'title_en': title_en,
+            'en_title': title_en,
+            'en_name': title_en,
             'title_orig': title_orig,
             'original_title': title_orig,
+            'name': name_from_file,
+            'clean_title': name_from_file,
+            'identify_title': name_from_file,
             'year': year,
+            'year_pure': year,
+            'title_year': title_year,
+            'type': media_type,
+            'category': video_info.get('category') or self.details.get('category') or '',
+            'vote_average': self.details.get('vote_average') or '',
+            'poster': poster,
+            'backdrop': backdrop,
+            'actors': actors,
+            'overview': overview,
             'tmdb': self.tmdb_id,
             'tmdb_id': self.tmdb_id,
             'tmdbid': self.tmdb_id,
+            'imdbid': self.details.get('imdb_id') or self.details.get('imdbid') or '',
+            'doubanid': self.details.get('douban_id') or self.details.get('doubanid') or '',
             'season': season_val,
             'episode': episode_val,
             'season_no': season_no,
             'episode_no': episode_no,
             's_e': season_episode,
             'season_episode': season_episode,
-            'season_name': f"Season {season_no}" if season_no else "",
+            'season_fmt': season_name_s,
+            'season_year': season_year,
+            'episode_title': episode_title,
+            'episode_date': episode_date,
+            'season_name': season_name_en,
+            'season_name_en': season_name_en,
+            'season_name_en_no0': season_name_en_no0,
+            'season_name_s': season_name_s,
+            'season_name_s_no0': season_name_s_no0,
             'season_name_zh': season_name_zh,
             'episode_name_zh': episode_name_zh,
             's_e_zh': season_episode_zh,
@@ -108,20 +183,25 @@ class P115RenameRenderer:
             'audio': audio,
             'fps': video_info.get('fps') or '',
             'group': group,
-            'original_name': safe_title or title_zh,
+            'original_name': original_name_text,
+            'part': part,
             'file_ext': ext_with_dot,
             'fileExt': ext_with_dot,
 
             # MoviePilot-compatible aliases
-            'videoFormat': source,
+            'resourceType': source,
+            'videoFormat': video_info.get('resolution') or '',
             'videoCodec': codec,
             'audioCodec': audio,
             'releaseGroup': group,
-            'customization': effect,
-            'edition': video_info.get('edition') or '',
+            'webSource': video_info.get('stream') or '',
+            'videoBit': video_info.get('videoBit') or video_info.get('video_bit') or '',
+            'resource_term': resource_term,
+            'customization': video_info.get('customization') or effect,
+            'edition': edition,
         }
 
-    def render_template(self, template, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None, file_ext=""):
+    def render_template(self, template, is_tv=False, season_num=None, episode_num=None, original_title=None, original_name=None, video_info=None, safe_title=None, file_ext=""):
         template = self.normalize_mp_jinja_template(template)
         if not template.strip():
             return ""
@@ -130,6 +210,7 @@ class P115RenameRenderer:
             season_num=season_num,
             episode_num=episode_num,
             original_title=original_title,
+            original_name=original_name,
             video_info=video_info,
             safe_title=safe_title,
             file_ext=file_ext,
@@ -141,7 +222,7 @@ class P115RenameRenderer:
             return ""
         return self.sanitize_rendered_template(rendered) if rendered else ""
 
-    def build_name(self, format_value, is_tv=False, season_num=None, episode_num=None, original_title=None, video_info=None, safe_title=None, file_ext=""):
+    def build_name(self, format_value, is_tv=False, season_num=None, episode_num=None, original_title=None, original_name=None, video_info=None, safe_title=None, file_ext=""):
         if not format_value:
             return ""
 
@@ -152,6 +233,7 @@ class P115RenameRenderer:
                 season_num=season_num,
                 episode_num=episode_num,
                 original_title=original_title,
+                original_name=original_name,
                 video_info=video_info,
                 safe_title=safe_title,
                 file_ext=file_ext,

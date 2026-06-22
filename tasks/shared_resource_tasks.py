@@ -3818,6 +3818,17 @@ def _file_payload_common(file_info: Dict[str, Any], raw_uploaded: bool = False, 
     }
 
 
+def _center_episode_air_date(*values: Any) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if not text:
+            continue
+        match = re.match(r'^(\d{4}-\d{2}-\d{2})', text)
+        if match:
+            return match.group(1)
+    return ''
+
+
 # 完结季纯净版识别：只在登记 completed_season_source 时执行。
 # 秒传消费端不再现场兜底识别，只信中心端保存的 is_clean_version 标签。
 _CLEAN_VERSION_MIN_DELTA_MINUTES = 2.5
@@ -5054,6 +5065,31 @@ def _local_display_meta_rows_for_candidate(candidate: Dict[str, Any]) -> Dict[st
                         row = cur.fetchone()
                         if row:
                             out['season'] = dict(row)
+                        expected = _safe_int_or_none(
+                            (out.get('season') or {}).get('total_episodes')
+                            or candidate.get('expected_episode_count')
+                            or candidate.get('total_episodes')
+                        )
+                        if expected and expected > 0:
+                            cur.execute(
+                                """
+                                SELECT release_date
+                                FROM media_metadata
+                                WHERE item_type='Episode'
+                                  AND parent_series_tmdb_id=%s
+                                  AND season_number=%s
+                                  AND episode_number=%s
+                                  AND release_date IS NOT NULL
+                                ORDER BY last_updated_at DESC NULLS LAST
+                                LIMIT 1
+                                """,
+                                (series_id, season_no, expected),
+                            )
+                            row = cur.fetchone()
+                            air_date = _center_episode_air_date((row or {}).get('release_date') if row else None)
+                            if air_date:
+                                out['season']['final_episode_air_date'] = air_date
+                                out['season']['last_episode_air_date'] = air_date
                     cur.execute(
                         """
                         SELECT * FROM media_metadata
@@ -5133,6 +5169,17 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
                     'expected_episode_count': expected,
                     'total_episodes': expected,
                     'episode_count': expected,
+                })
+            final_air_date = _center_episode_air_date(
+                row.get('final_episode_air_date'),
+                row.get('last_episode_air_date'),
+                candidate.get('final_episode_air_date'),
+                candidate.get('last_episode_air_date'),
+            )
+            if final_air_date:
+                meta.update({
+                    'final_episode_air_date': final_air_date,
+                    'last_episode_air_date': final_air_date,
                 })
             for src_key, dst_key in (
                 ('watching_status', 'watching_status'),
@@ -5358,6 +5405,18 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                     errors.append({'file': f.get('file_name'), 'error': '缺少 season_number/episode_number'})
                     continue
                 expected_count = _safe_int_or_none(candidate.get('expected_episode_count') or candidate.get('total_episodes') or candidate.get('episode_count'))
+                episode_air_date = _center_episode_air_date(
+                    f.get('episode_air_date'),
+                    f.get('air_date'),
+                    f.get('release_date'),
+                    f.get('premiere_date'),
+                    f.get('PremiereDate'),
+                    candidate.get('episode_air_date'),
+                    candidate.get('air_date'),
+                    candidate.get('release_date'),
+                    candidate.get('premiere_date'),
+                    candidate.get('PremiereDate'),
+                )
                 payload = {
                     'tmdb_id': tmdb_id,
                     'item_type': 'Episode',
@@ -5365,6 +5424,7 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
                     'episode_number': ep_no,
                     'title': candidate.get('title'),
                     'release_year': candidate.get('release_year'),
+                    'episode_air_date': episode_air_date or None,
                     'expected_episode_count': expected_count,
                     'source_provider': effective_provider,
                     **display_meta_bundle,
@@ -6511,6 +6571,7 @@ def disable_shared_sources_for_deleted_fids(
     reason_text = str(reason or 'washing_replaced_old_version').strip()
     center_message = str(message or '').strip() or f'local file deleted by washing: {reason_text}'
     disabled = 0
+    deleted = 0
     failed = 0
     items: List[Dict[str, Any]] = []
     logical_share_cleanup = _delete_logical_share_channels_for_fids(fid_list, reason_text)
@@ -6573,6 +6634,49 @@ def disable_shared_sources_for_deleted_fids(
         title = str(row.get('title') or row.get('file_name') or row.get('tmdb_id') or local_id)
         matched_file_fids = [str(x) for x in (row.get('matched_file_fids') or []) if str(x or '').strip()]
         center_resp: Dict[str, Any] = {}
+
+        if source_kind == 'completed_season':
+            delete_reason = 'legacy_completed_season_source_removed'
+            try:
+                shared_share_db.delete_local_source(local_id)
+                deleted += 1
+                item = {
+                    'id': local_id,
+                    'source_kind': source_kind,
+                    'center_source_id': center_source_id,
+                    'title': title,
+                    'ok': True,
+                    'deleted': True,
+                    'reason': delete_reason,
+                    'matched_file_fids': matched_file_fids,
+                    'root_fid_matched': str(row.get('root_fid') or '') in fid_list,
+                }
+                items.append(item)
+                logger.info(
+                    "  ➜ [共享资源] 洗版删除旧版前已删除废弃 completed_season 共享源: id=%s, center=%s, title=%s, matched_files=%s",
+                    local_id,
+                    center_source_id or '-',
+                    title,
+                    len(matched_file_fids) or ('root' if item['root_fid_matched'] else 0),
+                )
+            except Exception as e:
+                failed += 1
+                logger.warning(
+                    "  ➜ [共享资源] 洗版废弃 completed_season 本地删除失败: id=%s, center=%s, title=%s, err=%s",
+                    local_id,
+                    center_source_id or '-',
+                    title,
+                    e,
+                )
+                items.append({
+                    'id': local_id,
+                    'source_kind': source_kind,
+                    'center_source_id': center_source_id,
+                    'title': title,
+                    'ok': False,
+                    'error': str(e),
+                })
+            continue
 
         share_cleanup = _delete_completed_share_channels_for_source(row, reason_text, client=client)
         if not share_cleanup.get('ok'):
@@ -6689,6 +6793,7 @@ def disable_shared_sources_for_deleted_fids(
         'ok': failed == 0,
         'matched': len(rows),
         'disabled': disabled,
+        'deleted': deleted,
         'failed': failed,
         'logical_share_cleanup': logical_share_cleanup,
         'items': items[:50],
@@ -6847,6 +6952,7 @@ def _display_meta_has_useful_payload(meta: Dict[str, Any]) -> bool:
         'title', 'original_title', 'overview', 'poster_path', 'backdrop_path',
         'release_year', 'release_date', 'rating', 'genres_json', 'original_language',
         'expected_episode_count', 'total_episodes', 'episode_count',
+        'final_episode_air_date', 'last_episode_air_date',
     ):
         if meta.get(key) not in (None, '', [], {}):
             return True
@@ -6963,6 +7069,8 @@ def _list_display_meta_backfill_source_rows(limit: int = 500) -> List[Dict[str, 
             'episode_number': episode_no,
             'title': item.get('title') or item.get('fallback_title') or '',
             'release_year': item.get('release_year'),
+            'expected_episode_count': item.get('expected_episode_count'),
+            'total_episodes': item.get('expected_episode_count'),
             'missing_fields': item.get('missing_fields') or [],
             'center_missing': True,
         })
@@ -7034,6 +7142,7 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
                 'season_total': has_any(season, ('total_episodes',)),
                 'expected_episode_count': has_any(season, ('total_episodes',)),
                 'total_episodes': has_any(season, ('total_episodes',)),
+                'final_episode_air_date': has_any(season, ('final_episode_air_date', 'last_episode_air_date')),
             }
         return any(checks.get(field, False) for field in missing)
 

@@ -13,6 +13,56 @@ from handler.tg_media_candidate import candidate_to_recognition_hints, is_recogn
 
 logger = logging.getLogger(__name__)
 
+_ETK_TO_MP_RENAME_VARS = {
+    "title_zh": "title",
+    "title_en": "en_title",
+    "title_orig": "original_title",
+    "year_pure": "year",
+    "tmdb": "tmdbid",
+    "tmdb_id": "tmdbid",
+    "clean_title": "name",
+    "identify_title": "name",
+    "source": "resourceType",
+    "resolution": "videoFormat",
+    "stream": "webSource",
+    "codec": "videoCodec",
+    "audio": "audioCodec",
+    "audio_count": "audioCodec",
+    "group": "releaseGroup",
+    "s_e": "season_episode",
+    "season_name_s": "season_fmt",
+    "file_ext": "fileExt",
+}
+
+_MP_TO_ETK_RENAME_VARS = {
+    "en_title": "title_en",
+    "en_name": "title_en",
+    "resourceType": "source",
+    "videoFormat": "resolution",
+    "webSource": "stream",
+    "videoCodec": "codec",
+    "audioCodec": "audio",
+    "releaseGroup": "group",
+}
+
+_MP_RENAME_SUPPORTED_VARS = {
+    "title", "en_title", "original_title", "name", "en_name", "original_name",
+    "year", "title_year", "type", "category", "vote_average", "poster", "backdrop",
+    "actors", "overview", "resourceType", "effect", "edition", "videoFormat",
+    "resource_term", "releaseGroup", "videoCodec", "videoBit", "audioCodec", "fps",
+    "webSource", "tmdbid", "imdbid", "doubanid", "part", "fileExt", "customization",
+    "season", "season_fmt", "season_year", "episode", "season_episode",
+    "episode_title", "episode_date",
+}
+
+_MP_RENAME_ALLOWED_FILTERS = {"upper", "lower", "string", "default", "trim", "replace", "zfill"}
+_MP_RENAME_ETK_ONLY_LABELS = {}
+_MP_RENAME_OPTIONAL_SEGMENT_VARS = {
+    "resourceType", "effect", "edition", "videoFormat", "resource_term",
+    "releaseGroup", "videoCodec", "videoBit", "audioCodec", "fps",
+    "webSource", "part", "customization",
+}
+
 # ======================================================================
 # 核心基础函数 (Token管理与API请求)
 # ======================================================================
@@ -41,6 +91,173 @@ def _get_access_token(config: Dict[str, Any] = None) -> Optional[str]:
     except Exception as e:
         logger.error(f"  ➜ 获取 MoviePilot Token 失败: {e}")
         return None
+
+def _get_mp_base_and_headers(config: Dict[str, Any] = None) -> Tuple[str, Optional[dict], str]:
+    mp_config = settings_db.get_setting('mp_config') or {}
+    moviepilot_url = str(mp_config.get('moviepilot_url') or '').rstrip('/')
+    if not moviepilot_url:
+        return "", None, "MoviePilot URL 未配置"
+
+    access_token = _get_access_token(config)
+    if not access_token:
+        return moviepilot_url, None, "MoviePilot 认证失败，请检查用户名和密码"
+
+    return moviepilot_url, {"Authorization": f"Bearer {access_token}"}, ""
+
+
+def _extract_setting_value(data):
+    if not isinstance(data, dict):
+        return None
+    value = data.get("data")
+    if isinstance(value, dict):
+        for key in ("value", "data", "setting"):
+            if key in value:
+                return value.get(key)
+    if value is not None:
+        return value
+    for key in ("value", "setting"):
+        if key in data:
+            return data.get(key)
+    return None
+
+
+def convert_etk_rename_template_to_mp(template: str) -> Tuple[str, List[str]]:
+    """
+    Convert ETK-friendly rename variables to MoviePilot's documented Jinja context.
+    Returns the converted template and a list of ETK-only variables that MP cannot render.
+    """
+    text = str(template or "")
+
+    exact_replacements = {
+        r"{{\s*season_no\s*}}": "{{ season|string }}.zfill(2)",
+        r"{{\s*episode_no\s*}}": "{{ episode|string }}.zfill(2)",
+        r"{{\s*season_name_en\s*}}": "Season {{ season|string }}.zfill(2)",
+        r"{{\s*season_name_en_no0\s*}}": "Season {{ season }}",
+        r"{{\s*season_name_s_no0\s*}}": "S{{ season }}",
+        r"{{\s*season_name_zh\s*}}": "第 {{ season }} 季",
+        r"{{\s*episode_name_zh\s*}}": "第 {{ episode }} 集",
+        r"{{\s*season_episode_zh\s*}}": "第 {{ season }} 季 {{ episode }} 集",
+    }
+    for pattern, replacement in exact_replacements.items():
+        text = re.sub(pattern, replacement, text)
+
+    def replace_tag(match):
+        tag = match.group(0)
+        for old, new in _ETK_TO_MP_RENAME_VARS.items():
+            tag = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])", new, tag)
+        return tag
+
+    text = re.sub(r"({[{%#][\s\S]*?[}%#]})", replace_tag, text)
+    text = _dedupe_mp_audio_codec_segments(text)
+    text = _wrap_mp_optional_rename_segments(text)
+
+    unsupported = []
+    for tag in re.findall(r"{[{%][\s\S]*?[}%]}", text):
+        for name in re.findall(r"\b[A-Za-z_]\w*\b", tag):
+            if name in ("if", "endif", "else", "elif", "for", "endfor", "in", "and", "or", "not", "is", "none", "true", "false"):
+                continue
+            if name in _MP_RENAME_ALLOWED_FILTERS or name in _MP_RENAME_SUPPORTED_VARS:
+                continue
+            if name not in unsupported:
+                unsupported.append(name)
+
+    return text, unsupported
+
+
+def convert_mp_rename_template_to_etk(template: str) -> str:
+    """Convert MoviePilot rename variables to ETK-friendly aliases for imported templates."""
+    text = str(template or "")
+
+    def replace_tag(match):
+        tag = match.group(0)
+        for old, new in _MP_TO_ETK_RENAME_VARS.items():
+            tag = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])", new, tag)
+        return tag
+
+    return re.sub(r"({[{%#][\s\S]*?[}%#]})", replace_tag, text)
+
+
+def _dedupe_mp_audio_codec_segments(template: str) -> str:
+    audio_expr = r"\{\{\s*audioCodec(?:\s*\|[^}]*)?\s*\}\}"
+    pattern = re.compile(rf"({audio_expr})(?P<sep>\s+(?:[·•]|\-)\s*){audio_expr}")
+    previous = None
+    text = str(template or "")
+    while previous != text:
+        previous = text
+        text = pattern.sub(r"\1", text)
+    return text
+
+
+def _wrap_mp_optional_rename_segments(template: str) -> str:
+    def replace(match):
+        prefix = match.group("prefix")
+        expr = match.group("expr").strip()
+        var_name = re.match(r"([A-Za-z_]\w*)", expr)
+        if not var_name or var_name.group(1) not in _MP_RENAME_OPTIONAL_SEGMENT_VARS:
+            return match.group(0)
+        guard = var_name.group(1)
+        return f"{{% if {guard} %}}{prefix}{{{{{expr}}}}}{{% endif %}}"
+
+    text = str(template or "")
+    # Convert ETK-style bare optional segments such as " · {{source}}" or
+    # " - {{group}}" into MP-friendly guarded Jinja blocks.
+    pattern = re.compile(
+        r"(?P<prefix>\s+(?:[·•]|\-)\s*)\{\{\s*(?P<expr>[A-Za-z_]\w*(?:\s*\|[^}]*)?)\s*\}\}"
+    )
+    return pattern.sub(replace, text)
+
+
+def format_mp_unsupported_rename_vars(unsupported: List[str]) -> str:
+    labels = []
+    for name in unsupported:
+        label = _MP_RENAME_ETK_ONLY_LABELS.get(name)
+        labels.append(f"{name}（{label}）" if label else name)
+    return "、".join(labels)
+
+
+def get_rename_templates(config: Dict[str, Any] = None) -> Tuple[bool, dict, str]:
+    moviepilot_url, headers, error = _get_mp_base_and_headers(config)
+    if error:
+        return False, {}, error
+
+    templates = {}
+    for key, out_key in (("MOVIE_RENAME_FORMAT", "movie"), ("TV_RENAME_FORMAT", "tv")):
+        data, response = _request_json(
+            "GET",
+            f"{moviepilot_url}/api/v1/system/setting/{key}",
+            headers=headers,
+            timeout=15,
+        )
+        if not data:
+            status = response.status_code if response is not None else "请求失败"
+            return False, {}, f"读取 MoviePilot 配置 {key} 失败：{status}"
+        value = _extract_setting_value(data)
+        if value in (None, ""):
+            return False, {}, f"MoviePilot 配置 {key} 为空"
+        templates[out_key] = str(value)
+
+    return True, templates, ""
+
+
+def set_rename_templates(movie_template: str, tv_template: str, config: Dict[str, Any] = None) -> Tuple[bool, str]:
+    moviepilot_url, headers, error = _get_mp_base_and_headers(config)
+    if error:
+        return False, error
+
+    for key, value in (("MOVIE_RENAME_FORMAT", movie_template), ("TV_RENAME_FORMAT", tv_template)):
+        data, response = _request_json(
+            "POST",
+            f"{moviepilot_url}/api/v1/system/setting/{key}",
+            headers=headers,
+            json=value,
+            timeout=15,
+        )
+        if response is None or response.status_code not in (200, 201, 204):
+            status = response.status_code if response is not None else "请求失败"
+            return False, f"写入 MoviePilot 配置 {key} 失败：{status}"
+
+    return True, ""
+
 
 def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) -> bool:
     """
@@ -1049,10 +1266,62 @@ def update_subscription(payload: dict, config: Dict[str, Any] = None) -> bool:
 
         headers = {"Authorization": f"Bearer {access_token}"}
         res = requests.put(f"{moviepilot_url}/api/v1/subscribe/", headers=headers, json=payload, timeout=15)
-        return res.status_code in [200, 204]
+        if res.status_code in [200, 204]:
+            return True
+        logger.warning(f"  ➜ 更新 MP 订阅失败: {res.status_code} - {res.text}")
+        return False
     except Exception as e:
         logger.error(f"  ➜ 更新 MP 订阅失败: {e}")
         return False
+
+def lock_series_subscription_version(
+    tmdb_id: str,
+    season: int,
+    series_name: str,
+    include_regex: str,
+    config: Dict[str, Any] = None,
+    *,
+    best_version: bool = False,
+) -> bool:
+    """Lock an MP season subscription by include regex; recreate it if PUT is not persisted."""
+    tmdb_id = str(tmdb_id or '').strip()
+    include_regex = str(include_regex or '').strip()
+    log_title = f"《{series_name}》第 {season} 季" if series_name else f"第 {season} 季"
+    if not tmdb_id or not season or not include_regex:
+        return False
+
+    existing = get_subscription_by_tmdbid(tmdb_id, season, config) or {}
+    payload = dict(existing) if existing else {
+        "name": series_name,
+        "tmdbid": int(tmdb_id),
+        "type": "\u7535\u89c6\u5267",
+        "season": int(season),
+    }
+
+    payload["include"] = include_regex
+    payload["season"] = int(season)
+    payload["tmdbid"] = int(tmdb_id)
+    if series_name and not payload.get("name"):
+        payload["name"] = series_name
+    if best_version:
+        payload["best_version"] = 1
+        payload.pop("best_version_full", None)
+
+    if existing.get("id") and update_subscription(payload, config):
+        verified = get_subscription_by_tmdbid(tmdb_id, season, config) or {}
+        if str(verified.get("include") or "") == include_regex:
+            logger.info(f"  ➜ [版本锁定] 已更新 MP 订阅：{log_title}")
+            return True
+        logger.warning(f"  ➜ [版本锁定] MP 更新后未持久化包含正则，改为删除后重建：{log_title}")
+
+    recreate_payload = dict(payload)
+    recreate_payload.pop("id", None)
+    if existing:
+        cancel_subscription(tmdb_id, "Series", config or {}, season=season)
+    ok = subscribe_with_custom_payload(recreate_payload, config)
+    if ok:
+        logger.info(f"  ➜ [版本锁定] 已删除后重建 MP 订阅：{log_title}")
+    return ok
 
 def search_subscription(sub_id: int, config: Dict[str, Any] = None) -> bool:
     """触发指定订阅的立即搜索"""

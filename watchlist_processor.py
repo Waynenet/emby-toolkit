@@ -3,6 +3,7 @@
 import time
 import json
 import os
+import re
 import requests
 import concurrent.futures
 from typing import Optional, Dict, Any, List
@@ -528,59 +529,59 @@ class WatchlistProcessor:
                                 if not season_info.get('poster_path'): season_info['poster_path'] = season_details_deep.get('poster_path')
                                 if not season_info.get('overview'): season_info['overview'] = season_details_deep.get('overview')
                         
-                        if not air_date_str: continue
+                    if not air_date_str: continue
 
-                        try:
-                            air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
-                            days_diff = (air_date - today).days
+                    try:
+                        air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
+                        days_diff = (air_date - today).days
+
+                        if -30 <= days_diff <= 7:
+                            revived_count += 1
+                            status_desc = "已开播" if days_diff <= 0 else f"{days_diff}天后开播"
+                            logger.info(f"  ➜ 发现《{series_name}》第 {new_season_num} 季{status_desc}，触发复活订阅流程。")
                             
-                            if -30 <= days_diff <= 7:
-                                revived_count += 1
-                                status_desc = "已开播" if days_diff <= 0 else f"{days_diff}天后开播"
-                                logger.info(f"  ➜ 发现《{series_name}》第 {new_season_num} 季{status_desc}，触发复活订阅流程。")
-                                
-                                # 1. 构造媒体信息
-                                season_tmdb_id = str(season_info.get('id'))
-                                media_info = {
-                                    'tmdb_id': season_tmdb_id,
-                                    'item_type': 'Season',
-                                    'title': f"{series_name} - {season_info.get('name', f'第 {new_season_num} 季')}",
-                                    'release_date': air_date_str,
-                                    'poster_path': season_info.get('poster_path'),
-                                    'season_number': new_season_num,
-                                    'parent_series_tmdb_id': tmdb_id,
-                                    'overview': season_info.get('overview')
-                                }
+                            # 1. 构造媒体信息
+                            season_tmdb_id = str(season_info.get('id'))
+                            media_info = {
+                                'tmdb_id': season_tmdb_id,
+                                'item_type': 'Season',
+                                'title': f"{series_name} - {season_info.get('name', f'第 {new_season_num} 季')}",
+                                'release_date': air_date_str,
+                                'poster_path': season_info.get('poster_path'),
+                                'season_number': new_season_num,
+                                'parent_series_tmdb_id': tmdb_id,
+                                'overview': season_info.get('overview')
+                            }
 
-                                # ★★★ 修改点：定义专属的 source type，并区分开播状态 ★★★
-                                source_data = {"type": "revived_season", "reason": "watchlist_revival", "item_id": tmdb_id}
+                            # ★★★ 修改点：定义专属的 source type，并区分开播状态 ★★★
+                            source_data = {"type": "revived_season", "reason": "watchlist_revival", "item_id": tmdb_id}
 
-                                if days_diff <= 0:
-                                    # 已开播：直接设为 WANTED (想看/立即订阅)
-                                    request_db.set_media_status_wanted(
-                                        tmdb_ids=season_tmdb_id,
-                                        item_type='Season',
-                                        source=source_data,
-                                        media_info_list=[media_info]
-                                    )
-                                else:
-                                    # 未开播：设为 PENDING_RELEASE (待上映)
-                                    request_db.set_media_status_pending_release(
-                                        tmdb_ids=season_tmdb_id,
-                                        item_type='Season',
-                                        source=source_data,
-                                        media_info_list=[media_info]
-                                    )
-                                
-                                # 仅更新 TMDb 状态元数据，保持数据新鲜度 (可选，不影响逻辑)
-                                self._update_watchlist_entry(tmdb_id, series_name, {
-                                    "watchlist_tmdb_status": "Returning Series"
-                                })
+                            if days_diff <= 0:
+                                # 已开播：直接设为 WANTED (想看/立即订阅)
+                                request_db.set_media_status_wanted(
+                                    tmdb_ids=season_tmdb_id,
+                                    item_type='Season',
+                                    source=source_data,
+                                    media_info_list=[media_info]
+                                )
+                            else:
+                                # 未开播：设为 PENDING_RELEASE (待上映)
+                                request_db.set_media_status_pending_release(
+                                    tmdb_ids=season_tmdb_id,
+                                    item_type='Season',
+                                    source=source_data,
+                                    media_info_list=[media_info]
+                                )
 
-                                sub_status_desc = "立即订阅" if days_diff <= 0 else "待上映"
-                                logger.info(f"  ➜ 已为《{series_name}》第 {new_season_num} 季提交订阅请求，状态：{sub_status_desc}。")
-                                break 
-                        except ValueError: pass
+                            # 仅更新 TMDb 状态元数据，保持数据新鲜度 (可选，不影响逻辑)
+                            self._update_watchlist_entry(tmdb_id, series_name, {
+                                "watchlist_tmdb_status": "Returning Series"
+                            })
+
+                            sub_status_desc = "立即订阅" if days_diff <= 0 else "待上映"
+                            logger.info(f"  ➜ 已为《{series_name}》第 {new_season_num} 季提交订阅请求，状态：{sub_status_desc}。")
+                            break
+                    except ValueError: pass
                 
                 time.sleep(0.5) # 稍微减少一点 sleep，因为轻量检查很快
             
@@ -1464,12 +1465,13 @@ class WatchlistProcessor:
             enable_auto_pause = auto_pause_days > 0
             auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
             enable_sync_sub = watchlist_cfg.get('sync_mp_subscription', False)
+            version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
             episode_wash_enabled = bool(
                 watchlist_cfg.get(
                     'series_subscription_best_version',
                     watchlist_cfg.get('sync_mp_subscription_episode_wash', False),
                 )
-            )
+            ) or version_lock_mode == 'best'
             full_wash_enabled = bool(
                 watchlist_cfg.get(
                     'series_subscription_best_version_full',
@@ -1570,6 +1572,184 @@ class WatchlistProcessor:
 
         except Exception as e:
             logger.warning(f"同步状态给 MoviePilot 时出错: {e}")
+
+    def _version_lock_terms_from_filename(self, filename: str) -> List[str]:
+        text = str(filename or '')
+        terms = []
+        patterns = [
+            r'\b(?:2160p|1080p|720p|480p|4k)\b',
+            r'\b(?:remux|bluray|blu[ ._-]?ray|web[ ._-]?dl|web[ ._-]?rip|webrip|webdl|hdtv)\b',
+            r'\b(?:nf|netflix|amzn|amazon|dsnp|disney|hulu|max|atvp|apple|hbo|iqiyi|wetv|viu)\b',
+            r'\b(?:dovi|dolby[ ._-]?vision|dv|hdr10\+?|hdr10plus|hdr|hlg)\b',
+            r'\b(?:hevc|h\.?265|x265|avc|h\.?264|x264|av1)\b',
+            r'\b(?:ddp|dd\+|eac3|aac|truehd|atmos|dts[ ._-]?hd|dts)\b',
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                term = str(match if isinstance(match, str) else match[0]).strip(' ._-')
+                if term and term.lower() not in {t.lower() for t in terms}:
+                    terms.append(term)
+        group_match = re.search(r'[-\s]\s*([A-Za-z0-9][A-Za-z0-9._-]{1,24})\.[A-Za-z0-9]{2,5}$', text)
+        if group_match:
+            group = group_match.group(1).strip(' ._-')
+            if group and group.lower() not in {t.lower() for t in terms}:
+                terms.append(group)
+        return terms
+
+    def _build_version_lock_include_regex(self, filename: str) -> str:
+        aliases = {
+            'webdl': r'web[\s._-]?dl',
+            'web-dl': r'web[\s._-]?dl',
+            'bluray': r'blu[\s._-]?ray|bluray',
+            'blu-ray': r'blu[\s._-]?ray|bluray',
+            'hdr10+': r'hdr10\+|hdr10plus',
+            'h265': r'h\.?265|hevc|x265',
+            'hevc': r'hevc|h\.?265|x265',
+            'h264': r'h\.?264|avc|x264',
+            'avc': r'avc|h\.?264|x264',
+            'dovi': r'dovi|dolby[\s._-]?vision|dv',
+            'dolbyvision': r'dovi|dolby[\s._-]?vision|dv',
+            'ddp': r'ddp|dd\+|eac3',
+        }
+        lookaheads = []
+        seen = set()
+        for term in self._version_lock_terms_from_filename(filename):
+            compact = re.sub(r'[\s._-]+', '', term).lower()
+            if compact in seen or compact in {'sdr'}:
+                continue
+            seen.add(compact)
+            escaped = re.escape(term)
+            flexible = re.sub(r'\\[\s._-]+', r'[\\s._-]*', escaped)
+            lookaheads.append(f"(?=.*({aliases.get(compact, flexible)}))")
+        return "(?i)" + "".join(lookaheads[:8]) if lookaheads else ""
+
+    def _get_version_lock_candidate(self, tmdb_id: str, season_number: int, mode: str, series_name: str = '') -> Optional[Dict[str, Any]]:
+        log_title = f"《{series_name}》第 {season_number} 季" if series_name else f"第 {season_number} 季"
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT watchlist_version_lock_json
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s AND item_type = 'Season' AND season_number = %s
+                        LIMIT 1
+                        """,
+                        (str(tmdb_id), season_number),
+                    )
+                    season_row = cursor.fetchone()
+                    lock_state = season_row.get('watchlist_version_lock_json') if season_row else {}
+                    if isinstance(lock_state, str):
+                        try:
+                            lock_state = json.loads(lock_state)
+                        except Exception:
+                            lock_state = {}
+                    if (
+                        isinstance(lock_state, dict)
+                        and lock_state.get('locked')
+                        and lock_state.get('include')
+                        and str(lock_state.get('mode') or '') == mode
+                    ):
+                        return None
+
+                    level_sql = "AND e.washing_level = 1" if mode == 'best' else ""
+                    cursor.execute(
+                        f"""
+                        SELECT e.episode_number, e.washing_level,
+                               COALESCE(r.original_name, c.name) AS source_name
+                        FROM media_metadata e
+                        LEFT JOIN LATERAL (
+                            SELECT original_name
+                            FROM p115_organize_records r
+                            WHERE r.tmdb_id = %s
+                              AND r.season_number = %s
+                              AND r.pick_code IS NOT NULL
+                              AND e.file_pickcode_json IS NOT NULL
+                              AND e.file_pickcode_json ? r.pick_code
+                            ORDER BY r.processed_at ASC NULLS LAST
+                            LIMIT 1
+                        ) r ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT name
+                            FROM p115_filesystem_cache c
+                            WHERE c.pick_code IS NOT NULL
+                              AND e.file_pickcode_json IS NOT NULL
+                              AND e.file_pickcode_json ? c.pick_code
+                            ORDER BY c.updated_at DESC NULLS LAST
+                            LIMIT 1
+                        ) c ON TRUE
+                        WHERE e.item_type = 'Episode'
+                          AND e.parent_series_tmdb_id = %s
+                          AND e.season_number = %s
+                          AND e.in_library = TRUE
+                          {level_sql}
+                        ORDER BY e.episode_number ASC NULLS LAST, e.last_updated_at ASC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (str(tmdb_id), season_number, str(tmdb_id), season_number),
+                    )
+                    row = cursor.fetchone()
+                    return dict(row) if row and row.get('source_name') else None
+        except Exception as e:
+            logger.warning(f"  ➜ [版本锁定] 查询候选入库版本失败：{log_title}: {e}")
+            return None
+
+    def _save_version_lock_state(self, tmdb_id: str, season_number: int, state: Dict[str, Any], series_name: str = '') -> None:
+        log_title = f"《{series_name}》第 {season_number} 季" if series_name else f"第 {season_number} 季"
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata
+                        SET watchlist_version_lock_json = %s
+                        WHERE parent_series_tmdb_id = %s AND item_type = 'Season' AND season_number = %s
+                        """,
+                        (json.dumps(state, ensure_ascii=False), str(tmdb_id), season_number),
+                    )
+                    conn.commit()
+        except Exception as e:
+            logger.warning(f"  ➜ [版本锁定] 保存本地锁定状态失败：{log_title}: {e}")
+
+    def _apply_watchlist_version_lock(self, tmdb_id: str, series_name: str, seasons: List[int], mode: str) -> None:
+        mode = str(mode or 'off').strip().lower()
+        if mode not in ('best', 'any'):
+            return
+        for season_number in sorted({int(s) for s in seasons if s}):
+            row = self._get_version_lock_candidate(tmdb_id, season_number, mode, series_name)
+            if not row:
+                continue
+            include_regex = self._build_version_lock_include_regex(row.get('source_name'))
+            if not include_regex:
+                continue
+            ok = moviepilot.lock_series_subscription_version(
+                tmdb_id,
+                season_number,
+                series_name,
+                include_regex,
+                self.config,
+                best_version=(mode == 'best'),
+            )
+            episode_number = row.get('episode_number')
+            washing_level = row.get('washing_level')
+            try:
+                episode_number = int(episode_number) if episode_number is not None else None
+            except Exception:
+                episode_number = None
+            try:
+                washing_level = int(washing_level) if washing_level is not None else None
+            except Exception:
+                washing_level = None
+            self._save_version_lock_state(tmdb_id, season_number, {
+                'locked': bool(ok),
+                'mode': mode,
+                'season': season_number,
+                'episode': episode_number,
+                'washing_level': washing_level,
+                'source_name': row.get('source_name'),
+                'include': include_regex,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }, series_name)
 
     def _check_season_consistency(self, tmdb_id: str, season_number: int, expected_episode_count: int) -> bool:
         """统一调用 tasks.helpers.check_season_consistency，保留旧方法名兼容现有调用。"""
@@ -2879,6 +3059,12 @@ class WatchlistProcessor:
             series_details=latest_series_data, 
             final_status=final_status,
             old_status=old_status
+        )
+        self._apply_watchlist_version_lock(
+            tmdb_id=tmdb_id,
+            series_name=item_name,
+            seasons=list(active_seasons),
+            mode=watchlist_cfg.get('series_version_lock_mode', 'off'),
         )
 
     # --- 统一的、公开的追剧处理入口 ★★★

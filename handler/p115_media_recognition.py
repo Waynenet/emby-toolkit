@@ -58,6 +58,7 @@ def _install_test_stubs():
 
 _install_test_stubs()
 p115_service = importlib.import_module("handler.p115_service")
+moviepilot = importlib.import_module("handler.moviepilot")
 task_p115 = importlib.import_module("tasks.p115")
 
 
@@ -97,6 +98,19 @@ class P115RecognitionRuleTests(unittest.TestCase):
         )
         self.assertEqual(name, "绝命毒师 (2008) {tmdb-1396}")
 
+    def test_rename_renderer_exposes_original_name_template(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={"title": "寄生虫", "date": "2019-05-30"},
+            tmdb_id="496243",
+            original_title="Parasite",
+        )
+        name = renderer.build_name(
+            "{{original_name}}{{fileExt}}",
+            original_name="Parasite.2019.REMASTERED.1080p",
+            file_ext="mkv",
+        )
+        self.assertEqual(name, "Parasite.2019.REMASTERED.1080p.mkv")
+
     def test_rename_renderer_accepts_mp_zfill_shorthand(self):
         renderer = p115_service.P115RenameRenderer(
             details={"title": "绝命毒师", "date": "2008-01-20"},
@@ -125,6 +139,157 @@ class P115RecognitionRuleTests(unittest.TestCase):
             episode_num=1,
         )
         self.assertEqual(name, "第 1 季 第 1 集 第 1 季 1 集")
+
+    def test_rename_renderer_exposes_season_directory_tokens(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={"title": "绝命毒师", "date": "2008-01-20"},
+            tmdb_id="1396",
+            original_title="Breaking Bad",
+        )
+        name = renderer.build_name(
+            "{{season_name_en}} - {{season_name_en_no0}} - {{season_name_s}} - {{season_name_s_no0}}",
+            is_tv=True,
+            season_num=1,
+            episode_num=1,
+        )
+        self.assertEqual(name, "Season 01 - Season 1 - S01 - S1")
+
+    def test_rename_renderer_cleans_empty_separators(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={"title": "寄生虫", "date": "2019-05-30"},
+            tmdb_id="496243",
+            original_title="Parasite",
+        )
+        name = renderer.build_name(
+            "{{title}}{% if year %} ({{year}}){% endif %} · {{source}} · {{effect}} · {{resolution}} · {{codec | upper}} · {{audio}} · {{audio_count}} · {{stream}} - {{group}}{{fileExt}}",
+            file_ext="mkv",
+            video_info={
+                "source": "WEB-DL",
+                "resolution": "1080p",
+                "codec": "AVC",
+                "audio": "DDP 5.1",
+                "stream": "AMZN",
+            },
+        )
+        self.assertEqual(name, "寄生虫 (2019) · WEB-DL · 1080p · AVC · DDP 5.1 · AMZN.mkv")
+
+    def test_moviepilot_export_wraps_optional_rename_variables(self):
+        converted, unsupported = moviepilot.convert_etk_rename_template_to_mp(
+            "{{title}} {{year_pure}} · {{source}} · {{customization}} · {{resolution}} · {{codec | upper}} · {{audio}} · {{audio_count}} · {{stream}} - {{group}}"
+        )
+
+        self.assertEqual(unsupported, [])
+        self.assertIn("{{year}}", converted)
+        self.assertIn("{% if resourceType %} · {{resourceType}}{% endif %}", converted)
+        self.assertIn("{% if customization %} · {{customization}}{% endif %}", converted)
+        self.assertIn("{% if videoFormat %} · {{videoFormat}}{% endif %}", converted)
+        self.assertIn("{% if videoCodec %} · {{videoCodec | upper}}{% endif %}", converted)
+        self.assertIn("{% if audioCodec %} · {{audioCodec}}{% endif %}", converted)
+        self.assertEqual(converted.count("audioCodec"), 2)
+        self.assertIn("{% if webSource %} · {{webSource}}{% endif %}", converted)
+        self.assertIn("{% if releaseGroup %} - {{releaseGroup}}{% endif %}", converted)
+
+    def test_moviepilot_export_maps_internal_clean_title_to_mp_name(self):
+        converted, unsupported = moviepilot.convert_etk_rename_template_to_mp(
+            "{{clean_title}}{% if identify_title %}.{{identify_title}}{% endif %}{{fileExt}}"
+        )
+
+        self.assertEqual(unsupported, [])
+        self.assertIn("{{name}}", converted)
+        self.assertIn("{% if name %}.{{name}}{% endif %}", converted)
+
+    def test_moviepilot_import_converts_mp_variables_to_etk_aliases(self):
+        converted = moviepilot.convert_mp_rename_template_to_etk(
+            "{{title}}{% if en_title %}.{{en_title}}{% endif %}.{{season_episode}}"
+            "{% if videoFormat %}.{{videoFormat}}{% endif %}"
+            "{% if resourceType %}.{{resourceType}}{% endif %}"
+            "{% if webSource %}.{{webSource}}{% endif %}"
+            "{% if videoCodec %}.{{videoCodec}}{% endif %}"
+            "{% if audioCodec %}.{{audioCodec}}{% endif %}"
+            "{% if releaseGroup %}-{{releaseGroup}}{% endif %}{{fileExt}}"
+        )
+
+        self.assertIn("{% if title_en %}.{{title_en}}{% endif %}", converted)
+        self.assertIn("{% if resolution %}.{{resolution}}{% endif %}", converted)
+        self.assertIn("{% if source %}.{{source}}{% endif %}", converted)
+        self.assertIn("{% if stream %}.{{stream}}{% endif %}", converted)
+        self.assertIn("{% if codec %}.{{codec}}{% endif %}", converted)
+        self.assertIn("{% if audio %}.{{audio}}{% endif %}", converted)
+        self.assertIn("{% if group %}-{{group}}{% endif %}", converted)
+
+    def test_rename_renderer_accepts_moviepilot_english_title_alias(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={"title": "爱情有烟火", "date": "2026-01-01"},
+            tmdb_id="12345",
+            original_title="Love Has Fireworks",
+        )
+        name = renderer.build_name(
+            "{{title}}{% if en_title %}.{{en_title}}{% endif %}.{{season_episode}}{{fileExt}}",
+            is_tv=True,
+            season_num=1,
+            episode_num=13,
+            file_ext="mkv",
+        )
+        self.assertEqual(name, "爱情有烟火.Love Has Fireworks.S01E13.mkv")
+
+    def test_rename_renderer_exposes_moviepilot_documented_variables(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={
+                "title": "爱情有烟火",
+                "date": "2026-06-20",
+                "vote_average": 8.2,
+                "poster_path": "/poster.jpg",
+                "backdrop_path": "/backdrop.jpg",
+                "overview": "简介",
+                "actors": [{"name": "演员一"}, {"name": "演员二"}],
+                "imdb_id": "tt123",
+                "douban_id": "db123",
+            },
+            tmdb_id="12345",
+            original_title="Love Has Fireworks",
+        )
+        ctx = renderer.build_template_context(
+            is_tv=True,
+            season_num=1,
+            episode_num=13,
+            original_name="Love.Has.Fireworks.S01E13.Part.2.mkv",
+            video_info={
+                "source": "WEB-DL",
+                "effect": "HDR10",
+                "resolution": "2160p",
+                "codec": "HEVC",
+                "videoBit": "10bit",
+                "audio": "AAC 2.0",
+                "fps": "25fps",
+                "stream": "HHWEB",
+                "group": "ADWeb",
+                "category": "国产剧",
+                "episode_title": "第十三集",
+                "episode_date": "2026-06-20",
+            },
+            file_ext="mkv",
+        )
+
+        expected_keys = {
+            "title", "en_title", "original_title", "name", "en_name", "original_name",
+            "clean_title", "identify_title",
+            "year", "title_year", "type", "category", "vote_average", "poster",
+            "backdrop", "actors", "overview", "resourceType", "effect", "edition",
+            "videoFormat", "resource_term", "releaseGroup", "videoCodec", "videoBit",
+            "audioCodec", "fps", "webSource", "tmdbid", "imdbid", "doubanid", "part",
+            "fileExt", "customization", "season", "season_fmt", "season_year", "episode",
+            "season_episode", "episode_title", "episode_date",
+        }
+        self.assertTrue(expected_keys.issubset(ctx.keys()))
+        self.assertEqual(ctx["en_title"], "Love Has Fireworks")
+        self.assertEqual(ctx["videoFormat"], "2160p")
+        self.assertEqual(ctx["resourceType"], "WEB-DL")
+        self.assertEqual(ctx["videoBit"], "10bit")
+        self.assertEqual(ctx["webSource"], "HHWEB")
+        self.assertEqual(ctx["releaseGroup"], "ADWeb")
+        self.assertEqual(ctx["season_fmt"], "S01")
+        self.assertEqual(ctx["episode_title"], "第十三集")
+        self.assertEqual(ctx["part"], "2")
 
     def test_identify_media_enhanced_prefers_rule_search_input(self):
         with mock.patch.object(
@@ -204,6 +369,46 @@ class P115RecognitionRuleTests(unittest.TestCase):
         )
         self.assertEqual(season_num, 1)
         self.assertEqual(episode_num, 1)
+        self.assertEqual(season_dir, "Season 01")
+
+    def test_rename_file_node_uses_media_specific_file_templates(self):
+        organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)
+        organizer.rename_config = {
+            "movie_file_template": "MOVIE {{title}}{% if year %} ({{year}}){% endif %}{% if resolution %} · {{resolution}}{% endif %}{{fileExt}}",
+            "tv_file_template": "TV {{title}} - {{season_episode}}{% if resolution %} · {{resolution}}{% endif %}{{fileExt}}",
+            "file_template": "LEGACY {{title}} - {{season_episode}} · {{resolution}}{{fileExt}}",
+            "season_dir_template": "Season {{season_no}}",
+        }
+        organizer.tmdb_id = "1"
+        organizer.media_type = "movie"
+        organizer.original_title = "Parasite"
+        organizer.details = {"title": "寄生虫", "original_title": "Parasite", "date": "2019-05-30", "seasons": []}
+        organizer.raw_metadata = {}
+        organizer.forced_season = None
+        organizer._fetch_and_parse_mediainfo = lambda *args, **kwargs: None
+        organizer._extract_video_info = lambda *args, **kwargs: {"resolution": "1080p"}
+        organizer._parse_season_episode_by_custom_regex = lambda *args, **kwargs: (None, None, None)
+
+        movie_name, *_ = organizer._rename_file_node(
+            {"fn": "Parasite.2019.1080p.mkv", "rel_path": "Parasite"},
+            new_base_name="寄生虫",
+            is_tv=False,
+            original_title="Parasite",
+            silent_log=True,
+        )
+        tv_name, tv_season, tv_episode, season_dir, *_ = organizer._rename_file_node(
+            {"fn": "Breaking.Bad.S01E01.2160p.mkv", "rel_path": "Breaking Bad"},
+            new_base_name="绝命毒师",
+            is_tv=True,
+            original_title="Breaking Bad",
+            silent_log=True,
+        )
+
+        self.assertEqual(movie_name, "MOVIE 寄生虫 (2019) · 1080p.mkv")
+        self.assertNotIn("LEGACY", movie_name)
+        self.assertEqual(tv_name, "TV 绝命毒师 - S01E01 · 1080p.mkv")
+        self.assertEqual(tv_season, 1)
+        self.assertEqual(tv_episode, 1)
         self.assertEqual(season_dir, "Season 01")
 
     def test_execute_keeps_video_original_name_but_renames_sidecar_subtitle_to_video_basename(self):
