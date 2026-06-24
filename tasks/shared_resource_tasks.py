@@ -198,15 +198,31 @@ def _json_object(value: Any) -> Dict[str, Any]:
 
 def _row_has_adult_rating(row: Dict[str, Any]) -> bool:
     row = dict(row or {})
+    if row.get('adult') is True or str(row.get('adult') or '').strip().lower() == 'true':
+        return True
     if str(row.get('custom_rating') or '').strip().upper() == 'XXX':
         return True
     ratings = _json_object(row.get('official_rating_json'))
-    return str(ratings.get('US') or ratings.get('us') or '').strip().upper() == 'XXX'
+    if str(ratings.get('US') or ratings.get('us') or '').strip().upper() == 'XXX':
+        return True
+    return str(row.get('official_rating') or row.get('mpaa') or row.get('certification') or '').strip().upper() == 'XXX'
+
+
+def _adult_rating_rows(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = [dict(candidate or {})]
+    raw = _json_object((candidate or {}).get('raw_json'))
+    if raw:
+        rows.append(raw)
+        for key in ('candidate', 'media_row', 'source', 'shared_source'):
+            nested = raw.get(key)
+            if isinstance(nested, dict):
+                rows.append(nested)
+    return rows
 
 
 def _adult_rating_block_reason(candidate: Dict[str, Any]) -> str:
     candidate = dict(candidate or {})
-    for row in (candidate, _json_object(candidate.get('raw_json'))):
+    for row in _adult_rating_rows(candidate):
         if _row_has_adult_rating(row):
             title = row.get('title') or candidate.get('title') or row.get('tmdb_id') or candidate.get('tmdb_id') or ''
             return f'adult rating XXX: {title}'.strip()
@@ -2690,7 +2706,8 @@ def _client_call_transfer_lease(client: SharedCenterClient, identity: Dict[str, 
     return _direct_center_transfer_lease(payload)
 
 
-def _wait_transfer_lease_for_event(event: Dict[str, Any], *, max_wait_seconds: int = 60) -> Dict[str, Any]:
+def _wait_transfer_lease_for_event(event: Dict[str, Any], *, max_wait_seconds: int = 60,
+                                   stop_event: threading.Event | None = None) -> Dict[str, Any]:
     identity = _event_transfer_lease_identity(event)
     if not identity:
         return {'ok': True, 'skipped': True, 'reason': 'not_rapid_transfer_event'}
@@ -2699,6 +2716,8 @@ def _wait_transfer_lease_for_event(event: Dict[str, Any], *, max_wait_seconds: i
     attempts = 0
     last_resp: Dict[str, Any] = {}
     while True:
+        if stop_event is not None and stop_event.is_set():
+            return {'ok': True, 'lease_timeout': True, 'stopped': True, 'lease': last_resp, 'attempts': attempts}
         attempts += 1
         try:
             resp = _client_call_transfer_lease(client, identity, event) or {}
@@ -2742,7 +2761,11 @@ def _wait_transfer_lease_for_event(event: Dict[str, Any], *, max_wait_seconds: i
             f"  ➜ [共享资源] 中心秒传许可排队中：{_event_transfer_lease_label(event, identity)}，"
             f"{retry_after}s 后重试，reason={reason}"
         )
-        time.sleep(retry_after)
+        if stop_event is not None:
+            if stop_event.wait(retry_after):
+                return {'ok': True, 'lease_timeout': True, 'stopped': True, 'lease': last_resp, 'attempts': attempts}
+        else:
+            time.sleep(retry_after)
 
 
 def _local_event_should_bypass_transfer_lease(event: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
@@ -2827,6 +2850,8 @@ def _completed_season_share_lease_bypass(event: Dict[str, Any], source: Dict[str
 
 
 def _consume_device_event_with_transfer_gate(original_consume, event, *args, **kwargs):
+    stop_event = kwargs.pop('_stop_event', None)
+    lease_max_wait_seconds = kwargs.pop('_lease_max_wait_seconds', 60)
     event_type = _completed_share_event_type(event)
     if event_type == COMPLETED_SEASON_SHARE_CREATE_EVENT_TYPE:
         return _reject_legacy_completed_share_event(event, ack=bool(kwargs.get('ack', True)))
@@ -2856,7 +2881,11 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
             f"直接尝试分享转存，channel={share_bypass.get('channel_id') or '-'}"
         )
         return original_consume(event, *args, **kwargs)
-    lease_result = _wait_transfer_lease_for_event(event)
+    lease_result = _wait_transfer_lease_for_event(
+        event,
+        max_wait_seconds=lease_max_wait_seconds,
+        stop_event=stop_event,
+    )
     if lease_result.get('blocked'):
         lease = lease_result.get('lease') if isinstance(lease_result.get('lease'), dict) else {}
         return {
@@ -2888,11 +2917,15 @@ def consume_device_event_with_transfer_gate(event, *args, **kwargs):
 
 def poll_and_consume_once(*args, **kwargs):
     """长轮询消费前加本地配置门禁，保证自动秒传也能拦截纯净版/短剧。"""
+    stop_event = kwargs.pop('stop_event', None)
+    lease_max_wait_seconds = kwargs.pop('lease_max_wait_seconds', 60)
     original = getattr(shared_subscription_service, 'consume_device_event', None)
     if not callable(original) or getattr(original, '_etk_transfer_gate_wrapped', False):
         return _raw_poll_and_consume_once(*args, **kwargs)
 
     def _wrapped(event, *a, **kw):
+        kw['_stop_event'] = stop_event
+        kw['_lease_max_wait_seconds'] = lease_max_wait_seconds
         return _consume_device_event_with_transfer_gate(original, event, *a, **kw)
 
     _wrapped._etk_transfer_gate_wrapped = True
@@ -5191,6 +5224,9 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
                 value = row.get(src_key) if row.get(src_key) not in (None, '', [], {}) else candidate.get(src_key)
                 if value not in (None, '', [], {}):
                     meta[dst_key] = value
+            season_status = str(meta.get('watching_status') or '').strip()
+            if season_status:
+                meta['watchlist_is_airing'] = season_status in ('Watching', 'Paused')
         if include_series_fields:
             meta.update({
                 'rating': row.get('rating'),
@@ -5956,7 +5992,7 @@ def _sign_listener_loop():
             if not _enabled():
                 _LISTENER_STOP.wait(5)
                 continue
-            poll_and_process_rapid_sign_jobs_once(timeout=20, limit=10)
+            poll_and_process_rapid_sign_jobs_once(timeout=15, limit=10)
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
@@ -5976,7 +6012,12 @@ def _event_listener_loop():
             if not _enabled():
                 _LISTENER_STOP.wait(15)
                 continue
-            poll_and_consume_once(timeout=25, limit=10)
+            poll_and_consume_once(
+                timeout=15,
+                limit=5,
+                stop_event=_LISTENER_STOP,
+                lease_max_wait_seconds=20,
+            )
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
@@ -6138,6 +6179,7 @@ def _candidate_from_local_source(row: Dict[str, Any]) -> Dict[str, Any]:
         'file_name': row.get('file_name') if final_type == 'Movie' else None,
         'root_fid': row.get('root_fid'),
         'root_name': row.get('root_name'),
+        'raw_json': row.get('raw_json'),
         '_original_source_kind': source_kind,
         '_original_source_provider': row.get('source_provider') or '',
         '_original_center_source_id': row.get('center_source_id') or '',
@@ -7150,8 +7192,9 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
                 'series_meta': has_any(series, (
                     'release_year', 'release_date', 'rating',
                 )) or has_chinese_display(series),
+                'watchlist_status': has_any(season, ('watching_status', 'watchlist_tmdb_status')),
                 'credits': _row_has_chinese_credits(series),
-                'season_meta': has_any(season, ('release_year', 'release_date')) or has_chinese_display(season),
+                'season_meta': has_any(season, ('release_year', 'release_date', 'watching_status', 'watchlist_tmdb_status')) or has_chinese_display(season),
                 'season_total': has_any(season, ('total_episodes',)),
                 'expected_episode_count': has_any(season, ('total_episodes',)),
                 'total_episodes': has_any(season, ('total_episodes',)),
@@ -7161,7 +7204,7 @@ def _local_rows_have_display_payload(rows: Dict[str, Dict[str, Any]], item_type:
 
     candidates = [movie] if item_type == 'Movie' else ([episode] if item_type == 'Episode' else [series, season])
     return any(
-        has_any(row, ('release_year', 'release_date', 'rating', 'runtime_minutes'))
+        has_any(row, ('release_year', 'release_date', 'rating', 'runtime_minutes', 'watching_status', 'watchlist_tmdb_status'))
         or has_chinese_display(row)
         or _row_has_chinese_credits(row)
         for row in candidates

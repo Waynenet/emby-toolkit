@@ -5174,6 +5174,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             "tv_file_template": "{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}",
             "file_template": "{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}",
             "file_tmdb_fmt": "none", "file_params_en": True, "file_sep": " - ",
+            "video_codec_style": "hevc",
+            "hide_audio_channels": False,
             "strm_url_fmt": "standard"
         }
         raw_rules = settings_db.get_setting('p115_sorting_rules')
@@ -5767,7 +5769,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         return None
 
     def _rename_renderer(self):
-        return P115RenameRenderer(self.details, self.tmdb_id, self.original_title)
+        return P115RenameRenderer(self.details, self.tmdb_id, self.original_title, self.rename_config)
 
     def _get_rename_format(self, kind, fallback):
         return P115RenameRenderer.get_format(self.rename_config, kind, fallback)
@@ -7333,7 +7335,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # =================================================================
         # ★★★ 执行批量移动与后续 STRM 生成 ★★★
         # =================================================================
-        conflict_mode = cfg.get('conflict_mode', 'replace') # 获取覆盖模式，默认洗版替换
+        conflict_mode = settings_db.get_washing_conflict_mode(default='replace') # 获取覆盖模式，默认洗版替换
         
         # ★★★ 洗版特权检测 (细化到单集) ★★★
         active_washing_eps = set()

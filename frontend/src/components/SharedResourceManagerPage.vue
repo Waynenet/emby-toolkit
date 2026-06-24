@@ -240,6 +240,22 @@
               <template #unchecked>关闭</template>
             </n-switch>
           </n-form-item>
+          <n-form-item label="中心设备状态">
+            <n-spin :show="centerDeviceStatusLoading" size="small">
+              <div class="center-device-status-panel">
+                <div class="center-device-status-head">
+                  <n-tag size="small" round :type="centerDeviceStatusTagType(centerConfigDeviceStatus.status)">
+                    {{ centerConfigDeviceStatusLabel }}
+                  </n-tag>
+                  <span class="center-device-status-name">ServerID Hash：{{ centerConfigServerIdHash || '-' }}</span>
+                </div>
+                <n-alert v-if="centerConfigForcedOfflineReason" type="error" :bordered="false" class="center-device-status-alert">
+                  封禁理由：{{ centerConfigForcedOfflineReason }}
+                </n-alert>
+                <n-text v-else-if="centerDeviceStatusError" type="error">{{ centerDeviceStatusError }}</n-text>
+              </div>
+            </n-spin>
+          </n-form-item>
           <n-form-item label="禁止单集秒传">
             <n-switch v-model:value="sharedConfigForm.p115_shared_disable_episode_transfer">
               <template #checked>不秒传单集</template>
@@ -536,6 +552,9 @@ const manualCreating = ref(false);
 const showSharedConfigModal = ref(false);
 const sharedConfigLoading = ref(false);
 const sharedConfigSaving = ref(false);
+const centerDeviceStatusLoading = ref(false);
+const centerDeviceStatusError = ref('');
+const centerDeviceStatusData = ref({});
 const sharedConfigForm = reactive({
   p115_shared_resource_enabled: false,
   p115_shared_center_url: 'https://shared.55565576.xyz',
@@ -918,7 +937,7 @@ const isEffectiveShareRow = (row) => {
   return statuses.some(v => shareUsableStatuses.has(v));
 };
 const deleteShareDisabledTitle = (row) => isEffectiveShareRow(row)
-  ? '有效共享不能直接删除，除非媒体项已不存在，判定为无效共享后再删除本地记录'
+  ? '有效共享会先同步中心取消登记，再删除本地记录'
   : (isProblemShareRow(row) ? '删除异常/识别已变更的共享记录' : '删除本地共享记录');
 
 const statusMap = {
@@ -1198,7 +1217,6 @@ const shareColumns = [
       size: 'small',
       type: 'error',
       secondary: true,
-      disabled: isEffectiveShareRow(row),
       title: deleteShareDisabledTitle(row),
       onClick: () => deleteShare(row),
     }, { icon: () => h(NIcon, null, { default: () => h(CancelIcon) }), default: () => '删除' }),
@@ -2065,6 +2083,28 @@ const buildCenterImportSourcePayload = (row) => {
     status: row?.status || '',
   };
 };
+
+const centerDeviceForcedOffline = (device) => device?.forced_offline === true || String(device?.forced_offline || '').toLowerCase() === 'true';
+const centerDeviceStatusTagType = (status) => {
+  const value = String(status || '').toLowerCase();
+  if (value === 'banned') return 'error';
+  if (value === 'active') return 'success';
+  if (value === 'offline') return 'warning';
+  return 'default';
+};
+const centerConfigDeviceStatus = computed(() => centerDeviceStatusData.value?.device || {});
+const centerConfigLocalServerHash = computed(() => String(centerDeviceStatusData.value?.local_server_id_hash || '').trim());
+const centerConfigServerIdHash = computed(() => String(centerConfigDeviceStatus.value?.server_id_hash || centerConfigLocalServerHash.value || '').trim());
+const centerConfigForcedOfflineReason = computed(() => {
+  const device = centerConfigDeviceStatus.value || {};
+  if (!centerDeviceForcedOffline(device)) return '';
+  return String(device.ban_reason || device.forced_offline_reason || '').trim() || '未填写';
+});
+const centerConfigDeviceStatusLabel = computed(() => {
+  const device = centerConfigDeviceStatus.value || {};
+  if (centerDeviceForcedOffline(device)) return '已封禁/强制离线';
+  return statusMap[String(device.status || '').toLowerCase()]?.text || device.status || '未知';
+});
 
 const executeImport = async (row, mode) => {
   const modeText = centerTransferActionText(row);
@@ -3382,9 +3422,24 @@ const loadSharedConfig = async () => {
   }
 };
 
+const loadCenterDeviceStatus = async () => {
+  centerDeviceStatusLoading.value = true;
+  centerDeviceStatusError.value = '';
+  try {
+    const res = await axios.get('/api/shared/resources/center/device/status');
+    centerDeviceStatusData.value = res.data?.data || res.data || {};
+  } catch (e) {
+    centerDeviceStatusData.value = e.response?.data?.data || {};
+    centerDeviceStatusError.value = e.response?.data?.message || '读取中心设备状态失败';
+  } finally {
+    centerDeviceStatusLoading.value = false;
+  }
+};
+
 const openSharedConfigModal = async () => {
   showSharedConfigModal.value = true;
   await loadSharedConfig();
+  await loadCenterDeviceStatus();
 };
 
 const saveSharedConfig = async () => {
@@ -3395,7 +3450,7 @@ const saveSharedConfig = async () => {
     applySharedConfig(res.data?.data || sharedConfigForm);
     message.success(res.data?.message || '共享资源配置已保存');
     showSharedConfigModal.value = false;
-    await loadSummary();
+    await Promise.allSettled([loadSummary(), loadCenterDeviceStatus()]);
   } catch (e) {
     message.error(e.response?.data?.message || '保存共享资源配置失败');
   } finally {
@@ -4147,9 +4202,6 @@ const cancelShare = (row) => {
 
 
 const deleteShare = (row) => {
-  if (isEffectiveShareRow(row)) {
-    return message.warning('有效共享不能直接删除，请先停用，停用成功后再删除本地记录');
-  }
   const ids = Array.isArray(row.source_ids) ? row.source_ids.filter(Boolean) : [];
   const isBatch = ids.length > 1;
   const title = row.title || row.root_name || row.file_name || '该资源';
@@ -4750,7 +4802,7 @@ onUnmounted(() => {
   line-height: 1.55;
   word-break: break-all;
 }
-.center-version-action { flex: 0 0 auto; display: flex; align-items: center; }
+.center-version-action { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
 .center-version-detail-card-expandable { cursor: pointer; }
 .center-version-detail-card-expandable:hover {
   border-color: var(--n-primary-color, var(--accent-color, var(--center-detail-border)));
@@ -4770,7 +4822,6 @@ onUnmounted(() => {
   .center-version-detail-card { flex-direction: column; }
   .center-version-action { align-items: flex-start; }
 }
-
 
 /* 海报墙最终覆盖：保持影视探索式密集海报墙 */
 .center-card-grid {

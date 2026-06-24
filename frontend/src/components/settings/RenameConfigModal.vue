@@ -5,8 +5,20 @@
       <n-tabs type="segment" animated size="small">
         <n-tab-pane name="template" tab="模板规则">
           <n-alert type="info" style="margin-bottom: 12px;">
-            底层使用 Jinja2。可以用积木插入变量，也可以直接粘贴 MoviePilot 的重命名模板。
+            底层使用 Jinja2。可以用积木插入变量，也可以从 MoviePilot 一键导入重命名模板。
           </n-alert>
+
+          <div class="lego-container import-panel">
+            <div class="lego-header"><span>MoviePilot 模板导入</span></div>
+            <n-space>
+              <n-button size="small" secondary type="primary" @click="importMpTemplates" :loading="importingMp">
+                从 MP 导入模板
+              </n-button>
+              <n-button size="small" secondary type="primary" @click="exportMpTemplates" :loading="exportingMp">
+                导入到 MP
+              </n-button>
+            </n-space>
+          </div>
 
           <div class="template-grid">
             <n-form-item label="主目录模板">
@@ -93,54 +105,49 @@
             </div>
           </div>
 
-          <div class="lego-container">
-            <div class="lego-header"><span>MoviePilot 模板导入</span></div>
-            <n-space>
-              <n-button size="small" secondary type="primary" @click="importMpTemplates" :loading="importingMp">
-                从 MP 导入模板
-              </n-button>
-              <n-button size="small" secondary type="primary" @click="exportMpTemplates" :loading="exportingMp">
-                把模板导入 MP
-              </n-button>
-            </n-space>
-          </div>
-        </n-tab-pane>
-
-        <n-tab-pane name="file" tab="文件设置">
-          <n-form-item
-            label="保留原始文件名"
-            label-placement="left"
-            style="margin-bottom: 12px; background: rgba(24, 160, 88, 0.05); padding: 8px 12px; border-radius: 6px;"
-          >
-            <n-switch v-model:value="config.keep_original_name" />
-            <template #feedback>
-              <span style="font-size: 12px; color: gray;">
-                开启后仅保留最终文件名；主目录、季目录、STRM 路径和缓存路径仍按目录模板生成。
-              </span>
-            </template>
-          </n-form-item>
         </n-tab-pane>
 
         <n-tab-pane name="adv" tab="高级设置">
           <n-form label-placement="left" size="small" style="margin-top: 16px;">
-            <n-form-item label="同集/同电影覆盖模式">
-              <n-radio-group v-model:value="config.conflict_mode">
-                <n-space vertical>
-                  <n-radio value="replace">
-                    <b>洗版</b>
-                    <div style="font-size: 12px; color: gray;">删除目标目录中同一集/同一电影的旧版本，移入新版本。</div>
-                  </n-radio>
-                  <n-radio value="keep_both">
-                    <b>共存</b>
-                    <div style="font-size: 12px; color: gray;">只要文件名不同，同一集的不同版本将共存。</div>
-                  </n-radio>
-                  <n-radio value="skip">
-                    <b>跳过</b>
-                    <div style="font-size: 12px; color: gray;">只要目标目录已有该集/该电影，新文件直接丢入未识别。</div>
-                  </n-radio>
+            <n-form-item
+              label="保留原始文件名"
+              label-placement="left"
+              style="margin-bottom: 12px; background: rgba(24, 160, 88, 0.05); padding: 8px 12px; border-radius: 6px;"
+            >
+              <n-switch v-model:value="config.keep_original_name" />
+              <template #feedback>
+                <span style="font-size: 12px; color: gray;">
+                  开启后仅保留最终文件名；主目录、季目录、STRM 路径和缓存路径仍按目录模板生成。
+                </span>
+              </template>
+            </n-form-item>
+            <n-divider style="margin: 12px 0;" />
+
+            <n-form-item label="视频编码显示">
+              <n-radio-group v-model:value="config.video_codec_style">
+                <n-space>
+                  <n-radio value="hevc">HEVC / AVC</n-radio>
+                  <n-radio value="h265">H265 / H264</n-radio>
                 </n-space>
               </n-radio-group>
+              <template #feedback>
+                <span style="font-size: 12px; color: gray;">
+                  仅影响重命名变量 codec/videoCodec 的显示，不改变洗版、订阅和清理的编码判断。
+                </span>
+              </template>
             </n-form-item>
+
+            <n-divider style="margin: 12px 0;" />
+
+            <n-form-item label="隐藏声道数">
+              <n-switch v-model:value="config.hide_audio_channels" />
+              <template #feedback>
+                <span style="font-size: 12px; color: gray;">
+                  开启后重命名里的 audio/audioCodec 只保留音频格式，例如 DDP 5.1 输出为 DDP；音轨数不受影响。
+                </span>
+              </template>
+            </n-form-item>
+
             <n-divider style="margin: 12px 0;" />
 
             <n-form-item label="STRM 链接格式">
@@ -227,7 +234,6 @@ const activeTemplate = ref('main_dir_template');
 
 const defaultConfig = {
   keep_original_name: false,
-  conflict_mode: 'replace',
   main_dir_template: '{{title}}{% if year %} ({{year}}){% endif %} {tmdb={{tmdbid}}}',
   season_dir_template: 'Season {{season_no}}',
   movie_file_template: '{{title}}{% if year %} ({{year}}){% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}',
@@ -236,6 +242,8 @@ const defaultConfig = {
   main_dir_format: ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'],
   season_dir_format: ['season_name_en'],
   file_format: ['title_zh', 'sep_dash_space', 'year', 'sep_middot_space', 's_e', 'sep_middot_space', 'resolution', 'sep_middot_space', 'codec', 'sep_middot_space', 'audio_count', 'sep_space', 'audio', 'sep_middot_space', 'group'],
+  video_codec_style: 'hevc',
+  hide_audio_channels: false,
   strm_url_fmt: 'standard'
 };
 
@@ -502,6 +510,35 @@ const renderTemplate = (template, data) => {
   return cleanupEmptySeparators(output.replace(/[\\:*?"<>|]/g, '').trim());
 };
 
+const formatVideoCodecLabel = (codec, style = config.value.video_codec_style) => {
+  const useH26x = style === 'h265';
+  return String(codec || '')
+    .replace(/\b(?:HEVC|H[.\s]?265|X265)\b/gi, useH26x ? 'H265' : 'HEVC')
+    .replace(/\b(?:AVC|H[.\s]?264|X264)\b/gi, useH26x ? 'H264' : 'AVC');
+};
+
+const formatAudioLabel = (audio) => {
+  let text = String(audio || '');
+  if (config.value.hide_audio_channels) {
+    text = text.replace(/(?<!\d)(?:7[.\s_]?1|5[.\s_]?1|2[.\s_]?0|1[.\s_]?0)(?!\d)/g, '');
+    text = text.replace(/[\s._-]+$/g, '');
+  }
+  return text.replace(/\s+/g, ' ').trim();
+};
+
+const renamePreviewData = (data) => {
+  const rawCodec = data.codec || data.videoCodec || '';
+  const codec = formatVideoCodecLabel(rawCodec);
+  const audio = formatAudioLabel(data.audio || data.audioCodec || '');
+  return {
+    ...data,
+    codec,
+    videoCodec: codec,
+    audio,
+    audioCodec: audio
+  };
+};
+
 const cleanupEmptySeparators = (text) => {
   let cleaned = String(text || '').replace(/\s+/g, ' ').trim();
   for (let i = 0; i < 4; i++) {
@@ -531,27 +568,27 @@ const withExt = (name, data, template) => {
 };
 
 const previewMovieDir = computed(() =>
-  renderTemplate(config.value.main_dir_template, mockMovie) || '未配置主目录规则'
+  renderTemplate(config.value.main_dir_template, renamePreviewData(mockMovie)) || '未配置主目录规则'
 );
 
 const previewTvDir = computed(() =>
-  renderTemplate(config.value.main_dir_template, mockTv) || '未配置主目录规则'
+  renderTemplate(config.value.main_dir_template, renamePreviewData(mockTv)) || '未配置主目录规则'
 );
 
 const previewTvSeason = computed(() =>
-  renderTemplate(config.value.season_dir_template, mockTv) || '未配置季目录规则'
+  renderTemplate(config.value.season_dir_template, renamePreviewData(mockTv)) || '未配置季目录规则'
 );
 
 const previewMovieFile = computed(() =>
   config.value.keep_original_name
     ? mockMovie.originalFile
-    : withExt(renderTemplate(movieFileTemplate.value, mockMovie), mockMovie, movieFileTemplate.value)
+    : withExt(renderTemplate(movieFileTemplate.value, renamePreviewData(mockMovie)), mockMovie, movieFileTemplate.value)
 );
 
 const previewTvFile = computed(() =>
   config.value.keep_original_name
     ? mockTv.originalFile
-    : withExt(renderTemplate(tvFileTemplate.value, mockTv), mockTv, tvFileTemplate.value)
+    : withExt(renderTemplate(tvFileTemplate.value, renamePreviewData(mockTv)), mockTv, tvFileTemplate.value)
 );
 
 const previewMovieStrm = computed(() => {
@@ -607,7 +644,9 @@ const saveConfig = async () => {
   saving.value = true;
   try {
     config.value.file_template = config.value.tv_file_template || config.value.file_template;
-    const res = await axios.post('/api/p115/rename_config', config.value);
+    const payload = { ...config.value };
+    delete payload.conflict_mode;
+    const res = await axios.post('/api/p115/rename_config', payload);
     if (res.data.success) {
       message.success('重命名规则已保存');
       isVisible.value = false;

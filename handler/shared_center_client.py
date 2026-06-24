@@ -158,7 +158,11 @@ def _raise_for_center_error(resp):
 
 
 def _request_kwargs(timeout: int) -> Dict[str, Any]:
-    kwargs = {'timeout': timeout}
+    try:
+        read_timeout = max(1, int(timeout or 15))
+    except Exception:
+        read_timeout = 15
+    kwargs = {'timeout': (5, read_timeout)}
     getter = getattr(config_manager, 'get_proxies_for_requests', None)
     if callable(getter):
         proxies = getter()
@@ -348,6 +352,9 @@ class SharedCenterClient:
 
     def me(self) -> Dict[str, Any]:
         return self._get('/api/v1/me', timeout=12)
+
+    def device_status(self) -> Dict[str, Any]:
+        return self._get('/api/v1/devices/status', timeout=12)
 
     def stats(self) -> Dict[str, Any]:
         return self._get('/api/v1/stats', timeout=12)

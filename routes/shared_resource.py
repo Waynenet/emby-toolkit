@@ -1968,6 +1968,24 @@ def api_register_center_device():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@shared_resource_bp.route('/center/device/status', methods=['GET'])
+@admin_required
+def api_center_device_status():
+    try:
+        resp = SharedCenterClient().device_status()
+        data = {
+            **resp,
+            'local_server_id_hash': _current_server_id_hash(),
+        }
+        return jsonify({'success': True, 'data': data, **data})
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'data': {'local_server_id_hash': _current_server_id_hash()},
+        }), 500
+
+
 @shared_resource_bp.route('/credit/refresh', methods=['POST'])
 @admin_required
 def api_refresh_credit():

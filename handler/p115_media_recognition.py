@@ -20,6 +20,9 @@ def _install_test_stubs():
     settings_db_mod = types.ModuleType("database.settings_db")
     settings_db_mod.get_setting = lambda key: {}
     settings_db_mod.save_setting = lambda key, value: None
+    settings_db_mod.get_washing_conflict_mode = lambda default='replace': default
+    settings_db_mod.get_washing_priority_config = lambda default_conflict_mode='replace': {'conflict_mode': default_conflict_mode}
+    settings_db_mod.save_washing_priority_config = lambda value: value
     sys.modules.setdefault("database.settings_db", settings_db_mod)
 
     database_pkg = types.ModuleType("database")
@@ -290,6 +293,30 @@ class P115RecognitionRuleTests(unittest.TestCase):
         self.assertEqual(ctx["season_fmt"], "S01")
         self.assertEqual(ctx["episode_title"], "第十三集")
         self.assertEqual(ctx["part"], "2")
+
+    def test_rename_renderer_applies_display_preferences(self):
+        renderer = p115_service.P115RenameRenderer(
+            details={"title": "测试片", "date": "2026-01-01"},
+            tmdb_id="12345",
+            original_title="Test Movie",
+            config={"video_codec_style": "h265", "hide_audio_channels": True},
+        )
+        ctx = renderer.build_template_context(video_info={"codec": "HEVC 10bit", "audio": "DDP 5.1"})
+        self.assertEqual(ctx["codec"], "H265 10bit")
+        self.assertEqual(ctx["videoCodec"], "H265 10bit")
+        self.assertEqual(ctx["audio"], "DDP")
+        self.assertEqual(ctx["audioCodec"], "DDP")
+
+        ctx_avc = renderer.build_template_context(video_info={"codec": "AVC", "audio": "AAC 2.0"})
+        self.assertEqual(ctx_avc["codec"], "H264")
+        self.assertEqual(ctx_avc["videoCodec"], "H264")
+        self.assertEqual(ctx_avc["audio"], "AAC")
+
+        name = renderer.build_name(
+            "{{videoCodec}} - {{audioCodec}}",
+            video_info={"codec": "HEVC 10bit", "audio": "DDP 5.1"},
+        )
+        self.assertEqual(name, "H265 10bit - DDP")
 
     def test_identify_media_enhanced_prefers_rule_search_input(self):
         with mock.patch.object(
