@@ -100,12 +100,11 @@ def _shared_resource_config_payload() -> Dict[str, Any]:
     payload = settings_db.get_shared_resource_config() or {}
     payload.setdefault('p115_shared_resource_enabled', False)
     payload.setdefault('p115_shared_center_url', 'https://shared.55565576.xyz')
-    payload.setdefault('p115_shared_device_token', '')
-    payload.setdefault('p115_shared_install_id', '')
     payload['p115_shared_resource_mode'] = 'rapid'
     payload.setdefault('p115_shared_disable_episode_transfer', False)
     payload.setdefault('p115_shared_block_clean_version_transfer', False)
     payload.setdefault('p115_shared_block_short_drama_transfer', False)
+    payload.setdefault('p115_shared_intro_enabled', False)
     payload.setdefault('p115_shared_auto_share_requests_enabled', False)
     payload.setdefault('p115_shared_center_home_sections', [])
     return payload
@@ -115,17 +114,15 @@ def _save_shared_config(data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(data or {})
     data['p115_shared_resource_enabled'] = _boolish(data.get('p115_shared_resource_enabled'), False)
     data['p115_shared_center_url'] = str(data.get('p115_shared_center_url') or 'https://shared.55565576.xyz').rstrip('/')
-    data['p115_shared_device_token'] = str(data.get('p115_shared_device_token') or '').strip()
     data['p115_shared_resource_mode'] = 'rapid'
     data.pop('p115_shared_max_active_shares', None)
     data['p115_shared_disable_episode_transfer'] = _boolish(data.get('p115_shared_disable_episode_transfer'), False)
     data['p115_shared_block_clean_version_transfer'] = _boolish(data.get('p115_shared_block_clean_version_transfer'), False)
     data['p115_shared_block_short_drama_transfer'] = _boolish(data.get('p115_shared_block_short_drama_transfer'), False)
+    data['p115_shared_intro_enabled'] = _boolish(data.get('p115_shared_intro_enabled'), False)
     data['p115_shared_auto_share_requests_enabled'] = _boolish(data.get('p115_shared_auto_share_requests_enabled'), False)
     sections = data.get('p115_shared_center_home_sections')
     data['p115_shared_center_home_sections'] = sections if isinstance(sections, list) else []
-    install_id = str(data.get('p115_shared_install_id') or '').strip()
-    data['p115_shared_install_id'] = install_id
     return settings_db.save_shared_resource_config(data)
 
 
@@ -1660,6 +1657,7 @@ def api_center_source_tags():
         {'label': '连载中', 'value': 'ongoing'},
         {'label': '短剧', 'value': 'short_drama'},
         {'label': '纯净版', 'value': 'clean_version'},
+        {'label': '片头', 'value': 'intro'},
         {'label': '原盘', 'value': 'original_disc'},
         {'label': '国语', 'value': 'mandarin_audio'},
         {'label': '中字', 'value': 'chinese_subtitle'},
@@ -1684,7 +1682,7 @@ def api_center_sources_home():
             False,
         )
         home_sections = _shared_resource_config_payload().get('p115_shared_center_home_sections') or []
-        identity_key = _current_server_id_hash() or client.device_token
+        identity_key = _current_server_id_hash()
         cache_key = (client.base_url, identity_key, limit_per_section, json.dumps(home_sections, sort_keys=True, ensure_ascii=False))
         if not force_refresh:
             cached = _center_home_proxy_cache_get(cache_key)
@@ -1835,23 +1833,6 @@ def api_center_source_detail():
         client = SharedCenterClient()
         include_people = str(request.args.get('include_people') or '0').strip().lower() not in {'0', 'false', 'no', 'off'}
         limit = int(request.args.get('limit') or 200)
-        cache_key = (
-            'detail:v2',
-            client.base_url,
-            client.device_token,
-            request.args.get('source_kind') or '',
-            request.args.get('source_id') or '',
-            request.args.get('hub_id') or '',
-            request.args.get('tmdb_id') or '',
-            request.args.get('item_type') or '',
-            request.args.get('season_number') or '',
-            limit,
-            include_people,
-        )
-        if not _boolish(request.args.get('force_refresh') or request.args.get('refresh') or request.args.get('no_cache'), False):
-            cached = _center_proxy_cache_get(_CENTER_DETAIL_PROXY_CACHE, cache_key)
-            if cached:
-                return jsonify(cached)
 
         resp = client.display_detail(
             source_kind=request.args.get('source_kind') or '',
@@ -1905,7 +1886,6 @@ def api_center_source_detail():
         resp['children'] = []
         resp['pack_items'] = []
         payload = {'success': True, 'data': resp, **resp}
-        _center_proxy_cache_set(_CENTER_DETAIL_PROXY_CACHE, cache_key, payload)
         return jsonify(payload)
     except Exception as e:
         return jsonify({'success': False, 'message': str(e), 'data': {}, 'resources': [], 'versions': [], 'children': []}), 500
@@ -1955,7 +1935,6 @@ def api_register_center_device():
         client = SharedCenterClient()
         resp = client.register_device(name=name)
         cfg.update({
-            'p115_shared_device_token': resp.get('device_token') or '',
             'p115_shared_resource_enabled': True,
         })
         saved = _save_shared_config(cfg)
@@ -2029,6 +2008,14 @@ LEDGER_EVENT_LABEL_MAP = {
     'center_rapid_sign_job_failed': '秒传签名失败',
     'center_rapid_raw_uploaded': '上传媒体信息',
     'center_rapid_raw_ffprobe_uploaded': '上传媒体信息',
+    'center_intro_chapters_uploaded': '上传片头',
+    'center_intro_chapters_batch_fetched': '使用共享片头',
+    'center_intro_chapters_served': '共享片头被使用',
+    'center_intro_chapters_consumed': '使用共享片头',
+    'intro_chapters_uploaded': '上传片头',
+    'intro_chapters_batch_fetched': '使用共享片头',
+    'intro_chapters_served': '共享片头被使用',
+    'intro_chapters_consumed': '使用共享片头',
     'center_daily_grant': 'Pro每日赠送额度',
     'center_rapid_quota_consumed': 'Pro额度抵扣',
     'center_tier_cap_adjust': 'Pro等级上限调整',
@@ -2063,6 +2050,8 @@ LEDGER_REASON_LABEL_MAP = {
     'backup_source_registered': '备份共享入池',
     'shared_source_served': '共享资源被他人秒传',
     'shared_source_consumed': '从共享中心秒传资源',
+    'intro_chapters_served': '共享片头被使用',
+    'intro_chapters_consumed': '使用共享片头',
     'daily_grant': 'Pro每日赠送额度',
     'rapid_quota_consumed': 'Pro额度抵扣',
     'tier_cap_adjust': 'Pro等级上限调整',

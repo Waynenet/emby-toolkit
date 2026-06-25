@@ -2474,32 +2474,14 @@ class P115Service:
                 return resp
 
             def fs_get_info(self, file_id):
-                # 详情优先走 OpenAPI 获取完整父目录；访问上限/失败时用 Cookie 备用，再从本地缓存反推 parent_id。
-                openapi_resp = None
-                if self._openapi:
-                    openapi_resp = self._call_api(
-                        'fs_get_info',
-                        file_id,
-                        normalizer=_p115_normalize_info_response,
-                        force_openapi=True,
-                    )
-                    if _p115_success(openapi_resp):
-                        return openapi_resp
-
-                if self._cookie:
-                    cookie_resp = self._call_api(
-                        'fs_get_info',
-                        file_id,
-                        normalizer=_p115_normalize_info_response,
-                        force_cookie=True,
-                    )
-                    if _p115_success(cookie_resp):
-                        return self._fill_info_parent_from_cache(cookie_resp, file_id)
-                    return cookie_resp
-
-                if openapi_resp is not None:
-                    return openapi_resp
-                return {'state': False, 'error_msg': '未配置可用的 115 OpenAPI 或 Cookie，无法查询文件详情'}
+                resp = self._call_api(
+                    'fs_get_info',
+                    file_id,
+                    normalizer=_p115_normalize_info_response,
+                )
+                if _p115_success(resp):
+                    return self._fill_info_parent_from_cache(resp, file_id)
+                return resp
 
             def _is_exists_error(self, resp):
                 text = json.dumps(resp, ensure_ascii=False).lower() if resp is not None else ""
@@ -3208,6 +3190,24 @@ class P115Service:
 class P115CacheManager:
     _rapid_preid_hints = LimitedCache(maxsize=10000)
     _rapid_preid_hints_lock = threading.Lock()
+
+    @staticmethod
+    def _merge_center_intro_before_mediainfo_cache(sha1: str, mediainfo_json):
+        if not sha1 or not mediainfo_json:
+            return mediainfo_json
+        try:
+            from handler.shared_intro_service import extract_intro_chapters, fetch_intro_map, merge_intro_chapters
+            if extract_intro_chapters(mediainfo_json):
+                return mediainfo_json
+            intro_map = fetch_intro_map([sha1])
+            chapters = intro_map.get(str(sha1).upper())
+            if not chapters:
+                return mediainfo_json
+            merge_intro_chapters(mediainfo_json, chapters)
+            logger.debug(f"  ➜ [共享片头] 写入媒体信息缓存前已合并中心片头：{str(sha1).upper()[:12]}...")
+        except Exception as e:
+            logger.debug(f"  ➜ [共享片头] 写入媒体信息缓存前合并中心片头失败：{str(sha1).upper()[:12]}... -> {e}")
+        return mediainfo_json
 
     @staticmethod
     def get_local_path(cid):
@@ -4315,6 +4315,7 @@ class P115CacheManager:
 
             sha1 = str(sha1).upper()
             raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
+            mediainfo_json = P115CacheManager._merge_center_intro_before_mediainfo_cache(sha1, mediainfo_json)
 
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
@@ -4370,7 +4371,34 @@ class P115CacheManager:
                         (sha1,)
                     )
                     row = cursor.fetchone()
-                    return row['mediainfo_json_text'] if row and row.get('mediainfo_json_text') else None
+                    text = row['mediainfo_json_text'] if row and row.get('mediainfo_json_text') else None
+                    if not text:
+                        return None
+
+                    try:
+                        from psycopg2.extras import Json
+                        from handler.shared_intro_service import extract_intro_chapters, fetch_intro_map, merge_intro_chapters
+
+                        mediainfo_json = json.loads(text)
+                        if extract_intro_chapters(mediainfo_json):
+                            return text
+
+                        intro_map = fetch_intro_map([sha1])
+                        chapters = intro_map.get(sha1)
+                        if not chapters:
+                            return text
+
+                        merge_intro_chapters(mediainfo_json, chapters)
+                        cursor.execute(
+                            "UPDATE p115_mediainfo_cache SET mediainfo_json = %s WHERE sha1 = %s",
+                            (Json(mediainfo_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)), sha1)
+                        )
+                        conn.commit()
+                        logger.info(f"  ➜ [共享片头] 读取媒体信息缓存时已合并中心片头：{sha1[:12]}...（{len(chapters)} 个章节）")
+                        return json.dumps(mediainfo_json, ensure_ascii=False)
+                    except Exception as merge_error:
+                        logger.debug(f"  ➜ [共享片头] 读取媒体信息缓存时合并中心片头失败：{sha1[:12]}... -> {merge_error}")
+                        return text
         except Exception as e:
             logger.error(f"  ➜ 读取 p115_mediainfo_cache 失败: {e}")
             return None

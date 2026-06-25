@@ -17,7 +17,7 @@ import constants
 import utils
 from database import shared_credit_db, shared_share_db, settings_db
 from database.connection import get_db_connection
-from handler.shared_center_client import SharedCenterClient, shared_center_enabled
+from handler.shared_center_client import SharedCenterClient, shared_center_enabled, _current_server_id_hash
 from handler import shared_subscription_service as shared_subscription_service
 from handler.shared_subscription_service import poll_and_consume_once as _raw_poll_and_consume_once
 from handler import tmdb as tmdb_handler
@@ -31,6 +31,7 @@ _LISTENER_LOCK = threading.Lock()
 _FULL_SHARE_LOCK = threading.Lock()
 _CENTER_CONFIG_WARNED_REASONS = set()
 _LISTENER_FAILURE_WARN_THRESHOLD = 3
+_LISTENER_BACKOFF_MAX_SECONDS = 300
 
 
 def _cfg_bool(value: Any, default: bool = False) -> bool:
@@ -60,18 +61,17 @@ def _shared_resource_switch_enabled() -> bool:
 def _shared_center_runtime_config() -> Dict[str, str]:
     """读取共享中心运行必要配置。
 
-    shared_center_enabled() 在部分旧版本只判断中心 URL/开关，可能不校验
-    p115_shared_device_token。长轮询/签名轮询没有 token 时不能启动，
-    否则启动阶段会反复初始化中心客户端或进入无意义长轮询，表现为卡死。
+    中心端身份只认 Emby ServerID；长轮询/签名轮询启动前只需要确认中心 URL
+    和本机可读取 ServerID。
     """
     try:
         cfg = settings_db.get_shared_resource_config() or {}
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 读取共享中心配置失败，按未配置处理: {e}")
-        return {'center_url': '', 'device_token': ''}
+        return {'center_url': '', 'server_id_hash': ''}
     return {
         'center_url': str(cfg.get('p115_shared_center_url') or '').strip().rstrip('/'),
-        'device_token': str(cfg.get('p115_shared_device_token') or '').strip(),
+        'server_id_hash': _current_server_id_hash(),
     }
 
 
@@ -82,8 +82,8 @@ def _shared_center_runtime_ready(*, log_missing: bool = False) -> bool:
     missing = []
     if not cfg.get('center_url'):
         missing.append('center_url')
-    if not cfg.get('device_token'):
-        missing.append('device_token')
+    if not cfg.get('server_id_hash'):
+        missing.append('server_id')
     if missing:
         reason = 'missing_' + '_'.join(missing)
         if log_missing and reason not in _CENTER_CONFIG_WARNED_REASONS:
@@ -977,6 +977,109 @@ def _delete_logical_share_channels_for_fids(fid_list: List[str], reason: str, *,
     }
 
 
+def delete_logical_share_channels_from_center_rows(channels: List[Dict[str, Any]], reason: str, *, client: SharedCenterClient = None) -> Dict[str, Any]:
+    """Delete local 115 shares for logical channels returned by center scope-disable."""
+    seen = set()
+    rows: List[Dict[str, Any]] = []
+    for channel in channels or []:
+        if not isinstance(channel, dict):
+            continue
+        channel_id = str(channel.get('channel_id') or '').strip()
+        share_code = str(channel.get('share_code') or '').strip()
+        if not channel_id or not share_code or channel_id in seen:
+            continue
+        seen.add(channel_id)
+        rows.append(channel)
+    if not rows:
+        return {'ok': True, 'checked': 0, 'deleted_115': 0, 'deleted_local': 0, 'failed': 0, 'items': []}
+
+    p115 = None
+    deleted_115 = 0
+    deleted_local = 0
+    failed = 0
+    items = []
+    reason = str(reason or 'center_scope_disabled').strip() or 'center_scope_disabled'
+    for channel in rows:
+        channel_id = str(channel.get('channel_id') or '').strip()
+        share_code = str(channel.get('share_code') or '').strip()
+        group_id = str(channel.get('group_id') or '').strip()
+        item = {'channel_id': channel_id, 'center_source_id': group_id, 'share_code': share_code}
+
+        if p115 is None:
+            try:
+                from handler.p115_service import P115Service
+                p115 = P115Service.get_client()
+            except Exception as e:
+                p115 = None
+                item.update({'ok': False, 'error': f'115 客户端初始化失败: {e}'})
+                items.append(item)
+                failed += 1
+                continue
+        if not p115:
+            item.update({'ok': False, 'error': '115 客户端未初始化，无法删除逻辑季分享'})
+            items.append(item)
+            failed += 1
+            continue
+
+        delete_resp = _delete_completed_share_from_115(p115, share_code)
+        item['share_delete_response'] = delete_resp
+        if delete_resp.get('state') is False:
+            msg = f'中心范围下架后删除 115 逻辑季分享失败: {delete_resp}'
+            try:
+                shared_share_db.update_completed_season_share_channel(
+                    channel_id,
+                    status_message=msg[:1000],
+                    raw_json={'share_delete_response': delete_resp, 'cleanup_reason': reason},
+                    last_checked_at='NOW()',
+                )
+            except Exception:
+                pass
+            item.update({'ok': False, 'error': msg})
+            items.append(item)
+            failed += 1
+            continue
+
+        deleted_115 += 1 if delete_resp.get('deleted') or delete_resp.get('cancelled_only') or delete_resp.get('skipped') else 0
+        local_row = shared_share_db.get_completed_season_share_channel(channel_id)
+        row_for_report = local_row or {
+            'channel_id': channel_id,
+            'center_source_id': group_id,
+            'share_code': share_code,
+            'share_url': channel.get('share_url') or '',
+            'raw_json': {'share_kind': 'logical_season'},
+        }
+        center_resp = {}
+        try:
+            client = client or SharedCenterClient()
+            center_resp = _update_center_share_channel_status(client, row_for_report, channel_id, {
+                'status': 'disabled',
+                'review_status': 'admin_deleted',
+                'status_message': reason,
+                'raw_json': {'share_delete_response': delete_resp, 'cleanup_reason': reason},
+            })
+        except Exception as e:
+            center_resp = {'ok': False, 'error': str(e)}
+        if isinstance(center_resp, dict) and center_resp.get('ok') is False:
+            item.update({'ok': False, 'error': f'中心逻辑季分享通道状态同步失败: {center_resp}', 'center': center_resp})
+            items.append(item)
+            failed += 1
+            continue
+
+        deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
+        deleted_local += 1 if deleted else 0
+        item.update({'ok': True, 'deleted_115_share': True, 'deleted_local_channel': bool(deleted), 'center': center_resp})
+        items.append(item)
+
+    return {
+        'ok': failed == 0,
+        'checked': len(rows),
+        'deleted_115': deleted_115,
+        'deleted_local': deleted_local,
+        'failed': failed,
+        'items': items,
+    }
+
+
 def _extract_completed_share_payload(resp: Dict[str, Any], *, receive_code: str = '') -> Dict[str, Any]:
     resp = resp if isinstance(resp, dict) else {}
     data = resp.get('data') if isinstance(resp.get('data'), dict) else {}
@@ -1630,6 +1733,54 @@ def _logical_share_file_ids_from_payload(client: SharedCenterClient, group_id: s
     return ids
 
 
+def _logical_share_filelist_log_label(payload: Dict[str, Any], fallback_title: str = '', file_count: int = 0) -> str:
+    """给逻辑季文件列表分享日志生成可读标题，不直接显示中心内部分享名。"""
+    payload = payload if isinstance(payload, dict) else {}
+    fallback_title = str(fallback_title or '').strip() or '逻辑完结季'
+
+    def first_text(*keys: str) -> str:
+        for key in keys:
+            value = str(payload.get(key) or '').strip()
+            if value:
+                return value
+        return ''
+
+    parent = first_text('parent_series_tmdb_id', 'series_tmdb_id', 'series_id', 'tmdb_id', 'tv_id')
+    season = _safe_int_or_none(payload.get('season_number') or payload.get('season'))
+    if (not parent or season is None):
+        for value in (fallback_title, first_text('title', 'share_title', 'root_name', 'name')):
+            match = re.search(r'(?P<tmdb>\d{3,})\s+S(?P<season>\d{1,3})\b', str(value or ''), re.I)
+            if match:
+                parent = parent or match.group('tmdb')
+                season = season if season is not None else _safe_int_or_none(match.group('season'))
+                break
+
+    identity = _series_identity_from_db(parent, season) if parent and season is not None else {}
+    title = str(
+        identity.get('title')
+        or first_text('series_title', 'series_name', 'show_title', 'parent_title')
+        or ''
+    ).strip()
+    if not title:
+        title = fallback_title
+
+    count = (
+        _safe_int_or_none(file_count)
+        or _safe_int_or_none(payload.get('file_count'))
+        or _safe_int_or_none(payload.get('episode_total'))
+        or _safe_int_or_none(payload.get('expected_episode_count'))
+        or _safe_int_or_none(payload.get('total_episodes'))
+        or _safe_int_or_none(identity.get('expected_episode_count'))
+    )
+
+    label = f"《{title}》"
+    if season is not None:
+        label += f"第 {season} 季"
+    if count:
+        label += f"，共 {count} 集"
+    return label
+
+
 def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str, Any]:
     """处理中心端 create_logical_season_filelist_share 事件：按中心传入的 file_id 列表创建 115 分享。"""
     client = SharedCenterClient()
@@ -1647,6 +1798,7 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
 
     manifest_hash = str(payload.get('package_fingerprint') or payload.get('manifest_hash') or '').strip()
     share_ids = _logical_share_file_ids_from_payload(client, group_id, payload)
+    log_label = _logical_share_filelist_log_label(payload, fallback_title=title, file_count=len(share_ids))
     existing_share = _local_existing_logical_share_for_create(group_id, manifest_hash, share_ids)
     if existing_share:
         status = str(existing_share.get('status') or 'pending_review').strip().lower()
@@ -1700,7 +1852,7 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         })
         if ack and event_id:
             client.ack_device_events([event_id], result='ok' if reported else 'failed', message=message[:500])
-        logger.info(f"  ➜ [共享资源] 复用已有 115 文件列表分享：《{title}》。")
+        logger.info(f"  ➜ [共享资源] 复用已有 115 文件列表分享：{log_label}。")
         logger.debug(
             f"  ➜ [共享资源] 复用文件列表分享详情：channel={channel_id}, "
             f"existing={existing_share.get('channel_id')}"
@@ -1745,7 +1897,7 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         p115 = P115Service.get_client()
         if not p115:
             raise RuntimeError('115 客户端未初始化')
-        logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：《{title}》，共 {len(share_ids)} 个文件。")
+        logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：{log_label}。")
         logger.debug(f"  ➜ [共享资源] 文件列表分享通道：{channel_id}")
         create_resp = p115.share_create(share_ids, share_duration=-1, receive_code=receive_code)
     except Exception as e:
@@ -1862,7 +2014,7 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         'review_failed': '审核未通过',
         'failed': '创建失败',
     }.get(report_payload['status'], report_payload['status'] or '状态未知')
-    logger.info(f"  ➜ [共享资源] 115 文件列表分享已创建：《{title}》，状态：{status_text}。")
+    logger.info(f"  ➜ [共享资源] 115 文件列表分享已创建：{log_label}，状态：{status_text}。")
     logger.debug(f"  ➜ [共享资源] 文件列表分享上报详情：status={report_payload['status']}, channel={channel_id}")
     return {
         'ok': bool(reported),
@@ -1881,11 +2033,11 @@ def _direct_center_share_sync_heartbeat(payload: Dict[str, Any]) -> Dict[str, An
     """直连中心端分享同步签到接口。SharedCenterClient 未升级时兜底使用。"""
     cfg = settings_db.get_shared_resource_config() or {}
     base_url = str(cfg.get('p115_shared_center_url') or '').strip().rstrip('/')
-    token = str(cfg.get('p115_shared_device_token') or '').strip()
-    if not base_url or not token:
-        raise RuntimeError('共享中心地址或设备 Token 未配置')
+    server_id_hash = _current_server_id_hash()
+    if not base_url or not server_id_hash:
+        raise RuntimeError('共享中心地址或 Emby ServerID 未配置')
     headers = {
-        'X-Device-Token': token,
+        'X-Server-ID-Hash': server_id_hash,
         'Content-Type': 'application/json',
         'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
     }
@@ -1928,17 +2080,6 @@ def _report_share_sync_heartbeat(summary: Dict[str, Any] = None, *, status: str 
     method = getattr(client, 'share_sync_heartbeat', None)
     if callable(method):
         return method(payload)
-    for name in ('post', '_post'):
-        fn = getattr(client, name, None)
-        if callable(fn):
-            return fn('/api/v1/devices/share-sync/heartbeat', payload)
-    for name in ('request', '_request'):
-        fn = getattr(client, name, None)
-        if callable(fn):
-            try:
-                return fn('POST', '/api/v1/devices/share-sync/heartbeat', json=payload)
-            except TypeError:
-                return fn('POST', '/api/v1/devices/share-sync/heartbeat', payload)
     return _direct_center_share_sync_heartbeat(payload)
 
 def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any]:
@@ -2619,11 +2760,11 @@ def _direct_center_transfer_lease(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     cfg = settings_db.get_shared_resource_config() or {}
     base_url = str(cfg.get('p115_shared_center_url') or '').strip().rstrip('/')
-    token = str(cfg.get('p115_shared_device_token') or '').strip()
-    if not base_url or not token:
-        raise RuntimeError('共享中心地址或设备 Token 未配置')
+    server_id_hash = _current_server_id_hash()
+    if not base_url or not server_id_hash:
+        raise RuntimeError('共享中心地址或 Emby ServerID 未配置')
     headers = {
-        'X-Device-Token': token,
+        'X-Server-ID-Hash': server_id_hash,
         'Content-Type': 'application/json',
         'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
     }
@@ -5978,6 +6119,21 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
             results.append({'job_id': job_id, 'ok': False, 'error': str(e), 'submit': submit})
     return {'ok': True, 'count': len(jobs), 'items': results}
 
+def _listener_failure_backoff_seconds(consecutive_failures: int, *, base: int) -> int:
+    if consecutive_failures <= 0:
+        return 0
+    if consecutive_failures < _LISTENER_FAILURE_WARN_THRESHOLD:
+        return int(base)
+    exponent = min(consecutive_failures - _LISTENER_FAILURE_WARN_THRESHOLD, 6)
+    return min(_LISTENER_BACKOFF_MAX_SECONDS, int(base) * (2 ** exponent))
+
+
+def _listener_should_log_failure(consecutive_failures: int) -> bool:
+    if consecutive_failures <= _LISTENER_FAILURE_WARN_THRESHOLD:
+        return True
+    return consecutive_failures in {5, 8, 13, 21, 34, 55, 89}
+
+
 def _sign_listener_loop():
     """独立处理中心 sign_job。
 
@@ -5996,11 +6152,16 @@ def _sign_listener_loop():
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
-            if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
-                logger.warning(f"  ➜ [共享签名监听] 连续 {consecutive_failures} 轮处理失败: {e}")
-            else:
-                logger.debug(f"  ➜ [共享签名监听] 本轮处理失败: {e}")
-            _LISTENER_STOP.wait(3)
+            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=3)
+            if _listener_should_log_failure(consecutive_failures):
+                if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
+                    logger.warning(
+                        "  ➜ [共享签名监听] 连续 %s 轮处理失败，暂停 %s 秒后重试: %s",
+                        consecutive_failures, wait_seconds, e,
+                    )
+                else:
+                    logger.debug(f"  ➜ [共享签名监听] 本轮处理失败: {e}")
+            _LISTENER_STOP.wait(wait_seconds)
     logger.info('  ➜ [共享签名监听] Rapid v2 sign_job 长轮询监听已停止。')
 
 
@@ -6021,11 +6182,16 @@ def _event_listener_loop():
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
-            if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
-                logger.warning(f"  ➜ [共享事件监听] 连续 {consecutive_failures} 轮处理失败: {e}")
-            else:
-                logger.debug(f"  ➜ [共享事件监听] 本轮处理失败: {e}")
-            _LISTENER_STOP.wait(10)
+            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=10)
+            if _listener_should_log_failure(consecutive_failures):
+                if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
+                    logger.warning(
+                        "  ➜ [共享事件监听] 连续 %s 轮处理失败，暂停 %s 秒后重试: %s",
+                        consecutive_failures, wait_seconds, e,
+                    )
+                else:
+                    logger.debug(f"  ➜ [共享事件监听] 本轮处理失败: {e}")
+            _LISTENER_STOP.wait(wait_seconds)
     logger.info('  ➜ [共享事件监听] Rapid v2 长轮询监听已停止。')
 
 
@@ -6958,9 +7124,8 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
 
 
 def _center_request_headers_for_display_meta() -> Dict[str, str]:
-    cfg = settings_db.get_shared_resource_config() or {}
     return {
-        'X-Device-Token': str(cfg.get('p115_shared_device_token') or '').strip(),
+        'X-Server-ID-Hash': _current_server_id_hash(),
         'X-Client-Version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
         'Content-Type': 'application/json',
     }
@@ -7074,8 +7239,8 @@ def _fetch_center_missing_display_meta_rows(limit: int = 500) -> Dict[str, Any]:
     """
     base_url = _center_base_url_for_display_meta()
     headers = _center_request_headers_for_display_meta()
-    if not base_url or not headers.get('X-Device-Token'):
-        return {'ok': False, 'items': [], 'message': '共享中心 URL 或设备 Token 未配置'}
+    if not base_url or not headers.get('X-Server-ID-Hash'):
+        return {'ok': False, 'items': [], 'message': '共享中心 URL 或 Emby ServerID 未配置'}
     try:
         resp = requests.get(
             f"{base_url}/api/v1/metadata/display/missing",
@@ -7281,8 +7446,8 @@ def _build_display_meta_backfill_bundles(limit: int = 500) -> Dict[str, Any]:
 def _post_center_display_meta_backfill(bundles: List[Dict[str, Any]], *, batch_size: int = 100) -> Dict[str, Any]:
     base_url = _center_base_url_for_display_meta()
     headers = _center_request_headers_for_display_meta()
-    if not base_url or not headers.get('X-Device-Token'):
-        return {'ok': False, 'message': '共享中心 URL 或设备 Token 未配置', 'posted_batches': 0, 'accepted_meta_items': 0}
+    if not base_url or not headers.get('X-Server-ID-Hash'):
+        return {'ok': False, 'message': '共享中心 URL 或 Emby ServerID 未配置', 'posted_batches': 0, 'accepted_meta_items': 0}
 
     batch_size = max(1, min(int(batch_size or 100), 300))
     accepted_meta_items = 0
@@ -7441,6 +7606,14 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
         parts.append(f"残缺RAW补齐={raw_repair.get('uploaded', 0)}/{raw_repair.get('checked', 0)}")
         if raw_repair.get('missing_local'):
             parts.append(f"本地缺失RAW={raw_repair.get('missing_local')}")
+    intro_backfill = result.get('intro_backfill') if isinstance(result.get('intro_backfill'), dict) else {}
+    intro_disabled = intro_backfill.get('skipped') is True and bool(intro_backfill.get('reason'))
+    if intro_backfill and not intro_disabled:
+        parts.append(f"片头补齐={intro_backfill.get('uploaded', 0)}/{intro_backfill.get('scanned', 0)}")
+        if intro_backfill.get('skipped'):
+            parts.append(f"片头跳过={intro_backfill.get('skipped')}")
+        if intro_backfill.get('failed'):
+            parts.append(f"片头补齐失败={intro_backfill.get('failed')}")
     share_repair = result.get('logical_season_share_repair') if isinstance(result.get('logical_season_share_repair'), dict) else {}
     if share_repair:
         parts.append(f"分享回填={share_repair.get('backfilled', 0)}/{share_repair.get('missing_share_code', 0)}")
@@ -7455,7 +7628,7 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             parts.append(f"分享全量对账跳过={share_reconcile.get('message')}")
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -7491,6 +7664,11 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         result['raw_repair_backfill'] = _backfill_center_raw_repair_queue(limit=200)
     except Exception as e:
         result['raw_repair_backfill_error'] = str(e)
+    try:
+        from handler.shared_intro_service import scan_and_upload_local_intro
+        result['intro_backfill'] = scan_and_upload_local_intro(limit=1000)
+    except Exception as e:
+        result['intro_backfill_error'] = str(e)
     try:
         result['logical_season_share_repair'] = repair_logical_season_share_channels_from_115(max_pages=20, dry_run=False)
     except Exception as e:

@@ -14,7 +14,7 @@
                 <template #icon><n-icon :component="SettingsIcon" /></template>
                 配置
               </n-button>
-              <n-button v-if="needsCenterDeviceToken" type="warning" ghost :loading="registeringDevice" @click="registerCenterDevice">
+              <n-button v-if="needsCenterServerId" type="warning" ghost :loading="registeringDevice" @click="registerCenterDevice">
                 <template #icon><n-icon :component="SyncIcon" /></template>
                 {{ centerDeviceRegisterButtonText }}
               </n-button>
@@ -30,8 +30,8 @@
           </div>
         </template>
 
-        <n-alert v-if="needsCenterDeviceToken" class="center-register-alert" type="warning" :bordered="false" style="margin-bottom: 12px;">
-          {{ centerDeviceTokenAlertText }}
+        <n-alert v-if="needsCenterServerId" class="center-register-alert" type="warning" :bordered="false" style="margin-bottom: 12px;">
+          {{ centerServerIdAlertText }}
         </n-alert>
 
         <n-grid class="stat-grid" :cols="isMobile ? 2 : 5" :x-gap="12" :y-gap="12">
@@ -276,6 +276,13 @@
               <template #unchecked>允许秒传</template>
             </n-switch>
             <template #feedback>中心资源被标记为短剧时跳过秒传；短剧按单个视频实际时长低于 25 分钟识别，季包按包内多数集统计。</template>
+          </n-form-item>
+          <n-form-item label="共享片头">
+            <n-switch v-model:value="sharedConfigForm.p115_shared_intro_enabled">
+              <template #checked>上传并复用片头</template>
+              <template #unchecked>关闭</template>
+            </n-switch>
+            <template #feedback>开启后会上传片头数据，并在入库时从中心匹配片头数据。</template>
           </n-form-item>
           <n-form-item label="自动响应求共享">
             <n-switch v-model:value="sharedConfigForm.p115_shared_auto_share_requests_enabled">
@@ -558,12 +565,11 @@ const centerDeviceStatusData = ref({});
 const sharedConfigForm = reactive({
   p115_shared_resource_enabled: false,
   p115_shared_center_url: 'https://shared.55565576.xyz',
-  p115_shared_install_id: '',
-  p115_shared_device_token: '',
   p115_shared_resource_mode: 'rapid',
   p115_shared_disable_episode_transfer: false,
   p115_shared_block_clean_version_transfer: false,
   p115_shared_block_short_drama_transfer: false,
+  p115_shared_intro_enabled: false,
   p115_shared_auto_share_requests_enabled: false,
   p115_shared_center_home_sections: [],
 });
@@ -757,6 +763,7 @@ const CENTER_HOME_TAG_FALLBACK_OPTIONS = [
   { label: '连载中', value: 'ongoing' },
   { label: '短剧', value: 'short_drama' },
   { label: '纯净版', value: 'clean_version' },
+  { label: '片头', value: 'intro' },
   { label: '原盘', value: 'original_disc' },
   { label: '国语', value: 'mandarin_audio' },
   { label: '中字', value: 'chinese_subtitle' },
@@ -1024,14 +1031,12 @@ const centerCreatedTime = (row) => {
 const metaLine = (row, parts = []) => h('div', { class: 'sub-title' }, [tmdbLink(row), ...parts.filter(Boolean)]);
 
 const centerDeviceId = computed(() => String((summary.value.credit || {}).device_id || '').trim());
-const sharedDeviceToken = computed(() => String(sharedConfigForm.p115_shared_device_token || '').trim());
 const hasCenterDevice = computed(() => Boolean(centerDeviceId.value));
-const hasSharedDeviceToken = computed(() => Boolean(sharedDeviceToken.value));
-const needsCenterDeviceToken = computed(() => !hasSharedDeviceToken.value);
+const needsCenterServerId = computed(() => !centerConfigServerIdHash.value && !hasCenterDevice.value);
 const centerDeviceRegisterButtonText = computed(() => centerDeviceId.value ? '重新连接' : '连接中心');
-const centerDeviceTokenAlertText = computed(() => {
+const centerServerIdAlertText = computed(() => {
   if (hasCenterDevice.value) {
-    return '共享资源中心设备记录还在，但本地连接凭据缺失。点击“重新连接”会使用 Emby ServerID 取回同一设备身份。';
+    return '共享资源中心设备记录还在，但本机 ServerID 状态未确认。点击“重新连接”会使用 Emby ServerID 取回同一中心身份。';
   }
   return '共享资源中心尚未连接。点击“连接中心”后，系统会使用 Emby ServerID 注册中心身份。';
 });
@@ -3399,12 +3404,11 @@ const applySharedConfig = (data = {}) => {
   Object.assign(sharedConfigForm, {
     p115_shared_resource_enabled: Boolean(data.p115_shared_resource_enabled),
     p115_shared_center_url: data.p115_shared_center_url || 'https://shared.55565576.xyz',
-    p115_shared_install_id: data.p115_shared_install_id || '',
-    p115_shared_device_token: data.p115_shared_device_token || '',
     p115_shared_resource_mode: 'rapid',
     p115_shared_disable_episode_transfer: Boolean(data.p115_shared_disable_episode_transfer),
     p115_shared_block_clean_version_transfer: Boolean(data.p115_shared_block_clean_version_transfer),
     p115_shared_block_short_drama_transfer: Boolean(data.p115_shared_block_short_drama_transfer),
+    p115_shared_intro_enabled: Boolean(data.p115_shared_intro_enabled),
     p115_shared_auto_share_requests_enabled: Boolean(data.p115_shared_auto_share_requests_enabled),
     p115_shared_center_home_sections: normalizeCenterHomeSections(data.p115_shared_center_home_sections),
   });
@@ -3891,7 +3895,7 @@ const loadLedger = async () => {
   ledgerLoading.value = true;
   try {
     const res = await axios.get('/api/shared/resources/credit/ledger', {
-      params: { limit: 200, actual_only: 1, sync_center: hasSharedDeviceToken.value ? 1 : 0 },
+      params: { limit: 200, actual_only: 1, sync_center: 1 },
     });
     ledgerItems.value = res.data?.items || [];
   } catch {
@@ -3950,7 +3954,7 @@ const registerCenterDevice = async () => {
 };
 
 const refreshCredit = async () => {
-  if (needsCenterDeviceToken.value) {
+  if (needsCenterServerId.value) {
     message.warning('共享资源中心未连接，请先连接中心。');
     return;
   }
