@@ -979,46 +979,12 @@ class P115OpenAPIClient:
             except Exception:
                 pass
 
-        # 缓存仍缺 size 时，只要能定位 fid，就实时查 115 详情补齐。
         if (size <= 0 or not file_name or not pick_code) and not fid and pick_code:
             if cache_mgr and hasattr(cache_mgr, 'get_fid_by_pickcode'):
                 try:
                     fid = str(cache_mgr.get_fid_by_pickcode(pick_code) or '').strip()
                 except Exception:
                     fid = ''
-
-        if (size <= 0 or not file_name or not pick_code or not sha1) and fid:
-            try:
-                info_res = self.fs_get_info(fid)
-                data = info_res.get('data') if isinstance(info_res, dict) else {}
-                if isinstance(data, list):
-                    data = data[0] if data else {}
-                if isinstance(data, dict):
-                    if not sha1:
-                        sha1 = str(data.get('sha1') or data.get('sha') or data.get('file_sha1') or '').strip().upper()
-                    if not pick_code:
-                        pick_code = str(data.get('pc') or data.get('pick_code') or data.get('pickcode') or '').strip()
-                    if not file_name:
-                        file_name = str(data.get('fn') or data.get('n') or data.get('file_name') or data.get('name') or '').strip()
-                    if size <= 0:
-                        size = _safe_size(data.get('size_byte') or data.get('fs') or data.get('size') or data.get('file_size'))
-
-                    parent_id = data.get('parent_id') or data.get('pid') or data.get('cid')
-                    if cache_mgr and fid and parent_id and file_name and hasattr(cache_mgr, 'save_file_cache'):
-                        try:
-                            cache_mgr.save_file_cache(
-                                fid=fid,
-                                parent_id=parent_id,
-                                name=file_name,
-                                sha1=sha1 or None,
-                                pick_code=pick_code or None,
-                                local_path=None,
-                                size=size or 0,
-                            )
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"  ➜ [共享秒传] 实时查询 115 文件详情失败 fid={fid}: {e}")
 
         if not target_cid:
             return {'state': False, 'error_msg': '缺少目标目录 cid，无法秒传'}
@@ -1648,6 +1614,11 @@ class P115CookieClient:
             rapid_meta.get('pick_code'), rapid_meta.get('pickcode'), rapid_meta.get('pc'),
             source_meta.get('pick_code'), source_meta.get('pickcode'), source_meta.get('pc'),
         ) or '').strip()
+        fid = str(_first(
+            payload.get('fid'), payload.get('file_id'), payload.get('id'),
+            rapid_meta.get('fid'), rapid_meta.get('file_id'), rapid_meta.get('id'),
+            source_meta.get('fid'), source_meta.get('file_id'), source_meta.get('id'),
+        ) or '').strip()
         file_name = str(_first(
             payload.get('file_name'), payload.get('filename'), payload.get('name'),
             rapid_meta.get('file_name'), rapid_meta.get('filename'), rapid_meta.get('name'),
@@ -1673,14 +1644,23 @@ class P115CookieClient:
                     row = cache_mgr.get_file_cache_by_sha1(sha1)
                 if not row and pick_code and hasattr(cache_mgr, 'get_file_cache_by_pickcode'):
                     row = cache_mgr.get_file_cache_by_pickcode(pick_code)
+                if not row and fid and hasattr(cache_mgr, 'get_file_cache_by_id'):
+                    row = cache_mgr.get_file_cache_by_id(fid)
                 if row:
                     row = dict(row)
+                    fid = fid or str(row.get('id') or row.get('fid') or '').strip()
                     pick_code = pick_code or str(row.get('pick_code') or '').strip()
                     file_name = file_name or str(row.get('name') or '').strip()
                     if size <= 0:
                         size = _safe_size(row.get('size'))
             except Exception as e:
                 logger.debug(f"  ➜ [Cookie秒传] 查询 p115_filesystem_cache 失败: {e}")
+
+        if not fid and pick_code and cache_mgr and hasattr(cache_mgr, 'get_fid_by_pickcode'):
+            try:
+                fid = str(cache_mgr.get_fid_by_pickcode(pick_code) or '').strip()
+            except Exception:
+                fid = ''
 
         if not target_cid:
             return {'state': False, 'error_msg': 'Cookie 秒传缺少目标目录 cid', '_rapid_upload_backend': 'cookie'}
@@ -2841,18 +2821,62 @@ class P115Service:
                 except Exception:
                     app_type = 'web'
                 sign_ua = str(_first(payload.get('sign_user_agent'), payload.get('user_agent'), payload.get('ua'), get_115_ua(app_type)) or get_115_ua('web'))
-                priority = get_115_api_priority()
-                order = [('download_url', 'Cookie蜂群Holder'), ('openapi_downurl', 'OpenAPI蜂群Holder')] if priority == 'cookie' else [('openapi_downurl', 'OpenAPI蜂群Holder'), ('download_url', 'Cookie蜂群Holder')]
+                def _sign_cookie_downurl(_pc, user_agent=None):
+                    if not self._cookie:
+                        raise RuntimeError('未配置 115 Cookie，无法执行签名取链')
+                    cache_key = (f"sign_cookie_{_pc}", user_agent)
+                    cached = _DIRECT_URL_CACHE.get(cache_key)
+                    if cached and time.time() < cached.get('expire_at', 0):
+                        return cached.get('url')
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    future = executor.submit(self._cookie.download_url, _pc, user_agent)
+                    try:
+                        url = _p115_extract_down_url(future.result(timeout=12))
+                    except TimeoutError:
+                        P115Service.reset_cookie_client()
+                        raise RuntimeError('Cookie 签名取链超时')
+                    finally:
+                        try:
+                            executor.shutdown(wait=False)
+                        except Exception:
+                            pass
+                    if not url:
+                        repaired = self._repair_stale_pick_code_downurl(_pc, user_agent, backend='cookie')
+                        url = repaired.get('url') if isinstance(repaired, dict) else ''
+                    if url:
+                        _DIRECT_URL_CACHE[cache_key] = {'url': url, 'name': file_name or _pc, 'expire_at': time.time() + 180}
+                    return url
+
+                def _sign_openapi_downurl(_pc, user_agent=None):
+                    if not self._openapi:
+                        raise RuntimeError('未配置 115 Token，无法执行签名取链')
+                    cache_key = (f"sign_openapi_{_pc}", user_agent)
+                    cached = _DIRECT_URL_CACHE.get(cache_key)
+                    if cached and time.time() < cached.get('expire_at', 0):
+                        return cached.get('url')
+                    res = self._openapi.fs_downurl(_pc, user_agent)
+                    url = _p115_extract_down_url(res)
+                    if not url:
+                        repaired = self._repair_stale_pick_code_downurl(_pc, user_agent, backend='openapi')
+                        url = repaired.get('url') if isinstance(repaired, dict) else ''
+                    if url:
+                        _DIRECT_URL_CACHE[cache_key] = {'url': url, 'name': file_name or _pc, 'expire_at': time.time() + 180}
+                    return url
+
+                primary = get_115_api_priority()
+                order = (
+                    [(_sign_openapi_downurl, 'OpenAPI优先签名'), (_sign_cookie_downurl, 'Cookie备用签名')]
+                    if primary == 'cookie'
+                    else [(_sign_cookie_downurl, 'Cookie优先签名'), (_sign_openapi_downurl, 'OpenAPI备用签名')]
+                )
                 last_error = None
-                for method_name, label in order:
-                    method = getattr(self, method_name, None)
-                    if not callable(method):
-                        continue
+                for method, label in order:
                     try:
                         sign_result = _p115_try_local_holder_sign(
                             pick_code=pc,
                             sign_check=sign_check,
-                            downurl_getter=lambda _pc, _ua, _m=method: _m(_pc, user_agent=_ua),
+                            downurl_getter=method,
                             user_agent=sign_ua,
                             label=label,
                             sha1=sha1,
@@ -4055,7 +4079,7 @@ class P115CacheManager:
         if isinstance(ctx, dict):
             # 只保留跨账号、长期稳定的共享字段。
             # season_number / episode_number 是媒体身份的一部分，上传到中心后可避免消费端再次从文件名正则猜集号。
-            allowed = {"tmdb_id", "type", "original_language", "sha1", "season_number", "episode_number"}
+            allowed = {"tmdb_id", "type", "original_language", "sha1", "preid", "season_number", "episode_number"}
             raw_ffprobe_json["_etk"] = {
                 k: v for k, v in ctx.items()
                 if k in allowed and v not in [None, "", [], {}]
@@ -4069,6 +4093,22 @@ class P115CacheManager:
     def _norm_preid(value):
         text = str(value or '').strip().upper()
         return text if re.fullmatch(r'[A-F0-9]{40}', text) else ''
+
+    @staticmethod
+    def _extract_preid_from_raw_etk(raw_ffprobe_json):
+        try:
+            if isinstance(raw_ffprobe_json, str):
+                raw_ffprobe_json = json.loads(raw_ffprobe_json)
+        except Exception:
+            return ''
+        if not isinstance(raw_ffprobe_json, dict):
+            return ''
+        ctx = raw_ffprobe_json.get('_etk')
+        if not isinstance(ctx, dict):
+            return ''
+        return P115CacheManager._norm_preid(
+            ctx.get('preid') or ctx.get('pre_sha1') or ctx.get('pre_sha1_128k')
+        )
 
     @staticmethod
     def _ensure_preid_column():
@@ -4209,6 +4249,24 @@ class P115CacheManager:
         if existing:
             return existing
 
+        raw_preid = P115CacheManager._extract_preid_from_raw_etk(
+            item.get('raw_ffprobe_json') or item.get('raw')
+        )
+        if raw_preid:
+            P115CacheManager._update_preid_for_existing_cache(
+                raw_preid,
+                fid=fid,
+                parent_id=item.get('parent_id') or item.get('pid') or item.get('cid'),
+                name=file_name,
+                sha1=sha1,
+                pick_code=pick_code,
+            )
+            logger.debug(
+                f"  ➜ [115缓存] 命中 RAW _etk.preid，跳过直链 Range: "
+                f"{file_name or sha1 or pick_code} -> {raw_preid[:12]}..."
+            )
+            return raw_preid
+
         hinted_preid = P115CacheManager._lookup_preid_hint(
             item,
             sha1=sha1,
@@ -4317,6 +4375,30 @@ class P115CacheManager:
             raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
             mediainfo_json = P115CacheManager._merge_center_intro_before_mediainfo_cache(sha1, mediainfo_json)
 
+            # 整理/MP直出提取媒体信息时顺手补齐 preid，并写进 RAW _etk。
+            # 后续入库/共享登记可直接复用，避免再次拉直链 Range 计算前 128KB SHA1。
+            preid = P115CacheManager._extract_preid_from_raw_etk(raw_ffprobe_json)
+            try:
+                if not preid:
+                    preid = P115CacheManager.ensure_file_preid(
+                        file_info if isinstance(file_info, dict) else {'sha1': sha1},
+                        sha1=sha1,
+                        fid=fid,
+                        pick_code=pick_code,
+                        file_name=file_name,
+                    )
+                if preid and isinstance(file_info, dict):
+                    file_info['preid'] = preid
+                if preid and isinstance(raw_ffprobe_json, dict):
+                    ctx = raw_ffprobe_json.get('_etk') if isinstance(raw_ffprobe_json.get('_etk'), dict) else {}
+                    ctx = dict(ctx or {})
+                    ctx.setdefault('sha1', sha1)
+                    ctx['preid'] = preid
+                    raw_ffprobe_json['_etk'] = ctx
+                    raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
+            except Exception as e_preid:
+                logger.debug(f"  ➜ [媒体信息缓存] 顺手计算 preid 失败: sha1={sha1[:12]}..., err={e_preid}")
+
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
@@ -4333,21 +4415,6 @@ class P115CacheManager:
                         Json(raw_ffprobe_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if raw_ffprobe_json else None
                     ))
                     conn.commit()
-
-            # 整理/MP直出提取媒体信息时顺手补齐 preid：
-            # 只读取前 128KB，写入 p115_filesystem_cache，供后续 Rapid v2 登记/秒传直接复用。
-            try:
-                preid = P115CacheManager.ensure_file_preid(
-                    file_info if isinstance(file_info, dict) else {'sha1': sha1},
-                    sha1=sha1,
-                    fid=fid,
-                    pick_code=pick_code,
-                    file_name=file_name,
-                )
-                if preid and isinstance(file_info, dict):
-                    file_info['preid'] = preid
-            except Exception as e_preid:
-                logger.debug(f"  ➜ [媒体信息缓存] 顺手计算 preid 失败: sha1={sha1[:12]}..., err={e_preid}")
 
             logger.debug(f"  ➜ [媒体信息缓存] 已写入本地 p115_mediainfo_cache -> {sha1[:12]}...")
             return True
@@ -4430,11 +4497,16 @@ class P115CacheManager:
                 m.parent_series_tmdb_id,
                 m.season_number,
                 m.episode_number,
-                COALESCE(NULLIF(m.original_language, ''), NULLIF(p.original_language, '')) AS original_language
+                COALESCE(NULLIF(m.original_language, ''), NULLIF(p.original_language, '')) AS original_language,
+                fc.preid
             FROM media_metadata m
             LEFT JOIN media_metadata p
               ON p.tmdb_id = m.parent_series_tmdb_id
              AND p.item_type = 'Series'
+            LEFT JOIN p115_filesystem_cache fc
+              ON UPPER(fc.sha1) = %s
+             AND fc.preid IS NOT NULL
+             AND fc.preid <> ''
             WHERE m.file_sha1_json ? %s
             ORDER BY
                 CASE m.item_type
@@ -4448,7 +4520,7 @@ class P115CacheManager:
                 m.last_updated_at DESC NULLS LAST
             LIMIT 1
             """,
-            (sha1,)
+            (sha1, sha1)
         )
         row = cursor.fetchone()
         if not row:
@@ -4481,6 +4553,7 @@ class P115CacheManager:
             'season_number': _ctx_int(row.get('season_number')),
             'episode_number': _ctx_int(row.get('episode_number')),
             'sha1': sha1,
+            'preid': P115CacheManager._norm_preid(row.get('preid')),
         }
         return {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
 
@@ -4564,8 +4637,8 @@ class P115CacheManager:
                     ctx = raw_probe.get('_etk') if isinstance(raw_probe.get('_etk'), dict) else {}
                     need_backfill = not P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
 
-                    # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / 季集号。
-                    if not ctx.get('original_language') or not ctx.get('sha1'):
+                    # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / preid / 季集号。
+                    if not ctx.get('original_language') or not ctx.get('sha1') or not P115CacheManager._norm_preid(ctx.get('preid')):
                         need_backfill = True
                     if str(ctx.get('type') or '').strip().lower() in ('tv', 'series', 'season', 'episode'):
                         if ctx.get('season_number') in (None, '') or ctx.get('episode_number') in (None, ''):
@@ -5796,6 +5869,45 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         return None
 
+    @classmethod
+    def _extract_season_episode_from_file_node(cls, file_node):
+        if not isinstance(file_node, dict):
+            return None, None
+
+        name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name') or ''
+        rel_path = file_node.get('rel_path') or file_node.get('_etk_rel_dir') or ''
+        combined = f"{rel_path}/{name}" if rel_path else str(name)
+
+        match = re.search(r'(?i)(?<![A-Za-z0-9])S(\d{1,4})[ ._-]*E(\d{1,4})\b', combined)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+
+        season_num = cls._extract_season_from_path_or_text(rel_path)
+        episode_num = None
+        match = re.search(
+            r'(?i)(?:^|[ ._\-\[\(])(?:ep|episode)[ ._-]*(\d{1,4})\b'
+            r'|(?:^|[ ._\-\[\(])e(\d{1,4})\b'
+            r'|第\s*(\d{1,4})\s*[集话話回]',
+            str(name)
+        )
+        if match:
+            episode_num = next((int(v) for v in match.groups() if v is not None), None)
+        elif season_num is not None:
+            name_without_ext = str(name).rsplit('.', 1)[0]
+            if name_without_ext.isdigit():
+                episode_num = int(name_without_ext)
+
+        return season_num, episode_num
+
+    @classmethod
+    def _inject_file_node_identity(cls, file_node):
+        season_num, episode_num = cls._extract_season_episode_from_file_node(file_node)
+        if season_num is not None and file_node.get('season_number') in (None, ''):
+            file_node['season_number'] = season_num
+        if episode_num is not None and file_node.get('episode_number') in (None, ''):
+            file_node['episode_number'] = episode_num
+        return season_num, episode_num
+
     def _rename_renderer(self):
         return P115RenameRenderer(self.details, self.tmdb_id, self.original_title, self.rename_config)
 
@@ -5910,7 +6022,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         return None, None, None
 
-    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False, recognition_hints=None):
+    def _rename_file_node(self, file_node, new_base_name, year=None, is_tv=False, original_title=None, pre_fetched_mediainfo=None, local_pre_fetched_mediainfo=None, silent_log=False, recognition_hints=None, patch_raw_identity=True):
         original_name = file_node.get('fn') or file_node.get('n') or file_node.get('file_name', '')
         rel_path = file_node.get('rel_path', '')
         rule_result = _build_rule_parse_result(
@@ -6278,7 +6390,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         # raw_ffprobe_json 生成早于最终识别结果；此时 TMDb 身份与季集号已经落定，
         # 反向补写本地 RAW。手动重组时强制覆盖 _etk.tmdb_id/type，避免旧错误身份继续污染共享 RAW。
-        if not is_sub:
+        if not is_sub and patch_raw_identity:
             try:
                 raw_patch_sha1 = file_node.get('sha1') or file_node.get('sha')
                 force_identity = bool(getattr(self, 'is_manual_correct', False))
@@ -6618,6 +6730,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         pre_fetched_mediainfo = None
         local_pre_fetched_mediainfo = None
         if first_video and not getattr(self, 'is_manual_correct', False) and not getattr(self, 'is_from_memory', False):
+            self._inject_file_node_identity(first_video)
             v_sha1 = first_video.get('sha1') or first_video.get('sha')
             v_fid = first_video.get('fid') or first_video.get('file_id')
             
@@ -7015,6 +7128,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
             ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
             if ext in known_video_exts:
+                self._inject_file_node_identity(file_item)
                 sha1 = file_item.get('sha1') or file_item.get('sha')
                 if not sha1:
                     fid = file_item.get('fid') or file_item.get('file_id')
@@ -7049,6 +7163,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         local_pre_fetched_mediainfo=local_pre_fetched_mediainfo,
                         silent_log=True,  # ★ 开启静默，防止预扫描时重复打印日志
                         recognition_hints=self.recognition_hints,
+                        patch_raw_identity=False,
                     )
                     video_base_name = fn.rsplit('.', 1)[0]
                     if not keep_original:
@@ -8356,13 +8471,15 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 probe_sha1 = sha1 or file_item.get('sha1') or file_item.get('sha')
                                 if probe_sha1:
                                     probe_sha1 = str(probe_sha1).upper()
-                                    P115CacheManager.save_mediainfo_cache(probe_sha1, emby_obj, raw_ffprobe)
-                                    try:
-                                        cached_preid = P115CacheManager.ensure_file_preid(file_item, sha1=probe_sha1, fid=fid, pick_code=pick_code, file_name=original_name)
-                                        if cached_preid:
-                                            file_item['preid'] = cached_preid
-                                    except Exception as e_preid:
-                                        logger.debug(f"  ➜ [MP直出] 媒体信息提取后计算 preid 失败: {original_name} -> {e_preid}")
+                                    P115CacheManager.save_mediainfo_cache(
+                                        probe_sha1,
+                                        emby_obj,
+                                        raw_ffprobe,
+                                        file_info=file_item,
+                                        fid=fid,
+                                        pick_code=pick_code,
+                                        file_name=original_name,
+                                    )
                                     sha1 = probe_sha1
                                     file_item['sha1'] = probe_sha1
                                 mediainfo_text = json.dumps(emby_obj, ensure_ascii=False, indent=2)
@@ -8486,6 +8603,7 @@ def _extract_raw_ffprobe_identity(raw_ffprobe_json):
     media_type = ctx.get("type") or ctx.get("media_type") or ctx.get("item_type")
     original_language = ctx.get("original_language")
     sha1 = ctx.get("sha1")
+    preid = P115CacheManager._norm_preid(ctx.get("preid") or ctx.get("pre_sha1") or ctx.get("pre_sha1_128k"))
 
     def _identity_int(*values):
         for value in values:
@@ -8518,6 +8636,7 @@ def _extract_raw_ffprobe_identity(raw_ffprobe_json):
         "season_number": season_number,
         "episode_number": episode_number,
         "sha1": str(sha1).strip().upper() if sha1 not in [None, ""] else None,
+        "preid": preid,
     }
     return {k: v for k, v in identity.items() if v not in [None, "", [], {}]}
 

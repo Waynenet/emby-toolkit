@@ -564,25 +564,8 @@
                             <template #unchecked>直接播放源文件</template>
                         </n-switch>
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">实验功能：点播前复制到临时目录，停止播放后自动删除临时克隆文件。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">实验功能：点播前自动复制到根目录 / ETK复制播放，停止播放后自动删除临时克隆文件。</n-text>
                         </template>
-                    </n-form-item>
-
-                    <n-form-item v-if="configModel.p115_copy_play_enabled" label="复制播放临时目录" path="p115_copy_play_temp_cid">
-                      <n-input-group>
-                        <n-input
-                          :value="configModel.p115_copy_play_temp_name || configModel.p115_copy_play_temp_cid"
-                          placeholder="选择临时克隆目录"
-                          readonly
-                          @click="openFolderSelector('copy_play_temp', configModel.p115_copy_play_temp_cid)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('copy_play_temp', configModel.p115_copy_play_temp_cid)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">建议单独建一个空目录，ETK 会清理自己创建的临时克隆文件。</n-text>
-                      </template>
                     </n-form-item>
 
                     <n-form-item label="本地 STRM 根目录" path="local_strm_root">
@@ -777,7 +760,23 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 4：自定义季集号识别 -->
+                    <!-- ★ 卡片 4：小号播放池 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                          <span class="card-title">小号池</span>
+                          <n-button secondary type="primary" @click="playPoolModalRef?.open()">
+                            <template #icon><n-icon :component="OptionsIcon" /></template>
+                            配置
+                          </n-button>
+                        </div>
+                      </template>
+                      <n-alert :type="playPoolConfig.enabled && playPoolConfig.usable_count > 0 ? 'success' : 'info'" :show-icon="true">
+                        {{ playPoolSummaryText }}。启用后优先使用小号秒传播放，没有可用小号时回退主账号播放。
+                      </n-alert>
+                    </n-card>
+
+                    <!-- ★ 卡片 5：自定义季集号识别 -->
                     <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -795,7 +794,7 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 5：独立音乐库管理 -->
+                    <!-- ★ 卡片 6：独立音乐库管理 -->
                     <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -1981,11 +1980,13 @@
     </n-modal>
     <!-- ★ 引入频道监听模态框 -->
     <TGMonitorModal ref="tgMonitorModalRef" />
+    <PlayPoolConfigModal ref="playPoolModalRef" @updated="handlePlayPoolUpdated" />
 </template>
 
 <script setup>
 import { ref, watch, computed, onMounted, onUnmounted, nextTick, isShallow } from 'vue'; 
 import TGMonitorModal from './TGMonitorModal.vue';
+import PlayPoolConfigModal from './PlayPoolConfigModal.vue';
 import { 
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
@@ -2034,6 +2035,7 @@ const mpModalRef = ref(null);
 const washingPriorityModalRef = ref(null);
 const hdhiveModalRef = ref(null);
 const tgMonitorModalRef = ref(null);
+const playPoolModalRef = ref(null);
 const renameModalRef = ref(null);
 const episodeRegexModalRef = ref(null);
 const defaultStreamModalRef = ref(null);
@@ -2792,6 +2794,42 @@ const cookieQrcodeStatus = ref('idle');
 const cookieQrcodeLoading = ref(false);
 const cookieQrcodePolling = ref(null);
 
+const playPoolConfig = ref({
+  enabled: false,
+  usable_count: 0,
+  temp_dir_name: 'ETK小号播放临时目录',
+  accounts: []
+});
+
+const playPoolSummaryText = computed(() => {
+  const cfg = playPoolConfig.value || {};
+  const total = Array.isArray(cfg.accounts) ? cfg.accounts.length : 0;
+  const usable = Number(cfg.usable_count || 0);
+  if (!cfg.enabled) return total ? `已配置 ${total} 个小号，当前未启用` : '未启用，未配置小号';
+  if (!usable) return '已启用，但没有可用小号';
+  return `已启用，可用 ${usable} / ${total} 个小号`;
+});
+
+const handlePlayPoolUpdated = (data) => {
+  playPoolConfig.value = {
+    enabled: Boolean(data?.enabled),
+    usable_count: Number(data?.usable_count || 0),
+    temp_dir_name: data?.temp_dir_name || 'ETK小号播放临时目录',
+    accounts: Array.isArray(data?.accounts) ? data.accounts : []
+  };
+};
+
+const loadPlayPoolConfig = async () => {
+  try {
+    const res = await axios.get('/api/p115/play_pool');
+    if (res.data?.success && res.data.data) {
+      handlePlayPoolUpdated(res.data.data);
+    }
+  } catch (e) {
+    message.error('加载小号池失败: ' + (e.response?.data?.message || e.message));
+  }
+};
+
 const openCookieModal = () => {
   showCookieModal.value = true;
   tempCookieInput.value = '';
@@ -3246,9 +3284,6 @@ const confirmFolderSelection = () => {
   } else if (selectorContext.value === 'media_root') {
     configModel.value.p115_media_root_cid = cid;
     configModel.value.p115_media_root_name = name;
-  } else if (selectorContext.value === 'copy_play_temp') {
-    configModel.value.p115_copy_play_temp_cid = cid;
-    configModel.value.p115_copy_play_temp_name = name;
   } else if (selectorContext.value === 'shared_cache_path') {
     configModel.value.p115_shared_cache_cid = cid;
     configModel.value.p115_shared_cache_name = name;
@@ -3579,6 +3614,7 @@ onMounted(async () => {
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       check115Status();
+      loadPlayPoolConfig();
       if (!configModel.value.p115_auth_method) configModel.value.p115_auth_method = 'web';
       if (!['permanent', 'virtual'].includes(configModel.value.p115_shared_resource_mode)) configModel.value.p115_shared_resource_mode = 'permanent';
       if (!configModel.value.p115_shared_cache_retention_days || Number(configModel.value.p115_shared_cache_retention_days) < 1) configModel.value.p115_shared_cache_retention_days = 7;

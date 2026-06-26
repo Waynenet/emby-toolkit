@@ -5,7 +5,8 @@ import requests
 import re
 import os
 import json
-from flask import Flask, request, Response, redirect, send_file
+import threading
+from flask import Flask, request, Response, redirect, send_file, session
 from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timedelta
 import time
@@ -24,8 +25,11 @@ from handler.p115_copy_play import (
     discard_copy_play_clone,
     is_copy_play_missing_error,
     prepare_copy_play_pick_code,
+    record_source_play,
     recycle_clone_after_direct_url,
+    should_use_copy_play_for_source,
 )
+from handler import p115_play_pool
 from utils import extract_pickcode_from_strm_url
 
 import extensions
@@ -33,6 +37,9 @@ import handler.emby as emby
 logger = logging.getLogger(__name__)
 
 MISSING_ID_PREFIX = "-800000_"
+_USER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
+_USER_CONTEXT_LOCK = threading.Lock()
+_USER_CONTEXT_CACHE = {}
 
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
@@ -57,6 +64,142 @@ def _get_real_emby_url_and_key():
     api_key = config_manager.APP_CONFIG.get("emby_api_key", "")
     if not base_url or not api_key: raise ValueError("Emby服务器地址或API Key未配置")
     return base_url, api_key
+
+
+def _extract_emby_token_from_request():
+    token = (
+        request.args.get('api_key')
+        or request.args.get('AccessToken')
+        or request.args.get('X-Emby-Token')
+        or request.args.get('X-MediaBrowser-Token')
+        or request.headers.get('X-Emby-Token')
+        or request.headers.get('X-MediaBrowser-Token')
+        or ''
+    )
+    if token:
+        return str(token).strip()
+    auth = request.headers.get('Authorization') or ''
+    match = re.search(r'(?:Token|token)="?([^",\s]+)', auth)
+    return match.group(1).strip() if match else ''
+
+
+def _request_context_keys(full_path="", play_session_id=""):
+    keys = []
+
+    def add(prefix, value):
+        value = str(value or "").strip()
+        if value:
+            keys.append(f"{prefix}:{value}")
+
+    token = _extract_emby_token_from_request()
+    add("token", token)
+    add("device", request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id'))
+    add("play_session", play_session_id or request.args.get('PlaySessionId'))
+    add("remote", request.remote_addr)
+    add("client", "|".join([
+        request.remote_addr or "",
+        request.headers.get('X-Emby-Client') or "",
+        request.headers.get('User-Agent') or "",
+    ]))
+
+    item_match = re.search(r'/(?:videos|items)/(\d+)/', full_path or '', re.IGNORECASE)
+    if item_match:
+        add("item_client", "|".join([
+            item_match.group(1),
+            request.headers.get('X-Emby-Client') or "",
+            request.headers.get('User-Agent') or "",
+        ]))
+
+    return list(dict.fromkeys(keys))
+
+
+def _cache_request_user_context(user_id, full_path="", play_session_id=""):
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return
+    expires_at = time.time() + _USER_CONTEXT_TTL_SECONDS
+    with _USER_CONTEXT_LOCK:
+        for key in _request_context_keys(full_path, play_session_id):
+            _USER_CONTEXT_CACHE[key] = (user_id, expires_at)
+        if len(_USER_CONTEXT_CACHE) > 2000:
+            now = time.time()
+            for key, (_, expire_at) in list(_USER_CONTEXT_CACHE.items()):
+                if expire_at < now:
+                    _USER_CONTEXT_CACHE.pop(key, None)
+
+
+def _lookup_cached_request_user(full_path="", play_session_id=""):
+    now = time.time()
+    with _USER_CONTEXT_LOCK:
+        for key in _request_context_keys(full_path, play_session_id):
+            cached = _USER_CONTEXT_CACHE.get(key)
+            if not cached:
+                continue
+            user_id, expires_at = cached
+            if expires_at < now:
+                _USER_CONTEXT_CACHE.pop(key, None)
+                continue
+            return user_id
+    return ""
+
+
+def _extract_user_id_from_request_path_or_args(full_path=""):
+    user_id = (
+        request.args.get('UserId')
+        or request.args.get('userId')
+        or request.args.get('user_id')
+        or ''
+    )
+    if user_id:
+        return str(user_id).strip()
+    user_id_match = re.search(r'/Users/([^/]+)/', full_path or '', re.IGNORECASE)
+    return user_id_match.group(1).strip() if user_id_match else ""
+
+
+def _resolve_request_user_id(base_url, api_key, full_path="", play_session_id=""):
+    user_id = _extract_user_id_from_request_path_or_args(full_path)
+    if user_id:
+        _cache_request_user_context(user_id, full_path, play_session_id)
+        return str(user_id).strip()
+
+    user_id = _lookup_cached_request_user(full_path, play_session_id)
+    if user_id:
+        return user_id
+
+    token = _extract_emby_token_from_request()
+    if token and token != api_key:
+        try:
+            resp = requests.get(
+                f"{base_url.rstrip('/')}/emby/Users/Me",
+                headers={"X-Emby-Token": token, "Accept": "application/json"},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                user_id = str((resp.json() or {}).get('Id') or '').strip()
+                if user_id:
+                    _cache_request_user_context(user_id, full_path, play_session_id)
+                    return user_id
+        except Exception as e:
+            logger.debug(f"  ➜ [小号播放] 通过请求 Token 解析用户失败: {e}")
+
+    if play_session_id:
+        try:
+            resp = requests.get(f"{base_url.rstrip('/')}/emby/Sessions", params={"api_key": api_key}, timeout=5)
+            if resp.status_code == 200:
+                for item in resp.json() or []:
+                    item_play_state = item.get('PlayState') or {}
+                    if str(item_play_state.get('PlaySessionId') or item.get('PlaySessionId') or '') == str(play_session_id):
+                        user_id = str(item.get('UserId') or (item.get('User') or {}).get('Id') or '').strip()
+                        if user_id:
+                            _cache_request_user_context(user_id, full_path, play_session_id)
+                            return user_id
+        except Exception as e:
+            logger.debug(f"  ➜ [小号播放] 通过 Emby Sessions 解析用户失败: {e}")
+
+    user_id = str(session.get('emby_user_id') or '').strip()
+    if user_id:
+        _cache_request_user_context(user_id, full_path, play_session_id)
+    return user_id
 
 def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
     """
@@ -889,6 +1032,9 @@ def proxy_all(path):
     # --- 3. HTTP 代理逻辑 ---
     try:
         full_path = f'/{path}'
+        observed_user_id = _extract_user_id_from_request_path_or_args(full_path)
+        if observed_user_id:
+            _cache_request_user_context(observed_user_id, full_path, request.args.get('PlaySessionId', ''))
         # ===== 调试日志：打印所有请求路径 =====
         # logger.info(f"[PROXY] 请求路径: {full_path}")
         
@@ -930,12 +1076,13 @@ def proxy_all(path):
             display_name = "未知文件" # ★ 新增：用于记录人看的文件名
             source_paths = []
             base_url, api_key = _get_real_emby_url_and_key()
+            current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
 
             try:
                 playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
                 params = {
                     'api_key': api_key,
-                    'UserId': request.args.get('UserId', ''),
+                    'UserId': current_user_id,
                     'MaxStreamingBitrate': 140000000,
                     'PlaySessionId': play_session_id,
                 }
@@ -973,6 +1120,38 @@ def proxy_all(path):
             # ====================================================================
             if pick_code:
                 player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
+                play_client_key = "|".join([
+                    request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.remote_addr or "",
+                    request.headers.get('X-Emby-Client') or "",
+                    request.headers.get('User-Agent') or "",
+                ])
+
+                if p115_play_pool.has_usable_pool_for_user(current_user_id):
+                    try:
+                        play_result = p115_play_pool.prepare_play_pool_pick_code(
+                            pick_code,
+                            file_name=display_name,
+                            item_id=item_id,
+                            play_session_id=play_session_id,
+                            user_id=current_user_id,
+                            source='reverse_proxy',
+                            client_key=play_client_key,
+                            user_agent=player_ua,
+                        )
+                        real_115_url = p115_play_pool.get_direct_url(play_result, user_agent=player_ua)
+                        if real_115_url:
+                            p115_play_pool.recycle_session_after_direct_url(play_result, "起播后清理")
+                            response = redirect(real_115_url, code=302)
+                            response.headers['Access-Control-Allow-Origin'] = '*'
+                            return response
+                        logger.warning("  ⚠️ [小号播放] 小号池未拿到直链，已按小号池优先规则中止本次播放。")
+                        return Response("Play pool failed.", status=503)
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ [小号播放] 小号池播放失败，已按小号池优先规则中止本次播放: {e}")
+                        return Response(f"Play pool failed: {e}", status=503)
+                elif p115_play_pool.has_usable_pool():
+                    logger.debug("  ➜ [小号播放] 当前用户无可用小号，回退复制播放：user_id=%s", current_user_id or "-")
+
                 client = P115Service.get_client()
                 if not client:
                     return "115 Client not initialized", 500
@@ -981,18 +1160,17 @@ def proxy_all(path):
                     "file_name": display_name,
                     "item_id": item_id,
                     "play_session_id": play_session_id,
-                    "user_id": request.args.get('UserId', ''),
+                    "user_id": current_user_id,
                     "source": 'reverse_proxy',
-                    "client_key": "|".join([
-                        request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.remote_addr or "",
-                        request.headers.get('X-Emby-Client') or "",
-                        request.headers.get('User-Agent') or "",
-                    ]),
+                    "client_key": play_client_key,
                     "client_name": request.headers.get('X-Emby-Client') or request.headers.get('User-Agent') or "",
                 }
-                play_pick_code = prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
-                if not play_pick_code:
-                    return Response("Copy play failed.", status=503)
+                use_copy_play = should_use_copy_play_for_source(pick_code, **copy_play_kwargs)
+                play_pick_code = pick_code
+                if use_copy_play:
+                    play_pick_code = prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
+                    if not play_pick_code:
+                        return Response("Copy play failed.", status=503)
 
                 max_retries = 10 
                 retry_count = 0
@@ -1010,13 +1188,16 @@ def proxy_all(path):
                             real_115_url = client.download_url(play_pick_code, user_agent=player_ua)
                             
                         if real_115_url:
-                            recycle_clone_after_direct_url(play_pick_code, "起播后清理")
+                            if str(play_pick_code) != str(pick_code):
+                                recycle_clone_after_direct_url(play_pick_code, "起播后清理")
+                            else:
+                                record_source_play(pick_code, **copy_play_kwargs)
                             break 
                         else:
                             logger.warning(f"  ⚠️ [获取直链] {'OpenAPI' if use_openapi else 'Cookie'} 未拿到直链，切换接口重试 ({retry_count+1}/{max_retries})...")
                     except Exception as e:
                         err_str = str(e)
-                        if str(play_pick_code) != str(pick_code) and is_copy_play_missing_error(e):
+                        if use_copy_play and str(play_pick_code) != str(pick_code) and is_copy_play_missing_error(e):
                             discard_copy_play_clone(play_pick_code)
                             if rebuilt_copy_play:
                                 return Response("Copy play clone expired.", status=503)

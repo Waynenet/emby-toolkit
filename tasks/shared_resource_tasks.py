@@ -492,6 +492,12 @@ def _lookup_preid_from_p115_cache(file_info: Dict[str, Any]) -> str:
     preid = _norm_preid(file_info.get('preid') or meta.get('preid') or meta.get('pre_sha1') or meta.get('pre_sha1_128k'))
     if preid:
         return preid
+    raw = file_info.get('raw_ffprobe_json') if isinstance(file_info.get('raw_ffprobe_json'), dict) else file_info.get('raw')
+    etk = raw.get('_etk') if isinstance(raw, dict) and isinstance(raw.get('_etk'), dict) else {}
+    preid = _norm_preid(etk.get('preid') or etk.get('pre_sha1') or etk.get('pre_sha1_128k'))
+    if preid:
+        _save_preid_to_p115_cache(file_info, preid)
+        return preid
     sha1 = _norm_sha1(file_info.get('sha1'))
     fid = str(file_info.get('fid') or file_info.get('file_id') or '').strip()
     pc = str(file_info.get('pick_code') or file_info.get('pc') or meta.get('pick_code') or meta.get('pc') or '').strip()
@@ -2050,13 +2056,13 @@ def _direct_center_share_sync_heartbeat(payload: Dict[str, Any]) -> Dict[str, An
                 kwargs['proxies'] = proxies
         except Exception:
             pass
-    resp = requests.post(f'{base_url}/api/v1/devices/share-sync/heartbeat', headers=headers, json=payload, **kwargs)
-    try:
-        data = resp.json()
-    except Exception:
-        data = {'raw_text': resp.text[:1000]}
-    if resp.status_code >= 400:
-        raise RuntimeError(f'中心分享同步签到接口 HTTP {resp.status_code}: {data}')
+    with requests.post(f'{base_url}/api/v1/devices/share-sync/heartbeat', headers=headers, json=payload, **kwargs) as resp:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {'raw_text': resp.text[:1000]}
+        if resp.status_code >= 400:
+            raise RuntimeError(f'中心分享同步签到接口 HTTP {resp.status_code}: {data}')
     return data if isinstance(data, dict) else {'data': data}
 
 
@@ -2774,13 +2780,13 @@ def _direct_center_transfer_lease(payload: Dict[str, Any]) -> Dict[str, Any]:
         proxies = getter()
         if proxies:
             kwargs['proxies'] = proxies
-    resp = requests.post(f'{base_url}/api/v1/transfers/lease', headers=headers, json=payload, **kwargs)
-    try:
-        data = resp.json()
-    except Exception:
-        data = {'raw_text': resp.text[:1000]}
-    if resp.status_code >= 400:
-        raise RuntimeError(f'中心秒传许可接口 HTTP {resp.status_code}: {data}')
+    with requests.post(f'{base_url}/api/v1/transfers/lease', headers=headers, json=payload, **kwargs) as resp:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {'raw_text': resp.text[:1000]}
+        if resp.status_code >= 400:
+            raise RuntimeError(f'中心秒传许可接口 HTTP {resp.status_code}: {data}')
     return data if isinstance(data, dict) else {'data': data}
 
 
@@ -3151,6 +3157,9 @@ def _raw_for_file(file_info: Dict[str, Any]) -> Dict[str, Any]:
     etk = raw.get('_etk') if isinstance(raw.get('_etk'), dict) else {}
     etk = dict(etk or {})
     etk.setdefault('sha1', sha1)
+    preid = _norm_preid(file_info.get('preid') or etk.get('preid'))
+    if preid:
+        etk['preid'] = preid
     if file_info.get('tmdb_id'):
         etk.setdefault('tmdb_id', str(file_info.get('tmdb_id')))
     if file_info.get('item_type') in ('Movie', 'Episode', 'Season'):
@@ -7242,15 +7251,15 @@ def _fetch_center_missing_display_meta_rows(limit: int = 500) -> Dict[str, Any]:
     if not base_url or not headers.get('X-Server-ID-Hash'):
         return {'ok': False, 'items': [], 'message': '共享中心 URL 或 Emby ServerID 未配置'}
     try:
-        resp = requests.get(
+        with requests.get(
             f"{base_url}/api/v1/metadata/display/missing",
             headers=headers,
             params={'limit': max(1, min(int(limit or 500), 5000))},
             **_center_request_kwargs_for_display_meta(timeout=60),
-        )
-        if resp.status_code >= 400:
-            return {'ok': False, 'items': [], 'message': f"HTTP {resp.status_code}: {resp.text[:300]}"}
-        data = resp.json() if resp.content else {}
+        ) as resp:
+            if resp.status_code >= 400:
+                return {'ok': False, 'items': [], 'message': f"HTTP {resp.status_code}: {resp.text[:300]}"}
+            data = resp.json() if resp.content else {}
         items = [x for x in (data.get('items') or []) if isinstance(x, dict)]
         return {'ok': True, 'items': items, 'count': len(items), 'raw': data}
     except Exception as e:
@@ -7461,16 +7470,16 @@ def _post_center_display_meta_backfill(bundles: List[Dict[str, Any]], *, batch_s
         if not batch:
             continue
         try:
-            resp = requests.post(
+            with requests.post(
                 url,
                 headers=headers,
                 json={'items': batch, 'skip_logical_share_dispatch': True},
                 **_center_request_kwargs_for_display_meta(timeout=90),
-            )
-            posted_batches += 1
-            if resp.status_code >= 400:
-                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-            data = resp.json() if resp.content else {}
+            ) as resp:
+                posted_batches += 1
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+                data = resp.json() if resp.content else {}
             accepted_meta_items += _safe_int(data.get('accepted_meta_items'), 0)
             accepted_bundles += _safe_int(data.get('accepted_bundles'), 0)
             if data.get('errors'):

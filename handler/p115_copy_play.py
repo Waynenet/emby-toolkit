@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -13,8 +14,13 @@ from handler.p115_service import P115CacheManager, P115Service
 logger = logging.getLogger(__name__)
 
 COPY_PLAY_CLONES_KEY = "p115_copy_play_clones"
+COPY_PLAY_ACTIVE_SOURCES_KEY = "p115_copy_play_active_sources"
 COPY_PLAY_TTL_SECONDS = 12 * 60 * 60
+COPY_PLAY_TEMP_DIR_NAME = "ETK复制播放"
 MEDIA_EXTENSIONS = ("mkv", "mp4", "avi", "mov", "ts", "m2ts", "wmv", "flv", "webm", "iso")
+_PREPARE_LOCKS = {}
+_PREPARE_LOCKS_GUARD = threading.Lock()
+_ACTIVE_SOURCES_LOCK = threading.Lock()
 
 
 def is_copy_play_enabled():
@@ -22,10 +28,69 @@ def is_copy_play_enabled():
     return bool(cfg.get(constants.CONFIG_OPTION_115_COPY_PLAY_ENABLED))
 
 
-def _copy_play_temp_cid():
-    cfg = config_manager.APP_CONFIG or {}
-    cid = str(cfg.get(constants.CONFIG_OPTION_115_COPY_PLAY_TEMP_CID) or "").strip()
-    return cid if cid and cid != "0" else ""
+def _item_id(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("fid") or item.get("file_id") or item.get("id") or item.get("cid") or "").strip()
+
+
+def _item_name(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("name") or item.get("file_name") or item.get("fn") or item.get("n") or "").strip()
+
+
+def _item_pick_code(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("pick_code") or item.get("pc") or item.get("pickcode") or "").strip()
+
+
+def _item_is_dir(item):
+    if not isinstance(item, dict):
+        return False
+    item_type = item.get("fc")
+    if item_type is None:
+        item_type = item.get("file_category")
+    if item_type is not None:
+        return str(item_type) == "0"
+    icon = str(item.get("ico") or item.get("icon") or "").lower()
+    return icon in ("folder", "dir", "directory") or str(item.get("is_dir")).lower() in ("1", "true")
+
+
+def _list_child_folders(client, parent_cid):
+    resp = client.fs_files({"cid": str(parent_cid), "limit": 1000, "offset": 0})
+    if not isinstance(resp, dict) or not resp.get("state"):
+        raise RuntimeError((resp or {}).get("error_msg") or (resp or {}).get("message") or "读取复制播放目录失败")
+    folders = []
+    for item in resp.get("data") or []:
+        if _item_is_dir(item):
+            cid = _item_id(item)
+            name = _item_name(item)
+            if cid and name:
+                folders.append({"cid": cid, "name": name})
+    return folders
+
+
+def _ensure_copy_play_temp_dir(client):
+    for folder in _list_child_folders(client, "0"):
+        if folder["name"] == COPY_PLAY_TEMP_DIR_NAME:
+            return folder["cid"]
+
+    resp = client.fs_mkdir(COPY_PLAY_TEMP_DIR_NAME, "0")
+    if not isinstance(resp, dict) or not resp.get("state"):
+        raise RuntimeError((resp or {}).get("error_msg") or (resp or {}).get("message") or "创建复制播放目录失败")
+
+    cid = str(resp.get("cid") or "").strip()
+    if not cid and isinstance(resp.get("data"), dict):
+        cid = _item_id(resp["data"])
+    if cid:
+        return cid
+
+    for folder in _list_child_folders(client, "0"):
+        if folder["name"] == COPY_PLAY_TEMP_DIR_NAME:
+            return folder["cid"]
+    raise RuntimeError("复制播放目录已创建但未能确认 CID")
 
 
 def _safe_json(value, limit=800):
@@ -34,6 +99,20 @@ def _safe_json(value, limit=800):
     except Exception:
         text = str(value)
     return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _item_brief(item):
+    if not isinstance(item, dict):
+        return {"type": type(item).__name__}
+    keys = (
+        "fid", "file_id", "id", "cid", "pid", "parent_id",
+        "name", "file_name", "fn", "n",
+        "pick_code", "pc", "pickcode",
+        "sha1", "sha", "size", "fs", "file_size",
+        "fc", "file_category", "ico", "is_dir",
+        "status", "errno", "code", "message", "error_msg",
+    )
+    return {key: item.get(key) for key in keys if key in item and item.get(key) not in (None, "", [], {})}
 
 
 def _json_text(value):
@@ -85,6 +164,34 @@ def _load_clones():
 
 def _save_clones(clones):
     settings_db.save_setting(COPY_PLAY_CLONES_KEY, clones[-300:])
+
+
+def _load_active_sources():
+    data = settings_db.get_setting(COPY_PLAY_ACTIVE_SOURCES_KEY) or []
+    return data if isinstance(data, list) else []
+
+
+def _save_active_sources(records):
+    settings_db.save_setting(COPY_PLAY_ACTIVE_SOURCES_KEY, records[-500:])
+
+
+def _active_source_key(record):
+    return "|".join([
+        str(record.get("source_pick_code") or "").strip(),
+        str(record.get("item_id") or "").strip(),
+        str(record.get("play_session_id") or "").strip(),
+        str(record.get("user_id") or "").strip(),
+        str(record.get("client_key") or "").strip(),
+    ])
+
+
+def _active_sources_without_expired(records=None):
+    now = _now_ts()
+    records = _load_active_sources() if records is None else records
+    return [
+        record for record in records
+        if now - float(record.get("updated_at") or record.get("created_at") or 0) <= COPY_PLAY_TTL_SECONDS
+    ]
 
 
 def _extract_ids_from_copy_response(resp):
@@ -158,9 +265,9 @@ def _duplicate_name_index(actual_name, expected_name):
 def _item_to_clone(item, fallback_parent_id="", fallback_name=""):
     if not isinstance(item, dict):
         return {}
-    fid = str(item.get("fid") or item.get("file_id") or item.get("id") or "").strip()
-    pc = str(item.get("pick_code") or item.get("pc") or item.get("pickcode") or "").strip()
-    name = str(item.get("name") or item.get("file_name") or item.get("fn") or fallback_name or "").strip()
+    fid = _item_id(item)
+    pc = _item_pick_code(item)
+    name = _item_name(item) or str(fallback_name or "").strip()
     parent_id = str(item.get("parent_id") or item.get("pid") or item.get("cid") or fallback_parent_id or "").strip()
     if not fid or not pc:
         return {}
@@ -174,18 +281,121 @@ def _item_to_clone(item, fallback_parent_id="", fallback_name=""):
     }
 
 
+def _source_sha1(source_row):
+    return str(source_row.get("sha1") or source_row.get("sha") or "").strip().upper()
+
+
+def _item_sha1(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("sha1") or item.get("sha") or item.get("file_sha1") or "").strip().upper()
+
+
+
+
+def _probe_clone_direct_url(client, pick_code):
+    pc = str(pick_code or "").strip()
+    if not pc:
+        return {"ok": False, "reason": "missing_pick_code"}
+    user_agent = "Mozilla/5.0"
+    attempts = []
+    for method_name in ("download_url", "openapi_downurl"):
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            url = method(pc, user_agent=user_agent)
+            ok = bool(url)
+            attempts.append({"method": method_name, "ok": ok})
+            if ok:
+                return {"ok": True, "method": method_name}
+        except Exception as e:
+            attempts.append({"method": method_name, "ok": False, "error": str(e)[:200]})
+    return {"ok": False, "attempts": attempts}
+
+
+def _diagnose_copy_clone_failure(client, temp_cid, source_row, file_name, *, backend="", copy_resp=None, response_fids=None):
+    expected_name = str(source_row.get("name") or file_name or "").strip()
+    expected_size = _norm_size(source_row.get("size"))
+    response_fids = response_fids or []
+    try:
+        items = _list_temp_candidates(client, temp_cid, source_row, file_name)
+    except Exception as e:
+        logger.warning("  ➜ [复制播放诊断] 临时目录回查异常：%s", e)
+        return
+
+    matched = []
+    for item in items:
+        if _item_is_dir(item):
+            continue
+        item_name = _item_name(item)
+        item_size = _norm_size(item.get("size") or item.get("fs"))
+        duplicate_index = _duplicate_name_index(item_name, expected_name)
+        if duplicate_index < 0:
+            continue
+        if expected_size and item_size and item_size != expected_size:
+            continue
+        matched.append((duplicate_index, item))
+    matched.sort(key=lambda pair: pair[0], reverse=True)
+
+    logger.warning(
+        "  ➜ [复制播放诊断] %s 复制成功但未拿到可播放克隆 PC：源FID=%s，源PC=%s，SHA1=%s，size=%s，目录候选=%s，同名匹配=%s，复制返回FID=%s",
+        backend or "-",
+        source_row.get("id") or "-",
+        (str(source_row.get("pick_code") or "")[:8] + "...") if source_row.get("pick_code") else "-",
+        (str(source_row.get("sha1") or "")[:12] + "...") if source_row.get("sha1") else "-",
+        source_row.get("size") or "-",
+        len(items),
+        len(matched),
+        response_fids[:8],
+    )
+    logger.debug("  ➜ [复制播放诊断] 复制接口摘要：%s", _safe_json(copy_resp, limit=1200))
+    if not matched:
+        candidate_briefs = []
+        for item in items[:10]:
+            if _item_is_dir(item):
+                continue
+            candidate_briefs.append(_item_brief(item))
+        logger.warning(
+            "  ➜ [复制播放诊断] 未匹配到同名克隆：期望文件=%s，期望大小=%s，目录文件=%s",
+            expected_name or "-",
+            expected_size or "-",
+            _safe_json(candidate_briefs, limit=1500),
+        )
+
+    for index, item in matched[:5]:
+        fid = _item_id(item)
+        pc = _item_pick_code(item)
+        detail = {}
+        detail_resp = None
+        if fid and hasattr(client, "fs_get_info"):
+            try:
+                detail_resp = client.fs_get_info(fid)
+                detail = detail_resp.get("data") if isinstance(detail_resp, dict) else {}
+            except Exception as e:
+                detail_resp = {"state": False, "error_msg": str(e)}
+        detail_pc = _item_pick_code(detail)
+        probe_pc = detail_pc or pc
+        probe = _probe_clone_direct_url(client, probe_pc) if probe_pc else {"ok": False, "reason": "detail_missing_pick_code"}
+        logger.warning(
+            "  ➜ [复制播放诊断] 匹配克隆：序号=%s，列表=%s，详情=%s，直链探测=%s",
+            index,
+            _safe_json(_item_brief(item), limit=500),
+            _safe_json(_item_brief(detail) if detail else detail_resp, limit=700),
+            _safe_json(probe, limit=500),
+        )
+
+
 def _list_temp_candidates(client, temp_cid, source_row, file_name):
-    expected_name = str(file_name or source_row.get("name") or "").strip()
+    expected_name = str(source_row.get("name") or file_name or "").strip()
     payload = {
         "cid": temp_cid,
-        "limit": 100,
+        "limit": 1000,
         "offset": 0,
         "show_dir": 0,
         "record_open_time": 0,
         "count_folders": 0,
     }
-    if expected_name:
-        payload["search_value"] = expected_name
 
     resp = client.fs_files(payload)
     items = resp.get("data") if isinstance(resp, dict) else []
@@ -197,34 +407,61 @@ def _list_temp_candidates(client, temp_cid, source_row, file_name):
     if logger.isEnabledFor(logging.DEBUG):
         names = []
         for item in (items or [])[:8]:
-            names.append(str(item.get("name") or item.get("file_name") or item.get("fn") or item.get("n") or ""))
+            names.append(_item_name(item))
         logger.debug("  ➜ [复制播放] 临时目录回查摘要：候选文件=%s", names)
     return items if isinstance(items, list) else []
 
 
 def _find_clone_in_temp_dir(client, temp_cid, source_row, file_name):
-    expected_name = str(file_name or source_row.get("name") or "").strip()
+    expected_name = str(source_row.get("name") or file_name or "").strip()
     expected_size = _norm_size(source_row.get("size"))
+    expected_sha1 = _source_sha1(source_row)
     items = _list_temp_candidates(client, temp_cid, source_row, file_name)
     best_item = {}
     best_index = -1
 
     for item in items:
-        item_name = str(item.get("name") or item.get("file_name") or item.get("fn") or "").strip()
+        if _item_is_dir(item):
+            continue
+        item_name = _item_name(item)
         item_size = _norm_size(item.get("size") or item.get("fs"))
-        fid = str(item.get("fid") or item.get("file_id") or item.get("id") or "").strip()
+        item_sha1 = _item_sha1(item)
+        fid = _item_id(item)
         duplicate_index = _duplicate_name_index(item_name, expected_name)
         if duplicate_index < 0:
+            continue
+        if expected_sha1 and item_sha1 and item_sha1 == expected_sha1:
+            if fid and duplicate_index >= best_index:
+                best_item = item
+                best_index = duplicate_index
             continue
         if expected_size and item_size and item_size != expected_size:
             continue
         if fid and duplicate_index >= best_index:
             best_item = item
             best_index = duplicate_index
+    if not best_item and expected_size:
+        same_size_items = []
+        for item in items:
+            if _item_is_dir(item):
+                continue
+            item_size = _norm_size(item.get("size") or item.get("fs"))
+            fid = _item_id(item)
+            if fid and item_size == expected_size:
+                same_size_items.append(item)
+        if len(same_size_items) == 1:
+            best_item = same_size_items[0]
+            best_index = 0
+            logger.warning(
+                "  ➜ [复制播放] 临时目录按大小兜底命中克隆体：期望文件=%s，实际文件=%s，size=%s",
+                expected_name or "-",
+                _item_name(best_item) or "-",
+                expected_size,
+            )
     if best_item:
         logger.debug(
             "  ➜ [复制播放] 临时目录命中克隆体：文件=%s，重复序号=%s",
-            best_item.get("name") or best_item.get("file_name") or best_item.get("fn") or "-",
+            _item_name(best_item) or "-",
             best_index,
         )
     return best_item
@@ -317,6 +554,98 @@ def _client_key_device_id(client_key):
     return str(client_key or "").split("|", 1)[0].strip()
 
 
+def _is_same_viewer(record, *, play_session_id="", user_id="", client_key=""):
+    record_session = str(record.get("play_session_id") or "").strip()
+    record_user_id = str(record.get("user_id") or "").strip()
+    record_client_key = str(record.get("client_key") or "").strip()
+    request_device_id = _client_key_device_id(client_key)
+    record_device_id = _client_key_device_id(record_client_key)
+
+    if play_session_id and record_session == str(play_session_id):
+        return True
+    if user_id and record_user_id and record_user_id == str(user_id):
+        return True
+    if client_key and record_client_key == str(client_key):
+        return True
+    return bool(request_device_id and record_device_id and request_device_id == record_device_id)
+
+
+def _matches_playback_stop(record, *, play_session_id="", item_id="", user_id="", client_key=""):
+    match_session = play_session_id and play_session_id == str(record.get("play_session_id") or "")
+    match_item = item_id and item_id == str(record.get("item_id") or "")
+    record_client_key = str(record.get("client_key") or "")
+    device_id = _client_key_device_id(client_key)
+    match_client = bool(
+        (client_key and client_key == record_client_key)
+        or (device_id and _client_key_device_id(record_client_key) == device_id)
+    )
+    record_user_id = str(record.get("user_id") or "")
+    match_user = not user_id or not record_user_id or user_id == record_user_id
+    return bool(match_session or (match_item and match_client and match_user))
+
+
+def should_use_copy_play_for_source(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", client_name=""):
+    pc = str(source_pick_code or "").strip()
+    if not pc or not is_copy_play_enabled():
+        return False
+
+    with _ACTIVE_SOURCES_LOCK:
+        records = _load_active_sources()
+        active_records = _active_sources_without_expired(records)
+        if len(active_records) != len(records):
+            _save_active_sources(active_records)
+
+        for record in active_records:
+            if str(record.get("source_pick_code") or "").strip() != pc:
+                continue
+            if _is_same_viewer(record, play_session_id=play_session_id, user_id=user_id, client_key=client_key):
+                continue
+            logger.debug(
+                "  ➜ [复制播放] 检测到同源并发播放，启用复制播放：%s",
+                file_name or pc[:8] + "...",
+            )
+            return True
+    return False
+
+
+def record_source_play(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", client_name=""):
+    pc = str(source_pick_code or "").strip()
+    if not pc or not is_copy_play_enabled():
+        return False
+
+    now = _now_ts()
+    record = {
+        "source_pick_code": pc,
+        "file_name": str(file_name or ""),
+        "item_id": str(item_id or ""),
+        "play_session_id": str(play_session_id or ""),
+        "user_id": str(user_id or ""),
+        "client_key": str(client_key or ""),
+        "source": source,
+        "created_at": now,
+        "updated_at": now,
+        "created_at_text": datetime.now(timezone.utc).isoformat(),
+    }
+    record_key = _active_source_key(record)
+
+    with _ACTIVE_SOURCES_LOCK:
+        records = _active_sources_without_expired()
+        kept = []
+        replaced = False
+        for existing in records:
+            if _active_source_key(existing) == record_key:
+                record["created_at"] = float(existing.get("created_at") or now)
+                record["created_at_text"] = existing.get("created_at_text") or record["created_at_text"]
+                kept.append(record)
+                replaced = True
+            else:
+                kept.append(existing)
+        if not replaced:
+            kept.append(record)
+        _save_active_sources(kept)
+    return True
+
+
 def _friendly_client_name(value):
     text = str(value or "").strip()
     if not text:
@@ -337,6 +666,28 @@ def _friendly_client_name(value):
         if marker in lower:
             return label
     return text.split("/", 1)[0].strip()[:40]
+
+
+def _prepare_lock_key(source_pick_code, item_id="", play_session_id="", user_id="", client_key=""):
+    source_pick_code = str(source_pick_code or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    if play_session_id:
+        return f"{source_pick_code}|ps:{play_session_id}"
+    return "|".join([
+        source_pick_code,
+        str(item_id or "").strip(),
+        str(user_id or "").strip(),
+        str(client_key or "").strip(),
+    ])
+
+
+def _get_prepare_lock(key):
+    with _PREPARE_LOCKS_GUARD:
+        lock = _PREPARE_LOCKS.get(key)
+        if not lock:
+            lock = threading.Lock()
+            _PREPARE_LOCKS[key] = lock
+        return lock
 
 
 def _lookup_emby_item_id_by_pick_code(pick_code):
@@ -448,17 +799,35 @@ def cleanup_expired_clones(client=None):
 
 
 def prepare_copy_play_pick_code(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", client_name="", force_new=False):
+    lock_key = _prepare_lock_key(source_pick_code, item_id, play_session_id, user_id, client_key)
+    lock = _get_prepare_lock(lock_key)
+    with lock:
+        return _prepare_copy_play_pick_code_locked(
+            source_pick_code,
+            file_name=file_name,
+            item_id=item_id,
+            play_session_id=play_session_id,
+            user_id=user_id,
+            source=source,
+            client_key=client_key,
+            client_name=client_name,
+            force_new=force_new,
+        )
+
+
+def _prepare_copy_play_pick_code_locked(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", client_name="", force_new=False):
     if not is_copy_play_enabled():
         return source_pick_code
-
-    temp_cid = _copy_play_temp_cid()
-    if not temp_cid:
-        logger.warning("  ➜ [复制播放] 已开启但未配置临时目录，终止本次点播。")
-        return ""
 
     client = P115Service.get_client()
     if not client:
         logger.warning("  ➜ [复制播放] 115 客户端未初始化，终止本次点播。")
+        return ""
+
+    try:
+        temp_cid = _ensure_copy_play_temp_dir(client)
+    except Exception as e:
+        logger.warning("  ➜ [复制播放] 无法确认复制播放目录，终止本次点播：%s", e)
         return ""
 
     try:
@@ -547,6 +916,15 @@ def prepare_copy_play_pick_code(source_pick_code, *, file_name="", item_id="", p
         if clone:
             break
         last_copy_error = f"{backend} 已复制但未拿到克隆 PC"
+        _diagnose_copy_clone_failure(
+            client,
+            temp_cid,
+            source_row,
+            display_name,
+            backend=backend,
+            copy_resp=copy_resp,
+            response_fids=response_fids,
+        )
         logger.warning("  ➜ [复制播放] %s 已确认复制成功，但临时目录仍未刷出克隆体，终止本次点播，避免重复复制。", backend)
         break
 
@@ -588,13 +966,34 @@ def cleanup_for_playback_stop(data):
     user_id = str(user.get("Id") or "").strip()
     client_key = _client_key_from_webhook(data)
 
+    removed_active = 0
+    with _ACTIVE_SOURCES_LOCK:
+        previous_active_records = _load_active_sources()
+        active_records = _active_sources_without_expired(previous_active_records)
+        kept_active = []
+        for record in active_records:
+            if _matches_playback_stop(
+                record,
+                play_session_id=play_session_id,
+                item_id=item_id,
+                user_id=user_id,
+                client_key=client_key,
+            ):
+                removed_active += 1
+                continue
+            kept_active.append(record)
+        if removed_active or len(kept_active) != len(previous_active_records):
+            _save_active_sources(kept_active)
+        if removed_active:
+            logger.debug("  ➜ [复制播放] 停止播放清理源文件活跃记录：%s", removed_active)
+
     clones = _load_clones()
     if not clones:
-        return 0
+        return removed_active
     client = P115Service.get_client()
     if not client:
         logger.warning("  ➜ [复制播放] 停止播放后清理失败：115 客户端未初始化。")
-        return 0
+        return removed_active
     try:
         cleanup_expired_clones(client)
     except Exception as e:
@@ -603,17 +1002,13 @@ def cleanup_for_playback_stop(data):
     kept = []
     removed = 0
     for clone in clones:
-        match_session = play_session_id and play_session_id == str(clone.get("play_session_id") or "")
-        match_item = item_id and item_id == str(clone.get("item_id") or "")
-        clone_client_key = str(clone.get("client_key") or "")
-        device_id = _client_key_device_id(client_key)
-        match_client = bool(
-            (client_key and client_key == clone_client_key)
-            or (device_id and _client_key_device_id(clone_client_key) == device_id)
-        )
-        clone_user_id = str(clone.get("user_id") or "")
-        match_user = not user_id or not clone_user_id or user_id == clone_user_id
-        if match_session or (match_item and match_client and match_user):
+        if _matches_playback_stop(
+            clone,
+            play_session_id=play_session_id,
+            item_id=item_id,
+            user_id=user_id,
+            client_key=client_key,
+        ):
             if clone.get("recycled_after_direct_url"):
                 removed += 1
                 continue
@@ -624,4 +1019,4 @@ def cleanup_for_playback_stop(data):
     if removed:
         _save_clones(kept)
         logger.debug("  ➜ [复制播放] 停止播放清理完成：删除 %s 个临时克隆文件。", removed)
-    return removed
+    return removed_active + removed
