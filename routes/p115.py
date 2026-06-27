@@ -10,8 +10,8 @@ import time
 import random
 from urllib.parse import urlparse
 import requests
-from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app
-from extensions import admin_required
+from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app, session
+from extensions import admin_required, emby_login_required
 from database import settings_db
 from handler import moviepilot
 from handler.p115_service import P115Service, get_config, get_115_api_priority
@@ -25,6 +25,8 @@ from handler import p115_play_pool
 import constants
 import config_manager
 from functools import lru_cache, wraps
+from database import user_db
+from handler.telegram import send_telegram_message
 
 # 115扫码登录相关变量 (OAuth 2.0 + PKCE 模式)
 _qrcode_data = {
@@ -38,6 +40,51 @@ _qrcode_data = {
 }
 p115_bp = Blueprint('115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
+PLAY_POOL_USER_REWARD_KEY = 'p115_play_pool_user_cookie_rewards'
+
+
+def _load_play_pool_user_rewards():
+    rewards = settings_db.get_setting(PLAY_POOL_USER_REWARD_KEY) or {}
+    return rewards if isinstance(rewards, dict) else {}
+
+
+def _user_reward_entry(rewards, user_id):
+    value = rewards.get(str(user_id))
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return {'last_reward_date': value, 'total_days': 0.0}
+    return {'last_reward_date': '', 'total_days': 0.0}
+
+
+def _public_user_reward(entry):
+    total_days = float(entry.get('total_days') or 0)
+    return {
+        'total_days': round(total_days, 2),
+        'last_reward_days': float(entry.get('last_reward_days') or 0),
+        'last_reward_date': str(entry.get('last_reward_date') or ''),
+        'last_reward_mode': str(entry.get('last_reward_mode') or ''),
+    }
+
+
+def _resolve_play_request_user_id():
+    for key in ('UserId', 'userId', 'user_id'):
+        value = request.args.get(key)
+        if value:
+            return str(value).strip()
+    for key in ('X-Emby-User-Id', 'X-Emby-UserId', 'X-MediaBrowser-UserId'):
+        value = request.headers.get(key)
+        if value:
+            return str(value).strip()
+    return str(session.get('emby_user_id') or '').strip()
+
+
+def _play_request_client_key(user_id=""):
+    return "|".join([
+        request.args.get("DeviceId") or request.args.get("X-Emby-Device-Id") or request.headers.get("X-Emby-Device-Id") or request.args.get("PlaySessionId") or request.remote_addr or "",
+        user_id or "",
+        request.args.get("ItemId") or request.args.get("item_id") or "",
+    ])
 
 # --- 115扫码登录相关API (OAuth 2.0 + PKCE 模式) ---
 
@@ -347,7 +394,7 @@ def save_manual_cookie():
 
 
 @p115_bp.route('/play_pool/cookie_qrcode', methods=['GET'])
-@admin_required
+@emby_login_required
 def get_play_pool_cookie_qrcode():
     app_type = request.args.get('app', 'alipaymini')
     try:
@@ -380,7 +427,7 @@ def get_play_pool_cookie_qrcode():
 
 
 @p115_bp.route('/play_pool/cookie_qrcode/status', methods=['GET'])
-@admin_required
+@emby_login_required
 def check_play_pool_cookie_qrcode_status():
     request_uid = str(request.args.get('uid') or '').strip()
     with _play_pool_cookie_qrcode_lock:
@@ -1028,10 +1075,7 @@ def get_play_pool_config():
 @admin_required
 def save_play_pool_config():
     data = request.json or {}
-    if 'enabled' in data:
-        result = p115_play_pool.save_pool_enabled(bool(data.get('enabled')))
-    else:
-        result = p115_play_pool.get_public_config()
+    result = p115_play_pool.save_pool_settings(data)
     return jsonify({'success': True, 'data': result})
 
 
@@ -1045,10 +1089,110 @@ def add_play_pool_account():
     return jsonify({'success': True, 'data': item})
 
 
+@p115_bp.route('/play_pool/user-account', methods=['POST'])
+@emby_login_required
+def save_user_play_pool_account():
+    data = request.json or {}
+    emby_user_id = session.get('emby_user_id')
+    if not emby_user_id:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+    cookie = str(data.get('cookie') or '').strip()
+    existing = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
+    if not cookie and not existing.get('id'):
+        return jsonify({'success': False, 'message': 'Cookie 不能为空'}), 400
+    shared = bool(data.get('shared', False))
+    payload = {
+        'alias': str(data.get('alias') or session.get('emby_username') or '用户小号').strip() or '用户小号',
+        'app_type': str(data.get('app_type') or 'alipaymini').strip() or 'alipaymini',
+        'owner_type': 'user',
+        'owner_user_id': emby_user_id,
+        'shared': shared,
+        '_skip_auto_speedtest': True,
+    }
+    if cookie:
+        payload['cookie'] = cookie
+        payload['enabled'] = True
+    item = p115_play_pool.upsert_account(payload, account_id=existing.get('id') if existing else None)
+    speedtest_error = ''
+    speedtest_ok = False
+    config = p115_play_pool.get_public_config()
+    if cookie and config.get('auto_speedtest_enabled') is not False:
+        try:
+            result = p115_play_pool.speedtest_account(item['id'])
+            item['last_speed_bps'] = result.get('bps', 0)
+            speedtest_ok = True
+        except Exception as e:
+            speedtest_error = str(e)
+            p115_play_pool.upsert_account({'enabled': False, 'last_error': str(e)}, account_id=item['id'])
+    item = p115_play_pool._find_account_by_id(item['id']) or item
+    if speedtest_ok and item.get('enabled') and item.get('cookie'):
+        today = datetime.now().strftime('%Y-%m-%d')
+        rewards = _load_play_pool_user_rewards()
+        reward_entry = _user_reward_entry(rewards, emby_user_id)
+        if reward_entry.get('last_reward_date') != today:
+            reward_days = 0.8 if shared else 0.5
+            try:
+                user_db.extend_user_expiration_days(emby_user_id, reward_days)
+                reward_entry.update({
+                    'last_reward_date': today,
+                    'last_reward_days': reward_days,
+                    'last_reward_mode': 'shared' if shared else 'private',
+                    'total_days': round(float(reward_entry.get('total_days') or 0) + reward_days, 2),
+                })
+                rewards[str(emby_user_id)] = reward_entry
+                settings_db.save_setting(PLAY_POOL_USER_REWARD_KEY, rewards)
+                item['reward_days'] = reward_days
+            except Exception as e:
+                logger.error("  ➜ [小号播放] 用户 Cookie 奖励发放失败: user_id=%s, err=%s", emby_user_id, e, exc_info=True)
+    else:
+        chat_id = user_db.get_user_telegram_chat_id(emby_user_id)
+        if speedtest_error and chat_id:
+            try:
+                send_telegram_message(chat_id, f"你的 115 Cookie 未通过可用性检测，本日会员时长奖励未发放。\n原因：{speedtest_error or item.get('last_error') or 'Cookie 不可用'}")
+            except Exception as e:
+                logger.warning("  ➜ [小号播放] 发送用户 Cookie 失效通知失败: user_id=%s, err=%s", emby_user_id, e)
+    public_item = p115_play_pool.get_public_account(item.get('id')) or {}
+    if item.get('reward_days'):
+        public_item['reward_days'] = item.get('reward_days')
+    public_item['reward_summary'] = _public_user_reward(_user_reward_entry(_load_play_pool_user_rewards(), emby_user_id))
+    return jsonify({'success': True, 'data': public_item})
+
+
+@p115_bp.route('/play_pool/user-account', methods=['GET'])
+@emby_login_required
+def get_user_play_pool_account():
+    emby_user_id = session.get('emby_user_id')
+    item = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
+    item['reward_summary'] = _public_user_reward(_user_reward_entry(_load_play_pool_user_rewards(), emby_user_id))
+    return jsonify({'success': True, 'data': item})
+
+
+@p115_bp.route('/play_pool/user-account', methods=['DELETE'])
+@emby_login_required
+def delete_user_play_pool_account():
+    emby_user_id = session.get('emby_user_id')
+    item = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
+    if not item.get('id'):
+        return jsonify({'success': True, 'deleted': False})
+    ok = p115_play_pool.delete_account(item['id'])
+    return jsonify({'success': True, 'deleted': ok})
+
+
+@p115_bp.route('/play_pool/user-account/rewards', methods=['GET'])
+@emby_login_required
+def get_user_play_pool_rewards():
+    emby_user_id = session.get('emby_user_id')
+    rewards = _load_play_pool_user_rewards()
+    return jsonify({'success': True, 'data': _public_user_reward(_user_reward_entry(rewards, emby_user_id))})
+
+
 @p115_bp.route('/play_pool/accounts/<account_id>', methods=['PUT'])
 @admin_required
 def update_play_pool_account(account_id):
-    item = p115_play_pool.upsert_account(request.json or {}, account_id=account_id)
+    data = request.json or {}
+    if not str(data.get('cookie') or '').strip():
+        data['_skip_auto_speedtest'] = True
+    item = p115_play_pool.upsert_account(data, account_id=account_id)
     return jsonify({'success': True, 'data': item})
 
 
@@ -1525,19 +1669,49 @@ def play_115_video(pick_code, filename=None):
         if not client:
             return "115 Client not initialized", 500
 
+        current_user_id = _resolve_play_request_user_id()
         copy_play_kwargs = {
             "file_name": filename or "",
             "item_id": request.args.get("ItemId") or request.args.get("item_id") or "",
             "play_session_id": request.args.get("PlaySessionId") or "",
-            "user_id": request.args.get("UserId") or "",
+            "user_id": current_user_id,
             "source": "/api/p115/play",
-            "client_key": "|".join([
-                request.args.get("DeviceId") or request.args.get("X-Emby-Device-Id") or request.headers.get("X-Emby-Device-Id") or request.args.get("PlaySessionId") or request.remote_addr or "",
-                request.args.get("UserId") or "",
-                request.args.get("ItemId") or request.args.get("item_id") or "",
-            ]),
+            "client_key": _play_request_client_key(current_user_id),
             "client_name": request.headers.get("X-Emby-Client") or request.headers.get("User-Agent") or "",
         }
+        if p115_play_pool.has_usable_pool_for_user(current_user_id):
+            try:
+                play_result = p115_play_pool.prepare_play_pool_pick_code(
+                    pick_code,
+                    user_agent=request_ua,
+                    **{k: v for k, v in copy_play_kwargs.items() if k != "client_name"},
+                )
+                real_url = p115_play_pool.get_direct_url(play_result, user_agent=request_ua)
+                if not real_url:
+                    logger.warning("  ⚠️ [小号播放] 路由层未拿到小号直链，已按小号池优先规则中止本次播放。")
+                    return "Play pool failed", 503
+                p115_play_pool.recycle_session_after_direct_url(play_result, "起播后清理")
+                if is_emby_server:
+                    headers_to_115 = {
+                        "User-Agent": request_ua,
+                        "Accept": "*/*",
+                        "Connection": "keep-alive",
+                    }
+                    if 'Range' in request.headers:
+                        headers_to_115['Range'] = request.headers['Range']
+                    resp = requests.get(real_url, headers=headers_to_115, stream=True, timeout=10)
+                    excluded_headers = ['content-encoding', 'transfer-encoding', 'connection', 'host']
+                    response_headers = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_headers]
+                    return Response(stream_with_context(resp.iter_content(chunk_size=8192)), status=resp.status_code, headers=response_headers)
+                response = redirect(real_url, code=302)
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                return response
+            except Exception as e:
+                logger.warning(f"  ⚠️ [小号播放] 路由层小号池播放失败，已按小号池优先规则中止本次播放: {e}")
+                return f"Play pool failed: {e}", 503
+        elif p115_play_pool.has_usable_pool():
+            logger.debug("  ➜ [小号播放] 路由层当前用户无可用小号，回退复制播放：user_id=%s", current_user_id or "-")
+
         play_pick_code = prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
         if not play_pick_code:
             return "Copy play failed", 503

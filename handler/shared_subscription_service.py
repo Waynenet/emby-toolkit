@@ -52,9 +52,9 @@ def _kick_115_organize_detached(reason: str = '', delay: float = 3.0) -> Dict[st
         if delay and delay > 0:
             time.sleep(delay)
         try:
-            from tasks.p115 import task_scan_and_organize_115
-            logger.info(f"  ➜ [共享资源] 准备扫描待整理...")
-            task_scan_and_organize_115()
+            import task_manager
+            logger.info(f"  ➜ [共享资源] 准备触发待整理扫描...")
+            task_manager.trigger_115_organize_task(reason=reason or 'shared_resource')
         except Exception as e:
             logger.error(f"  ➜ [共享资源] 触发 115 待整理扫描失败: {e}", exc_info=True)
 
@@ -532,8 +532,27 @@ def _client_report_transfer(
 
 
 
+def _writable_queue_path_for_base(base: str) -> str:
+    base = str(base or '').strip()
+    if not base:
+        return ''
+    try:
+        base = os.path.abspath(os.path.expanduser(base))
+        os.makedirs(base, exist_ok=True)
+        probe = os.path.join(base, f'.{_PENDING_TRANSFER_REPORT_QUEUE_FILE}.write_test')
+        with open(probe, 'a', encoding='utf-8'):
+            pass
+        try:
+            os.remove(probe)
+        except Exception:
+            pass
+        return os.path.join(base, _PENDING_TRANSFER_REPORT_QUEUE_FILE)
+    except Exception:
+        return ''
+
+
 def _pending_transfer_report_queue_path() -> str:
-    """本地持久化队列路径。默认落在工作目录 data/ 下，不依赖额外建表。"""
+    """本地持久化队列路径。默认落到容器持久配置目录，避免 /app 只读或非运行用户不可写。"""
     configured = str(
         os.environ.get('ETK_SHARED_TRANSFER_REPORT_QUEUE')
         or _cfg('CONFIG_OPTION_115_SHARED_TRANSFER_REPORT_QUEUE', 'p115_shared_transfer_report_queue_path', '')
@@ -544,25 +563,26 @@ def _pending_transfer_report_queue_path() -> str:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         return path
 
+    for base in (
+        os.environ.get('APP_DATA_DIR'),
+        os.environ.get('CONFIG_DIR'),
+        os.environ.get('XDG_CONFIG_HOME'),
+        os.environ.get('HOME'),
+    ):
+        path = _writable_queue_path_for_base(base)
+        if path:
+            return path
+
     app_cfg = config_manager.APP_CONFIG if isinstance(config_manager.APP_CONFIG, dict) else {}
     for key in ('data_dir', 'DATA_DIR', 'config_dir', 'CONFIG_DIR', 'db_dir', 'DB_DIR'):
-        base = str(app_cfg.get(key) or '').strip()
-        if not base:
-            continue
-        try:
-            base = os.path.abspath(os.path.expanduser(base))
-            os.makedirs(base, exist_ok=True)
-            return os.path.join(base, _PENDING_TRANSFER_REPORT_QUEUE_FILE)
-        except Exception:
-            pass
+        path = _writable_queue_path_for_base(app_cfg.get(key))
+        if path:
+            return path
 
     for base in (os.path.join(os.getcwd(), 'data'), os.getcwd()):
-        try:
-            base = os.path.abspath(base)
-            os.makedirs(base, exist_ok=True)
-            return os.path.join(base, _PENDING_TRANSFER_REPORT_QUEUE_FILE)
-        except Exception:
-            pass
+        path = _writable_queue_path_for_base(base)
+        if path:
+            return path
     return os.path.join('/tmp', _PENDING_TRANSFER_REPORT_QUEUE_FILE)
 
 
@@ -702,8 +722,23 @@ def _client_report_transfer_with_retry_queue(
             share_channel_id=payload['share_channel_id'],
         ) or {}
     except Exception as e:
-        queued = _enqueue_pending_transfer_report(payload, error=str(e))
-        return {'ok': False, 'pending_report_queued': True, 'error': str(e), **queued}
+        report_error = str(e)
+        try:
+            queued = _enqueue_pending_transfer_report(payload, error=report_error)
+            return {'ok': False, 'pending_report_queued': True, 'error': report_error, **queued}
+        except Exception as queue_error:
+            logger.error(
+                f"  ➜ [共享资源] 转存结果上报失败，且本地补报队列写入失败："
+                f"{payload.get('source_kind')}:{payload.get('source_id')}，"
+                f"result={payload.get('result')}，report_err={report_error[:180]}，"
+                f"queue_err={str(queue_error)[:180]}"
+            )
+            return {
+                'ok': False,
+                'pending_report_queued': False,
+                'error': report_error,
+                'queue_error': str(queue_error),
+            }
 
 
 def _drain_pending_transfer_reports(client: SharedCenterClient = None, *, limit: int = None, force: bool = False) -> Dict[str, Any]:
@@ -2991,24 +3026,35 @@ def _locate_share_imported_item(p115, *, parent_cid: str, receive_title: str, ma
     """参考影巢逻辑：share_import 成功后按 receive_title 在待整理根目录定位真实 file_id。"""
     parent_cid = str(parent_cid or '').strip()
     receive_title = str(receive_title or '').strip()
-    if not parent_cid or not receive_title or not p115 or not hasattr(p115, 'fs_files'):
+    if not parent_cid or not p115 or not hasattr(p115, 'fs_files'):
         return {}
     for attempt in range(1, max(1, int(max_retries or 3)) + 1):
         wait_time = attempt * 2
         logger.debug(
             f"  ➜ [共享资源] 等待 {wait_time}s 后定位分享转存目录 "
-            f"({attempt}/{max_retries})：{receive_title}"
+            f"({attempt}/{max_retries})：{receive_title or parent_cid}"
         )
         time.sleep(wait_time)
         try:
-            resp = p115.fs_files({'cid': parent_cid, 'search_value': receive_title, 'limit': 10})
+            query = {'cid': parent_cid, 'limit': 100, 'record_open_time': 0, 'count_folders': 0}
+            if receive_title and '等' not in receive_title:
+                query['search_value'] = receive_title
+                query['limit'] = 10
+            resp = p115.fs_files(query)
             items = resp.get('data') if isinstance(resp, dict) else []
             if not isinstance(items, list):
                 items = []
             for item in items:
-                if isinstance(item, dict) and _p115_item_name(item) == receive_title:
+                if isinstance(item, dict) and receive_title and _p115_item_name(item) == receive_title:
                     logger.info(f"  ➜ [共享资源] 已定位分享转存目录：{receive_title} (fid={_p115_item_id(item) or '-'})")
                     return dict(item)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = _p115_item_name(item)
+                if os.path.splitext(name)[1].lower() in VIDEO_EXTS:
+                    logger.info(f"  ➜ [共享资源] 已确认分享转存文件落入标准目录：{parent_cid}，示例={name}")
+                    return {'fid': parent_cid, 'file_id': parent_cid, 'fn': receive_title or name, 'fc': '0'}
             logger.debug(f"  ➜ [共享资源] 第 {attempt}/{max_retries} 次未定位到分享转存目录，等待 115 索引同步。")
         except Exception as e:
             logger.warning(f"  ➜ [共享资源] 定位分享转存目录失败({attempt}/{max_retries})：{e}")

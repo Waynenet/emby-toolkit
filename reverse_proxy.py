@@ -41,6 +41,51 @@ _USER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
 _USER_CONTEXT_LOCK = threading.Lock()
 _USER_CONTEXT_CACHE = {}
 
+
+def _patch_emby_web_player_js(text):
+    patched = text
+    patterns = [
+        r"\.crossOrigin\s*=\s*['\"]anonymous['\"]",
+        r"\.crossorigin\s*=\s*['\"]anonymous['\"]",
+        r"\[['\"]crossOrigin['\"]\]\s*=\s*['\"]anonymous['\"]",
+        r"\[['\"]crossorigin['\"]\]\s*=\s*['\"]anonymous['\"]",
+        r"\.setAttribute\(\s*['\"]crossorigin['\"]\s*,\s*['\"]anonymous['\"]\s*\)",
+        r"\.setAttribute\(\s*['\"]crossOrigin['\"]\s*,\s*['\"]anonymous['\"]\s*\)",
+    ]
+    for pattern in patterns:
+        patched = re.sub(pattern, ".removeAttribute('crossorigin')", patched)
+    patched = re.sub(
+        r"\b([A-Za-z_$][\w$]*)\s*&&\s*\(\s*([A-Za-z_$][\w$]*)\.crossOrigin\s*=\s*\1\s*\);?",
+        r"\2.removeAttribute('crossorigin');",
+        patched,
+    )
+    patched = patched.replace('crossorigin="anonymous"', '')
+    patched = patched.replace("crossorigin='anonymous'", '')
+    return patched
+
+
+def _should_patch_emby_web_player_js(path, resp):
+    path_lower = str(path or "").lower()
+    if not path_lower.endswith(".js"):
+        return False
+    if "plugin.js" not in path_lower and "htmlvideoplayer" not in path_lower:
+        return False
+    content_type = str(resp.headers.get('Content-Type') or '').lower()
+    return not content_type or 'javascript' in content_type or 'text/plain' in content_type
+
+
+def _is_emby_transcode_playback_request(full_path_lower):
+    if '/videos/' not in full_path_lower:
+        return False
+    if any(token in full_path_lower for token in ('master.m3u8', 'main.m3u8', '.m3u8', '/hls', 'transcode')):
+        return True
+    return bool(request.args.get('TranscodeReasons') or request.args.get('TranscodingMaxAudioChannels'))
+
+
+def _block_emby_transcode_playback(full_path):
+    logger.debug("  ⚠️ [302反代] 已阻断 Emby 转码：%s", full_path)
+    return Response("Emby transcoding fallback is disabled for 115 direct playback.", status=409)
+
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
 
@@ -1042,9 +1087,10 @@ def proxy_all(path):
         # ★★★ 拦截 H: 视频流请求 (stream, original, Download 等) ★★★
         # ====================================================================
         full_path_lower = full_path.lower()
+        if _is_emby_transcode_playback_request(full_path_lower):
+            return _block_emby_transcode_playback(full_path)
         
         if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or ('/items/' in full_path_lower and '/download' in full_path_lower):
-            
             # 检测浏览器客户端
             user_agent = request.headers.get('User-Agent', '').lower()
             client_name = request.headers.get('X-Emby-Client', '').lower()
@@ -1052,19 +1098,6 @@ def proxy_all(path):
             native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer', 'applecoremedia']
             if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent or 'applecoremedia' in user_agent:
                 is_browser = False
-            
-            # 浏览器直接转发给 Emby 服务端，不做 302 重定向（115 直链存在跨域问题）
-            if is_browser:
-                base_url, api_key = _get_real_emby_url_and_key()
-                target_url = f"{base_url}/{path.lstrip('/')}"
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                forward_params = request.args.copy()
-                forward_params['api_key'] = api_key
-                resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), timeout=(10.0, 1800.0), stream=True)
-                excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-                response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
-                return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
             
             # 客户端处理逻辑
             match = re.search(r'/(?:videos|items)/(\d+)/', full_path_lower)
@@ -1231,7 +1264,7 @@ def proxy_all(path):
                 return Response("Only ETK standard 115 STRM playback is supported.", status=409)
 
             # 本地物理视频保留 Emby 原生播放路径，避免误伤普通本地库。
-            logger.info("  ▶️ [本地视频] 未检测到 STRM pick_code，转交 Emby 原生播放。")
+            logger.debug("  ➜ [本地视频] 转交 Emby 原生播放。")
             target_url = f"{base_url}/{path.lstrip('/')}"
             forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
             forward_headers['Host'] = urlparse(base_url).netloc
@@ -1337,6 +1370,18 @@ def proxy_all(path):
         
         excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+        if _should_patch_emby_web_player_js(path, resp):
+            try:
+                text = resp.content.decode(resp.encoding or 'utf-8', errors='ignore')
+                patched = _patch_emby_web_player_js(text)
+                if patched != text:
+                    headers = [(name, value) for name, value in response_headers if name.lower() not in ('etag', 'last-modified', 'cache-control')]
+                    headers.append(('Content-Type', resp.headers.get('Content-Type') or 'application/javascript; charset=utf-8'))
+                    headers.append(('Cache-Control', 'no-cache, no-store, must-revalidate'))
+                    logger.debug("  ➜ [302播放] 已移除 Emby Web 播放器 crossorigin: %s", path)
+                    return Response(patched, resp.status_code, headers)
+            except Exception as e:
+                logger.debug("  ➜ [302播放] 修补 Emby Web 播放器脚本失败: %s, err=%s", path, e)
         
         return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         

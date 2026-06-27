@@ -22,6 +22,8 @@ PLAY_POOL_TEMP_DIR_NAME = "ETK小号播放临时目录"
 PLAY_POOL_SESSION_TTL_SECONDS = 12 * 60 * 60
 _PREPARE_LOCKS = {}
 _PREPARE_LOCKS_GUARD = threading.Lock()
+_SESSION_LOCKS = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
 _ALLOWED_USER_EXPAND_CACHE = {}
 _ALLOWED_USER_EXPAND_TTL_SECONDS = 60
 
@@ -54,6 +56,25 @@ def _safe_float(value, default=0.0):
         return float(value)
     except Exception:
         return default
+
+
+def _safe_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def _normalize_owner_type(value):
+    return "user" if str(value or "").strip().lower() == "user" else "admin"
 
 
 def _mask_cookie(cookie):
@@ -89,9 +110,39 @@ def _human_gb_limit(value):
     return _human_bytes(bytes_value) if bytes_value > 0 else ""
 
 
-def _account_daily_limited(account):
-    daily_limit_bytes = _limit_gb_to_bytes((account or {}).get("daily_traffic_limit_gb"))
+def _account_daily_limited(account, daily_limit_gb=None):
+    if daily_limit_gb is None:
+        daily_limit_gb = _load_config().get("daily_traffic_limit_gb", 0.0)
+    daily_limit_bytes = _limit_gb_to_bytes(daily_limit_gb)
     return bool(daily_limit_bytes and _safe_int((account or {}).get("daily_traffic_bytes"), 0) >= daily_limit_bytes)
+
+
+def _speedtest_threshold_bps(config=None):
+    mbps = _safe_float((config or {}).get("auto_speedtest_threshold_mbps"), 0.0)
+    return int(mbps * 1024 * 1024) if mbps > 0 else 0
+
+
+def _find_account_by_id(account_id):
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        return None
+    for account in _load_config().get("accounts") or []:
+        if str(account.get("id")) == account_id:
+            return account
+    return None
+
+
+def _find_account_by_owner(owner_type, owner_user_id):
+    owner_type = _normalize_owner_type(owner_type)
+    owner_user_id = str(owner_user_id or "").strip()
+    if not owner_user_id:
+        return None
+    for account in reversed(_load_config().get("accounts") or []):
+        if _normalize_owner_type(account.get("owner_type")) != owner_type:
+            continue
+        if str(account.get("owner_user_id") or "").strip() == owner_user_id:
+            return account
+    return None
 
 
 def _normalize_daily_traffic(account):
@@ -101,6 +152,29 @@ def _normalize_daily_traffic(account):
         account["daily_traffic_bytes"] = 0
     else:
         account["daily_traffic_bytes"] = _safe_int(account.get("daily_traffic_bytes"), 0)
+
+
+def _apply_speedtest_gate(account_id, speed_bps, *, error_msg=""):
+    account = _find_account_by_id(account_id)
+    if not account:
+        return {}
+    config = _load_config()
+    gate_enabled = _safe_bool(config.get("auto_speedtest_enabled"), True)
+    threshold_bps = _speedtest_threshold_bps(config)
+    patch = {
+        "last_speed_bps": _safe_int(speed_bps, 0),
+        "last_speed_at": _now_text(),
+        "last_error": str(error_msg or "").strip(),
+    }
+    if gate_enabled and threshold_bps > 0:
+        enabled = _safe_int(speed_bps, 0) >= threshold_bps
+        patch["enabled"] = enabled
+        if not enabled:
+            patch["last_error"] = f"测速 {_human_bytes(speed_bps)}/s 低于阈值 {_human_bytes(threshold_bps)}/s，已自动停用"
+    elif error_msg:
+        patch["enabled"] = False
+    _mark_account(account_id, patch)
+    return patch
 
 
 def _display_title(file_name):
@@ -162,9 +236,15 @@ def _expand_allowed_user_ids(selected_user_ids):
 
 
 def _account_allowed_for_user(account, user_id):
+    owner_type = _normalize_owner_type((account or {}).get("owner_type"))
+    owner_user_id = str((account or {}).get("owner_user_id") or "").strip()
+    if owner_type == "user" and not _safe_bool((account or {}).get("shared"), False):
+        return bool(str(user_id or "").strip() and str(user_id).strip() == owner_user_id)
     raw_allowed = _normalize_user_ids((account or {}).get("allowed_user_ids"))
     allowed = _expand_allowed_user_ids(raw_allowed) if raw_allowed else []
     if not allowed:
+        if owner_type == "user" and _safe_bool((account or {}).get("shared"), False):
+            return True
         allowed = _normalize_user_ids((account or {}).get("allowed_effective_user_ids"))
     if not allowed:
         return True
@@ -189,10 +269,12 @@ def _load_config():
         account["cookie"] = str(account.get("cookie") or "").strip()
         account["app_type"] = str(account.get("app_type") or "alipaymini").strip() or "alipaymini"
         account["enabled"] = bool(account.get("enabled", True))
+        account["owner_type"] = _normalize_owner_type(account.get("owner_type"))
+        account["owner_user_id"] = str(account.get("owner_user_id") or "").strip()
+        account["shared"] = _safe_bool(account.get("shared"), account["owner_type"] != "user")
         account["temp_cid"] = str(account.get("temp_cid") or "").strip()
         account["play_count"] = _safe_int(account.get("play_count"), 0)
         account["traffic_bytes"] = _safe_int(account.get("traffic_bytes"), 0)
-        account["daily_traffic_limit_gb"] = _safe_float(account.get("daily_traffic_limit_gb"), 0.0)
         _normalize_daily_traffic(account)
         account["active_count"] = _safe_int(account.get("active_count"), 0)
         account["last_speed_bps"] = _safe_int(account.get("last_speed_bps"), 0)
@@ -202,6 +284,9 @@ def _load_config():
         clean_accounts.append(account)
     return {
         "enabled": bool(data.get("enabled", False)),
+        "auto_speedtest_enabled": _safe_bool(data.get("auto_speedtest_enabled"), True),
+        "auto_speedtest_threshold_mbps": max(0.0, _safe_float(data.get("auto_speedtest_threshold_mbps"), 0.0)),
+        "daily_traffic_limit_gb": max(0.0, _safe_float(data.get("daily_traffic_limit_gb"), 0.0)),
         "accounts": clean_accounts,
         "updated_at": data.get("updated_at") or "",
     }
@@ -210,6 +295,9 @@ def _load_config():
 def _save_config(config):
     payload = {
         "enabled": bool(config.get("enabled", False)),
+        "auto_speedtest_enabled": _safe_bool(config.get("auto_speedtest_enabled"), True),
+        "auto_speedtest_threshold_mbps": max(0.0, _safe_float(config.get("auto_speedtest_threshold_mbps"), 0.0)),
+        "daily_traffic_limit_gb": max(0.0, _safe_float(config.get("daily_traffic_limit_gb"), 0.0)),
         "accounts": config.get("accounts") if isinstance(config.get("accounts"), list) else [],
         "updated_at": _now_text(),
     }
@@ -217,15 +305,22 @@ def _save_config(config):
     return payload
 
 
-def _public_account(account):
+def _public_account(account, config=None):
+    config = config or _load_config()
     out = dict(account or {})
     out.pop("cookie", None)
     out.pop("allowed_effective_user_ids", None)
     out["cookie_mask"] = _mask_cookie(account.get("cookie"))
+    out["owner_type"] = _normalize_owner_type(account.get("owner_type"))
+    out["owner_type_text"] = "用户自有" if out["owner_type"] == "user" else "管理员小号"
+    out["owner_user_id"] = str(account.get("owner_user_id") or "").strip()
+    out["owner_user_name"] = _display_user_name(out["owner_user_id"]) if out["owner_user_id"] else ""
+    out["shared"] = _safe_bool(account.get("shared"), out["owner_type"] != "user")
     out["traffic_text"] = _human_bytes(account.get("traffic_bytes"))
     out["daily_traffic_text"] = _human_bytes(account.get("daily_traffic_bytes"))
-    out["daily_traffic_limit_text"] = _human_gb_limit(account.get("daily_traffic_limit_gb"))
-    out["daily_traffic_limited"] = _account_daily_limited(account)
+    daily_limit_gb = _safe_float(config.get("daily_traffic_limit_gb"), 0.0)
+    out["daily_traffic_limit_text"] = _human_gb_limit(daily_limit_gb)
+    out["daily_traffic_limited"] = _account_daily_limited(account, daily_limit_gb)
     speed = _safe_int(account.get("last_speed_bps"), 0)
     out["last_speed_text"] = f"{_human_bytes(speed)}/s" if speed > 0 else "未测速"
     return out
@@ -233,19 +328,56 @@ def _public_account(account):
 
 def get_public_config():
     config = _load_config()
+    threshold_mbps = _safe_float(config.get("auto_speedtest_threshold_mbps"), 0.0)
+    daily_limit_gb = _safe_float(config.get("daily_traffic_limit_gb"), 0.0)
     return {
         "enabled": config["enabled"],
-        "accounts": [_public_account(x) for x in config["accounts"]],
-        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and x.get("cookie") and not _account_daily_limited(x)]),
+        "accounts": [_public_account(x, config) for x in config["accounts"]],
+        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and x.get("cookie") and not _account_daily_limited(x, daily_limit_gb)]),
         "temp_dir_name": PLAY_POOL_TEMP_DIR_NAME,
+        "auto_speedtest_enabled": _safe_bool(config.get("auto_speedtest_enabled"), True),
+        "auto_speedtest_threshold_mbps": threshold_mbps,
+        "auto_speedtest_threshold_text": f"{threshold_mbps:.2f} MB/s" if threshold_mbps > 0 else "",
+        "daily_traffic_limit_gb": daily_limit_gb,
+        "daily_traffic_limit_text": _human_gb_limit(daily_limit_gb),
     }
 
 
-def save_pool_enabled(enabled):
+def get_public_account(account_id):
     config = _load_config()
-    config["enabled"] = bool(enabled)
+    account = _find_account_by_id(account_id)
+    return _public_account(account, config) if account else None
+
+
+def get_public_account_by_owner(owner_type, owner_user_id):
+    config = _load_config()
+    owner_type = _normalize_owner_type(owner_type)
+    owner_user_id = str(owner_user_id or "").strip()
+    for account in reversed(config.get("accounts") or []):
+        if _normalize_owner_type(account.get("owner_type")) != owner_type:
+            continue
+        if str(account.get("owner_user_id") or "").strip() == owner_user_id:
+            return _public_account(account, config)
+    return None
+
+
+def save_pool_settings(data):
+    data = data if isinstance(data, dict) else {}
+    config = _load_config()
+    if "enabled" in data:
+        config["enabled"] = bool(data.get("enabled"))
+    if "auto_speedtest_enabled" in data:
+        config["auto_speedtest_enabled"] = _safe_bool(data.get("auto_speedtest_enabled"), True)
+    if "auto_speedtest_threshold_mbps" in data:
+        config["auto_speedtest_threshold_mbps"] = max(0.0, _safe_float(data.get("auto_speedtest_threshold_mbps"), 0.0))
+    if "daily_traffic_limit_gb" in data:
+        config["daily_traffic_limit_gb"] = max(0.0, _safe_float(data.get("daily_traffic_limit_gb"), 0.0))
     _save_config(config)
     return get_public_config()
+
+
+def save_pool_enabled(enabled):
+    return save_pool_settings({"enabled": enabled})
 
 
 def upsert_account(payload, account_id=None):
@@ -254,6 +386,18 @@ def upsert_account(payload, account_id=None):
     accounts = config["accounts"]
     target = None
     if account_id:
+        for item in accounts:
+            if str(item.get("id")) == str(account_id):
+                target = item
+                break
+    if target is None:
+        owner_type = _normalize_owner_type(payload.get("owner_type"))
+        owner_user_id = str(payload.get("owner_user_id") or "").strip()
+        if owner_type == "user" and owner_user_id:
+            target = _find_account_by_owner(owner_type, owner_user_id)
+    if target is None and not account_id and payload.get("owner_type") == "user" and payload.get("owner_user_id"):
+        target = _find_account_by_owner("user", payload.get("owner_user_id"))
+    if target is None and account_id:
         for item in accounts:
             if str(item.get("id")) == str(account_id):
                 target = item
@@ -282,8 +426,18 @@ def upsert_account(payload, account_id=None):
         target["enabled"] = bool(payload.get("enabled"))
     elif "enabled" not in target:
         target["enabled"] = True
-    if "daily_traffic_limit_gb" in payload:
-        target["daily_traffic_limit_gb"] = max(0.0, _safe_float(payload.get("daily_traffic_limit_gb"), 0.0))
+    if "owner_type" in payload:
+        target["owner_type"] = _normalize_owner_type(payload.get("owner_type"))
+    elif "owner_type" not in target and not account_id:
+        target["owner_type"] = "admin"
+    if "owner_user_id" in payload:
+        target["owner_user_id"] = str(payload.get("owner_user_id") or "").strip()
+    elif "owner_user_id" not in target and not account_id:
+        target["owner_user_id"] = ""
+    if "shared" in payload:
+        target["shared"] = _safe_bool(payload.get("shared"), target.get("owner_type") != "user")
+    elif "shared" not in target and not account_id:
+        target["shared"] = target.get("owner_type") != "user"
     if "allowed_user_ids" in payload:
         target["allowed_user_ids"] = _normalize_user_ids(payload.get("allowed_user_ids"))
         target["allowed_effective_user_ids"] = _expand_allowed_user_ids(target["allowed_user_ids"])
@@ -293,6 +447,18 @@ def upsert_account(payload, account_id=None):
     target["updated_at"] = _now_text()
     target.setdefault("temp_cid", "")
     _save_config(config)
+    if str(target.get("cookie") or "").strip() and _safe_bool(config.get("auto_speedtest_enabled"), True) and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
+        try:
+            speedtest_account(target["id"])
+            target = _find_account_by_id(target["id"]) or target
+        except Exception as e:
+            _mark_account(target["id"], {
+                "enabled": False,
+                "last_error": str(e),
+                "last_speed_bps": 0,
+                "last_speed_at": _now_text(),
+            })
+            target = _find_account_by_id(target["id"]) or target
     return _public_account(target)
 
 
@@ -333,37 +499,38 @@ def _extract_cid(resp):
     return ""
 
 
-def _ensure_temp_cid(account, client):
-    cid = str(account.get("temp_cid") or "").strip()
-    if cid:
-        return cid
+def _find_temp_cid(client):
+    resp = client.fs_files({
+        "cid": "0",
+        "search_value": PLAY_POOL_TEMP_DIR_NAME,
+        "show_dir": 1,
+        "limit": 1000,
+        "offset": 0,
+        "record_open_time": 0,
+        "count_folders": 0,
+    })
+    if not resp.get("state"):
+        raise RuntimeError(f"查询小号临时目录失败: {resp.get('error_msg') or resp.get('message') or resp}")
+    for item in resp.get("data") or []:
+        name = item.get("name") or item.get("file_name") or item.get("fn")
+        fc = str(item.get("fc") if item.get("fc") is not None else item.get("type") or "")
+        item_id = item.get("fid") or item.get("file_id") or item.get("id") or item.get("cid")
+        if name == PLAY_POOL_TEMP_DIR_NAME and item_id and (not fc or fc == "0"):
+            return str(item_id)
+    return ""
 
-    found = ""
-    try:
-        resp = client.fs_files({
-            "cid": "0",
-            "search_value": PLAY_POOL_TEMP_DIR_NAME,
-            "show_dir": 1,
-            "limit": 100,
-            "offset": 0,
-            "record_open_time": 0,
-            "count_folders": 0,
-        })
-        for item in resp.get("data") or []:
-            name = item.get("name") or item.get("file_name") or item.get("fn")
-            fc = str(item.get("fc") if item.get("fc") is not None else item.get("type") or "")
-            item_id = item.get("fid") or item.get("file_id") or item.get("id") or item.get("cid")
-            if name == PLAY_POOL_TEMP_DIR_NAME and item_id and (not fc or fc == "0"):
-                found = str(item_id)
-                break
-    except Exception as e:
-        logger.debug(f"  ➜ [小号播放] 查询小号临时目录失败: {account.get('alias')}, err={e}")
+
+def _ensure_temp_cid(account, client):
+    found = _find_temp_cid(client)
 
     if not found:
         resp = client.fs_mkdir(PLAY_POOL_TEMP_DIR_NAME, "0")
-        if not resp.get("state"):
+        if resp.get("state"):
+            found = _extract_cid(resp)
+        if not found:
+            found = _find_temp_cid(client)
+        if not found and not resp.get("state"):
             raise RuntimeError(f"创建小号临时目录失败: {resp.get('error_msg') or resp.get('message') or resp}")
-        found = _extract_cid(resp)
     if not found:
         raise RuntimeError("创建小号临时目录后未拿到 CID")
 
@@ -423,6 +590,7 @@ def _extract_clone_from_rapid_response(resp, client, temp_cid, file_name, sha1, 
 
 
 def _select_account(config, user_id=""):
+    user_id = str(user_id or "").strip()
     sessions = _load_sessions()
     active_counts = {}
     now = _now_ts()
@@ -445,10 +613,18 @@ def _select_account(config, user_id=""):
             continue
         account = dict(account)
         account["_active_count"] = active_counts.get(str(account.get("id")), 0)
+        owner_type = _normalize_owner_type(account.get("owner_type"))
+        owner_user_id = str(account.get("owner_user_id") or "").strip()
+        if user_id and owner_type == "user" and owner_user_id == user_id:
+            account["_priority"] = 0
+        elif owner_type == "user":
+            account["_priority"] = 1
+        else:
+            account["_priority"] = 2
         candidates.append(account)
     if not candidates:
         return None
-    candidates.sort(key=lambda x: (x.get("_active_count", 0), -_safe_int(x.get("last_speed_bps"), 0), float(x.get("last_used_at") or 0)))
+    candidates.sort(key=lambda x: (x.get("_priority", 9), x.get("_active_count", 0), -_safe_int(x.get("last_speed_bps"), 0), float(x.get("last_used_at") or 0)))
     return candidates[0]
 
 
@@ -514,6 +690,30 @@ def _get_prepare_lock(key):
             lock = threading.Lock()
             _PREPARE_LOCKS[key] = lock
         return lock
+
+
+def _get_session_lock(key):
+    key = str(key or "").strip() or "default"
+    with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(key)
+        if not lock:
+            lock = threading.Lock()
+            _SESSION_LOCKS[key] = lock
+        return lock
+
+
+def _find_session_by_id(session_id):
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {}
+    for session in reversed(_load_sessions()):
+        if session_id == str(session.get("session_id") or "").strip():
+            return session
+    return {}
+
+
+def _same_user_agent(left, right):
+    return str(left or "").strip() == str(right or "").strip()
 
 
 def _find_reusable_session(*, source_pick_code="", item_id="", play_session_id="", user_id="", client_key=""):
@@ -684,22 +884,28 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     )
     if reusable:
         account = next((x for x in config.get("accounts") or [] if str(x.get("id")) == str(reusable.get("account_id"))), None)
-        if account and not _account_allowed_for_user(account, user_id):
-            account = None
-        if reusable.get("direct_url") or (account and account.get("enabled") and account.get("cookie")):
+        account_usable = bool(
+            account
+            and account.get("enabled")
+            and account.get("cookie")
+            and _account_allowed_for_user(account, user_id)
+        )
+        direct_url = str(reusable.get("direct_url") or "").strip()
+        direct_url_usable = bool(direct_url and _same_user_agent(reusable.get("direct_url_user_agent"), user_agent))
+        if account_usable and (not direct_url or direct_url_usable):
             logger.debug(
                 "  ➜ [小号播放] 复用已有小号播放记录：%s | account=%s | session=%s | direct_url=%s",
                 reusable.get("file_name") or display_name,
-                (account or {}).get("alias") or (account or {}).get("id") or reusable.get("account_alias") or "-",
+                account.get("alias") or account.get("id") or reusable.get("account_alias") or "-",
                 reusable.get("session_id") or "-",
-                "yes" if reusable.get("direct_url") else "no",
+                "yes" if direct_url_usable else "no",
             )
             return {
                 "pick_code": reusable.get("temp_pick_code") or "",
-                "client": _account_client(account) if account and account.get("cookie") else None,
-                "account": account or {},
+                "client": _account_client(account),
+                "account": account,
                 "session": reusable,
-                "direct_url": reusable.get("direct_url") or "",
+                "direct_url": direct_url if direct_url_usable else "",
             }
 
     _cleanup_superseded_sessions(
@@ -799,24 +1005,39 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
 
 
 def get_direct_url(play_result, user_agent=""):
-    cached_url = str((play_result or {}).get("direct_url") or ((play_result or {}).get("session") or {}).get("direct_url") or "").strip()
-    if cached_url:
+    user_agent = str(user_agent or "").strip()
+    session = (play_result or {}).get("session") or {}
+    cached_url = str((play_result or {}).get("direct_url") or session.get("direct_url") or "").strip()
+    if cached_url and _same_user_agent(session.get("direct_url_user_agent"), user_agent):
         return cached_url
     client = play_result.get("client")
     pick_code = play_result.get("pick_code")
     if not client or not pick_code:
         return ""
-    url = client.download_url(pick_code, user_agent=user_agent)
     session_id = str(((play_result or {}).get("session") or {}).get("session_id") or "").strip()
-    if url and session_id:
-        _patch_session(session_id, {
-            "direct_url": url,
-            "direct_url_cached_at": _now_ts(),
-        })
-        session = play_result.get("session") or {}
-        session["direct_url"] = url
-        session["direct_url_cached_at"] = _now_ts()
-    return url
+    lock = _get_session_lock(session_id or pick_code)
+    with lock:
+        fresh_session = _find_session_by_id(session_id)
+        cached_url = str(fresh_session.get("direct_url") or "").strip()
+        if cached_url and _same_user_agent(fresh_session.get("direct_url_user_agent"), user_agent):
+            session = play_result.get("session") or {}
+            session["direct_url"] = cached_url
+            session["direct_url_cached_at"] = fresh_session.get("direct_url_cached_at") or _now_ts()
+            session["direct_url_user_agent"] = fresh_session.get("direct_url_user_agent") or user_agent
+            return cached_url
+
+        url = client.download_url(pick_code, user_agent=user_agent)
+        if url and session_id:
+            _patch_session(session_id, {
+                "direct_url": url,
+                "direct_url_cached_at": _now_ts(),
+                "direct_url_user_agent": user_agent,
+            })
+            session = play_result.get("session") or {}
+            session["direct_url"] = url
+            session["direct_url_cached_at"] = _now_ts()
+            session["direct_url_user_agent"] = user_agent
+        return url
 
 
 def recycle_session_after_direct_url(play_result, reason="起播后清理"):
@@ -828,32 +1049,34 @@ def recycle_session_after_direct_url(play_result, reason="起播后清理"):
     if not temp_pick_code and not session_id:
         return False
 
-    sessions = _load_sessions()
-    if not sessions:
-        return False
+    lock = _get_session_lock(session_id or temp_pick_code)
+    with lock:
+        sessions = _load_sessions()
+        if not sessions:
+            return False
 
-    target = None
-    for item in sessions:
-        if session_id and session_id == str(item.get("session_id") or ""):
-            target = item
-            break
-        if temp_pick_code and temp_pick_code == str(item.get("temp_pick_code") or "").strip():
-            target = item
-            break
-    if not target:
-        return False
+        target = None
+        for item in sessions:
+            if session_id and session_id == str(item.get("session_id") or ""):
+                target = item
+                break
+            if temp_pick_code and temp_pick_code == str(item.get("temp_pick_code") or "").strip():
+                target = item
+                break
+        if not target or target.get("recycled_after_direct_url"):
+            return False
 
-    account_id = str(target.get("account_id") or "")
-    account = next((x for x in _load_config().get("accounts") or [] if str(x.get("id")) == account_id), None)
-    if not account:
-        return False
-    if not _delete_session_file(account, target, reason):
-        return False
+        account_id = str(target.get("account_id") or "")
+        account = next((x for x in _load_config().get("accounts") or [] if str(x.get("id")) == account_id), None)
+        if not account:
+            return False
+        if not _delete_session_file(account, target, reason):
+            return False
 
-    target["recycled_after_direct_url"] = True
-    target["recycled_at"] = _now_ts()
-    _save_sessions(sessions)
-    return True
+        target["recycled_after_direct_url"] = True
+        target["recycled_at"] = _now_ts()
+        _save_sessions(sessions)
+        return True
 
 
 def cleanup_expired_sessions():
@@ -1070,7 +1293,7 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
         if not url:
             raise RuntimeError("小号获取测速直链失败")
         result = _speedtest_url(url, user_agent=user_agent or "Mozilla/5.0")
-        _mark_account(account_id, {"last_speed_bps": result["bps"], "last_speed_at": _now_text(), "last_error": ""})
+        _apply_speedtest_gate(account_id, result["bps"])
         return result
     finally:
         if clone.get("fid"):
