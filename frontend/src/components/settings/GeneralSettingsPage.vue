@@ -14,49 +14,263 @@
           :label-align="formLabelAlign"
           :model="configModel"
         >
-          <n-tabs class="settings-tabs" type="line" animated :size="isMobile ? 'medium' : 'large'" :pane-style="tabPaneStyle">
+          <n-grid class="settings-top-cards" cols="1 l:2" :x-gap="24" :y-gap="16" responsive="screen">
+            <n-gi>
+              <n-card :bordered="false" class="dashboard-card pro-card">
+                <div class="top-card-content">
+                  <div>
+                    <div class="top-card-title" :style="{ color: proStatusInfo.color }">
+                      <span class="top-card-icon">{{ proStatusInfo.icon }}</span>
+                      Emby Toolkit {{ proStatusInfo.text }}
+                    </div>
+                    <div class="top-card-desc">
+                      <span v-html="proStatusInfo.desc"></span><br/>
+                      <span v-if="configModel?.is_pro_active" class="pro-expire-time">
+                        {{ configModel?.pro_expire_time?.startsWith('2099') ? '到期时间：永久有效' : '到期时间：' + configModel?.pro_expire_time?.split('T')[0] }}
+                      </span>
+                    </div>
+                  </div>
+                  <n-space align="center">
+                    <n-tag v-if="configModel?.is_pro_active" type="warning" size="large" round :bordered="false" class="pro-active-tag">
+                      已激活
+                    </n-tag>
+                    <n-button type="warning" size="large" strong @click="showProModal = true">
+                      <template #icon><n-icon><DiamondIcon /></n-icon></template>
+                      {{ configModel?.is_pro_active ? '续期 Pro' : '升级 Pro' }}
+                    </n-button>
+                  </n-space>
+                </div>
+              </n-card>
+            </n-gi>
+            <n-gi>
+              <n-card :bordered="false" class="dashboard-card quick-deploy-card">
+                <template #header><span class="card-title">一键部署</span></template>
+                <template #header-extra>
+                  <n-button type="primary" ghost :loading="quickDeployLoading" @click="handleQuickDeploy115">
+                    <template #icon><n-icon :component="FlashIcon" /></template>
+                    开始部署
+                  </n-button>
+                </template>
+                <n-space vertical :size="10">
+                  <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
+                    <n-gi v-for="item in quickDeployPrerequisites" :key="item.label">
+                      <div class="prerequisite-item" :class="{ pending: !item.done }">
+                        <n-icon :component="item.done ? CheckIcon : CloseIcon" />
+                        <button type="button" class="prerequisite-link" @click="jumpToSettingsTab(item.tab)">
+                          {{ item.label }}
+                        </button>
+                      </div>
+                    </n-gi>
+                  </n-grid>
+                  <div class="prerequisite-note">
+                    请先完成上面清单的配置项，然后执行一键部署。一键部署会在网盘和本地创建基础目录树以及对应的分类、洗版、重命名配置，同时会在Emby创建对应的媒体库。
+                  </div>
+                  <div v-if="quickDeployLoading || quickDeployProgress > 0" class="quick-deploy-progress">
+                    <n-progress
+                      type="line"
+                      :percentage="quickDeployProgress"
+                      :processing="quickDeployLoading"
+                      indicator-placement="inside"
+                    />
+                    <n-text depth="3" style="font-size:0.8em;">{{ quickDeployStatus }}</n-text>
+                  </div>
+                </n-space>
+              </n-card>
+            </n-gi>
+          </n-grid>
+
+          <n-tabs v-model:value="activeSettingsTab" class="settings-tabs" type="line" animated :size="isMobile ? 'medium' : 'large'" :pane-style="tabPaneStyle">
+            <!-- ================== 标签页 1: Emby 前置配置 ================== -->
+            <n-tab-pane name="emby" tab="Emby & 虚拟库">
+              <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
+
+                <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card">
+                    <template #header><span class="card-title">Emby 连接设置</span></template>
+                    
+                    <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
+                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
+                      
+                      <!-- 1. Emby URL (左) -->
+                      <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
+                      <n-form-item-grid-item label-width="100">
+                        <template #label>
+                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
+                            <span>Emby URL</span>
+                            <n-tooltip trigger="hover">
+                              <template #trigger>
+                                <n-icon :component="AlertIcon" class="info-icon" />
+                              </template>
+                              此项修改需要重启容器才能生效。
+                            </n-tooltip>
+                          </div>
+                        </template>
+                        <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
+                      </n-form-item-grid-item>
+
+                      <!-- 2. 外网访问 URL (右) -->
+                      <n-form-item-grid-item label="外网URL" path="emby_public_url" label-width="100">
+                        <n-input v-model:value="configModel.emby_public_url" placeholder="留空则不开启" />
+                      </n-form-item-grid-item>
+
+                      <!-- 3. API Key (左) -->
+                      <n-form-item-grid-item label="APIKey" path="emby_api_key" label-width="100">
+                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="输入 API Key" />
+                      </n-form-item-grid-item>
+
+                      <!-- 4. 用户 ID (右) -->
+                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id" label-width="100">
+                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位用户ID" />
+                        <template #feedback>
+                          <div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位。</div>
+                        </template>
+                      </n-form-item-grid-item>
+
+                      <!-- 分割线 (占满一行) -->
+                      <n-gi span="1 m:2">
+                        <n-divider title-placement="left" style="margin: 8px 0; font-size: 0.9em; color: gray;">管理员凭证 (选填)</n-divider>
+                      </n-gi>
+
+                      <!-- 5. 管理员用户 (左) -->
+                      <n-form-item-grid-item label="用户名" path="emby_admin_user" label-width="100">
+                        <n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" />
+                      </n-form-item-grid-item>
+
+                      <!-- 6. 管理员密码 (右) -->
+                      <n-form-item-grid-item label="密码" path="emby_admin_pass" label-width="100">
+                        <n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" />
+                      </n-form-item-grid-item>
+
+                      <!-- 7. 超时时间 (占满一行，保持长标签) -->
+                      <n-form-item-grid-item label="Emby API 超时时间 (秒)" path="emby_api_timeout" span="1 m:2" label-width="200">
+                        <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="STRM 根目录" path="local_strm_root" span="1 m:2" label-width="100">
+                        <n-input-group>
+                          <n-input
+                            v-model:value="configModel.local_strm_root"
+                            placeholder="例如: /mnt/media"
+                            @click="openLocalFolderSelector('local_strm_root', false)"
+                          >
+                            <template #prefix><n-icon :component="FolderIcon" /></template>
+                          </n-input>
+                          <n-button type="primary" ghost @click="openLocalFolderSelector('local_strm_root', false)">选择</n-button>
+                        </n-input-group>
+                        <template #feedback>
+                          <n-text depth="3" style="font-size:0.8em;">一键部署会在此目录创建本地镜像目录，并把二级分类媒体库指向这些路径。</n-text>
+                        </template>
+                      </n-form-item-grid-item>
+
+                      <!-- 分割线 -->
+                      <n-gi span="1 m:2">
+                        <n-divider title-placement="left" style="margin-top: 10px;">选择要处理的媒体库</n-divider>
+                      </n-gi>
+
+                      <!-- 8. 媒体库选择 -->
+                      <n-form-item-grid-item label-placement="top" span="1 m:2">
+                        <n-spin :show="loadingLibraries">
+                          <n-checkbox-group v-model:value="configModel.libraries_to_process">
+                            <n-space item-style="display: flex; flex-wrap: wrap;">
+                              <n-checkbox v-for="lib in availableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name" />
+                            </n-space>
+                          </n-checkbox-group>
+                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key)">
+                            未找到媒体库。请检查 Emby URL 和 API Key。
+                          </n-text>
+                          <div v-if="libraryError" style="color: red; margin-top: 5px;">{{ libraryError }}</div>
+                        </n-spin>
+                      </n-form-item-grid-item>
+
+                    </n-grid>
+                  </n-card>
+                </n-gi>
+
+                <!-- ########## 右侧卡片: 虚拟库 (反向代理) ########## -->
+                <n-gi>
+                  <n-card :bordered="false" class="dashboard-card">
+                    <template #header><span class="card-title">虚拟库（Pro）</span></template>
+                    
+                    <!-- 同样使用紧凑双列 -->
+                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
+
+                      <!-- 1. 启用开关 -->
+                      <n-form-item-grid-item label="启用" path="proxy_enabled" label-width="100">
+                        <n-switch v-model:value="configModel.proxy_enabled" />
+                      </n-form-item-grid-item>
+
+                      <!-- 2. 端口 -->
+                      <n-form-item-grid-item label-width="100">
+                        <template #label>
+                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
+                            <span>端口</span>
+                            <n-tooltip trigger="hover">
+                              <template #trigger>
+                                <n-icon :component="AlertIcon" class="info-icon" style="margin-left: 4px;" />
+                              </template>
+                              需重启容器生效
+                            </n-tooltip>
+                          </div>
+                        </template>
+                        <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
+                      </n-form-item-grid-item>
+
+                      <!-- 3. 缺失占位符 (占满一行，因为说明文字较长) -->
+                      <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" span="1 m:2" label-width="100">
+                         <n-space align="center">
+                            <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
+                            <n-text depth="3" style="font-size: 0.8em;">在榜单中显示未入库海报</n-text>
+                         </n-space>
+                      </n-form-item-grid-item>
+
+                      <!-- 5. 合并原生库 -->
+                      <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries" label-width="100">
+                        <n-switch v-model:value="configModel.proxy_merge_native_libraries" :disabled="!configModel.proxy_enabled"/>
+                      </n-form-item-grid-item>
+
+                      <!-- 6. 显示位置 -->
+                      <n-form-item-grid-item label="显示位置" path="proxy_native_view_order" label-width="100">
+                        <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
+                          <n-radio value="before">在前</n-radio>
+                          <n-radio value="after">在后</n-radio>
+                        </n-radio-group>
+                      </n-form-item-grid-item>
+
+                      <!-- 分割线 -->
+                      <n-gi span="1 m:2">
+                        <n-divider title-placement="left" style="margin-top: 10px;">选择合并显示的原生媒体库</n-divider>
+                      </n-gi>
+
+                      <!-- 7. 原生库选择 -->
+                      <n-form-item-grid-item 
+                        v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" 
+                        path="proxy_native_view_selection" 
+                        label-placement="top"
+                        span="1 m:2"
+                      >
+                        <n-spin :show="loadingNativeLibraries">
+                          <n-checkbox-group v-model:value="configModel.proxy_native_view_selection">
+                            <n-space item-style="display: flex; flex-wrap: wrap;">
+                              <n-checkbox v-for="lib in nativeAvailableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name"/>
+                            </n-space>
+                          </n-checkbox-group>
+                          <n-text depth="3" v-if="!loadingNativeLibraries && nativeAvailableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key && configModel.emby_user_id)">
+                            未找到原生媒体库。请检查 Emby URL、API Key 和 用户ID。
+                          </n-text>
+                          <div v-if="nativeLibraryError" style="color: red; margin-top: 5px;">{{ nativeLibraryError }}</div>
+                        </n-spin>
+                      </n-form-item-grid-item>
+
+                    </n-grid>
+                  </n-card>
+                </n-gi>
+              </n-grid>
+            </n-tab-pane>
+
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general" tab="通用设置">
               <n-grid cols="1 l:3" :x-gap="24" :y-gap="24" responsive="screen">
-                <n-gi span="1 l:3">
-                  <n-card :bordered="false" class="dashboard-card" style="background: linear-gradient(135deg, #fffcf8 0%, #fff 100%); border: 1px solid #ffe5c4;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
-                      <div>
-                        <!-- 动态图标和标题 -->
-                        <div style="font-size: 18px; font-weight: bold; display: flex; align-items: center; gap: 8px;" :style="{ color: proStatusInfo.color }">
-                          <span style="font-size: 22px;">{{ proStatusInfo.icon }}</span>
-                          Emby Toolkit {{ proStatusInfo.text }}
-                        </div>
-                        
-                        <!-- 动态描述和到期时间 -->
-                        <div style="font-size: 13px; color: #888; margin-top: 6px;">
-                          <!-- ⚠️ 这里改成了 v-html，这样才能渲染出超链接 -->
-                          <span v-html="proStatusInfo.desc"></span><br/>
-                          
-                          <span v-if="configModel?.is_pro_active" style="color: #d48806; font-weight: bold; margin-top: 4px; display: inline-block;">
-                            {{ configModel?.pro_expire_time?.startsWith('2099') ? '到期时间：永久有效' : '到期时间：' + configModel?.pro_expire_time?.split('T')[0] }}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      <!-- 按钮状态 -->
-                      <n-space align="center">
-                        <n-tag v-if="configModel?.is_pro_active" type="warning" size="large" round :bordered="false" style="font-weight: bold; font-size: 14px; padding: 0 15px;">
-                          已激活
-                        </n-tag>
-                        <n-button
-                          type="warning"
-                          size="large"
-                          strong
-                          @click="showProModal = true"
-                        >
-                          <template #icon><n-icon><DiamondIcon /></n-icon></template>
-                          {{ configModel?.is_pro_active ? '续期 Pro' : '升级 Pro' }}
-                        </n-button>
-                      </n-space>
-                    </div>
-                  </n-card>
-                </n-gi>
                 <!-- 左侧列 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
@@ -492,17 +706,6 @@
                             <n-text depth="3" style="font-size:0.8em;">支持普通字符串替换和正则表达式替换。</n-text>
                         </template>
                     </n-form-item>
-                    <n-form-item label="基础部署">
-                      <n-space vertical :size="8" style="width: 100%;">
-                        <n-button type="primary" ghost :loading="quickDeployLoading" @click="handleQuickDeploy115">
-                          <template #icon><n-icon :component="FlashIcon" /></template>
-                          115 网盘一键部署
-                        </n-button>
-                        <n-text depth="3" style="font-size:0.8em;">
-                          先完成本卡片授权、接口和 STRM 链接地址等基础项并保存，再一键创建目录、分类、重命名和洗版配置。
-                        </n-text>
-                      </n-space>
-                    </n-form-item>
                   </n-card>
                 </n-gi>
 
@@ -568,22 +771,6 @@
                         </template>
                     </n-form-item>
 
-                    <n-form-item label="本地 STRM 根目录" path="local_strm_root">
-                      <n-input-group>
-                        <n-input 
-                          v-model:value="configModel.local_strm_root" 
-                          placeholder="例如: /mnt/media" 
-                          @click="openLocalFolderSelector('local_strm_root', false)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openLocalFolderSelector('local_strm_root', false)">选择</n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">ETK 自动在此目录生成与网盘对应的 .strm 文件</n-text>
-                      </template>
-                    </n-form-item>
-                    
                     <n-form-item label="智能整理" path="p115_enable_organize">
                         <n-switch v-model:value="configModel.p115_enable_organize">
                             <template #checked>整理并生成STRM</template>
@@ -803,178 +990,6 @@
                     </n-card>
 
                   </n-space>
-                </n-gi>
-              </n-grid>
-            </n-tab-pane>
-
-            <!-- ================== 标签页 2: Emby (紧凑双列版) ================== -->
-            <n-tab-pane name="emby" tab="Emby & 302反代">
-              <n-grid cols="1 l:2" :x-gap="24" :y-gap="24" responsive="screen">
-
-                <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">Emby 连接设置</span></template>
-                    
-                    <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
-                      
-                      <!-- 1. Emby URL (左) -->
-                      <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                      <n-form-item-grid-item label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>Emby URL</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" />
-                              </template>
-                              此项修改需要重启容器才能生效。
-                            </n-tooltip>
-                          </div>
-                        </template>
-                        <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
-                      </n-form-item-grid-item>
-
-                      <!-- 2. 外网访问 URL (右) -->
-                      <n-form-item-grid-item label="外网URL" path="emby_public_url" label-width="100">
-                        <n-input v-model:value="configModel.emby_public_url" placeholder="留空则不开启" />
-                      </n-form-item-grid-item>
-
-                      <!-- 3. API Key (左) -->
-                      <n-form-item-grid-item label="APIKey" path="emby_api_key" label-width="100">
-                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="输入 API Key" />
-                      </n-form-item-grid-item>
-
-                      <!-- 4. 用户 ID (右) -->
-                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id" label-width="100">
-                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位用户ID" />
-                        <template #feedback>
-                          <div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位。</div>
-                        </template>
-                      </n-form-item-grid-item>
-
-                      <!-- 分割线 (占满一行) -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin: 8px 0; font-size: 0.9em; color: gray;">管理员凭证 (选填)</n-divider>
-                      </n-gi>
-
-                      <!-- 5. 管理员用户 (左) -->
-                      <n-form-item-grid-item label="用户名" path="emby_admin_user" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" />
-                      </n-form-item-grid-item>
-
-                      <!-- 6. 管理员密码 (右) -->
-                      <n-form-item-grid-item label="密码" path="emby_admin_pass" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" />
-                      </n-form-item-grid-item>
-
-                      <!-- 7. 超时时间 (占满一行，保持长标签) -->
-                      <n-form-item-grid-item label="Emby API 超时时间 (秒)" path="emby_api_timeout" span="1 m:2" label-width="200">
-                        <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
-                      </n-form-item-grid-item>
-
-                      <!-- 分割线 -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin-top: 10px;">选择要处理的媒体库</n-divider>
-                      </n-gi>
-
-                      <!-- 8. 媒体库选择 -->
-                      <n-form-item-grid-item label-placement="top" span="1 m:2">
-                        <n-spin :show="loadingLibraries">
-                          <n-checkbox-group v-model:value="configModel.libraries_to_process">
-                            <n-space item-style="display: flex; flex-wrap: wrap;">
-                              <n-checkbox v-for="lib in availableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name" />
-                            </n-space>
-                          </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key)">
-                            未找到媒体库。请检查 Emby URL 和 API Key。
-                          </n-text>
-                          <div v-if="libraryError" style="color: red; margin-top: 5px;">{{ libraryError }}</div>
-                        </n-spin>
-                      </n-form-item-grid-item>
-
-                    </n-grid>
-                  </n-card>
-                </n-gi>
-
-                <!-- ########## 右侧卡片: 虚拟库 (反向代理) ########## -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">302反代（Pro）</span></template>
-                    
-                    <!-- 同样使用紧凑双列 -->
-                    <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
-
-                      <!-- 1. 启用开关 -->
-                      <n-form-item-grid-item label="启用" path="proxy_enabled" label-width="100">
-                        <n-switch v-model:value="configModel.proxy_enabled" />
-                      </n-form-item-grid-item>
-
-                      <!-- 2. 端口 -->
-                      <n-form-item-grid-item label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>端口</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" style="margin-left: 4px;" />
-                              </template>
-                              需重启容器生效
-                            </n-tooltip>
-                          </div>
-                        </template>
-                        <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
-                      </n-form-item-grid-item>
-
-                      <!-- 3. 缺失占位符 (占满一行，因为说明文字较长) -->
-                      <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" span="1 m:2" label-width="100">
-                         <n-space align="center">
-                            <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
-                            <n-text depth="3" style="font-size: 0.8em;">在榜单中显示未入库海报</n-text>
-                         </n-space>
-                      </n-form-item-grid-item>
-
-                      <!-- 5. 合并原生库 -->
-                      <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries" label-width="100">
-                        <n-switch v-model:value="configModel.proxy_merge_native_libraries" :disabled="!configModel.proxy_enabled"/>
-                      </n-form-item-grid-item>
-
-                      <!-- 6. 显示位置 -->
-                      <n-form-item-grid-item label="显示位置" path="proxy_native_view_order" label-width="100">
-                        <n-radio-group v-model:value="configModel.proxy_native_view_order" :disabled="!configModel.proxy_enabled || !configModel.proxy_merge_native_libraries">
-                          <n-radio value="before">在前</n-radio>
-                          <n-radio value="after">在后</n-radio>
-                        </n-radio-group>
-                      </n-form-item-grid-item>
-
-                      <!-- 分割线 -->
-                      <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin-top: 10px;">选择合并显示的原生媒体库</n-divider>
-                      </n-gi>
-
-                      <!-- 7. 原生库选择 -->
-                      <n-form-item-grid-item 
-                        v-if="configModel.proxy_enabled && configModel.proxy_merge_native_libraries" 
-                        path="proxy_native_view_selection" 
-                        label-placement="top"
-                        span="1 m:2"
-                      >
-                        <n-spin :show="loadingNativeLibraries">
-                          <n-checkbox-group v-model:value="configModel.proxy_native_view_selection">
-                            <n-space item-style="display: flex; flex-wrap: wrap;">
-                              <n-checkbox v-for="lib in nativeAvailableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name"/>
-                            </n-space>
-                          </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingNativeLibraries && nativeAvailableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key && configModel.emby_user_id)">
-                            未找到原生媒体库。请检查 Emby URL、API Key 和 用户ID。
-                          </n-text>
-                          <div v-if="nativeLibraryError" style="color: red; margin-top: 5px;">{{ nativeLibraryError }}</div>
-                        </n-spin>
-                      </n-form-item-grid-item>
-
-                    </n-grid>
-                  </n-card>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
@@ -1582,7 +1597,7 @@
     <n-modal v-model:show="showQuickDeployResult" preset="card" title="115 网盘一键部署完成" :style="modalStyle(620)" class="custom-modal glass-modal">
       <n-space vertical :size="16">
         <n-alert type="success" :show-icon="true">
-          已自动创建基础目录，并写入目录配置、分类配置、重命名配置和洗版配置。
+          已自动创建 115 目录、本地 STRM 镜像目录和二级分类 Emby 媒体库，并写入分类、重命名和洗版配置。
         </n-alert>
         <div class="quick-deploy-tree">
           <div class="quick-deploy-tree-title">115 目录树</div>
@@ -1602,9 +1617,20 @@
             <li>{{ quickDeployTree.unrecognized_root?.name || 'ETK未识别' }}</li>
           </ul>
         </div>
-        <n-alert type="warning" :show-icon="true">
-          本地 STRM 根目录无法自动判断，请继续手动设置“本地 STRM 根目录”，否则只完成网盘侧部署。
-        </n-alert>
+        <div class="quick-deploy-tree" v-if="quickDeployEmbyLibraries.length">
+          <div class="quick-deploy-tree-title">Emby 媒体库</div>
+          <ul>
+            <li v-for="lib in quickDeployEmbyLibraries" :key="lib.name + lib.path">
+              {{ lib.name }} - {{ lib.created ? '已创建' : '已存在' }} - {{ lib.path }}
+            </li>
+          </ul>
+        </div>
+        <div class="quick-deploy-tree" v-if="quickDeployLocalDirs.length">
+          <div class="quick-deploy-tree-title">本地 STRM 镜像目录</div>
+          <ul>
+            <li v-for="dir in quickDeployLocalDirs" :key="dir.path">{{ dir.path }}</li>
+          </ul>
+        </div>
         <n-space justify="end">
           <n-button @click="showQuickDeployResult = false">知道了</n-button>
         </n-space>
@@ -1982,7 +2008,7 @@ import {
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
   NFormItemGridItem, NCheckboxGroup, NCheckbox, NText, NRadioGroup, NRadio,
   NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip,
-  NQrCode, NResult
+  NQrCode, NResult, NProgress
 } from 'naive-ui';
 import { 
   DownloadOutline as ExportIcon, 
@@ -2031,6 +2057,7 @@ const episodeRegexModalRef = ref(null);
 const defaultStreamModalRef = ref(null);
 const musicModalRef = ref(null);
 const ruleManagerRef = ref(null);
+const activeSettingsTab = ref('emby');
 
 const MOBILE_BREAKPOINT = 768;
 const isMobile = ref(false);
@@ -2735,8 +2762,28 @@ const showCreateFolderInput = ref(false);
 const selectorContext = ref(''); 
 const searchKeyword = ref('');
 const quickDeployLoading = ref(false);
+const quickDeployProgress = ref(0);
+const quickDeployStatus = ref('');
 const showQuickDeployResult = ref(false);
 const quickDeployTree = ref(null);
+const quickDeployLocalDirs = ref([]);
+const quickDeployEmbyLibraries = ref([]);
+const quickDeployPrerequisites = computed(() => {
+  const model = configModel.value || {};
+  const p115Ready = !!(p115Info.value?.has_token || p115Info.value?.has_cookie);
+  const strmUrlReady = !!model.etk_server_url && /^https?:\/\//i.test(model.etk_server_url);
+  return [
+    { label: '115 授权', done: p115Ready, tab: '115_drive' },
+    { label: 'Emby URL', done: !!model.emby_server_url, tab: 'emby' },
+    { label: 'Emby API Key', done: !!model.emby_api_key, tab: 'emby' },
+    { label: 'STRM 根目录', done: !!model.local_strm_root, tab: 'emby' },
+    { label: 'STRM 链接地址', done: strmUrlReady, tab: '115_drive' }
+  ];
+});
+
+const jumpToSettingsTab = (tabName) => {
+  activeSettingsTab.value = tabName;
+};
 
 // ★★★ Cookie 扫码获取逻辑 ★★★
 const showCookieModal = ref(false);
@@ -3203,30 +3250,95 @@ const handleCreateFolder = async () => {
 };
 
 const handleQuickDeploy115 = () => {
-  dialog.warning({
+  const missing = [];
+  if (!(p115Info.value?.has_token || p115Info.value?.has_cookie)) missing.push('115 授权');
+  if (!configModel.value?.emby_server_url) missing.push('Emby URL');
+  if (!configModel.value?.emby_api_key) missing.push('Emby API Key');
+  if (!configModel.value?.local_strm_root) missing.push('STRM 根目录');
+  if (!configModel.value?.etk_server_url) missing.push('STRM 链接地址');
+  if (configModel.value?.etk_server_url && !/^https?:\/\//i.test(configModel.value.etk_server_url)) {
+    message.warning('STRM 链接地址必须以 http:// 或 https:// 开头。');
+    return;
+  }
+  if (missing.length) {
+    message.warning(`一键部署前请先配置并保存：${missing.join('、')}`);
+    return;
+  }
+
+  const startQuickDeploy = async () => {
+    quickDeployLoading.value = true;
+    quickDeployProgress.value = 1;
+    quickDeployStatus.value = '正在启动一键部署...';
+    quickDeployLocalDirs.value = [];
+    quickDeployEmbyLibraries.value = [];
+    try {
+      const response = await fetch('/api/p115/quick_deploy?stream=1', { method: 'POST' });
+      if (!response.ok || !response.body) {
+        throw new Error(`请求失败: HTTP ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let finalEvent = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.type === 'progress') {
+            quickDeployProgress.value = Number(event.percent || 0);
+            quickDeployStatus.value = event.message || '';
+          } else if (event.type === 'done') {
+            finalEvent = event;
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer);
+        if (event.type === 'done') finalEvent = event;
+      }
+
+      if (!finalEvent?.success) {
+        throw new Error(finalEvent?.message || '一键部署失败');
+      }
+
+      const data = finalEvent.data || {};
+      const cfg = data.config || {};
+      Object.assign(configModel.value, cfg);
+      quickDeployTree.value = data.tree || null;
+      quickDeployLocalDirs.value = data.local_dirs || [];
+      quickDeployEmbyLibraries.value = data.emby_libraries || [];
+      showQuickDeployResult.value = true;
+      quickDeployProgress.value = 100;
+      quickDeployStatus.value = finalEvent.message || '一键部署完成';
+      if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
+        await fetchEmbyLibrariesInternal();
+      }
+      message.success(finalEvent.message || '115 网盘基础配置已部署完成');
+    } catch (e) {
+      quickDeployStatus.value = '部署失败';
+      message.error('一键部署失败: ' + (e.response?.data?.message || e.message));
+    } finally {
+      quickDeployLoading.value = false;
+    }
+  };
+
+  const dialogInstance = dialog.warning({
     title: '一键部署 115 基础配置',
-    content: '将自动在 115 根目录创建 ETK媒体库、ETK待整理、ETK未识别，并覆盖当前分类规则、重命名规则和洗版规则。确认继续？',
+    content: '将自动创建 115 目录、本地 STRM 镜像目录，并按二级分类创建 Emby 媒体库；同时覆盖当前分类规则、重命名规则和洗版规则。确认继续？',
     positiveText: '开始部署',
     negativeText: '取消',
-    onPositiveClick: async () => {
-      quickDeployLoading.value = true;
-      try {
-        const res = await axios.post('/api/p115/quick_deploy');
-        if (!res.data?.success) {
-          message.error(res.data?.message || '一键部署失败');
-          return;
-        }
-        const data = res.data.data || {};
-        const cfg = data.config || {};
-        Object.assign(configModel.value, cfg);
-        quickDeployTree.value = data.tree || null;
-        showQuickDeployResult.value = true;
-        message.success(res.data.message || '115 网盘基础配置已部署完成');
-      } catch (e) {
-        message.error('一键部署失败: ' + (e.response?.data?.message || e.message));
-      } finally {
-        quickDeployLoading.value = false;
-      }
+    onPositiveClick: () => {
+      dialogInstance.destroy();
+      setTimeout(startQuickDeploy, 0);
+      return false;
     }
   });
 };
@@ -3656,6 +3768,81 @@ onUnmounted(() => {
   font-size: 16px;
   vertical-align: middle;
 }
+.settings-top-cards {
+  margin-bottom: 18px;
+}
+.top-card-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.top-card-title {
+  font-size: 18px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.top-card-icon {
+  font-size: 22px;
+}
+.top-card-desc {
+  font-size: 13px;
+  color: #888;
+  margin-top: 6px;
+  line-height: 1.6;
+}
+.pro-card {
+  background: linear-gradient(135deg, #fffcf8 0%, #fff 100%);
+  border: 1px solid #ffe5c4;
+}
+.pro-expire-time {
+  color: #d48806;
+  font-weight: bold;
+  margin-top: 4px;
+  display: inline-block;
+}
+.pro-active-tag {
+  font-weight: bold;
+  font-size: 14px;
+  padding: 0 15px;
+}
+.quick-deploy-card {
+  height: 100%;
+}
+.prerequisite-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--n-success-color);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.prerequisite-item.pending {
+  color: var(--n-error-color);
+}
+.prerequisite-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.prerequisite-link:hover {
+  color: var(--n-primary-color);
+}
+.prerequisite-note {
+  color: var(--n-text-color-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
 /* ★★★ 新增：文件夹浏览器样式 ★★★ */
 .folder-browser {
   display: flex;
@@ -3715,6 +3902,12 @@ onUnmounted(() => {
 
 .quick-deploy-tree li {
   line-height: 1.8;
+}
+.quick-deploy-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
 }
 .browser-footer {
   padding: 12px 16px; border-top: 1px solid var(--n-divider-color);
@@ -3808,6 +4001,14 @@ onUnmounted(() => {
     font-size: 15px;
   }
 
+  .top-card-content {
+    align-items: flex-start;
+  }
+
+  .top-card-title {
+    font-size: 16px;
+  }
+
   .description-text {
     font-size: 12px;
     line-height: 1.7;
@@ -3861,3 +4062,4 @@ onUnmounted(() => {
 }
 
 </style>
+

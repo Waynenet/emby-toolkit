@@ -1,6 +1,7 @@
 # routes/p115.py
 import logging
 import threading
+from queue import Queue
 from datetime import datetime, timedelta
 import json
 import base64
@@ -13,7 +14,7 @@ import requests
 from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app, session
 from extensions import admin_required, emby_login_required
 from database import settings_db
-from handler import moviepilot
+from handler import moviepilot, emby
 from handler.p115_service import P115Service, get_config, get_115_api_priority
 from handler.p115_copy_play import (
     discard_copy_play_clone,
@@ -26,7 +27,6 @@ import constants
 import config_manager
 from functools import lru_cache, wraps
 from database import user_db
-from handler.telegram import send_telegram_message
 
 # 115扫码登录相关变量 (OAuth 2.0 + PKCE 模式)
 _qrcode_data = {
@@ -40,33 +40,6 @@ _qrcode_data = {
 }
 p115_bp = Blueprint('115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
-PLAY_POOL_USER_REWARD_KEY = 'p115_play_pool_user_cookie_rewards'
-
-
-def _load_play_pool_user_rewards():
-    rewards = settings_db.get_setting(PLAY_POOL_USER_REWARD_KEY) or {}
-    return rewards if isinstance(rewards, dict) else {}
-
-
-def _user_reward_entry(rewards, user_id):
-    value = rewards.get(str(user_id))
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        return {'last_reward_date': value, 'total_days': 0.0}
-    return {'last_reward_date': '', 'total_days': 0.0}
-
-
-def _public_user_reward(entry):
-    total_days = float(entry.get('total_days') or 0)
-    return {
-        'total_days': round(total_days, 2),
-        'last_reward_days': float(entry.get('last_reward_days') or 0),
-        'last_reward_date': str(entry.get('last_reward_date') or ''),
-        'last_reward_mode': str(entry.get('last_reward_mode') or ''),
-    }
-
-
 def _resolve_play_request_user_id():
     for key in ('UserId', 'userId', 'user_id'):
         value = request.args.get(key)
@@ -1113,48 +1086,27 @@ def save_user_play_pool_account():
         payload['cookie'] = cookie
         payload['enabled'] = True
     item = p115_play_pool.upsert_account(payload, account_id=existing.get('id') if existing else None)
-    speedtest_error = ''
-    speedtest_ok = False
-    config = p115_play_pool.get_public_config()
-    if cookie and config.get('auto_speedtest_enabled') is not False:
+    reward_result = {}
+    if cookie:
         try:
             result = p115_play_pool.speedtest_account(item['id'])
             item['last_speed_bps'] = result.get('bps', 0)
-            speedtest_ok = True
+            item = p115_play_pool._find_account_by_id(item['id']) or item
+            reward_result = p115_play_pool._reward_user_cookie(
+                item,
+                notify_user=False,
+                speed_text=result.get('speed_text') or '',
+                error_text='' if item.get('enabled') else item.get('last_error') or '测速未达标',
+            )
         except Exception as e:
-            speedtest_error = str(e)
             p115_play_pool.upsert_account({'enabled': False, 'last_error': str(e)}, account_id=item['id'])
+            item = p115_play_pool._find_account_by_id(item['id']) or item
+            reward_result = p115_play_pool._reward_user_cookie(item, notify_user=False, error_text=str(e))
     item = p115_play_pool._find_account_by_id(item['id']) or item
-    if speedtest_ok and item.get('enabled') and item.get('cookie'):
-        today = datetime.now().strftime('%Y-%m-%d')
-        rewards = _load_play_pool_user_rewards()
-        reward_entry = _user_reward_entry(rewards, emby_user_id)
-        if reward_entry.get('last_reward_date') != today:
-            reward_days = 0.8 if shared else 0.5
-            try:
-                user_db.extend_user_expiration_days(emby_user_id, reward_days)
-                reward_entry.update({
-                    'last_reward_date': today,
-                    'last_reward_days': reward_days,
-                    'last_reward_mode': 'shared' if shared else 'private',
-                    'total_days': round(float(reward_entry.get('total_days') or 0) + reward_days, 2),
-                })
-                rewards[str(emby_user_id)] = reward_entry
-                settings_db.save_setting(PLAY_POOL_USER_REWARD_KEY, rewards)
-                item['reward_days'] = reward_days
-            except Exception as e:
-                logger.error("  ➜ [小号播放] 用户 Cookie 奖励发放失败: user_id=%s, err=%s", emby_user_id, e, exc_info=True)
-    else:
-        chat_id = user_db.get_user_telegram_chat_id(emby_user_id)
-        if speedtest_error and chat_id:
-            try:
-                send_telegram_message(chat_id, f"你的 115 Cookie 未通过可用性检测，本日会员时长奖励未发放。\n原因：{speedtest_error or item.get('last_error') or 'Cookie 不可用'}")
-            except Exception as e:
-                logger.warning("  ➜ [小号播放] 发送用户 Cookie 失效通知失败: user_id=%s, err=%s", emby_user_id, e)
     public_item = p115_play_pool.get_public_account(item.get('id')) or {}
-    if item.get('reward_days'):
-        public_item['reward_days'] = item.get('reward_days')
-    public_item['reward_summary'] = _public_user_reward(_user_reward_entry(_load_play_pool_user_rewards(), emby_user_id))
+    if reward_result.get('reward_days'):
+        public_item['reward_days'] = reward_result.get('reward_days')
+    public_item['reward_summary'] = p115_play_pool.public_user_reward(emby_user_id)
     return jsonify({'success': True, 'data': public_item})
 
 
@@ -1163,7 +1115,7 @@ def save_user_play_pool_account():
 def get_user_play_pool_account():
     emby_user_id = session.get('emby_user_id')
     item = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
-    item['reward_summary'] = _public_user_reward(_user_reward_entry(_load_play_pool_user_rewards(), emby_user_id))
+    item['reward_summary'] = p115_play_pool.public_user_reward(emby_user_id)
     return jsonify({'success': True, 'data': item})
 
 
@@ -1182,8 +1134,7 @@ def delete_user_play_pool_account():
 @emby_login_required
 def get_user_play_pool_rewards():
     emby_user_id = session.get('emby_user_id')
-    rewards = _load_play_pool_user_rewards()
-    return jsonify({'success': True, 'data': _public_user_reward(_user_reward_entry(rewards, emby_user_id))})
+    return jsonify({'success': True, 'data': p115_play_pool.public_user_reward(emby_user_id)})
 
 
 @p115_bp.route('/play_pool/accounts/<account_id>', methods=['PUT'])
@@ -1276,15 +1227,15 @@ def _p115_ensure_folder(client, parent_cid, name):
 
 def _p115_deploy_sorting_rules(category_dirs):
     base_rules = [
-        ('国漫', 'tv', {'countries': ['中国'], 'genres': [16]}),
-        ('日番', 'tv', {'countries': ['日本'], 'genres': [16]}),
-        ('美漫', 'tv', {'countries': ['美国'], 'genres': [16]}),
-        ('国产片', 'movie', {'countries': ['中国']}),
-        ('日韩片', 'movie', {'countries': ['日本', '韩国']}),
-        ('欧美片', 'movie', {'countries': ['美国', '英国', '法国', '德国', '加拿大']}),
-        ('国产剧', 'tv', {'countries': ['中国']}),
-        ('日韩剧', 'tv', {'countries': ['日本', '韩国']}),
-        ('欧美剧', 'tv', {'countries': ['美国', '英国', '法国', '德国', '加拿大']}),
+        ('国漫', 'tv', {'genres': [16], 'languages': ['国语', '粤语']}),
+        ('日番', 'tv', {'genres': [16], 'languages': ['日语']}),
+        ('美漫', 'tv', {'genres': [16]}),
+        ('国产片', 'movie', {'languages': ['国语', '粤语']}),
+        ('日韩片', 'movie', {'languages': ['日语', '韩语']}),
+        ('欧美片', 'movie', {}),
+        ('国产剧', 'tv', {'languages': ['国语', '粤语']}),
+        ('日韩剧', 'tv', {'languages': ['日语', '韩语']}),
+        ('欧美剧', 'tv', {}),
     ]
     rules = []
     for index, (name, media_type, extra) in enumerate(base_rules, start=1):
@@ -1299,8 +1250,8 @@ def _p115_deploy_sorting_rules(category_dirs):
             'match_mode': 'and',
             'media_type': media_type,
             'genres': extra.get('genres', []),
-            'countries': extra.get('countries', []),
-            'languages': [],
+            'countries': [],
+            'languages': extra.get('languages', []),
             'studios': [],
             'keywords': [],
             'ratings': [],
@@ -1322,11 +1273,14 @@ def _p115_deploy_washing_groups(category_dirs):
         return [
             {'resolution': ['4k'], 'codec': [], 'effect': [], 'audio': [], 'subtitle': [], 'subtitle_effect': False, 'clean_version': False, 'min_size_gb': None, 'max_size_gb': None, 'is_exclude': False},
             {'resolution': ['1080p'], 'codec': [], 'effect': [], 'audio': [], 'subtitle': [], 'subtitle_effect': False, 'clean_version': False, 'min_size_gb': None, 'max_size_gb': None, 'is_exclude': False},
-            {'resolution': ['720p'], 'codec': [], 'effect': [], 'audio': [], 'subtitle': [], 'subtitle_effect': False, 'clean_version': False, 'min_size_gb': None, 'max_size_gb': None, 'is_exclude': False},
         ]
 
     groups = []
-    for index, (name, media_type) in enumerate((('动漫', 'Series'), ('电影', 'Movie'), ('剧集', 'Series')), start=1):
+    for index, (name, media_type) in enumerate((
+        ('国漫', 'Series'), ('日番', 'Series'), ('美漫', 'Series'),
+        ('国产片', 'Movie'), ('日韩片', 'Movie'), ('欧美片', 'Movie'),
+        ('国产剧', 'Series'), ('日韩剧', 'Series'), ('欧美剧', 'Series'),
+    ), start=1):
         root = category_dirs[name]
         groups.append({
             'id': index,
@@ -1349,92 +1303,216 @@ def _p115_deploy_washing_groups(category_dirs):
     return groups
 
 
+def _p115_local_path(*parts):
+    clean_parts = [str(p).strip('/\\') for p in parts[1:] if str(p or '').strip('/\\')]
+    return os.path.normpath(os.path.join(str(parts[0]), *clean_parts))
+
+
+def _p115_create_local_mirror(local_root, category_dirs):
+    if not local_root:
+        raise RuntimeError('请先在 Emby 配置页填写本地 STRM 根目录')
+
+    local_dirs = []
+    for name in ('动漫', '电影', '剧集'):
+        rel_path = category_dirs[name]['path']
+        abs_path = _p115_local_path(local_root, rel_path)
+        os.makedirs(abs_path, exist_ok=True)
+        local_dirs.append({'name': name, 'path': abs_path, 'category_path': rel_path})
+
+    for name in ('国漫', '日番', '美漫', '国产片', '日韩片', '欧美片', '国产剧', '日韩剧', '欧美剧'):
+        rel_path = category_dirs[name]['path']
+        abs_path = _p115_local_path(local_root, rel_path)
+        os.makedirs(abs_path, exist_ok=True)
+        local_dirs.append({'name': name, 'path': abs_path, 'category_path': rel_path})
+        category_dirs[name]['local_path'] = abs_path
+
+    return local_dirs
+
+
+def _p115_deploy_emby_libraries(local_root, category_dirs):
+    config = get_config()
+    base_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+    api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+    if not base_url or not api_key:
+        raise RuntimeError('请先填写 Emby URL 和 API Key 并保存')
+
+    library_defs = [
+        ('国漫', 'tvshows'), ('日番', 'tvshows'), ('美漫', 'tvshows'),
+        ('国产片', 'movies'), ('日韩片', 'movies'), ('欧美片', 'movies'),
+        ('国产剧', 'tvshows'), ('日韩剧', 'tvshows'), ('欧美剧', 'tvshows'),
+    ]
+    libraries = []
+    for name, collection_type in library_defs:
+        local_path = category_dirs[name].get('local_path') or _p115_local_path(local_root, category_dirs[name]['path'])
+        libraries.append(emby.create_library(base_url, api_key, name, collection_type, local_path))
+    return libraries
+
+
+def _quick_deploy_payload(progress=None):
+    def emit(percent, text):
+        if progress:
+            progress(percent, text)
+
+    client = P115Service.get_client()
+    config = get_config()
+    missing = []
+    if not client:
+        missing.append("115 授权")
+    if not config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL):
+        missing.append("Emby URL")
+    if not config.get(constants.CONFIG_OPTION_EMBY_API_KEY):
+        missing.append("Emby API Key")
+    if not config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT):
+        missing.append("本地 STRM 根目录")
+    etk_server_url = str(config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip()
+    if not etk_server_url:
+        missing.append("STRM 链接地址")
+    elif not etk_server_url.startswith(('http://', 'https://')):
+        raise RuntimeError("STRM 链接地址必须以 http:// 或 https:// 开头")
+    if missing:
+        raise RuntimeError("一键部署前请先配置：" + "、".join(missing))
+
+    emit(5, '正在创建 115 一级目录')
+    media_root = _p115_ensure_folder(client, '0', 'ETK媒体库')
+    save_root = _p115_ensure_folder(client, '0', 'ETK待整理')
+    unrecognized_root = _p115_ensure_folder(client, '0', 'ETK未识别')
+
+    category_dirs = {
+        '动漫': _p115_ensure_folder(client, media_root['cid'], '动漫'),
+        '电影': _p115_ensure_folder(client, media_root['cid'], '电影'),
+        '剧集': _p115_ensure_folder(client, media_root['cid'], '剧集'),
+    }
+    child_map = {
+        '动漫': ['国漫', '日番', '美漫'],
+        '电影': ['国产片', '日韩片', '欧美片'],
+        '剧集': ['国产剧', '日韩剧', '欧美剧'],
+    }
+    emit(15, '正在创建 115 二级分类目录')
+    for parent_name, child_names in child_map.items():
+        parent = category_dirs[parent_name]
+        parent['children'] = []
+        parent['path'] = parent_name
+        for child_name in child_names:
+            child = _p115_ensure_folder(client, parent['cid'], child_name)
+            child['path'] = f"{parent_name}/{child_name}"
+            parent['children'].append(child)
+            category_dirs[child_name] = child
+
+    local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+    emit(30, '正在创建本地 STRM 镜像目录')
+    local_dirs = _p115_create_local_mirror(local_root, category_dirs)
+
+    emit(45, '正在写入 115 基础配置')
+    monitor_paths = config.get(constants.CONFIG_OPTION_MONITOR_PATHS, [])
+    if not isinstance(monitor_paths, list):
+        monitor_paths = []
+    norm_local_root = os.path.normpath(str(local_root))
+    existing_monitor_paths = [str(p) for p in monitor_paths if str(p or '').strip()]
+    if norm_local_root not in {os.path.normpath(p) for p in existing_monitor_paths}:
+        existing_monitor_paths.append(local_root)
+
+    dynamic_config = {
+        constants.CONFIG_OPTION_115_SAVE_PATH_CID: save_root['cid'],
+        constants.CONFIG_OPTION_115_SAVE_PATH_NAME: save_root['name'],
+        constants.CONFIG_OPTION_115_UNRECOGNIZED_CID: unrecognized_root['cid'],
+        constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME: unrecognized_root['name'],
+        constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: media_root['cid'],
+        constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: media_root['name'],
+        constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: True,
+        constants.CONFIG_OPTION_115_MP_CLASSIFY: False,
+        constants.CONFIG_OPTION_115_API_PRIORITY: config.get(constants.CONFIG_OPTION_115_API_PRIORITY, 'openapi'),
+        constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE: config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10),
+        constants.CONFIG_OPTION_115_EXTENSIONS: config.get(constants.CONFIG_OPTION_115_EXTENSIONS, ['mkv', 'mp4', 'iso', 'ts', 'm2ts']),
+        constants.CONFIG_OPTION_MONITOR_ENABLED: True,
+        constants.CONFIG_OPTION_MONITOR_PATHS: existing_monitor_paths,
+    }
+    config_manager.save_config(dynamic_config)
+
+    emit(55, '正在写入重命名配置')
+    rename_config = {
+        'keep_original_name': False,
+        'main_dir_template': '{{title}}{% if year %} ({{year}}){% endif %}{% if tmdbid %} {tmdb={{tmdbid}}}{% endif %}',
+        'season_dir_template': 'Season {{season_no}}',
+        'movie_file_template': '{{title}}{{fileExt}}',
+        'tv_file_template': '{{title}}{% if season_episode %} {{season_episode}}{% endif %}{{fileExt}}',
+        'file_template': '{{title}}{% if season_episode %} {{season_episode}}{% endif %}{{fileExt}}',
+        'main_dir_format': ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'],
+        'season_dir_format': ['season_name_en'],
+        'file_format': ['title_zh', 'sep_space', 's_e'],
+        'file_tmdb_fmt': 'none',
+        'video_codec_style': 'hevc',
+        'hide_audio_channels': False,
+        'strm_url_fmt': 'standard',
+    }
+    settings_db.save_setting('p115_rename_config', rename_config)
+    settings_db.save_washing_priority_config({'conflict_mode': 'replace'})
+
+    emit(65, '正在写入二级分类规则')
+    sorting_rules = _p115_deploy_sorting_rules(category_dirs)
+    emit(72, '正在写入二级分类洗版规则')
+    washing_groups = _p115_deploy_washing_groups(category_dirs)
+
+    emit(82, '正在创建 Emby 媒体库')
+    emby_libraries = _p115_deploy_emby_libraries(local_root, category_dirs)
+    library_ids = [item['id'] for item in emby_libraries if item.get('id')]
+    if library_ids:
+        dynamic_config[constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS] = library_ids
+        config_manager.save_config({constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS: library_ids})
+
+    tree = {
+        'media_root': {**media_root, 'children': [category_dirs['动漫'], category_dirs['电影'], category_dirs['剧集']]},
+        'save_root': save_root,
+        'unrecognized_root': unrecognized_root,
+    }
+    emit(100, '一键部署完成')
+    return {
+        'config': dynamic_config,
+        'tree': tree,
+        'local_dirs': local_dirs,
+        'emby_libraries': emby_libraries,
+        'sorting_rules_count': len(sorting_rules),
+        'washing_groups_count': len(washing_groups),
+        'rename_config': rename_config,
+    }
+
+
 @p115_bp.route('/quick_deploy', methods=['POST'])
 @admin_required
 def quick_deploy_115():
-    """一键部署 115 基础目录、分类、重命名和洗版规则。"""
-    client = P115Service.get_client()
-    if not client:
-        return jsonify({"success": False, "message": "无法初始化 115 客户端，请先完成 115 授权"}), 500
+    """一键部署 115 基础目录、分类、重命名、洗版规则、本地目录和 Emby 媒体库。"""
+    if request.args.get('stream') == '1':
+        def generate():
+            q = Queue()
+
+            def progress(percent, text):
+                q.put({'type': 'progress', 'percent': percent, 'message': text})
+
+            def worker():
+                try:
+                    data = _quick_deploy_payload(progress)
+                    q.put({'type': 'done', 'success': True, 'message': '115 网盘基础配置已部署完成', 'data': data})
+                except Exception as e:
+                    logger.error(f"  ➜ [115一键部署] 执行失败: {e}", exc_info=True)
+                    q.put({'type': 'done', 'success': False, 'message': str(e)})
+
+            threading.Thread(target=worker, daemon=True).start()
+            while True:
+                event = q.get()
+                yield json.dumps(event, ensure_ascii=False) + '\n'
+                if event.get('type') == 'done':
+                    break
+
+        response = Response(stream_with_context(generate()), mimetype='application/x-ndjson')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        return response
 
     try:
-        media_root = _p115_ensure_folder(client, '0', 'ETK媒体库')
-        save_root = _p115_ensure_folder(client, '0', 'ETK待整理')
-        unrecognized_root = _p115_ensure_folder(client, '0', 'ETK未识别')
-
-        category_dirs = {
-            '动漫': _p115_ensure_folder(client, media_root['cid'], '动漫'),
-            '电影': _p115_ensure_folder(client, media_root['cid'], '电影'),
-            '剧集': _p115_ensure_folder(client, media_root['cid'], '剧集'),
-        }
-        child_map = {
-            '动漫': ['国漫', '日番', '美漫'],
-            '电影': ['国产片', '日韩片', '欧美片'],
-            '剧集': ['国产剧', '日韩剧', '欧美剧'],
-        }
-        for parent_name, child_names in child_map.items():
-            parent = category_dirs[parent_name]
-            parent['children'] = []
-            parent['path'] = parent_name
-            for child_name in child_names:
-                child = _p115_ensure_folder(client, parent['cid'], child_name)
-                child['path'] = f"{parent_name}/{child_name}"
-                parent['children'].append(child)
-                category_dirs[child_name] = child
-
-        dynamic_config = {
-            constants.CONFIG_OPTION_115_SAVE_PATH_CID: save_root['cid'],
-            constants.CONFIG_OPTION_115_SAVE_PATH_NAME: save_root['name'],
-            constants.CONFIG_OPTION_115_UNRECOGNIZED_CID: unrecognized_root['cid'],
-            constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME: unrecognized_root['name'],
-            constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: media_root['cid'],
-            constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: media_root['name'],
-            constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: True,
-            constants.CONFIG_OPTION_115_MP_CLASSIFY: False,
-            constants.CONFIG_OPTION_115_API_PRIORITY: get_config().get(constants.CONFIG_OPTION_115_API_PRIORITY, 'openapi'),
-            constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE: get_config().get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10),
-            constants.CONFIG_OPTION_115_EXTENSIONS: get_config().get(constants.CONFIG_OPTION_115_EXTENSIONS, ['mkv', 'mp4', 'iso', 'ts', 'm2ts']),
-        }
-        config_manager.save_config(dynamic_config)
-
-        rename_config = {
-            'keep_original_name': False,
-            'main_title_lang': 'zh',
-            'main_year_en': True,
-            'main_tmdb_fmt': '{tmdb=ID}',
-            'season_fmt': 'Season {02}',
-            'main_dir_template': '{{title}}{% if year %} ({{year}}){% endif %} {tmdb={{tmdbid}}}',
-            'season_dir_template': 'Season {{season_no}}',
-            'movie_file_template': '{{title}}{% if year %} ({{year}}){% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}',
-            'tv_file_template': '{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}',
-            'file_template': '{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{% if resolution %} · {{resolution}}{% endif %}{% if videoCodec %} · {{videoCodec | upper}}{% endif %}{% if audioCodec %} · {{audioCodec}}{% endif %}{% if releaseGroup %} · {{releaseGroup}}{% endif %}{{fileExt}}',
-            'file_format': ['s_e'],
-            'file_tmdb_fmt': 'none',
-            'video_codec_style': 'hevc',
-            'hide_audio_channels': False,
-            'strm_url_fmt': 'standard',
-        }
-        settings_db.save_setting('p115_rename_config', rename_config)
-        settings_db.save_washing_priority_config({'conflict_mode': 'replace'})
-
-        sorting_rules = _p115_deploy_sorting_rules(category_dirs)
-        washing_groups = _p115_deploy_washing_groups(category_dirs)
-
-        tree = {
-            'media_root': {**media_root, 'children': [category_dirs['动漫'], category_dirs['电影'], category_dirs['剧集']]},
-            'save_root': save_root,
-            'unrecognized_root': unrecognized_root,
-        }
+        data = _quick_deploy_payload()
         return jsonify({
             'success': True,
             'message': '115 网盘基础配置已部署完成',
-            'data': {
-                'config': dynamic_config,
-                'tree': tree,
-                'sorting_rules_count': len(sorting_rules),
-                'washing_groups_count': len(washing_groups),
-                'rename_config': rename_config,
-            }
+            'data': data
         })
     except Exception as e:
         logger.error(f"  ➜ [115一键部署] 执行失败: {e}", exc_info=True)

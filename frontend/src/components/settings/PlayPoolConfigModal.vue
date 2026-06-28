@@ -1,8 +1,9 @@
 <template>
   <n-modal v-model:show="showModal" preset="card" title="小号 Cookie 池" style="width: 760px; max-width: calc(100vw - 24px);" :mask-closable="false" class="custom-modal glass-modal">
     <n-space vertical :size="16">
-      <n-alert type="info" :show-icon="true">
-        有可用小号时，播放链路会优先使用小号秒传并获取直链；没有可用小号会回退主账号播放。
+      <n-alert>
+        <li>有可用小号时，播放链路会优先使用小号秒传并获取直链；没有可用小号会回退主账号播放。</li>
+        <li>低于测速阈值或高于单日流量上限时会自动停用，反之则自动启用。</li>
       </n-alert>
 
       <div class="play-pool-toolbar">
@@ -24,26 +25,26 @@
 
       <div class="play-pool-global-settings">
         <n-space align="center" :vertical="isMobile" :size="12">
-          <n-switch v-model:value="playPoolConfig.auto_speedtest_enabled" @update:value="savePlayPoolSettings">
-            <template #checked>自动测速</template>
-            <template #unchecked>关闭测速</template>
-          </n-switch>
-          <n-input-number
-            v-model:value="playPoolConfig.auto_speedtest_threshold_mbps"
-            :min="0"
-            :precision="2"
-            placeholder="测速阈值 MB/s"
-            style="width: 150px;"
-            @blur="savePlayPoolSettings"
-          />
-          <n-input-number
-            v-model:value="playPoolConfig.daily_traffic_limit_gb"
-            :min="0"
-            :precision="0"
-            placeholder="单日上限 GB"
-            style="width: 150px;"
-            @blur="savePlayPoolSettings"
-          />
+          <n-input-group class="play-pool-setting-input">
+            <n-input-group-label>测速阈值 MB/s</n-input-group-label>
+            <n-input-number
+              v-model:value="playPoolConfig.auto_speedtest_threshold_mbps"
+              :min="0"
+              :precision="2"
+              placeholder="5"
+              @blur="savePlayPoolSettings"
+            />
+          </n-input-group>
+          <n-input-group class="play-pool-setting-input">
+            <n-input-group-label>单日流量上限 GB</n-input-group-label>
+            <n-input-number
+              v-model:value="playPoolConfig.daily_traffic_limit_gb"
+              :min="0"
+              :precision="0"
+              placeholder="0"
+              @blur="savePlayPoolSettings"
+            />
+          </n-input-group>
         </n-space>
       </div>
 
@@ -195,8 +196,7 @@ const playPoolConfig = ref({
   enabled: false,
   usable_count: 0,
   temp_dir_name: 'ETK小号播放临时目录',
-  auto_speedtest_enabled: true,
-  auto_speedtest_threshold_mbps: null,
+  auto_speedtest_threshold_mbps: 5,
   daily_traffic_limit_gb: null,
   accounts: []
 });
@@ -272,8 +272,7 @@ const applyConfig = (data) => {
     enabled: Boolean(data?.enabled),
     usable_count: Number(data?.usable_count || 0),
     temp_dir_name: data?.temp_dir_name || 'ETK小号播放临时目录',
-    auto_speedtest_enabled: data?.auto_speedtest_enabled !== false,
-    auto_speedtest_threshold_mbps: Number(data?.auto_speedtest_threshold_mbps || 0) || null,
+    auto_speedtest_threshold_mbps: Number(data?.auto_speedtest_threshold_mbps || 0) || 5,
     daily_traffic_limit_gb: Number(data?.daily_traffic_limit_gb || 0) || null,
     accounts: Array.isArray(data?.accounts) ? data.accounts : []
   };
@@ -328,7 +327,6 @@ const savePlayPoolSettings = async () => {
   try {
     const res = await axios.post('/api/p115/play_pool', {
       enabled: Boolean(playPoolConfig.value.enabled),
-      auto_speedtest_enabled: Boolean(playPoolConfig.value.auto_speedtest_enabled),
       auto_speedtest_threshold_mbps: Number(playPoolConfig.value.auto_speedtest_threshold_mbps || 0),
       daily_traffic_limit_gb: Number(playPoolConfig.value.daily_traffic_limit_gb || 0)
     });
@@ -514,6 +512,9 @@ defineExpose({ open });
 .play-pool-form-card {
   background: var(--n-action-color);
 }
+.play-pool-setting-input {
+  width: 230px;
+}
 .play-pool-user-scope {
   display: grid;
   gap: 6px;
@@ -566,6 +567,9 @@ defineExpose({ open });
 }
 
 @media (max-width: 768px) {
+  .play-pool-setting-input {
+    width: 100%;
+  }
   .play-pool-account,
   .play-pool-qrcode {
     align-items: stretch;
