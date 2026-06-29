@@ -256,6 +256,44 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_state' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_state (
+                        state_key TEXT PRIMARY KEY,
+                        state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_snapshots' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_snapshots (
+                        id SERIAL PRIMARY KEY,
+                        tmdb_id TEXT NOT NULL,
+                        item_type TEXT NOT NULL DEFAULT 'Series',
+                        season_number INTEGER,
+                        subscribe_id INTEGER,
+                        scope_total INTEGER DEFAULT 0,
+                        scope_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        subscribe_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        last_checked_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_delete_records' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_delete_records (
+                        fingerprint TEXT PRIMARY KEY,
+                        tmdb_id TEXT,
+                        season_number INTEGER,
+                        episode_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        reason TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        expires_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+
                 logger.trace("  ➜ 正在创建 'person_metadata' 表...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS person_metadata (
@@ -408,7 +446,8 @@ def init_db():
                         -- 模板默认的有效期（天数），0 表示永久
                         default_expiration_days INTEGER DEFAULT 30,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        allow_unrestricted_subscriptions BOOLEAN DEFAULT FALSE NOT NULL
+                        allow_unrestricted_subscriptions BOOLEAN DEFAULT FALSE NOT NULL,
+                        max_concurrent_streams INTEGER DEFAULT 0 NOT NULL
                     )
                 """)
 
@@ -605,6 +644,34 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建共享资源虚拟入库表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS shared_virtual_imports (
+                        id SERIAL PRIMARY KEY,
+                        source_kind TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        tmdb_id TEXT,
+                        item_type TEXT,
+                        parent_series_tmdb_id TEXT,
+                        season_number INTEGER,
+                        episode_number INTEGER,
+                        title TEXT,
+                        release_year INTEGER,
+                        file_count INTEGER NOT NULL DEFAULT 0,
+                        total_size BIGINT NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'virtual',
+                        watched_count INTEGER NOT NULL DEFAULT 0,
+                        played_percent REAL NOT NULL DEFAULT 0,
+                        strm_paths_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        source_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        files_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        last_played_at TIMESTAMP WITH TIME ZONE,
+                        promoted_at TIMESTAMP WITH TIME ZONE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
 
                 logger.trace("  ➜ 正在创建完结季 115 分享通道本地表...")
                 cursor.execute("""
@@ -684,6 +751,9 @@ def init_db():
                             "washing_level": "INTEGER",
                             "washing_snapshot_json": "JSONB DEFAULT '{}'::jsonb"
                         },
+                        'subscribe_assistant_snapshots': {
+                            "last_checked_at": "TIMESTAMP WITH TIME ZONE"
+                        },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
                             "resubscribe_source": "TEXT DEFAULT 'moviepilot'", 
@@ -697,7 +767,8 @@ def init_db():
                         'user_templates': {
                             "source_emby_user_id": "TEXT",
                             "emby_configuration_json": "JSONB",
-                            "allow_unrestricted_subscriptions": "BOOLEAN DEFAULT FALSE NOT NULL"
+                            "allow_unrestricted_subscriptions": "BOOLEAN DEFAULT FALSE NOT NULL",
+                            "max_concurrent_streams": "INTEGER DEFAULT 0 NOT NULL"
                         },
                         'emby_users_extended': {
                             "template_id": "INTEGER",
@@ -801,6 +872,9 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_local_path ON p115_filesystem_cache (local_path) WHERE local_path IS NOT NULL AND local_path <> '';")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_washing_level ON p115_filesystem_cache (washing_level) WHERE washing_level IS NOT NULL;")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_washing_level ON media_metadata (washing_level) WHERE washing_level IS NOT NULL AND in_library = TRUE;")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_media ON subscribe_assistant_snapshots (tmdb_id, item_type, season_number);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_checked ON subscribe_assistant_snapshots (last_checked_at);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_delete_records_expires ON subscribe_assistant_delete_records (expires_at);")
 
                     # p115_filesystem_cache 是网盘实时镜像，联动删除会同步清理，不再承载 preid 永久缓存。
                     # preid 的长期来源是 p115_mediainfo_cache.raw_ffprobe_json._etk.preid。
@@ -863,6 +937,8 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_srsf_sha1 ON shared_rapid_source_files(UPPER(sha1));")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_srsf_episode ON shared_rapid_source_files(tmdb_id, season_number, episode_number);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_srsf_source_episode_sha1 ON shared_rapid_source_files(local_source_id, tmdb_id, season_number, episode_number, UPPER(sha1));")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_status_updated ON shared_virtual_imports(status, updated_at DESC);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_svi_media ON shared_virtual_imports(tmdb_id, item_type, season_number, episode_number);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_scssc_channel ON shared_completed_season_share_channels(channel_id);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_scssc_center_source ON shared_completed_season_share_channels(center_source_id, status, updated_at DESC);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_scssc_status_check ON shared_completed_season_share_channels(status, last_checked_at NULLS FIRST, updated_at ASC);")

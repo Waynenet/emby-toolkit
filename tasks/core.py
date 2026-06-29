@@ -14,7 +14,7 @@ from .actors import (task_enrich_aliases, task_persons_translation,
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
 from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_repair_p115_fingerprints, task_restore_nfo_and_images, task_fill_studio_images
-from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist
+from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
 from .subscriptions import task_auto_subscribe, task_manual_subscribe_batch
@@ -67,6 +67,7 @@ TASK_HELP_TEXTS = {
     'update-daily-theme': '更新每日主题推荐内容，用于影视探索页的主题展示。',
     'manual_subscribe_batch': '处理手动批量订阅队列，适合一次性提交多个想看的电影或剧集。',
     'scan_old_seasons_backfill': '扫描缺季老剧并尝试补齐缺失季度，适合老剧季信息不完整时使用。',
+    'subscribe-assistant-maintenance': '运行增强订阅助手巡检，处理下载超时、完成快照复查和过期状态清理。',
     'contribute-mediainfo': '把本地媒体信息贡献到中心。',
     'generate_embeddings': '为媒体生成向量索引，用于语义搜索、相似推荐等智能功能。',
     'refresh-collections': '刷新 TMDb 原生合集信息，让电影系列合集保持最新。',
@@ -290,6 +291,7 @@ def get_task_registry(context: str = 'all'):
         'role-translation': (task_role_translation, "中文化角色名", 'media', True),
         'actor-translation': (task_persons_translation, "中文化人物名", 'media', True),
         'process-watchlist': (task_process_watchlist, "刷新智能追剧", 'watchlist', True),
+        'subscribe-assistant-maintenance': (task_subscribe_assistant_maintenance, "订阅助手巡检", 'watchlist', True),
         'actor-tracking': (task_process_actor_subscriptions, "刷新演员订阅", 'actor', True),
         'custom-collections': (task_process_all_custom_collections, "刷新自建合集", 'media', True),
         'auto-subscribe': (task_auto_subscribe, "统一订阅处理", 'media', True),
@@ -308,7 +310,6 @@ def get_task_registry(context: str = 'all'):
         'shared-resource-maintenance': (task_shared_resource_maintenance, "共享资源维护", 'media', True),
         'sync-all-user-data': (task_sync_all_user_data, "同步用户数据", 'media', True),
         'generate_embeddings': (task_generate_embeddings, "生成媒体向量", 'media', True),
-        'purge-ghost-actors': (task_purge_ghost_actors, "删除幽灵演员", 'media', True),
         'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
@@ -323,6 +324,7 @@ def get_task_registry(context: str = 'all'):
         'refresh-collections': (task_refresh_collections, "刷新原生合集", 'media', False),
         'update-resubscribe-cache': (task_update_resubscribe_cache, "刷新媒体整理", 'media', False),
         'merge-duplicate-actors': (task_merge_duplicate_actors, "合并分身演员", 'media', False),
+        'purge-ghost-actors': (task_purge_ghost_actors, "删除幽灵演员", 'media', False),
         'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', False),
         'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', False),
         'fill-studio-images': (task_fill_studio_images, "补全工作室图标", 'media', False),

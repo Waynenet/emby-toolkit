@@ -14,6 +14,7 @@ import config_manager
 import constants
 from database import settings_db
 from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer
+from handler.p115_rename import P115RenameRenderer
 from handler.p115_media_analyzer import P115MediaAnalyzerMixin
 from handler.shared_center_client import SharedCenterClient, shared_center_enabled
 
@@ -33,6 +34,7 @@ _PENDING_TRANSFER_REPORT_MAX_ITEMS = 1000
 _PENDING_TRANSFER_REPORT_RETRY_BASE_SECONDS = 30
 _PENDING_TRANSFER_REPORT_RETRY_MAX_SECONDS = 3600
 _PENDING_TRANSFER_REPORT_DEFAULT_DRAIN_LIMIT = 20
+VIRTUAL_IMPORT_TEMP_DIR_NAME = 'ETK虚拟入库临时文件'
 
 
 
@@ -254,6 +256,51 @@ def _target_cid() -> str:
     cid = str(_cfg('CONFIG_OPTION_115_SAVE_PATH_CID', 'p115_save_path_cid', '') or '').strip()
     if not cid or cid == '0':
         raise RuntimeError('未配置 115 待整理目录 CID（p115_save_path_cid），无法秒传共享资源')
+    return cid
+
+
+def _root_cid() -> str:
+    return '0'
+
+
+def _virtual_temp_dir_cid() -> str:
+    p115 = P115Service.get_client()
+    if not p115:
+        raise RuntimeError('115 客户端未初始化')
+    name = VIRTUAL_IMPORT_TEMP_DIR_NAME
+    try:
+        items = p115.fs_files(_root_cid())
+        raw_items = []
+        if isinstance(items, dict):
+            raw_items = items.get('data') or items.get('items') or items.get('list') or []
+            if isinstance(raw_items, dict):
+                raw_items = raw_items.get('list') or raw_items.get('items') or []
+        elif isinstance(items, list):
+            raw_items = items
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+            item_name = str(item.get('n') or item.get('name') or item.get('file_name') or item.get('fn') or '').strip()
+            is_dir = bool(item.get('is_dir') or item.get('is_directory') or str(item.get('fc') or '') == '0')
+            cid = str(item.get('cid') or item.get('fid') or item.get('file_id') or item.get('id') or '').strip()
+            if item_name == name and cid and is_dir:
+                return cid
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 检查临时目录失败，准备重新创建：{e}")
+
+    resp = p115.fs_mkdir(name, _root_cid())
+    if not isinstance(resp, dict) or not resp.get('state'):
+        raise RuntimeError(f'创建虚拟入库临时目录失败：{resp}')
+    cid = str(
+        resp.get('cid')
+        or resp.get('file_id')
+        or resp.get('id')
+        or (resp.get('data') or {}).get('file_id')
+        or (resp.get('data') or {}).get('cid')
+        or ''
+    ).strip()
+    if not cid:
+        raise RuntimeError(f'创建虚拟入库临时目录成功但未返回 CID：{resp}')
     return cid
 
 
@@ -960,7 +1007,7 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
         )
         return {'ok': False, 'response': first_resp, 'skipped': True, 'message': '缺少 source_kind/source_id'}
 
-    logger.warning(
+    logger.debug(
         f"  ➜ [负载均衡签名] 秒传返回 status=7，准备请求中心调度在线 holder："
         f"source={source_kind}:{source_id}, sha1={sha1[:12]}..., backend={sign_req.get('backend') or '-'}, "
         f"sign_check={sign_req.get('sign_check')}"
@@ -986,7 +1033,7 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     holder_id = str(create_resp.get('holder_id') or (create_resp.get('job') or {}).get('holder_id') or '').strip()
     if not job_id:
         raise RuntimeError(f'中心未返回 sign_job id: {create_resp}')
-    logger.info(f"  ➜ [负载均衡签名] 签名任务已创建：等待源客户端签名...")
+    logger.debug(f"  ➜ [负载均衡签名] 签名任务已创建：等待源客户端签名...")
     wait_started_at = time.time()
     wait_resp = client.wait_rapid_sign_job(job_id, timeout=75)
     wait_elapsed = time.time() - wait_started_at
@@ -1021,7 +1068,7 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     signed_meta = dict(rapid_meta or {})
     signed_meta['sign_key'] = sign_req.get('sign_key')
     signed_meta['sign_val'] = sign_val
-    logger.info(
+    logger.debug(
         f"  ➜ [负载均衡签名] 已收到签名，开始秒传："
         f"{file_name}"
     )
@@ -1602,9 +1649,10 @@ def _prepare_files_before_rapid_transfer(
     source_label = f"{source_kind or '-'}:{source_id or '-'}"
     preflight_started_at = time.time()
     logger.debug(f"  ➜ [共享资源] 秒传前预检开始：source={source_label}, files={len(files)}")
+    virtual_auto_promote = bool((payload or {}).get('_virtual_auto_promote'))
 
     conflict_mode = _current_organize_conflict_mode(default='skip')
-    if conflict_mode == 'replace':
+    if conflict_mode == 'replace' and not virtual_auto_promote:
         files, inventory_gate = _replace_mode_short_circuit_best_inventory(
             source_kind=source_kind,
             source_id=source_id,
@@ -1677,7 +1725,12 @@ def _prepare_files_before_rapid_transfer(
             f"失败 {len(intro_errors)}"
         )
 
-    if conflict_mode != 'replace':
+    if virtual_auto_promote:
+        logger.info(
+            f"  ➜ [共享资源] 虚拟入库自动转正：强制进入洗版预检，命中 active_washing 的媒体允许替换"
+        )
+
+    if conflict_mode != 'replace' and not virtual_auto_promote:
         logger.info(
             f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 {conflict_mode or '未配置'}，"
             f"跳过洗版预检，耗时 {time.time() - preflight_started_at:.1f}s"
@@ -1688,6 +1741,7 @@ def _prepare_files_before_rapid_transfer(
             'intro_merged_count': intro_merged,
             'intro_merge_errors': intro_errors[:20],
             'washing_checked': False,
+            'virtual_auto_promote': virtual_auto_promote,
             'message': f'当前覆盖模式为 {conflict_mode or "未配置"}，跳过洗版预检',
         }
 
@@ -1699,6 +1753,7 @@ def _prepare_files_before_rapid_transfer(
             'raw_cache_errors': cache_errors[:20],
             'washing_checked': True,
             'washing_rejected': True,
+            'virtual_auto_promote': virtual_auto_promote,
             'errors': ['115 客户端未初始化，无法执行洗版预检'],
         }
 
@@ -1711,6 +1766,7 @@ def _prepare_files_before_rapid_transfer(
             'raw_cache_errors': cache_errors[:20],
             'washing_checked': True,
             'washing_rejected': True,
+            'virtual_auto_promote': virtual_auto_promote,
             'errors': [f'导入 WashingService 失败，拒绝秒传: {e}'],
         }
 
@@ -1850,7 +1906,12 @@ def _prepare_files_before_rapid_transfer(
             season_num=s_num,
             episode_num=e_num,
             original_lang=original_lang,
-            is_active_washing=False,
+            is_active_washing=_local_active_washing_for_media(
+                media_type,
+                tmdb_for_washing,
+                season_num=s_num,
+                episode_num=e_num,
+            ),
             has_external_subtitle=False,
         )
         logger.debug(
@@ -1904,6 +1965,7 @@ def _prepare_files_before_rapid_transfer(
             'raw_cache_errors': cache_errors[:20],
             'washing_checked': True,
             'washing_rejected': True,
+            'virtual_auto_promote': virtual_auto_promote,
             'errors': errors[:50],
         }
 
@@ -1917,6 +1979,7 @@ def _prepare_files_before_rapid_transfer(
             'raw_cache_errors': cache_errors[:20],
             'washing_checked': True,
             'washing_rejected': True,
+            'virtual_auto_promote': virtual_auto_promote,
             'errors': errors[:50] or ['所有中心源均未通过洗版预检'],
         }
 
@@ -1936,6 +1999,7 @@ def _prepare_files_before_rapid_transfer(
             'raw_cache_errors': cache_errors[:20],
             'washing_checked': True,
             'washing_rejected': False,
+            'virtual_auto_promote': virtual_auto_promote,
             'selected_count': len(selected),
             'errors': errors[:50],
         }
@@ -1950,6 +2014,7 @@ def _prepare_files_before_rapid_transfer(
         'raw_cache_errors': cache_errors[:20],
         'washing_checked': True,
         'washing_rejected': False,
+        'virtual_auto_promote': virtual_auto_promote,
         'selected_count': len(candidates),
         'errors': errors[:50],
     }
@@ -1975,7 +2040,7 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
     preid = _norm_sha1(file_info.get('preid') or rapid_meta.get('preid') or rapid_meta.get('pre_sha1') or rapid_meta.get('pre_sha1_128k'))
     if preid:
         rapid_meta.setdefault('preid', preid)
-    logger.info(f"  ➜ [共享资源] 准备执行 115 秒传：{file_name}")
+    logger.debug(f"  ➜ [共享资源] 准备执行 115 秒传：{file_name}")
     resp = _call_rapid_method(
         p115,
         target_cid=target_cid,
@@ -2485,6 +2550,53 @@ def _local_episode_in_library(parent_series_tmdb_id: Any, season_number: Any, ep
         logger.debug(
             f"  ➜ [共享资源] 查询本地分集入库状态失败: tmdb={parent}, "
             f"S{season}E{episode}, err={e}"
+        )
+        return False
+
+
+def _local_active_washing_for_media(media_type: str, tmdb_id: Any, season_num: Any = None, episode_num: Any = None) -> bool:
+    tmdb = str(tmdb_id or '').strip()
+    if not tmdb:
+        return False
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if str(media_type or '').lower() == 'movie':
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM media_metadata
+                        WHERE item_type='Movie'
+                          AND tmdb_id=%s
+                          AND active_washing=TRUE
+                        LIMIT 1
+                        """,
+                        (tmdb,),
+                    )
+                else:
+                    season = _safe_int_or_none(season_num)
+                    episode = _safe_int_or_none(episode_num)
+                    if season is None or episode is None:
+                        return False
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM media_metadata
+                        WHERE item_type='Episode'
+                          AND parent_series_tmdb_id=%s
+                          AND season_number=%s
+                          AND episode_number=%s
+                          AND active_washing=TRUE
+                        LIMIT 1
+                        """,
+                        (tmdb, season, episode),
+                    )
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [共享资源] 查询 active_washing 失败: media_type={media_type}, "
+            f"tmdb={tmdb}, S{season_num if season_num is not None else '-'}E{episode_num if episode_num is not None else '-'}, err={e}"
         )
         return False
 
@@ -3991,6 +4103,420 @@ def _build_gap_query(item: Dict[str, Any], title: str = '', tmdb_id=None, item_t
         'title': title or item.get('title'),
         'release_year': year or item.get('release_year'),
     }
+
+
+def prepare_center_source_files_for_virtual(source: Dict[str, Any]) -> Dict[str, Any]:
+    """展开中心资源为虚拟入库文件清单，并预缓存 MediaInfo。"""
+    client = SharedCenterClient()
+    source = dict(source or {})
+    source_kind = _normalize_source_kind(source.get('source_kind') or source.get('kind') or '')
+    source_id = str(source.get('source_id') or source.get('source_ref_id') or source.get('episode_source_id') or '').strip()
+    if not source_kind:
+        source_kind = _normalize_source_kind(source.get('item_type') or source.get('display_type') or '')
+    if not source_id and source_kind == 'episode':
+        source_id = str(source.get('episode_source_id') or '').strip()
+    if not source_kind or not source_id:
+        return {'ok': False, 'message': '中心源缺少 source_kind/source_id，无法虚拟入库'}
+    event = {'event_id': '', 'source_kind': source_kind, 'source_ref_id': source_id, 'payload_json': source}
+    source_kind, source_id, files = _event_sources(event, client)
+    files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
+    if not files:
+        return {'ok': False, 'message': '中心返回的文件清单为空，无法虚拟入库'}
+    files, preflight = _prepare_files_before_rapid_transfer(
+        client,
+        source_kind=source_kind,
+        source_id=source_id,
+        payload=source,
+        files=files,
+    )
+    if not files:
+        return {'ok': False, 'message': (preflight.get('errors') or ['共享资源未通过虚拟入库预检'])[0], 'preflight': preflight}
+    return {'ok': True, 'source_kind': source_kind, 'source_id': source_id, 'files': files, 'preflight': preflight}
+
+
+def _safe_path_component(value: Any, fallback: str = '未命名') -> str:
+    text = str(value or '').strip() or fallback
+    text = re.sub(r'[\\/:*?"<>|\r\n\t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip(' ._-')
+    return (text or fallback)[:180]
+
+
+def _safe_virtual_rel_path(value: Any, fallback: str = '未命名') -> str:
+    parts = [
+        _safe_path_component(part, fallback='')
+        for part in str(value or '').replace('\\', '/').split('/')
+    ]
+    parts = [part for part in parts if part]
+    return '/'.join(parts) or fallback
+
+
+def _virtual_video_info(file_name: str, sha1: str = '') -> Dict[str, Any]:
+    analyzer = _MediainfoBuilder()
+    info = analyzer._extract_video_info(file_name or '') or {}
+    sha1 = _norm_sha1(sha1)
+    if sha1:
+        try:
+            real_info = analyzer._fetch_and_parse_mediainfo(sha1, info, file_node=None, silent_log=True) or {}
+            if real_info:
+                info.update(real_info)
+        except Exception as e:
+            logger.debug(f"  ➜ [虚拟入库] 读取媒体信息命名参数失败：{sha1[:12]} -> {e}")
+    return info
+
+
+def _virtual_valid_year(*values) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if re.fullmatch(r'(19|20)\d{2}', text):
+            return text
+        if re.fullmatch(r'(19|20)\d{2}[-/].*', text):
+            return text[:4]
+    return ''
+
+
+def _virtual_series_release_year(tmdb_id: Any) -> str:
+    tmdb_id = str(tmdb_id or '').strip()
+    if not tmdb_id:
+        return ''
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT release_year
+                    FROM media_metadata
+                    WHERE item_type = 'Series' AND tmdb_id = %s
+                    LIMIT 1
+                    """,
+                    (tmdb_id,),
+                )
+                row = cursor.fetchone()
+                return _virtual_valid_year(row.get('release_year') if row else '')
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 查询父剧年份失败：tmdb={tmdb_id}, err={e}")
+    return ''
+
+
+def _virtual_rename_year(source: Dict[str, Any], file_info: Dict[str, Any], *, is_tv: bool, tmdb_id: Any) -> str:
+    if not is_tv:
+        return _virtual_valid_year(source.get('release_year'), source.get('year'), file_info.get('release_year'), file_info.get('year'))
+    return (
+        _virtual_valid_year(
+            source.get('series_release_year'),
+            source.get('parent_series_release_year'),
+            source.get('series_year'),
+            source.get('first_air_year'),
+            file_info.get('series_release_year'),
+            file_info.get('parent_series_release_year'),
+            file_info.get('series_year'),
+            file_info.get('first_air_year'),
+        )
+        or _virtual_series_release_year(tmdb_id)
+    )
+
+
+def _virtual_category_path(source: Dict[str, Any], files: List[Dict[str, Any]]) -> str:
+    cfg = config_manager.APP_CONFIG or {}
+    first = next((f for f in files or [] if isinstance(f, dict)), {}) or {}
+    item_type = str(source.get('item_type') or first.get('item_type') or '').strip()
+    media_type = 'movie' if item_type == 'Movie' or _normalize_source_kind(source.get('source_kind')) == 'movie' else 'tv'
+    tmdb_id = str(
+        source.get('tmdb_id')
+        or source.get('parent_series_tmdb_id')
+        or first.get('parent_series_tmdb_id')
+        or first.get('tmdb_id')
+        or ''
+    ).strip()
+    try:
+        p115 = P115Service.get_client()
+        organizer = SmartOrganizer(
+            p115,
+            int(tmdb_id) if str(tmdb_id).isdigit() else 0,
+            media_type,
+            source.get('title') or first.get('title') or first.get('file_name') or '',
+            None,
+            False,
+        )
+        organizer.current_sorting_filename = first.get('file_name') or first.get('name') or ''
+        season_num, _ = _guess_se_from_source(first, source)
+        cid = organizer.get_target_cid(season_num=season_num if media_type == 'tv' else None)
+        for rule in organizer.rules:
+            if str(rule.get('cid')) == str(cid):
+                return str(rule.get('category_path') or rule.get('dir_name') or rule.get('name') or '').strip() or ('电影' if media_type == 'movie' else '剧集')
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 计算分类目录失败，使用兜底分类：{e}")
+    return '电影' if media_type == 'movie' else '剧集'
+
+
+def _virtual_washing_identity(source: Dict[str, Any], file_info: Dict[str, Any], media_type: str, season_num=None, episode_num=None) -> Dict[str, Any]:
+    tmdb_id = (
+        source.get('tmdb_id') or file_info.get('tmdb_id')
+        if media_type == 'movie'
+        else _source_parent_series_tmdb_id(file_info, source)
+    )
+    return {
+        'tmdb_id': str(tmdb_id or '').strip(),
+        'media_type': media_type,
+        'season_number': season_num if media_type != 'movie' else None,
+        'episode_number': episode_num if media_type != 'movie' else None,
+    }
+
+
+def _virtual_washing_target(source: Dict[str, Any], file_info: Dict[str, Any], media_type: str, season_num=None) -> Dict[str, Any]:
+    identity = _virtual_washing_identity(source, file_info, media_type, season_num=season_num)
+    tmdb_text = str(identity.get('tmdb_id') or '').strip()
+    if not tmdb_text:
+        return {'target_cid': '', 'original_lang': ''}
+    try:
+        p115 = P115Service.get_client()
+        organizer = SmartOrganizer(
+            p115,
+            int(tmdb_text) if tmdb_text.isdigit() else 0,
+            media_type,
+            source.get('title') or file_info.get('title') or file_info.get('file_name') or file_info.get('name') or '',
+            None,
+            False,
+        )
+        if media_type == 'tv' and season_num is not None:
+            organizer.forced_season = int(season_num)
+        organizer.current_sorting_filename = file_info.get('file_name') or file_info.get('name') or ''
+        target_cid = organizer.get_target_cid(season_num=season_num if media_type == 'tv' else None)
+        return {
+            'target_cid': str(target_cid or '').strip(),
+            'original_lang': str((organizer.raw_metadata or {}).get('lang_code') or '').strip(),
+        }
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 计算洗版目标目录失败: tmdb={tmdb_text}, media_type={media_type}, err={e}")
+        return {'target_cid': '', 'original_lang': ''}
+
+
+def _cache_virtual_import_file(
+    source: Dict[str, Any],
+    file_info: Dict[str, Any],
+    *,
+    virtual_id: int,
+    sha1: str,
+    safe_file: str,
+    local_file_path: str,
+) -> None:
+    source_kind = _normalize_source_kind(source.get('source_kind') or file_info.get('source_kind'))
+    season_num, episode_num = _guess_se_from_source(file_info, source)
+    item_type = str(source.get('item_type') or file_info.get('item_type') or '').strip()
+    media_type = 'movie' if item_type == 'Movie' or source_kind == 'movie' else 'tv'
+    identity = _virtual_washing_identity(source, file_info, media_type, season_num, episode_num)
+    target = _virtual_washing_target(source, file_info, media_type, season_num=season_num)
+    target_cid = target.get('target_cid') or ''
+    file_size = _rapid_size_to_int(file_info.get('size') or file_info.get('file_size') or file_info.get('fs'), 0)
+    level = None
+    reason = '未计算洗版优先级'
+    if target_cid:
+        level, reason = _washing_new_level(
+            sha1,
+            safe_file,
+            file_size,
+            target_cid,
+            media_type,
+            original_lang=target.get('original_lang') or '',
+            has_external_subtitle=False,
+            tmdb_id=identity.get('tmdb_id') or '',
+            season_num=season_num,
+            episode_num=episode_num,
+        )
+        try:
+            level = int(level) if level not in (None, '', [], {}) else None
+        except Exception:
+            level = None
+    else:
+        reason = '缺少洗版目标目录'
+
+    snapshot = {
+        'reason': reason,
+        'target_cid': target_cid or None,
+        'media_type': media_type,
+        'identity': identity,
+        'evaluated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'source': 'virtual_import',
+    }
+    P115CacheManager.save_file_cache(
+        fid=f"virtual:{int(virtual_id)}:{sha1}",
+        parent_id=f"virtual:{int(virtual_id)}",
+        name=safe_file,
+        sha1=sha1,
+        pick_code=None,
+        local_path=local_file_path.replace('\\', '/'),
+        size=file_size,
+        washing_level=level,
+        washing_snapshot_json=snapshot,
+    )
+
+
+def _virtual_standard_paths(source: Dict[str, Any], file_info: Dict[str, Any], category_path: str) -> tuple[str, str]:
+    item_type = str(source.get('item_type') or file_info.get('item_type') or '').strip()
+    source_kind = _normalize_source_kind(source.get('source_kind') or file_info.get('source_kind'))
+    season_num, episode_num = _guess_se_from_source(file_info, source)
+    sha1 = _norm_sha1(file_info.get('sha1'))
+    file_name = _safe_path_component(file_info.get('file_name') or file_info.get('name') or file_info.get('sha1') or 'video.mkv')
+    video_info = _virtual_video_info(file_name, sha1)
+    if season_num is None and video_info.get('season_number') is not None:
+        season_num = _safe_int(video_info.get('season_number'), 1)
+    if episode_num is None and video_info.get('episode_number') is not None:
+        episode_num = _safe_int(video_info.get('episode_number'), None)
+    is_tv = item_type == 'Episode' or season_num is not None or source_kind in ('logical_season', 'season_hub')
+    title = _safe_path_component(
+        (source.get('title') if is_tv else None)
+        or file_info.get('series_title')
+        or file_info.get('series_name')
+        or source.get('series_title')
+        or source.get('series_name')
+        or source.get('title')
+        or file_info.get('title')
+        or file_info.get('file_name')
+        or '共享资源'
+    )
+    tmdb_id = (
+        source.get('parent_series_tmdb_id') or source.get('series_tmdb_id') or file_info.get('parent_series_tmdb_id') or file_info.get('series_tmdb_id') or source.get('tmdb_id') or file_info.get('tmdb_id')
+        if is_tv else
+        source.get('tmdb_id') or file_info.get('tmdb_id')
+    ) or ''
+    year = _virtual_rename_year(source, file_info, is_tv=is_tv, tmdb_id=tmdb_id)
+    ext = os.path.splitext(file_name)[1] or '.mkv'
+    stem = os.path.splitext(file_name)[0]
+
+    rename_config = settings_db.get_setting('p115_rename_config') or {
+        "main_dir_template": "{{title}}{% if year %} ({{year}}){% endif %} {tmdb={{tmdbid}}}",
+        "season_fmt": "Season {02}",
+        "movie_file_template": "{{title}}{% if year %} ({{year}}){% endif %}{{fileExt}}",
+        "tv_file_template": "{{title}}{% if year %} ({{year}}){% endif %}{% if season_episode %} · {{season_episode}}{% endif %}{{fileExt}}",
+    }
+    details = {
+        'title': title,
+        'original_title': source.get('original_title') or file_info.get('original_title') or title,
+        'date': f"{year}-01-01" if re.fullmatch(r'(19|20)\d{2}', str(year or '')) else '',
+    }
+    renderer = P115RenameRenderer(details, str(tmdb_id or ''), details.get('original_title') or title, rename_config)
+    main_format = P115RenameRenderer.get_format(rename_config, 'main_dir', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
+    root_name = renderer.build_name(main_format, is_tv=is_tv, original_title=details.get('original_title'), safe_title=title) or ''
+    if not root_name:
+        root_name = title
+        if year:
+            root_name += f" ({year})"
+        if tmdb_id:
+            root_name += f" {{tmdb={tmdb_id}}}"
+    root_name = _safe_virtual_rel_path(root_name, title)
+
+    if is_tv:
+        season_format = P115RenameRenderer.get_format(rename_config, 'season_dir', ['season_name_en'])
+        season_dir = renderer.build_name(
+            season_format,
+            is_tv=True,
+            season_num=int(season_num or 1),
+            original_title=details.get('original_title'),
+            original_name=file_name,
+            video_info=video_info,
+            safe_title=title,
+        ) or f"Season {int(season_num or 1):02d}"
+        season_dir = _safe_path_component(season_dir, f"Season {int(season_num or 1):02d}")
+        if rename_config.get('keep_original_name'):
+            safe_file = file_name
+        else:
+            file_format = P115RenameRenderer.get_format(rename_config, 'tv_file', None)
+            if not file_format:
+                file_format = P115RenameRenderer.get_format(rename_config, 'file', None)
+            safe_file = renderer.build_name(
+                file_format,
+                is_tv=True,
+                season_num=int(season_num or 1),
+                episode_num=int(episode_num) if episode_num is not None else None,
+                original_title=details.get('original_title'),
+                original_name=file_name,
+                video_info=video_info,
+                safe_title=title,
+                file_ext=ext,
+            ) if file_format else ''
+            if not safe_file:
+                if episode_num is not None:
+                    safe_file = f"{title} - S{int(season_num or 1):02d}E{int(episode_num):02d}{ext}"
+                else:
+                    safe_file = f"{stem}{ext}"
+        return os.path.join(category_path or '剧集', root_name, season_dir), _safe_path_component(safe_file)
+
+    if rename_config.get('keep_original_name'):
+        safe_file = file_name
+    else:
+        file_format = P115RenameRenderer.get_format(rename_config, 'movie_file', None)
+        if not file_format:
+            file_format = P115RenameRenderer.get_format(rename_config, 'file', None)
+        safe_file = renderer.build_name(
+            file_format,
+            is_tv=False,
+            original_title=details.get('original_title'),
+            original_name=file_name,
+            video_info=video_info,
+            safe_title=title,
+            file_ext=ext,
+        ) if file_format else ''
+        if not safe_file:
+            safe_file = file_name
+    return os.path.join(category_path or '电影', root_name), _safe_path_component(safe_file)
+
+
+def create_virtual_strm_files(source: Dict[str, Any], files: List[Dict[str, Any]], virtual_id: int) -> List[str]:
+    cfg = config_manager.APP_CONFIG or {}
+    local_root = str(cfg.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) or '').strip()
+    etk_url = str(cfg.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip().rstrip('/')
+    if not local_root:
+        raise RuntimeError('请先配置本地 STRM 根目录')
+    if not etk_url.startswith(('http://', 'https://')):
+        raise RuntimeError('STRM 链接地址必须以 http:// 或 https:// 开头')
+    category_path = _virtual_category_path(source, files)
+    out = []
+    for file_info in files or []:
+        sha1 = _norm_sha1((file_info or {}).get('sha1'))
+        if not sha1:
+            continue
+        rel_dir, safe_file = _virtual_standard_paths(source, file_info, category_path)
+        local_dir = os.path.join(local_root, rel_dir)
+        os.makedirs(local_dir, exist_ok=True)
+        strm_path = os.path.join(local_dir, os.path.splitext(safe_file)[0] + '.strm')
+        content = f"{etk_url}/api/p115/virtual-play/{int(virtual_id)}/{sha1}/{safe_file}"
+        with open(strm_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        out.append(strm_path)
+        try:
+            _cache_virtual_import_file(
+                source,
+                file_info,
+                virtual_id=virtual_id,
+                sha1=sha1,
+                safe_file=safe_file,
+                local_file_path=os.path.join(rel_dir, safe_file),
+            )
+        except Exception as e:
+            logger.warning(f"  ➜ [虚拟入库] 写入洗版缓存失败: {safe_file} -> {e}")
+        try:
+            mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
+            if mediainfo_text:
+                with open(os.path.splitext(strm_path)[0] + '-mediainfo.json', 'w', encoding='utf-8') as f:
+                    f.write(mediainfo_text)
+        except Exception as e:
+            logger.debug(f"  ➜ [虚拟入库] 生成媒体信息文件失败：{safe_file} -> {e}")
+        try:
+            from monitor_service import enqueue_file_actively
+            enqueue_file_actively(strm_path)
+        except Exception:
+            pass
+    return out
+
+
+def rapid_save_virtual_play_file(virtual_id: int, file_info: Dict[str, Any]) -> Dict[str, Any]:
+    target_cid = _virtual_temp_dir_cid()
+    info = dict(file_info or {})
+    info['_rapid_transfer_token'] = f"virtual:{virtual_id}:{int(time.time() * 1000)}"
+    result = rapid_save_file(info, target_cid=target_cid)
+    result['virtual_id'] = int(virtual_id)
+    result['virtual_target_cid'] = target_cid
+    return result
 
 
 def _probe_subscriptions_batch_no_gap(client: SharedCenterClient, queries: List[Dict[str, Any]], limit_per_item: int = 200) -> Dict[str, Any]:

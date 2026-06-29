@@ -34,6 +34,7 @@ from database import custom_collection_db, tmdb_collection_db, settings_db, user
 from database.connection import get_db_connection
 from database.log_db import LogDBManager
 from handler.p115_service import P115Service, SmartOrganizer, get_config
+from services.subscribe_assistant.manager import SubscribeAssistantManager
 try:
     from p115client import P115Client
 except ImportError:
@@ -86,6 +87,141 @@ def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path:
         return True
     logger.warning(f"  ➜ [Webhook] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
     return True
+
+
+def _extract_virtual_id_from_webhook(data):
+    texts = []
+    for key in ('Path', 'MediaSourceId'):
+        value = (data.get('Item') or {}).get(key)
+        if value:
+            texts.append(str(value))
+    for key in ('Path', 'Url', 'MediaSourceId'):
+        value = (data.get('PlaybackInfo') or {}).get(key)
+        if value:
+            texts.append(str(value))
+    try:
+        texts.append(json.dumps(data, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+    for text in texts:
+        match = re.search(r'/api/p115/virtual-play/(\d+)', text)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def _maybe_promote_virtual_import_from_playback(data):
+    virtual_id = _extract_virtual_id_from_webhook(data or {})
+    if not virtual_id:
+        return
+    try:
+        from database import shared_virtual_db
+        row = shared_virtual_db.get_virtual_import(virtual_id)
+        if not row or row.get('status') != 'virtual':
+            return
+        cfg = settings_db.get_shared_resource_config() or {}
+        item_type = str(row.get('item_type') or '').lower()
+        playback = data.get('PlaybackInfo') or {}
+        percent = 0.0
+        for key in ('PlayedPercentage', 'PlayedPercent'):
+            if playback.get(key) not in (None, ''):
+                percent = float(playback.get(key) or 0)
+                break
+        if not percent:
+            pos = float(playback.get('PositionTicks') or 0)
+            runtime = float((data.get('Item') or {}).get('RunTimeTicks') or playback.get('RunTimeTicks') or 0)
+            if pos > 0 and runtime > 0:
+                percent = min(100.0, pos * 100.0 / runtime)
+        row = shared_virtual_db.record_virtual_play(virtual_id, percent=percent)
+        episode_threshold = int(cfg.get('p115_shared_virtual_auto_promote_episodes') or 0)
+        movie_threshold = int(cfg.get('p115_shared_virtual_auto_promote_movie_percent') or 0)
+        should_promote = False
+        if item_type == 'movie' and movie_threshold > 0 and float(row.get('played_percent') or 0) >= movie_threshold:
+            should_promote = True
+        elif item_type != 'movie' and episode_threshold > 0 and int(row.get('watched_count') or 0) >= episode_threshold:
+            should_promote = True
+        if not should_promote:
+            logger.debug(
+                "  ➜ [虚拟入库] 播放阈值未触发自动转正：virtual_id=%s, item_type=%s, watched=%s/%s, percent=%.2f/%s",
+                virtual_id,
+                row.get('item_type') or item_type,
+                int(row.get('watched_count') or 0),
+                episode_threshold,
+                float(row.get('played_percent') or 0),
+                movie_threshold,
+            )
+            return
+        from tasks.shared_resource_tasks import consume_device_event_with_transfer_gate
+        source = row.get('source_payload_json') if isinstance(row.get('source_payload_json'), dict) else {}
+        event = {
+            'event_id': '',
+            'source_kind': source.get('source_kind') or row.get('source_kind') or '',
+            'source_ref_id': source.get('source_id') or source.get('source_ref_id') or row.get('source_id') or '',
+            'payload_json': {**source, '_virtual_auto_promote': True, '_virtual_id': virtual_id},
+        }
+        marked = shared_virtual_db.mark_active_washing_for_virtual_import(virtual_id, True)
+        logger.info(f"  ➜ [虚拟入库] 自动转正已开启 active_washing 特权：virtual_id={virtual_id}, rows={marked}")
+        result = consume_device_event_with_transfer_gate(event, ack=False)
+        if result.get('ok'):
+            shared_virtual_db.update_virtual_import(virtual_id, status='promoting', promoted_at='NOW()')
+            logger.info(f"  ➜ [虚拟入库] 播放阈值触发自动转正，保留虚拟 STRM 等待正式入库完成：virtual_id={virtual_id}")
+    except Exception as e:
+        logger.warning(f"  ➜ [虚拟入库] 播放阈值自动转正失败：virtual_id={virtual_id}, err={e}")
+
+
+def _cleanup_promoting_virtual_imports_after_library_ready(item_details: dict, item_type: str, tmdb_id: str) -> dict:
+    tmdb_id = str(tmdb_id or '').strip()
+    if not tmdb_id:
+        return {'records': 0, 'cache': 0}
+
+    try:
+        from database import shared_virtual_db
+        item_type_text = str(item_type or '').strip()
+        season_number = None
+        if item_type_text in {'Season', 'Episode'}:
+            season_number = item_details.get('IndexNumber') if item_type_text == 'Season' else item_details.get('ParentIndexNumber')
+        data = shared_virtual_db.list_virtual_imports(status='promoting', page=1, page_size=200)
+        candidates = []
+        for row in data.get('items') or []:
+            row_item_type = str(row.get('item_type') or '').strip().lower()
+            row_tmdb = str(
+                row.get('parent_series_tmdb_id')
+                or row.get('tmdb_id')
+                or ''
+            ).strip()
+            if item_type_text == 'Movie':
+                if row_item_type == 'movie' and row_tmdb == tmdb_id:
+                    candidates.append(row)
+            elif item_type_text in {'Series', 'Season', 'Episode'}:
+                if row_item_type in {'series', 'season', 'episode', 'tv'} and row_tmdb == tmdb_id:
+                    if season_number in (None, '') or row.get('season_number') in (None, season_number):
+                        candidates.append(row)
+
+        stats = {'records': 0, 'cache': 0}
+        for row in candidates:
+            virtual_id = int(row.get('id') or 0)
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM p115_filesystem_cache WHERE parent_id = %s OR id LIKE %s",
+                            (f"virtual:{virtual_id}", f"virtual:{virtual_id}:%"),
+                        )
+                        stats['cache'] += cursor.rowcount or 0
+                    conn.commit()
+            except Exception as e:
+                logger.debug(f"  ➜ [虚拟入库] 正式入库后清理虚拟缓存失败: virtual_id={virtual_id} -> {e}")
+            if shared_virtual_db.delete_virtual_import(virtual_id):
+                stats['records'] += 1
+        if stats['records']:
+            logger.info(
+                "  ➜ [虚拟入库] 正式入库完成后清理转正中虚拟记录：records=%s, cache=%s",
+                stats['records'], stats['cache'],
+            )
+        return stats
+    except Exception as e:
+        logger.warning(f"  ➜ [虚拟入库] 正式入库后清理转正中虚拟项失败: {e}")
+        return {'records': 0, 'cache': 0, 'error': str(e)}
 
 
 def _submit_webhook_media_task(
@@ -852,6 +988,8 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             log_prefix="Webhook新集指纹补齐",
         )
 
+    _cleanup_promoting_virtual_imports_after_library_ready(item_details, item_type, tmdb_id)
+
     # 3. 共享资源供给侧实时触发：电影/本轮新增分集均在 Webhook 入库完成后登记；中心端负责后续整季归类。
     _submit_shared_auto_share_after_library_ready(
         item_details,
@@ -1490,10 +1628,10 @@ def emby_webhook():
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     # try:
     #     import json
-    #     # 使用 WARNING 级别和醒目的 emoji，让它在日志中脱颖而出
-    #     logger.warning("✨✨✨ [魔法日志] 收到原始 Emby Webhook 负载，内容如下: ✨✨✨")
+    #     # 使用 WARNING 级别和醒目的标记，让它在日志中容易检索
+    #     logger.warning("  ➜ [魔法日志] 收到原始 Webhook 负载：Event=%s, type=%s", data.get("Event") or "-", data.get("type") or "-")
     #     # 将整个 JSON 数据格式化后打印出来
-    #     logger.warning(json.dumps(data, indent=2, ensure_ascii=False))
+    #     logger.warning(json.dumps(data, indent=2, ensure_ascii=False, default=str))
     # except Exception as e:
     #     logger.error(f"[魔法日志] 记录原始 Webhook 时出错: {e}")
     # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
@@ -1607,6 +1745,17 @@ def emby_webhook():
 
         # 深度删除处理完毕，直接返回 200，不再往下走
         return jsonify({"status": "deep_delete_processed"}), 200
+    # ======================================================================
+    # ★★★ 处理 MoviePilot 订阅助手事件 ★★★
+    # ======================================================================
+    if mp_event_type in {"download.added", "subscribe.added", "subscribe.modified", "subscribe.deleted", "subscribe.complete"}:
+        try:
+            handled = SubscribeAssistantManager(config_manager.APP_CONFIG).handle_moviepilot_event(mp_event_type, data)
+            return jsonify({"status": "subscribe_assistant_processed" if handled else "subscribe_assistant_ignored"}), 200
+        except Exception as e:
+            logger.error(f"  ➜ [订阅助手] MP Webhook 事件处理失败: {mp_event_type} -> {e}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     # ======================================================================
     # ★★★ 处理 MoviePilot transfer.complete 事件 ★★★
     # ======================================================================
@@ -1802,6 +1951,12 @@ def emby_webhook():
                         cleanup_data['_etk_webhook_remote_addr'] = request.remote_addr or ''
                         spawn(cleanup_for_playback_stop, cleanup_data)
                         spawn(p115_play_pool.cleanup_for_playback_stop, cleanup_data)
+                        spawn(_maybe_promote_virtual_import_from_playback, cleanup_data)
+                        try:
+                            from reverse_proxy import clear_play_concurrency_for_playback_stop
+                            spawn(clear_play_concurrency_for_playback_stop, cleanup_data)
+                        except Exception as e:
+                            logger.debug(f"  ➜ [并发控制] 播放停止清理任务分配失败: {e}")
                     except Exception as e:
                         logger.error(f"  ➜ [复制播放] 停止播放清理任务分配失败: {e}")
 

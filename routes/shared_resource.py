@@ -3,6 +3,7 @@
 import json
 import logging
 import copy
+import os
 import re
 import socket
 import threading
@@ -16,10 +17,15 @@ from flask import Blueprint, jsonify, request
 import constants
 import config_manager
 from extensions import admin_required
-from database import shared_credit_db, shared_share_db, settings_db
+from database import shared_credit_db, shared_share_db, shared_virtual_db, settings_db
 from database.connection import get_db_connection
 from handler.shared_center_client import SharedCenterClient, _current_server_id_hash
-from handler.shared_subscription_service import consume_device_event
+from handler.shared_subscription_service import (
+    consume_device_event,
+    create_virtual_strm_files,
+    prepare_center_source_files_for_virtual,
+)
+from handler import emby
 from handler import tmdb as tmdb_handler
 import tasks.shared_resource_tasks as shared_tasks
 
@@ -106,6 +112,9 @@ def _shared_resource_config_payload() -> Dict[str, Any]:
     payload.setdefault('p115_shared_block_short_drama_transfer', False)
     payload.setdefault('p115_shared_intro_enabled', False)
     payload.setdefault('p115_shared_auto_share_requests_enabled', False)
+    payload.setdefault('p115_shared_virtual_import_enabled', False)
+    payload.setdefault('p115_shared_virtual_auto_promote_episodes', 0)
+    payload.setdefault('p115_shared_virtual_auto_promote_movie_percent', 0)
     payload.setdefault('p115_shared_center_home_sections', [])
     return payload
 
@@ -121,6 +130,9 @@ def _save_shared_config(data: Dict[str, Any]) -> Dict[str, Any]:
     data['p115_shared_block_short_drama_transfer'] = _boolish(data.get('p115_shared_block_short_drama_transfer'), False)
     data['p115_shared_intro_enabled'] = _boolish(data.get('p115_shared_intro_enabled'), False)
     data['p115_shared_auto_share_requests_enabled'] = _boolish(data.get('p115_shared_auto_share_requests_enabled'), False)
+    data['p115_shared_virtual_import_enabled'] = _boolish(data.get('p115_shared_virtual_import_enabled'), False)
+    data['p115_shared_virtual_auto_promote_episodes'] = max(0, _safe_int(data.get('p115_shared_virtual_auto_promote_episodes'), 0))
+    data['p115_shared_virtual_auto_promote_movie_percent'] = max(0, min(_safe_int(data.get('p115_shared_virtual_auto_promote_movie_percent'), 0), 100))
     sections = data.get('p115_shared_center_home_sections')
     data['p115_shared_center_home_sections'] = sections if isinstance(sections, list) else []
     return settings_db.save_shared_resource_config(data)
@@ -1478,6 +1490,149 @@ def _center_source_transfer_preflight(source: Dict[str, Any]) -> Dict[str, Any]:
     return {'ok': True}
 
 
+def _virtual_source_metadata(source: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
+    item_type = source.get('item_type') or first.get('item_type') or ''
+    tmdb_id = source.get('tmdb_id') or first.get('tmdb_id') or ''
+    parent_tmdb = source.get('parent_series_tmdb_id') or source.get('series_tmdb_id') or first.get('parent_series_tmdb_id') or first.get('series_tmdb_id') or ''
+    if item_type == 'Episode' or str(source.get('source_kind') or '').lower() in {'logical_season', 'season_hub'}:
+        tmdb_id = parent_tmdb or tmdb_id
+    total_size = 0
+    for f in files or []:
+        if isinstance(f, dict):
+            total_size += _safe_int(f.get('size') or f.get('file_size'), 0)
+    return {
+        'tmdb_id': tmdb_id,
+        'item_type': item_type or ('Movie' if str(source.get('source_kind') or '').lower() == 'movie' else 'Episode'),
+        'parent_series_tmdb_id': parent_tmdb,
+        'season_number': source.get('season_number') if source.get('season_number') not in (None, '') else first.get('season_number'),
+        'episode_number': source.get('episode_number') if source.get('episode_number') not in (None, '') else first.get('episode_number'),
+        'title': source.get('title') or first.get('title') or first.get('file_name') or '',
+        'release_year': source.get('release_year') or source.get('year') or first.get('release_year'),
+        'file_count': len(files or []),
+        'total_size': total_size,
+    }
+
+
+def _delete_virtual_files(row: Dict[str, Any]) -> int:
+    deleted = 0
+    paths = row.get('strm_paths_json') if isinstance(row.get('strm_paths_json'), list) else []
+    for path in paths:
+        text = str(path or '').strip()
+        if not text:
+            continue
+        for candidate in (text, re.sub(r'\.strm$', '-mediainfo.json', text, flags=re.I)):
+            try:
+                if candidate and os.path.exists(candidate):
+                    os.remove(candidate)
+                    deleted += 1
+            except Exception as e:
+                logger.debug(f"  ➜ [虚拟入库] 删除本地文件失败：{candidate} -> {e}")
+    return deleted
+
+
+def _virtual_strm_paths(row: Dict[str, Any]) -> List[str]:
+    paths = row.get('strm_paths_json') if isinstance(row.get('strm_paths_json'), list) else []
+    out, seen = [], set()
+    for path in paths:
+        text = str(path or '').strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _virtual_emby_delete_path(row: Dict[str, Any]) -> str:
+    paths = _virtual_strm_paths(row)
+    if not paths:
+        return ''
+    item_type = str(row.get('item_type') or '').strip().lower()
+    if item_type in {'tv', 'series', 'season', 'episode'}:
+        return os.path.dirname(paths[0])
+    return paths[0]
+
+
+def _find_emby_item_by_path(path: str) -> Dict[str, Any]:
+    path = str(path or '').strip()
+    base_url = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or '').rstrip('/')
+    api_key = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
+    if not path or not base_url or not api_key:
+        return {}
+    try:
+        resp = requests.get(
+            f"{base_url}/Items",
+            params={
+                "api_key": api_key,
+                "Recursive": "true",
+                "Path": path,
+                "Fields": "Id,Path,Name,Type",
+                "Limit": 5,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {}
+        wanted = os.path.normcase(os.path.normpath(path))
+        items = resp.json().get("Items") or []
+        for item in items:
+            item_path = str(item.get("Path") or "")
+            if item_path and os.path.normcase(os.path.normpath(item_path)) == wanted:
+                return item
+        return items[0] if items else {}
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 查询 Emby 虚拟项失败：{path} -> {e}")
+    return {}
+
+
+def _delete_virtual_emby_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    delete_path = _virtual_emby_delete_path(row)
+    item = _find_emby_item_by_path(delete_path)
+    item_id = str(item.get('Id') or '').strip()
+    if not item_id:
+        return {'ok': True, 'found': False, 'path': delete_path}
+    base_url = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or '').rstrip('/')
+    api_key = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
+    user_id = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID) or '').strip()
+    ok = emby.delete_item(item_id, base_url, api_key, user_id)
+    return {'ok': bool(ok), 'found': True, 'id': item_id, 'name': item.get('Name') or '', 'path': delete_path}
+
+
+def _delete_virtual_p115_cache(row: Dict[str, Any]) -> int:
+    try:
+        virtual_id = int(row.get('id') or 0)
+    except Exception:
+        virtual_id = 0
+    if virtual_id <= 0:
+        return 0
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM p115_filesystem_cache WHERE parent_id = %s OR id LIKE %s",
+                    (f"virtual:{virtual_id}", f"virtual:{virtual_id}:%"),
+                )
+                deleted = cursor.rowcount or 0
+            conn.commit()
+        return deleted
+    except Exception as e:
+        logger.debug(f"  ➜ [虚拟入库] 清理 115 虚拟缓存失败: virtual_id={virtual_id} -> {e}")
+        return 0
+
+
+def _remove_virtual_import_record(row: Dict[str, Any]) -> Dict[str, Any]:
+    deleted_files = _delete_virtual_files(row)
+    deleted_cache = _delete_virtual_p115_cache(row)
+    deleted_row = shared_virtual_db.delete_virtual_import(int(row.get('id')))
+    return {'item': deleted_row or row, 'deleted_files': deleted_files, 'deleted_cache': deleted_cache}
+
+
+def _delete_virtual_import_record_only(row: Dict[str, Any]) -> Dict[str, Any]:
+    deleted_cache = _delete_virtual_p115_cache(row)
+    deleted_row = shared_virtual_db.delete_virtual_import(int(row.get('id')))
+    return {'item': deleted_row or row, 'deleted_files': 0, 'deleted_cache': deleted_cache}
+
+
 def _track_list_value(value: Any) -> List[Any]:
     if value in (None, '', [], {}):
         return []
@@ -1917,6 +2072,32 @@ def api_center_import():
     if not preflight.get('ok'):
         return jsonify({'success': False, 'message': preflight.get('message') or '该资源已被配置拦截', 'data': preflight}), 400
 
+    cfg = _shared_resource_config_payload()
+    if _boolish(cfg.get('p115_shared_virtual_import_enabled'), False) and not _boolish(data.get('force_real'), False):
+        prepared = prepare_center_source_files_for_virtual(source)
+        if not prepared.get('ok'):
+            return jsonify({'success': False, 'message': prepared.get('message') or '虚拟入库失败', 'data': prepared}), 400
+        files = prepared.get('files') or []
+        meta = _virtual_source_metadata(
+            {
+                **source,
+                'source_kind': prepared.get('source_kind') or source_kind,
+                'source_id': prepared.get('source_id') or source_id,
+            },
+            files,
+        )
+        row = shared_virtual_db.create_virtual_import({
+            **meta,
+            'source_kind': prepared.get('source_kind') or source_kind,
+            'source_id': prepared.get('source_id') or source_id,
+            'source_payload_json': source,
+            'files_json': files,
+        })
+        strm_paths = create_virtual_strm_files(source, files, row['id'])
+        row = shared_virtual_db.update_virtual_import(row['id'], strm_paths_json=strm_paths)
+        message = f"虚拟入库完成：{len(strm_paths)}/{len(files)}"
+        return jsonify({'success': True, 'message': message, 'data': {'ok': True, 'virtual': True, 'item': row, 'preflight': prepared.get('preflight') or {}}})
+
     event = {'event_id': '', 'source_kind': source_kind, 'source_ref_id': source_id, 'payload_json': source}
     # 前端手动秒传不经过后台长轮询 poll_and_consume_once，不能直接调用
     # handler.shared_subscription_service.consume_device_event；否则会绕过秒传许可 lease。
@@ -1924,6 +2105,61 @@ def api_center_import():
     status = 200 if result.get('ok') else 400
     message = result.get('message') or f"秒传完成：{result.get('success_count', 0)}/{result.get('total', 0)}"
     return jsonify({'success': bool(result.get('ok')), 'message': message, 'data': result}), status
+
+
+@shared_resource_bp.route('/virtual-imports', methods=['GET'])
+@admin_required
+def api_virtual_imports():
+    data = shared_virtual_db.list_virtual_imports(
+        status=request.args.get('status') or 'virtual',
+        keyword=request.args.get('keyword') or request.args.get('q') or '',
+        item_type=request.args.get('item_type') or request.args.get('type') or 'all',
+        page=int(request.args.get('page') or 1),
+        page_size=int(request.args.get('page_size') or 30),
+    )
+    return jsonify({'success': True, **data})
+
+
+@shared_resource_bp.route('/virtual-imports/<int:virtual_id>', methods=['DELETE'])
+@admin_required
+def api_delete_virtual_import(virtual_id: int):
+    row = shared_virtual_db.get_virtual_import(virtual_id)
+    if not row:
+        return jsonify({'success': False, 'message': '虚拟入库记录不存在'}), 404
+    emby_result = _delete_virtual_emby_item(row)
+    if emby_result.get('found') and not emby_result.get('ok'):
+        return jsonify({'success': False, 'message': 'Emby 虚拟项删除失败，已停止辞退', 'data': {'emby_delete': emby_result}}), 500
+    return jsonify({
+        'success': True,
+        'message': '已提交辞退，等待 Emby 删除 webhook 善后清理虚拟入库记录',
+        'data': {'item': row, 'emby_delete': emby_result},
+    })
+
+
+@shared_resource_bp.route('/virtual-imports/<int:virtual_id>/promote', methods=['POST'])
+@admin_required
+def api_promote_virtual_import(virtual_id: int):
+    row = shared_virtual_db.get_virtual_import(virtual_id)
+    if not row:
+        return jsonify({'success': False, 'message': '虚拟入库记录不存在'}), 404
+    source = row.get('source_payload_json') if isinstance(row.get('source_payload_json'), dict) else {}
+    if not source:
+        return jsonify({'success': False, 'message': '虚拟记录缺少中心源 payload，无法正式入库'}), 400
+    source_kind = source.get('source_kind') or row.get('source_kind') or ''
+    source_id = source.get('source_id') or source.get('source_ref_id') or row.get('source_id') or ''
+    marked = shared_virtual_db.mark_active_washing_for_virtual_import(virtual_id, True)
+    logger.info(f"  ➜ [虚拟入库] 手动转正已开启 active_washing 特权：virtual_id={virtual_id}, rows={marked}")
+    event = {'event_id': '', 'source_kind': source_kind, 'source_ref_id': source_id, 'payload_json': {**source, '_virtual_auto_promote': True, '_virtual_id': virtual_id}}
+    result = shared_tasks.consume_device_event_with_transfer_gate(event, ack=False)
+    status = 200 if result.get('ok') else 400
+    if result.get('ok'):
+        item = shared_virtual_db.update_virtual_import(virtual_id, status='promoting', promoted_at='NOW()')
+        return jsonify({
+            'success': True,
+            'message': result.get('message') or '已提交转正，等待正式入库完成后清理虚拟记录',
+            'data': {'result': result, 'item': item},
+        }), status
+    return jsonify({'success': False, 'message': result.get('message') or '正式入库失败', 'data': result}), status
 
 
 @shared_resource_bp.route('/center/device/register', methods=['POST'])
@@ -2018,6 +2254,7 @@ LEDGER_EVENT_LABEL_MAP = {
     'intro_chapters_consumed': '使用共享片头',
     'center_daily_grant': 'Pro每日赠送额度',
     'center_rapid_quota_consumed': 'Pro额度抵扣',
+    'virtual_play': '虚拟播放',
     'center_tier_cap_adjust': 'Pro等级上限调整',
     'center_pro_expired_clear': 'Pro过期清空额度',
     'center_pro_inactive_clear': 'Pro认证失效清空额度',
@@ -2054,6 +2291,7 @@ LEDGER_REASON_LABEL_MAP = {
     'intro_chapters_consumed': '使用共享片头',
     'daily_grant': 'Pro每日赠送额度',
     'rapid_quota_consumed': 'Pro额度抵扣',
+    'virtual_play': '虚拟播放',
     'tier_cap_adjust': 'Pro等级上限调整',
     'pro_expired_clear': 'Pro过期清空额度',
     'pro_inactive_clear': 'Pro认证失效清空额度',
@@ -2436,6 +2674,8 @@ def _ledger_is_pro_quota_row(row: Dict[str, Any]) -> bool:
     row = row if isinstance(row, dict) else {}
     code = _ledger_event_code(row)
     reason = _ledger_reason_code(row)
+    if reason == 'virtual_play':
+        return False
     ledger_type = str(row.get('ledger_type') or '').strip().lower()
     return ledger_type == 'pro_quota' or reason in {
         'daily_grant', 'rapid_quota_consumed', 'tier_cap_adjust',

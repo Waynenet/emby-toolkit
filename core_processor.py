@@ -1195,14 +1195,20 @@ class MediaProcessor:
         try:
             if file_path.startswith('http'):
                 pc = utils.extract_pickcode_from_strm_url(file_path)
+                virtual_match = re.search(r'/api/p115/virtual-play/\d+/([A-Fa-f0-9]{40})(?:/|$)', file_path)
+                if virtual_match:
+                    sha1 = virtual_match.group(1).upper()
             elif file_path.lower().endswith('.strm') and os.path.exists(file_path):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     pc = utils.extract_pickcode_from_strm_url(content)
+                    virtual_match = re.search(r'/api/p115/virtual-play/\d+/([A-Fa-f0-9]{40})(?:/|$)', content)
+                    if virtual_match:
+                        sha1 = virtual_match.group(1).upper()
         except Exception as e:
             logger.warning(f"读取 STRM 文件失败: {e}")
 
-        if pc:
+        if pc and not sha1:
             sha1 = self._get_sha1_by_pickcode(pc)
 
         return pc, sha1
@@ -1914,6 +1920,7 @@ class MediaProcessor:
                     movie_record['file_sha1_json'] = json.dumps(list(dict.fromkeys(all_sha1s)))
                     movie_record['file_pickcode_json'] = json.dumps(list(dict.fromkeys(all_pcs)))
                     movie_record['in_library'] = True
+                    movie_record['active_washing'] = False
                     _apply_washing_snapshot(movie_record, all_sha1s, all_pcs)
 
                 # media_metadata.runtime_minutes 只保存 TMDb 官方片长。
@@ -2394,7 +2401,8 @@ class MediaProcessor:
                                         emby_path = ''
                             
                         mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                        file_sha1 = self._get_sha1_by_pickcode(file_pc)
+                        if not file_sha1 and file_pc:
+                            file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
                         temp_version = version.copy()
                         temp_version['Path'] = emby_path
@@ -2439,7 +2447,7 @@ class MediaProcessor:
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
                 "imdb_id", "tagline",
-                "washing_level", "washing_snapshot_json"
+                "washing_level", "washing_snapshot_json", "active_washing"
             ]
             data_for_batch = []
             for record in records_to_upsert:
@@ -2470,6 +2478,7 @@ class MediaProcessor:
                 if db_row_complete['file_sha1_json'] is None: db_row_complete['file_sha1_json'] = '[]'
                 if db_row_complete['file_pickcode_json'] is None: db_row_complete['file_pickcode_json'] = '[]'
                 if db_row_complete.get('washing_version_json') is None: db_row_complete['washing_version_json'] = '[]'
+                if db_row_complete.get('active_washing') is None: db_row_complete['active_washing'] = False
 
                 r_date = db_row_complete.get('release_date')
                 if not r_date: db_row_complete['release_date'] = None
@@ -2504,6 +2513,10 @@ class MediaProcessor:
                 if col == 'total_episodes':
                     update_clauses.append(
                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
+                    )
+                elif col == 'active_washing':
+                    update_clauses.append(
+                        "active_washing = CASE WHEN EXCLUDED.item_type = 'Movie' AND EXCLUDED.in_library IS TRUE THEN FALSE ELSE media_metadata.active_washing END"
                     )
                 else:
                     # 其他字段正常更新
