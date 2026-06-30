@@ -9,8 +9,11 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import requests
+import pytz
 
+import constants
 from database import settings_db, user_db
+from handler.p115_temp_dir import cleanup_old_temp_videos_for_client, find_temp_video, get_temp_dir_name
 from handler.p115_play_pool_client import P115PlayPoolClient
 from handler.p115_service import P115CacheManager, P115Service
 
@@ -20,7 +23,6 @@ PLAY_POOL_CONFIG_KEY = "p115_play_pool_config"
 PLAY_POOL_SESSIONS_KEY = "p115_play_pool_sessions"
 PLAY_POOL_USER_REWARD_KEY = "p115_play_pool_user_cookie_rewards"
 PLAY_POOL_DEFAULT_SPEEDTEST_THRESHOLD_MBPS = 5.0
-PLAY_POOL_TEMP_DIR_NAME = "ETK小号播放临时目录"
 PLAY_POOL_SESSION_TTL_SECONDS = 12 * 60 * 60
 _PREPARE_LOCKS = {}
 _PREPARE_LOCKS_GUARD = threading.Lock()
@@ -36,6 +38,19 @@ def _now_ts():
 
 def _now_text():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _format_local_date_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(pytz.timezone(constants.TIMEZONE)).strftime("%Y-%m-%d")
+    except Exception:
+        return text[:10]
 
 
 def _today_key():
@@ -205,7 +220,7 @@ def _reward_user_cookie(account, *, notify_user=False, speed_text="", error_text
                     f"测速：{speed_text or '通过'}\n"
                     f"{reward_note}\n"
                     f"累计奖励：{summary.get('total_days', 0):g} 天\n"
-                    f"到期时间：{summary.get('last_expiration_date') or '永久'}"
+                    f"到期时间：{_format_local_date_text(summary.get('last_expiration_date')) or '永久'}"
                 )
             else:
                 send_text = (
@@ -434,7 +449,7 @@ def get_public_config():
         "enabled": config["enabled"],
         "accounts": [_public_account(x, config) for x in config["accounts"]],
         "usable_count": len([x for x in config["accounts"] if x.get("enabled") and x.get("cookie") and not _account_daily_limited(x, daily_limit_gb)]),
-        "temp_dir_name": PLAY_POOL_TEMP_DIR_NAME,
+        "temp_dir_name": get_temp_dir_name(),
         "auto_speedtest_enabled": True,
         "auto_speedtest_threshold_mbps": threshold_mbps,
         "auto_speedtest_threshold_text": f"{threshold_mbps:.2f} MB/s" if threshold_mbps > 0 else "",
@@ -476,6 +491,10 @@ def save_pool_settings(data):
 
 def save_pool_enabled(enabled):
     return save_pool_settings({"enabled": enabled})
+
+
+def is_pool_enabled():
+    return bool(_load_config().get("enabled"))
 
 
 def upsert_account(payload, account_id=None):
@@ -598,9 +617,10 @@ def _extract_cid(resp):
 
 
 def _find_temp_cid(client):
+    temp_dir_name = get_temp_dir_name()
     resp = client.fs_files({
         "cid": "0",
-        "search_value": PLAY_POOL_TEMP_DIR_NAME,
+        "search_value": temp_dir_name,
         "show_dir": 1,
         "limit": 1000,
         "offset": 0,
@@ -613,16 +633,23 @@ def _find_temp_cid(client):
         name = item.get("name") or item.get("file_name") or item.get("fn")
         fc = str(item.get("fc") if item.get("fc") is not None else item.get("type") or "")
         item_id = item.get("fid") or item.get("file_id") or item.get("id") or item.get("cid")
-        if name == PLAY_POOL_TEMP_DIR_NAME and item_id and (not fc or fc == "0"):
+        if name == temp_dir_name and item_id and (not fc or fc == "0"):
             return str(item_id)
     return ""
 
 
 def _ensure_temp_cid(account, client):
+    configured = str((account or {}).get("temp_cid") or "").strip()
+    if configured:
+        return configured
+    raise RuntimeError("小号临时目录 CID 未保存，请在临时目录设置中重新保存配置")
+
+
+def _confirm_temp_cid(account, client):
     found = _find_temp_cid(client)
 
     if not found:
-        resp = client.fs_mkdir(PLAY_POOL_TEMP_DIR_NAME, "0")
+        resp = client.fs_mkdir(get_temp_dir_name(), "0")
         if resp.get("state"):
             found = _extract_cid(resp)
         if not found:
@@ -634,6 +661,42 @@ def _ensure_temp_cid(account, client):
 
     account["temp_cid"] = found
     return found
+
+
+def ensure_all_account_temp_dirs():
+    config = _load_config()
+    results = []
+    changed = False
+    for account in config.get("accounts") or []:
+        if not account.get("cookie"):
+            results.append({
+                "id": account.get("id"),
+                "alias": account.get("alias") or account.get("id") or "",
+                "success": False,
+                "message": "未配置 Cookie",
+            })
+            continue
+        try:
+            client = _account_client(account)
+            previous = str(account.get("temp_cid") or "").strip()
+            cid = _confirm_temp_cid(account, client)
+            changed = changed or cid != previous
+            results.append({
+                "id": account.get("id"),
+                "alias": account.get("alias") or account.get("id") or "",
+                "success": True,
+                "cid": cid,
+            })
+        except Exception as e:
+            results.append({
+                "id": account.get("id"),
+                "alias": account.get("alias") or account.get("id") or "",
+                "success": False,
+                "message": str(e),
+            })
+    if changed:
+        _save_config(config)
+    return results
 
 
 def _extract_clone_from_rapid_response(resp, client, temp_cid, file_name, sha1, size):
@@ -856,38 +919,7 @@ def _find_reusable_session(*, source_pick_code="", item_id="", play_session_id="
 
 
 def _cleanup_superseded_sessions(*, source_pick_code="", user_id="", client_key=""):
-    source_pick_code = str(source_pick_code or "").strip()
-    user_id = str(user_id or "").strip()
-    client_key = str(client_key or "").strip()
-    if not source_pick_code or not (user_id or client_key):
-        return 0
-
-    sessions = _load_sessions()
-    if not sessions:
-        return 0
-    account_map = {str(a.get("id")): a for a in _load_config().get("accounts") or []}
-    kept = []
-    removed = 0
-    for session in sessions:
-        if source_pick_code == str(session.get("source_pick_code") or ""):
-            kept.append(session)
-            continue
-        session_user_id = str(session.get("user_id") or "")
-        session_client_key = str(session.get("client_key") or "")
-        match_user = bool(user_id and session_user_id and user_id == session_user_id)
-        match_client = bool(client_key and session_client_key and client_key == session_client_key)
-        if match_user and (match_client or not session_client_key):
-            if session.get("recycled_after_direct_url"):
-                removed += 1
-                continue
-            account = account_map.get(str(session.get("account_id") or ""))
-            if account and _delete_session_file(account, session, "下一集起播清理"):
-                removed += 1
-                continue
-        kept.append(session)
-    if removed:
-        _save_sessions(kept)
-    return removed
+    return 0
 
 
 def _pick_upload_file_name(request_name, cache_name, fallback):
@@ -1007,6 +1039,42 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
 
     client = _account_client(account)
     temp_cid = _ensure_temp_cid(account, client)
+    existing = find_temp_video(client, temp_cid, sha1=sha1, size=size, file_name=display_name)
+    if existing:
+        record = {
+            "session_id": uuid.uuid4().hex,
+            "account_id": account["id"],
+            "account_alias": account.get("alias") or "",
+            "source_pick_code": str(source_pick_code),
+            "source_sha1": sha1,
+            "source_size": size,
+            "temp_cid": temp_cid,
+            "temp_fid": existing["fid"],
+            "temp_pick_code": existing["pick_code"],
+            "file_name": existing.get("name") or display_name,
+            "item_id": str(item_id or ""),
+            "play_session_id": str(play_session_id or ""),
+            "user_id": str(user_id or ""),
+            "client_key": str(client_key or ""),
+            "source": source,
+            "created_at": _now_ts(),
+            "created_at_text": _now_text(),
+        }
+        _record_session(record)
+        _mark_account(account["id"], {
+            "last_used_at": _now_ts(),
+            "last_error": "",
+            "play_count": _safe_int(account.get("play_count"), 0) + 1,
+            "temp_cid": temp_cid,
+        })
+        logger.info(
+            "  ➜ [小号播放] 复用临时目录文件：%s %s/%s",
+            _display_title(record["file_name"]),
+            account.get("alias") or account.get("id") or "小号",
+            _display_user_name(user_id),
+        )
+        return {"pick_code": record["temp_pick_code"], "client": client, "account": account, "session": record}
+
     payload = {
         "cid": temp_cid,
         "sha1": sha1,
@@ -1192,6 +1260,27 @@ def cleanup_expired_sessions():
     if removed:
         _save_sessions(kept)
     return removed
+
+
+def cleanup_temp_dir_old_videos(older_than_hours=3):
+    results = []
+    for account in _load_config().get("accounts") or []:
+        if not account.get("cookie"):
+            continue
+        try:
+            client = _account_client(account)
+            temp_cid = str(account.get("temp_cid") or "").strip()
+            if not temp_cid:
+                raise RuntimeError("小号临时目录 CID 未保存，请重新保存临时目录配置")
+            results.append(cleanup_old_temp_videos_for_client(
+                client,
+                older_than_hours,
+                account.get("alias") or account.get("id") or "小号",
+                cid=temp_cid,
+            ))
+        except Exception as e:
+            logger.warning("  ➜ [115临时目录] 清理小号临时目录失败: %s, err=%s", account.get("alias") or account.get("id"), e)
+    return results
 
 
 def _delete_session_file(account, session, reason):

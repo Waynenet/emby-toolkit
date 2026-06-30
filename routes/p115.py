@@ -20,8 +20,10 @@ from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
 from handler.p115_copy_play import (
     discard_copy_play_clone,
+    is_copy_play_enabled,
     is_copy_play_missing_error,
     prepare_copy_play_pick_code,
+    record_source_play,
     recycle_clone_after_direct_url,
 )
 from handler import p115_play_pool
@@ -1175,6 +1177,35 @@ def cleanup_play_pool_sessions():
     return jsonify({'success': True, 'removed': removed})
 
 
+@p115_bp.route('/temp_dir_config', methods=['GET'])
+@admin_required
+def get_temp_dir_config():
+    from handler.p115_temp_dir import get_temp_dir_config
+    return jsonify({'success': True, 'data': get_temp_dir_config()})
+
+
+@p115_bp.route('/temp_dir_config', methods=['POST'])
+@admin_required
+def save_temp_dir_config():
+    from handler.p115_temp_dir import save_temp_dir_config
+    data = request.json or {}
+    client = P115Service.get_client()
+    if not client:
+        return jsonify({'success': False, 'message': '115 客户端未初始化，请先配置 115 Cookie/OpenAPI'}), 500
+    try:
+        config = save_temp_dir_config(client, cleanup_cron=data.get('cleanup_cron'))
+        account_results = p115_play_pool.ensure_all_account_temp_dirs()
+        try:
+            from scheduler_manager import scheduler_manager
+            scheduler_manager.update_p115_temp_dir_cleanup_job()
+        except Exception as e:
+            logger.debug("  ➜ [115临时目录] 刷新定时清理任务失败: %s", e)
+        return jsonify({'success': True, 'data': {**config, 'accounts': account_results}})
+    except Exception as e:
+        logger.error("  ➜ [115临时目录] 保存临时目录配置失败: %s", e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 def _p115_folder_id(item):
     return item.get('fid') or item.get('file_id') or item.get('id') or item.get('cid')
 
@@ -1551,6 +1582,23 @@ def handle_washing_priority_groups():
             return jsonify({"success": False, "message": str(e)}), 500
 
 
+@p115_bp.route('/release_groups', methods=['GET'])
+@admin_required
+def handle_release_groups():
+    """返回洗版优先级可选的发布组标准名。"""
+    try:
+        from tasks.helpers import RELEASE_GROUPS
+        options = [
+            {"label": str(group), "value": str(group)}
+            for group in RELEASE_GROUPS.keys()
+            if str(group or "").strip()
+        ]
+        options.sort(key=lambda item: item["label"].lower())
+        return jsonify({"success": True, "data": options})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @p115_bp.route('/washing_priority_config', methods=['GET', 'POST'])
 @admin_required
 def handle_washing_priority_config():
@@ -1773,7 +1821,6 @@ def play_115_video(pick_code, filename=None):
                 if not real_url:
                     logger.warning("  ⚠️ [小号播放] 路由层未拿到小号直链，已按小号池优先规则中止本次播放。")
                     return "Play pool failed", 503
-                p115_play_pool.recycle_session_after_direct_url(play_result, "起播后清理")
                 if is_emby_server:
                     headers_to_115 = {
                         "User-Agent": request_ua,
@@ -1796,7 +1843,13 @@ def play_115_video(pick_code, filename=None):
             disable_copy_play_for_play_pool = True
             logger.debug("  ➜ [小号播放] 路由层当前用户无可用小号，本次不触发复制播放：user_id=%s", current_user_id or "-")
 
-        play_pick_code = pick_code if disable_copy_play_for_play_pool else prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
+        use_copy_play = bool(
+            not disable_copy_play_for_play_pool
+            and is_copy_play_enabled()
+        )
+        play_pick_code = pick_code
+        if use_copy_play:
+            play_pick_code = prepare_copy_play_pick_code(pick_code, **copy_play_kwargs)
         if not play_pick_code:
             return "Copy play failed", 503
 
@@ -1814,6 +1867,10 @@ def play_115_video(pick_code, filename=None):
                     real_url = client.download_url(play_pick_code, user_agent=request_ua)
                     
                 if real_url:
+                    if str(play_pick_code) == str(pick_code):
+                        record_source_play(pick_code, **copy_play_kwargs)
+                    else:
+                        recycle_clone_after_direct_url(play_pick_code, "起播后清理")
                     break
             except Exception as e:
                 if str(play_pick_code) != str(pick_code) and is_copy_play_missing_error(e):
@@ -1833,8 +1890,6 @@ def play_115_video(pick_code, filename=None):
         
         if not real_url:
             return "Failed to get download URL or Rate Limited", 404
-
-        recycle_clone_after_direct_url(play_pick_code, "起播后清理")
 
         # =================================================================
         # ★★★ 核心分流逻辑 ★★★
@@ -1958,6 +2013,7 @@ def play_virtual_115_video(virtual_id, sha1, filename=None):
         save_result = rapid_save_virtual_play_file(virtual_id, file_info)
         if not save_result.get('ok'):
             return save_result.get('message') or "Virtual rapid save failed", 503
+        from_temp_reuse = bool(save_result.get('from_temp_reuse') or ((save_result.get('response') or {}).get('_from_temp_reuse')))
         client = P115Service.get_client()
         if not client:
             return "115 Client not initialized", 500
@@ -1974,33 +2030,34 @@ def play_virtual_115_video(virtual_id, sha1, filename=None):
         if not pick_code:
             return "Virtual temp pick_code not found", 503
 
-        try:
-            shared_credit_db.add_credit_ledger(
-                'virtual_play',
-                delta=-10,
-                reason='虚拟播放',
-                ref_id=str(virtual_id),
-                source_id=str(row.get('source_id') or ''),
-                virtual_id=str(virtual_id),
-                tmdb_id=row.get('tmdb_id') or '',
-                item_type=row.get('item_type') or '',
-                title=row.get('title') or file_info.get('file_name') or '',
-                raw_json={'virtual_import': row, 'file': file_info, 'sha1': sha1},
-            )
-        except Exception as e:
-            logger.debug(f"  ➜ [虚拟播放] 写入本地贡献点流水失败：{e}")
-        try:
-            SharedCenterClient().report_transfer(
-                row.get('source_kind') or file_info.get('source_kind') or '',
-                row.get('source_id') or file_info.get('source_id') or file_info.get('source_ref_id') or '',
-                'success',
-                success_count=10,
-                total_count=10,
-                message=f"虚拟播放：{file_info.get('file_name') or filename or sha1}",
-                transfer_mode='virtual',
-            )
-        except Exception as e:
-            logger.debug(f"  ➜ [虚拟播放] 上报中心虚拟播放失败：{e}")
+        if not from_temp_reuse:
+            try:
+                shared_credit_db.add_credit_ledger(
+                    'virtual_play',
+                    delta=-10,
+                    reason='虚拟播放',
+                    ref_id=str(virtual_id),
+                    source_id=str(row.get('source_id') or ''),
+                    virtual_id=str(virtual_id),
+                    tmdb_id=row.get('tmdb_id') or '',
+                    item_type=row.get('item_type') or '',
+                    title=row.get('title') or file_info.get('file_name') or '',
+                    raw_json={'virtual_import': row, 'file': file_info, 'sha1': sha1},
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [虚拟播放] 写入本地贡献点流水失败：{e}")
+            try:
+                SharedCenterClient().report_transfer(
+                    row.get('source_kind') or file_info.get('source_kind') or '',
+                    row.get('source_id') or file_info.get('source_id') or file_info.get('source_ref_id') or '',
+                    'success',
+                    success_count=10,
+                    total_count=10,
+                    message=f"虚拟播放：{file_info.get('file_name') or filename or sha1}",
+                    transfer_mode='virtual',
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [虚拟播放] 上报中心虚拟播放失败：{e}")
 
         real_url = None
         api_priority = get_115_api_priority('openapi')
@@ -2016,10 +2073,6 @@ def play_virtual_115_video(virtual_id, sha1, filename=None):
             time.sleep(0.5)
         if not real_url:
             return "Failed to get virtual download URL", 404
-
-        if not temp_item:
-            temp_item = _find_virtual_temp_file(client, save_result.get('virtual_target_cid') or save_result.get('target_cid'), sha1, save_result.get('file_name') or file_info.get('file_name') or '')
-        _delete_virtual_temp_file(client, temp_item)
 
         if is_emby_server:
             headers_to_115 = {"User-Agent": request_ua, "Accept": "*/*", "Connection": "keep-alive"}

@@ -767,8 +767,18 @@
                             <template #unchecked>直接播放源文件</template>
                         </n-switch>
                         <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">同一个视频第二个用户播放前自动复制到临时目录播放，停止播放后自动删除临时克隆文件。</n-text>
+                            <n-text depth="3" style="font-size:0.8em;">播放前自动复制到临时目录播放，临时文件由定时清理处理。</n-text>
                         </template>
+                    </n-form-item>
+
+                    <n-form-item label="临时目录">
+                      <n-button secondary type="primary" @click="openTempDirConfigModal">
+                        <template #icon><n-icon :component="FolderIcon" /></template>
+                        临时目录设置
+                      </n-button>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">复制播放、小号播放、虚拟播放共用；配置独立保存，不随全局设置保存触发。</n-text>
+                      </template>
                     </n-form-item>
 
                     <n-form-item label="智能整理" path="p115_enable_organize">
@@ -1637,6 +1647,34 @@
       </n-space>
     </n-modal>
     
+    <n-modal v-model:show="showTempDirConfigModal" preset="card" title="115 临时目录设置" :style="modalStyle(520)" class="custom-modal glass-modal">
+      <n-spin :show="tempDirConfigLoading">
+        <n-space vertical :size="14">
+          <n-alert type="warning" :bordered="false">
+            临时目录为 ETK临时目录。保存时会为主号和所有小号确认或创建目录并记录 CID；如果临时目录被误删，请务必重新保存该配置。
+          </n-alert>
+          <n-form label-placement="left" label-width="140">
+            <n-form-item label="临时目录 CID">
+              <n-input :value="tempDirConfig.cid || '未保存'" readonly />
+            </n-form-item>
+            <n-form-item label="清理 CRON">
+              <n-input v-model:value="tempDirConfig.cleanup_cron" placeholder="0 * * * *" />
+              <template #feedback>
+                <n-text depth="3" style="font-size:0.8em;">按计划清理 3 小时以前的临时视频；留空则不启用定时清理。</n-text>
+              </template>
+            </n-form-item>
+          </n-form>
+          <n-alert v-if="tempDirConfig.accounts?.length" type="info" :bordered="false">
+            小号临时目录：成功 {{ tempDirConfig.accounts.filter(item => item.success).length }} 个，失败 {{ tempDirConfig.accounts.filter(item => !item.success).length }} 个。
+          </n-alert>
+          <n-space justify="end">
+            <n-button @click="showTempDirConfigModal = false">关闭</n-button>
+            <n-button type="primary" :loading="tempDirConfigSaving" @click="saveTempDirConfig">保存并确认目录</n-button>
+          </n-space>
+        </n-space>
+      </n-spin>
+    </n-modal>
+
     <!-- ★ 引入自定义重命名模态框 -->
     <RenameConfigModal ref="renameModalRef" />
 
@@ -2288,6 +2326,14 @@ const componentIsMounted = ref(false);
 const nativeAvailableLibraries = ref([]);
 const loadingNativeLibraries = ref(false);
 const nativeLibraryError = ref(null);
+const showTempDirConfigModal = ref(false);
+const tempDirConfigLoading = ref(false);
+const tempDirConfigSaving = ref(false);
+const tempDirConfig = ref({
+  cid: '',
+  cleanup_cron: '0 * * * *',
+  accounts: []
+});
 let unwatchGlobal = null;
 let unwatchEmbyConfig = null;
 const isTestingProxy = ref(false);
@@ -2303,6 +2349,53 @@ const proTier = ref('year'); // 默认选中年付
 const isTransferMode = ref(false);
 const proPricing = ref(null);
 const isLoadingProPricing = ref(false);
+
+const loadTempDirConfig = async () => {
+  tempDirConfigLoading.value = true;
+  try {
+    const res = await axios.get('/api/p115/temp_dir_config');
+    if (res.data?.success) {
+      tempDirConfig.value = {
+        cid: res.data.data?.cid || '',
+        cleanup_cron: res.data.data?.cleanup_cron || '0 * * * *',
+        accounts: res.data.data?.accounts || []
+      };
+    }
+  } catch (error) {
+    message.error(error.response?.data?.message || '加载临时目录配置失败');
+  } finally {
+    tempDirConfigLoading.value = false;
+  }
+};
+
+const openTempDirConfigModal = async () => {
+  showTempDirConfigModal.value = true;
+  await loadTempDirConfig();
+};
+
+const saveTempDirConfig = async () => {
+  tempDirConfigSaving.value = true;
+  try {
+    const res = await axios.post('/api/p115/temp_dir_config', {
+      cleanup_cron: tempDirConfig.value.cleanup_cron || ''
+    });
+    if (res.data?.success) {
+      tempDirConfig.value = {
+        cid: res.data.data?.cid || '',
+        cleanup_cron: res.data.data?.cleanup_cron || '',
+        accounts: res.data.data?.accounts || []
+      };
+      const failed = tempDirConfig.value.accounts.filter(item => !item.success).length;
+      message.success(failed ? `临时目录已保存，${failed} 个小号确认失败` : '临时目录配置已保存');
+    } else {
+      message.error(res.data?.message || '保存临时目录配置失败');
+    }
+  } catch (error) {
+    message.error(error.response?.data?.message || '保存临时目录配置失败');
+  } finally {
+    tempDirConfigSaving.value = false;
+  }
+};
 
 const fallbackProTierOptions = [
   { key: 'month', tier: 'M', label: '月付', amount: '8.00', amountText: '8', note: '' },
@@ -2808,7 +2901,7 @@ const cookieQrcodePolling = ref(null);
 const playPoolConfig = ref({
   enabled: false,
   usable_count: 0,
-  temp_dir_name: 'ETK小号播放临时目录',
+  temp_dir_name: 'ETK临时目录',
   accounts: []
 });
 
@@ -2825,7 +2918,7 @@ const handlePlayPoolUpdated = (data) => {
   playPoolConfig.value = {
     enabled: Boolean(data?.enabled),
     usable_count: Number(data?.usable_count || 0),
-    temp_dir_name: data?.temp_dir_name || 'ETK小号播放临时目录',
+    temp_dir_name: data?.temp_dir_name || 'ETK临时目录',
     accounts: Array.isArray(data?.accounts) ? data.accounts : []
   };
 };

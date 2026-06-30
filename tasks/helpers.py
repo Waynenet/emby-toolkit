@@ -136,24 +136,17 @@ AUDIO_SUBTITLE_KEYWORD_MAP, AUDIO_DISPLAY_MAP, SUB_DISPLAY_MAP = _build_language
 
 RELEASE_GROUPS: Dict[str, List[str]] = {
     "0ff": ['FF(?:(?:A|WE)B|CD|E(?:DU|B)|TV)'],
-    "1pt": [],
-    "52pt": [],
     "观众": ['Audies', r'\bAD(?:Audio|E(?:book|)|Music|Web)\b'],
-    "azusa": [],
     "备胎": ['BeiTai'],
     "学校": ['Bts(?:CHOOL|HD|PAD|TV)', 'Zone'],
-    "carpt": ['CarPT'],
+    "车": ['CarPT'],
     "彩虹岛": ['CHD(?:Bits|PAD|(?:|HK)TV|WEB|)', 'StBOX', 'OneHD', 'Lee', 'xiaopie'],
     "碟粉": ['discfan'],
-    "dragonhd": [],
     "eastgame": ['(?:(?:iNT|(?:HALFC|Mini(?:S|H|FH)D))-|)TLF'],
-    "filelist": [],
     "gainbound": ['(?:DG|GBWE)B'],
     "hares": ['Hares(?:(?:M|T)V|Web|)'],
-    "hd4fans": [],
     "高清视界": ['HDA(?:pad|rea|TV)', 'EPiC'],
     "阿童木": ['hdatmos'],
-    "hdbd": [],
     "hdchina": ['HDC(?:hina|TV|)', 'k9611', 'tudou', 'iHD'],
     "杜比": ['D(?:ream|BTV)', '(?:HD|QHstudI)o'],
     "红豆饭": ['beAst(?:TV|)', 'HDFans'],
@@ -161,29 +154,20 @@ RELEASE_GROUPS: Dict[str, List[str]] = {
     "hdpt": ['HDPT(?:Web|)'],
     "天空": ['HDS(?:ky|TV|Pad|WEB|)', 'AQLJ'],
     "高清时间": ['hdtime'],
-    "HDU": [],
-    "hdvideo": [],
     "hdzone": ['HDZ(?:one|)'],
     "憨憨": ['HHWEB'],
     "末日": ['AGSV(PT|WEB|MUS)'],
-    "hitpt": [],
     "htpt": ['HTPT'],
-    "iptorrents": [],
-    "joyhd": [],
     "朋友": ['FRDS', 'Yumi', 'cXcY'],
     "柠檬": ['L(?:eague(?:(?:C|H)D|(?:M|T)V|NF|WEB)|HD)', 'i18n', 'CiNT'],
     "馒头": ['MTeam(?:TV|)', 'MPAD', 'MWeb'],
-    "nanyangpt": [],
     "老师": ['nicept'],
-    "oshen": [],
     "我堡": ['Our(?:Bits|TV)', 'FLTTH', 'PbK', 'MGs', 'iLove(?:HD|TV)'],
     "猪猪": ['PiGo(?:NF|(?:H|WE)B)'],
     "铂金学院": ['ptchina'],
     "猫站": ['PTer(?:DIY|Game|(?:M|T)V|WEB|)'],
     "pthome": ['PTH(?:Audio|eBook|music|ome|tv|WEB|)'],
-    "ptmsg": [],
     "烧包": ['PTsbao', 'OPS', 'F(?:Fans(?:AIeNcE|BD|D(?:VD|IY)|TV|WEB)|HDMv)', 'SGXT'],
-    "pttime": [],
     "葡萄": ['PuTao'],
     "聆音": ['lingyin'],
     "春天": [r"CMCT(?:A|V)?", "Oldboys", "GTR", "CLV", "CatEDU", "Telesto", "iFree"],
@@ -191,8 +175,6 @@ RELEASE_GROUPS: Dict[str, List[str]] = {
     "他吹吹风": ['tccf'],
     "北洋园": ['TJUPT'],
     "听听歌": ['TTG', 'WiKi', 'NGB', 'DoA', '(?:ARi|ExRE)N'],
-    "U2": [],
-    "ultrahd": [],
     "others": ['B(?:MDru|eyondHD|TN)', 'C(?:fandora|trlhd|MRG)', 'DON', 'EVO', 'FLUX', 'HONE(?:yG|)',
                'N(?:oGroup|T(?:b|G))', 'PandaMoon', 'SMURF', 'T(?:EPES|aengoo|rollHD )'],
     "anime": [r'\bANi\b', r'\bHYSUB\b', r'\bKTXP\b', 'LoliHouse', r'\bMCE\b', 'Nekomoe kissaten', 'SweetSub', 'MingY',
@@ -245,6 +227,60 @@ def _extract_exclusion_keywords_from_filename(filename: str) -> List[str]:
             return [group_name]
 
     return []
+
+def extract_release_groups_from_filename(filename: str) -> List[str]:
+    """Return standardized release group names matched by RELEASE_GROUPS."""
+    return _extract_exclusion_keywords_from_filename(filename)
+
+def extract_release_group_token_from_filename(filename: str) -> str:
+    """从常见命名尾部提取原始发布组别名，例如 HDSWEB、ADWeb。"""
+    text = str(filename or '').strip()
+    if not text:
+        return ''
+    name_part = os.path.splitext(text)[0].strip(' ._-')
+    if '@' in name_part:
+        token = name_part.rsplit('@', 1)[-1]
+    else:
+        token = re.split(r'\s*[·-]\s*', name_part)[-1]
+    token = str(token or '').strip(' ._-')
+    if re.search(r'[A-Za-z]', token):
+        return token
+    return ''
+
+def normalize_release_group_name(value: str) -> str:
+    """将发布组别名归一为 RELEASE_GROUPS 的标准组名；未命中时返回清洗后的原值。"""
+    text = str(value or '').strip(' ._-')
+    if not text:
+        return ''
+    text = re.sub(r'\.(?:mkv|mp4|ts|avi|mov|wmv|strm|nfo|json)$', '', text, flags=re.IGNORECASE).strip(' ._-')
+    if not text:
+        return ''
+
+    for group_name, alias_list in RELEASE_GROUPS.items():
+        if text.lower() == str(group_name).lower():
+            return group_name
+        for alias in alias_list:
+            try:
+                if re.fullmatch(alias, text, re.IGNORECASE):
+                    return group_name
+            except re.error as e:
+                logger.warning(f"RELEASE_GROUPS 中存在无效的正则表达式: '{alias}' for group '{group_name}'. Error: {e}")
+                continue
+    return text
+
+def describe_release_group_match(filename: str) -> Dict[str, str]:
+    """返回发布组标准名和命中的尾部别名，用于锁版判断和日志展示。"""
+    token = extract_release_group_token_from_filename(filename)
+    groups = extract_release_groups_from_filename(filename)
+    standard = groups[0] if groups else normalize_release_group_name(token)
+    return {
+        'group': standard,
+        'alias': token,
+    }
+
+def format_release_group_label(group_name: str, alias: str = '') -> str:
+    group = str(group_name or '').strip(' ._-')
+    return group or str(alias or '').strip(' ._-')
 
 def get_keywords_by_group_name(group_name: str) -> List[str]:
     """
