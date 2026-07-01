@@ -5,7 +5,12 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from database.connection import get_db_connection
-from tasks.helpers import extract_release_groups_from_filename, normalize_lang_code, normalize_release_group_name
+from tasks.helpers import (
+    extract_release_groups_from_filename,
+    normalize_lang_code,
+    normalize_release_group_name,
+    quality_source_tokens,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,35 @@ class WashingService:
     def _safe_parse_list(cls, val: Any) -> List[Any]:
         parsed = cls._safe_parse_jsonish(val)
         return parsed if isinstance(parsed, list) else []
+
+    @classmethod
+    def _extract_raw_etk(cls, raw_ffprobe_json: Any) -> Dict[str, Any]:
+        raw = cls._safe_parse_jsonish(raw_ffprobe_json)
+        if not isinstance(raw, dict):
+            return {}
+        ctx = raw.get("_etk")
+        return dict(ctx) if isinstance(ctx, dict) else {}
+
+    @classmethod
+    def _attach_raw_etk(cls, parsed: Any, raw_ffprobe_json: Any) -> Any:
+        etk = cls._extract_raw_etk(raw_ffprobe_json)
+        if not etk:
+            return parsed
+        if isinstance(parsed, list):
+            out = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    patched = dict(item)
+                    patched["_etk"] = {**(patched.get("_etk") if isinstance(patched.get("_etk"), dict) else {}), **etk}
+                    out.append(patched)
+                else:
+                    out.append(item)
+            return out
+        if isinstance(parsed, dict):
+            patched = dict(parsed)
+            patched["_etk"] = {**(patched.get("_etk") if isinstance(patched.get("_etk"), dict) else {}), **etk}
+            return patched
+        return parsed
 
     @classmethod
     def _extract_media_source_info(cls, info: Any) -> Dict[str, Any]:
@@ -338,11 +372,15 @@ class WashingService:
             _get_detected_languages_from_streams,
             _get_resolution_tier,
             _get_standardized_effect,
+            extract_quality_source_from_filename,
+            normalize_quality_source,
+            quality_source_tokens,
             normalize_lang_code # ★ 确保引入
         )
 
         norm = {
             "resolution": "unknown",
+            "source": "unknown",
             "codec": "unknown",
             "effect": "sdr",
             "release_group": "",
@@ -365,6 +403,7 @@ class WashingService:
         media_source = cls._extract_media_source_info(parsed)
         media_streams = cls._extract_media_streams(parsed)
         video_stream = cls._extract_video_stream(parsed)
+        etk = parsed.get("_etk") if isinstance(parsed, dict) and isinstance(parsed.get("_etk"), dict) else {}
 
         # 1. 分辨率
         width = (
@@ -418,6 +457,22 @@ class WashingService:
             or ""
         )
         filename = raw_filename.lower()
+
+        raw_source = ""
+        if isinstance(parsed, dict):
+            raw_source = (
+                etk.get("quality_source")
+                or parsed.get("quality_source")
+                or parsed.get("source")
+                or parsed.get("quality")
+                or parsed.get("quality_display")
+                or parsed.get("resourceType")
+                or parsed.get("resource_type")
+                or ""
+            )
+        norm["source"] = normalize_quality_source(raw_source) if raw_source else extract_quality_source_from_filename(raw_filename)
+        if not norm["source"]:
+            norm["source"] = "unknown"
 
         effect_tag = _get_standardized_effect(filename, video_stream or media_source or {})
         norm["effect"] = str(effect_tag).lower().strip()
@@ -579,6 +634,24 @@ class WashingService:
                 if match: return True, f"命中排除条件: 特效 ({file_effect})"
             else:
                 if not match: return False, f"特效未命中 ({file_effect})"
+
+        req_source = priority_rule.get("source") or priority_rule.get("quality") or []
+        if req_source:
+            if not isinstance(req_source, list):
+                req_source = [req_source]
+            req_source_norm = set()
+            for source in req_source:
+                req_source_norm.update(quality_source_tokens(source))
+            req_source_norm.discard("")
+            file_source_tokens = quality_source_tokens(norm_info.get("source") or "")
+            match = bool(file_source_tokens and req_source_norm and file_source_tokens & req_source_norm)
+
+            if is_exclude:
+                if match:
+                    return True, f"命中排除条件: 来源 ({norm_info.get('source')})"
+            else:
+                if not match:
+                    return False, f"来源未命中 ({norm_info.get('source') or 'unknown'})"
 
         req_release_group = priority_rule.get("release_group") or priority_rule.get("release_groups") or []
         if req_release_group:
@@ -842,7 +915,7 @@ class WashingService:
                         library_target_params.append(target_cid)
 
                     sql = f"""
-                        SELECT DISTINCT pmc.sha1, pmc.mediainfo_json,
+                        SELECT DISTINCT pmc.sha1, pmc.mediainfo_json, pmc.raw_ffprobe_json,
                             (
                                 SELECT pfc_name.name
                                 FROM p115_filesystem_cache pfc_name
@@ -928,7 +1001,7 @@ class WashingService:
                             etk_params.append(int(episode_num))
 
                     etk_sql = f"""
-                        SELECT DISTINCT pmc.sha1, pmc.mediainfo_json, pfc.name AS file_name
+                        SELECT DISTINCT pmc.sha1, pmc.mediainfo_json, pmc.raw_ffprobe_json, pfc.name AS file_name
                         FROM p115_mediainfo_cache pmc
                         JOIN p115_filesystem_cache pfc
                           ON UPPER(pfc.sha1) = UPPER(pmc.sha1)
@@ -952,6 +1025,7 @@ class WashingService:
         for row in rows:
             raw = row.get("mediainfo_json")
             parsed = cls._safe_parse_jsonish(raw)
+            parsed = cls._attach_raw_etk(parsed, row.get("raw_ffprobe_json"))
             if parsed:
                 file_name = str(row.get("file_name") or "").strip()
                 if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
@@ -976,10 +1050,11 @@ class WashingService:
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (str(sha1),))
+                    cursor.execute("SELECT mediainfo_json, raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1 = %s", (str(sha1),))
                     row = cursor.fetchone()
                     if row and row['mediainfo_json']:
-                        return cls._safe_parse_jsonish(row['mediainfo_json'])
+                        parsed = cls._safe_parse_jsonish(row['mediainfo_json'])
+                        return cls._attach_raw_etk(parsed, row.get("raw_ffprobe_json"))
         except Exception as e:
             logger.warning(f"  ➜ 从 p115_mediainfo_cache 获取 SHA1 {sha1} 失败: {e}")
         return None

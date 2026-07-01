@@ -4039,7 +4039,10 @@ class P115CacheManager:
         if isinstance(ctx, dict):
             # 只保留跨账号、长期稳定的共享字段。
             # season_number / episode_number 是媒体身份的一部分，上传到中心后可避免消费端再次从文件名正则猜集号。
-            allowed = {"tmdb_id", "type", "original_language", "sha1", "preid", "season_number", "episode_number"}
+            allowed = {
+                "tmdb_id", "type", "original_language", "sha1", "preid",
+                "season_number", "episode_number", "quality_source",
+            }
             raw_ffprobe_json["_etk"] = {
                 k: v for k, v in ctx.items()
                 if k in allowed and v not in [None, "", [], {}]
@@ -4069,6 +4072,42 @@ class P115CacheManager:
         return P115CacheManager._norm_preid(
             ctx.get('preid') or ctx.get('pre_sha1') or ctx.get('pre_sha1_128k')
         )
+
+    @staticmethod
+    def _extract_quality_source_from_context(file_info=None, file_name=None):
+        try:
+            from tasks.helpers import extract_quality_source_from_filename, normalize_quality_source
+        except Exception:
+            return ''
+
+        item = dict(file_info or {}) if isinstance(file_info, dict) else {}
+
+        def _norm(value):
+            text = str(value or '').strip()
+            if not text:
+                return ''
+            normalized = normalize_quality_source(text)
+            lowered = str(normalized or '').strip().lower()
+            if not lowered or lowered in {'unknown', '未知', '4k', '2k', '1080p', '720p', '480p', '2160p'}:
+                return ''
+            if re.fullmatch(r'\d{3,4}p', lowered):
+                return ''
+            return normalized
+
+        for key in ('quality_source', 'quality', 'source_quality', 'resourceType', 'resource_type', 'quality_display'):
+            value = _norm(item.get(key))
+            if value:
+                return value
+        name = str(
+            file_name
+            or item.get('file_name')
+            or item.get('fn')
+            or item.get('name')
+            or item.get('original_name')
+            or ''
+        ).strip()
+        detected = extract_quality_source_from_filename(name)
+        return _norm(detected)
 
     @staticmethod
     def _ensure_preid_column():
@@ -4301,6 +4340,13 @@ class P115CacheManager:
             sha1 = str(sha1).upper()
             raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
             mediainfo_json = P115CacheManager._merge_center_intro_before_mediainfo_cache(sha1, mediainfo_json)
+            quality_source = P115CacheManager._extract_quality_source_from_context(file_info, file_name=file_name)
+            if quality_source and isinstance(raw_ffprobe_json, dict):
+                ctx = raw_ffprobe_json.get('_etk') if isinstance(raw_ffprobe_json.get('_etk'), dict) else {}
+                ctx = dict(ctx or {})
+                ctx.setdefault('quality_source', quality_source)
+                raw_ffprobe_json['_etk'] = ctx
+                raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
 
             # 整理/MP直出提取媒体信息时顺手补齐 preid，并写进 RAW _etk。
             # 后续入库/共享登记可直接复用，避免再次拉直链 Range 计算前 128KB SHA1。
@@ -4328,6 +4374,26 @@ class P115CacheManager:
 
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
+                    if isinstance(raw_ffprobe_json, dict):
+                        try:
+                            cursor.execute(
+                                "SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1 = %s",
+                                (sha1,),
+                            )
+                            existing_row = cursor.fetchone()
+                            existing_raw = existing_row.get('raw_ffprobe_json') if existing_row else None
+                            if isinstance(existing_raw, str):
+                                existing_raw = json.loads(existing_raw)
+                            existing_ctx = existing_raw.get('_etk') if isinstance(existing_raw, dict) and isinstance(existing_raw.get('_etk'), dict) else {}
+                            if existing_ctx.get('quality_source'):
+                                ctx = raw_ffprobe_json.get('_etk') if isinstance(raw_ffprobe_json.get('_etk'), dict) else {}
+                                ctx = dict(ctx or {})
+                                ctx.setdefault('quality_source', existing_ctx.get('quality_source'))
+                                raw_ffprobe_json['_etk'] = ctx
+                                raw_ffprobe_json = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_ffprobe_json)
+                        except Exception as e_merge:
+                            logger.debug(f"  ➜ [媒体信息缓存] 合并旧 RAW _etk.quality_source 失败: sha1={sha1[:12]}..., err={e_merge}")
+
                     cursor.execute("""
                         INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json, raw_ffprobe_json, created_at, hit_count)
                         VALUES (%s, %s, %s, NOW(), 0)
@@ -6340,6 +6406,127 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         return new_name, season_num, episode_num, s_name, video_info, bool(real_info), part_num
 
+    def _standard_relative_category_path(self, target_cid):
+        """Return the local category path used by the normal organize flow."""
+        config = get_config()
+        category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
+        if not category_rule:
+            return "未识别"
+        if category_rule.get('category_path'):
+            return category_rule['category_path']
+
+        media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
+        try:
+            dir_info = self.client.fs_files({'cid': target_cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+            path_nodes = dir_info.get('path', [])
+            start_idx = 0
+            found_root = False
+
+            if media_root_cid == '0':
+                start_idx = 0 if str(target_cid) == '0' else 1
+                found_root = True
+            else:
+                for i, node in enumerate(path_nodes):
+                    if str(node.get('cid') or node.get('file_id')) == media_root_cid:
+                        start_idx = i + 1
+                        found_root = True
+                        break
+
+            if found_root and start_idx < len(path_nodes):
+                rel_segments = [
+                    str(n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')).strip()
+                    for n in path_nodes[start_idx:]
+                    if (n.get('file_name') or n.get('fn') or n.get('name') or n.get('n'))
+                ]
+                relative_category_path = "/".join(rel_segments) if rel_segments else category_rule.get('dir_name', '未识别')
+            else:
+                relative_category_path = category_rule.get('dir_name', '未识别')
+
+            category_rule['category_path'] = relative_category_path
+            settings_db.save_setting('p115_sorting_rules', self.rules)
+            return relative_category_path
+        except Exception:
+            return category_rule.get('dir_name', '未识别')
+
+    def build_standard_local_preview(self, file_item, *, target_cid=None, season_num=None):
+        """Dry-run the normal organize path/name rules without moving or creating 115 files."""
+        file_item = dict(file_item or {})
+        file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name') or file_item.get('name') or ''
+        if not file_name:
+            return {}
+        file_item.setdefault('fn', file_name)
+        file_item.setdefault('file_name', file_name)
+
+        self._inject_file_node_identity(file_item)
+        for src_key, dst_key in (('season_number', '_forced_season'), ('episode_number', '_forced_episode')):
+            if file_item.get(dst_key) in (None, '') and file_item.get(src_key) not in (None, ''):
+                try:
+                    file_item[dst_key] = int(float(file_item.get(src_key)))
+                except Exception:
+                    pass
+        if self.media_type == 'tv' and season_num is not None:
+            try:
+                self.forced_season = int(season_num)
+            except Exception:
+                pass
+
+        title = self.details.get('title') or self.original_title
+        original_title = self.details.get('original_title') or title
+        date_str = self.details.get('date') or ''
+        year = date_str[:4] if date_str else ''
+        cfg = self.rename_config
+        keep_original = cfg.get('keep_original_name', False)
+        base_title = original_title if cfg.get('main_title_lang', 'zh') == 'original' else title
+        safe_title = self._sanitize_115_name_component(base_title)
+
+        main_format = self._get_rename_format('main_dir', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
+        std_root_name = self._build_name_from_format(
+            main_format,
+            is_tv=(self.media_type == 'tv'),
+            original_title=original_title,
+            safe_title=safe_title,
+        ) or safe_title
+
+        if not target_cid:
+            self.current_sorting_filename = file_name
+            target_cid = self.get_target_cid(season_num=season_num if self.media_type == 'tv' else None)
+        if not target_cid:
+            return {}
+
+        renamed, parsed_season, parsed_episode, season_dir, video_info, has_real_info, part_num = self._rename_file_node(
+            file_item,
+            safe_title,
+            year=year,
+            is_tv=(self.media_type == 'tv'),
+            original_title=original_title,
+            pre_fetched_mediainfo=None,
+            local_pre_fetched_mediainfo=None,
+            silent_log=True,
+            recognition_hints=self.recognition_hints,
+            patch_raw_identity=False,
+        )
+        new_filename = file_name if keep_original else renamed
+        relative_category_path = self._standard_relative_category_path(target_cid)
+        if self.media_type == 'tv' and parsed_season is not None and season_dir:
+            rel_dir = os.path.join(relative_category_path, std_root_name, season_dir)
+        else:
+            rel_dir = os.path.join(relative_category_path, std_root_name)
+
+        return {
+            'target_cid': str(target_cid),
+            'category_path': relative_category_path,
+            'root_name': std_root_name,
+            'season_dir': season_dir,
+            'season_number': parsed_season,
+            'episode_number': parsed_episode,
+            'file_name': new_filename,
+            'relative_dir': rel_dir,
+            'relative_path': os.path.join(rel_dir, new_filename).replace('\\', '/'),
+            'video_info': video_info,
+            'has_real_info': has_real_info,
+            'part_num': part_num,
+        }
+
     def _scan_files_recursively(self, cid, depth=0, max_depth=3, current_rel_path=""):
         all_files = []
         if depth > max_depth: return []
@@ -7400,6 +7587,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # ★★★ 执行批量移动与后续 STRM 生成 ★★★
         # =================================================================
         conflict_mode = settings_db.get_washing_conflict_mode(default='replace') # 获取覆盖模式，默认洗版替换
+        skip_scope = settings_db.get_washing_skip_scope(default='directory') if conflict_mode == 'skip' else 'directory'
         
         # ★★★ 洗版特权检测 (细化到单集) ★★★
         active_washing_eps = set()
@@ -7616,6 +7804,43 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     logger.debug(f"  ➜ [洗版快照] 计算失败: {_new_name} -> {e}")
                     return {}
 
+            def _library_has_same_media(_s_num, _e_num):
+                try:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            if self.media_type == 'movie':
+                                cursor.execute(
+                                    """
+                                    SELECT 1
+                                    FROM media_metadata
+                                    WHERE item_type = 'Movie'
+                                      AND tmdb_id = %s
+                                      AND COALESCE(in_library, FALSE) = TRUE
+                                    LIMIT 1
+                                    """,
+                                    (str(self.tmdb_id),),
+                                )
+                            else:
+                                if _s_num is None or _e_num is None:
+                                    return False
+                                cursor.execute(
+                                    """
+                                    SELECT 1
+                                    FROM media_metadata
+                                    WHERE item_type = 'Episode'
+                                      AND parent_series_tmdb_id = %s
+                                      AND season_number = %s
+                                      AND episode_number = %s
+                                      AND COALESCE(in_library, FALSE) = TRUE
+                                    LIMIT 1
+                                    """,
+                                    (str(self.tmdb_id), int(_s_num), int(_e_num)),
+                                )
+                            return cursor.fetchone() is not None
+                except Exception as e:
+                    logger.debug(f"  ➜ [覆盖模式:跳过] 全库存在性查询失败: {new_name if 'new_name' in locals() else '-'} -> {e}")
+                    return False
+
             def _register_batch_washing_candidate(_item, _new_name, _action, _reason, _file_size):
                 key = _batch_washing_identity_key(_item, True)
                 if key is None:
@@ -7750,6 +7975,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         continue
                     elif action == 'REPLACE':
                         logger.info(f"  ➜ [洗版替换] {new_name}，原因：{reason}")
+                        item['_washing_replaces_existing'] = True
                         item['_washing_snapshot'] = _build_washing_snapshot(item, new_name, reason, file_size, has_ext_sub)
                         if not _register_batch_washing_candidate(item, new_name, action, reason, file_size):
                             continue
@@ -7789,6 +8015,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                             valid_items.append(item)
                     else:
+                        if conflict_mode == 'skip' and skip_scope == 'library' and is_vid and _library_has_same_media(s_num, e_num):
+                            logger.info(f"  ➜ [覆盖模式:跳过/全库] 媒体库已存在同集/同电影，放弃处理: {new_name}")
+                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            continue
                         if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
             
@@ -7852,7 +8082,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                         logger.debug(f"  ➜ 删除本地旧 STRM: {old_strm_full_path}")
                                         
                                     # 2. 删除 mediainfo.json
-                                    old_mi_full_path = os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json"
+                                    old_mi_full_path = os.path.join(local_root, os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json")
                                     if os.path.exists(old_mi_full_path):
                                         os.remove(old_mi_full_path)
                                         
@@ -7925,8 +8155,72 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 emby_api_key,
                                 update_type="Deleted",
                             )
+                            time.sleep(1)
                         except Exception as e:
                             logger.warning(f"  ➜ [版本控制] 通知 Emby 扫描旧版本路径失败: {e}")
+
+            # 虚拟入库转正后会清理 virtual:* 缓存，洗版替换可能找不到旧 fid。
+            # 但同名 STRM 仍在本地，必须先删掉并通知 Emby，避免新版同名覆盖后没有 webhook 回流。
+            local_replace_paths_for_emby = []
+            local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+            if local_root and os.path.exists(local_root):
+                try:
+                    relative_category_path = self._standard_relative_category_path(target_cid)
+                    for item in valid_items:
+                        if not item.get('_washing_replaces_existing'):
+                            continue
+                        new_name = item.get('_new_filename') or ''
+                        ext = new_name.split('.')[-1].lower() if '.' in new_name else ''
+                        if ext not in known_video_exts:
+                            continue
+                        s_name = item.get('_s_name')
+                        if self.media_type == 'tv' and item.get('_season_num') is not None and s_name:
+                            old_file_rel_path = os.path.join(relative_category_path, std_root_name, s_name, new_name)
+                        else:
+                            old_file_rel_path = os.path.join(relative_category_path, std_root_name, new_name)
+                        old_file_rel_path = str(old_file_rel_path).replace('\\', '/').lstrip('\\/')
+                        old_strm_full_path = os.path.join(local_root, os.path.splitext(old_file_rel_path)[0] + ".strm")
+                        if not os.path.exists(old_strm_full_path):
+                            continue
+
+                        os.remove(old_strm_full_path)
+                        local_replace_paths_for_emby.append(old_strm_full_path)
+                        logger.info(f"  ➜ [版本控制] 已删除本地同名旧 STRM: {old_strm_full_path}")
+
+                        old_mi_full_path = os.path.join(local_root, os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json")
+                        if os.path.exists(old_mi_full_path):
+                            os.remove(old_mi_full_path)
+
+                        old_dir_full_path = os.path.dirname(old_strm_full_path)
+                        old_base_name = os.path.splitext(os.path.basename(old_file_rel_path))[0]
+                        if os.path.exists(old_dir_full_path):
+                            for f in os.listdir(old_dir_full_path):
+                                if f.startswith(old_base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo', 'jpg', 'png', 'jpeg', 'bif']:
+                                    try:
+                                        os.remove(os.path.join(old_dir_full_path, f))
+                                    except Exception:
+                                        pass
+                except Exception as e:
+                    logger.warning(f"  ➜ [版本控制] 本地同名旧版本兜底清理失败: {e}")
+
+            if local_replace_paths_for_emby:
+                emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+                emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+                if emby_url and emby_api_key:
+                    try:
+                        from handler import emby
+                        logger.info(
+                            f"  ➜ [版本控制] 已删除本地同名旧版本，通知 Emby 极速扫描 {len(local_replace_paths_for_emby)} 个旧 STRM 路径..."
+                        )
+                        emby.notify_emby_file_changes(
+                            local_replace_paths_for_emby,
+                            emby_url,
+                            emby_api_key,
+                            update_type="Deleted",
+                        )
+                        time.sleep(1)
+                    except Exception as e:
+                        logger.warning(f"  ➜ [版本控制] 通知 Emby 扫描本地同名旧版本失败: {e}")
                 
             # -----------------------------------------------------------
             # ★ 3. 执行移动新文件
@@ -8063,42 +8357,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     break
                             if not category_name: category_name = "未识别"
 
-                            category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
-                            relative_category_path = "未识别"
-                            
-                            if category_rule:
-                                if 'category_path' in category_rule and category_rule['category_path']:
-                                    relative_category_path = category_rule['category_path']
-                                else:
-                                    media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
-                                    try:
-                                        dir_info = self.client.fs_files({'cid': target_cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-                                        path_nodes = dir_info.get('path', [])
-                                        start_idx = 0
-                                        found_root = False
-                                        
-                                        if media_root_cid == '0':
-                                            if str(target_cid) == '0': start_idx = 0
-                                            else: start_idx = 1 
-                                            found_root = True
-                                        else:
-                                            for i, node in enumerate(path_nodes):
-                                                if str(node.get('cid') or node.get('file_id')) == media_root_cid:
-                                                    start_idx = i + 1
-                                                    found_root = True
-                                                    break
-                                        
-                                        if found_root and start_idx < len(path_nodes):
-                                            rel_segments = [str(n.get('file_name') or n.get('fn') or n.get('name') or n.get('n')).strip() for n in path_nodes[start_idx:] if (n.get('file_name') or n.get('fn') or n.get('name') or n.get('n'))]
-                                            relative_category_path = "/".join(rel_segments) if rel_segments else category_rule.get('dir_name', '未识别')
-                                        else:
-                                            relative_category_path = category_rule.get('dir_name', '未识别')
-                                            
-                                        category_rule['category_path'] = relative_category_path
-                                        settings_db.save_setting('p115_sorting_rules', self.rules)
-                                        
-                                    except Exception as e:
-                                        relative_category_path = category_rule.get('dir_name', '未识别')
+                            relative_category_path = self._standard_relative_category_path(target_cid)
 
                             # ★ 保留原名只影响文件名，本地目录仍走标准结构
                             if self.media_type == 'tv' and season_num is not None and s_name:

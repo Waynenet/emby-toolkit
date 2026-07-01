@@ -154,6 +154,55 @@ def _dict_size_candidates(data: Dict[str, Any]) -> List[Any]:
     return values
 
 
+def _quality_source_from_shared_info(data: Dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        return ''
+    try:
+        from tasks.helpers import normalize_quality_source
+    except Exception:
+        normalize_quality_source = None
+
+    def _norm(value):
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        normalized = normalize_quality_source(text) if normalize_quality_source else text
+        lowered = str(normalized or '').strip().lower()
+        if not lowered or lowered in {'unknown', '未知', '4k', '2k', '1080p', '720p', '480p', '2160p'}:
+            return ''
+        if re.fullmatch(r'\d{3,4}p', lowered):
+            return ''
+        return normalized
+
+    for key in ('quality_source', 'quality', 'source_quality', 'resourceType', 'resource_type', 'quality_display'):
+        value = _norm(data.get(key))
+        if value:
+            return value
+    for nested_key in ('rapid_meta_json', 'rapid_meta', 'media_signature_json', 'summary_json', 'version_summary'):
+        nested = data.get(nested_key)
+        if isinstance(nested, str):
+            try:
+                nested = json.loads(nested)
+            except Exception:
+                nested = None
+        if isinstance(nested, dict):
+            value = _quality_source_from_shared_info(nested)
+            if value:
+                return value
+    return ''
+
+
+def _apply_quality_source_to_raw(raw: Dict[str, Any], quality_source: str) -> Dict[str, Any]:
+    if not isinstance(raw, dict) or not quality_source:
+        return raw
+    patched = dict(raw)
+    ctx = patched.get('_etk') if isinstance(patched.get('_etk'), dict) else {}
+    ctx = dict(ctx or {})
+    ctx['quality_source'] = quality_source
+    patched['_etk'] = ctx
+    return patched
+
+
 def _lookup_p115_cache_for_file(file_info: Dict[str, Any]) -> Dict[str, Any]:
     from database.connection import get_db_connection
     from handler.p115_service import P115CacheManager
@@ -212,6 +261,14 @@ def _lookup_p115_cache_for_file(file_info: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_rapid_file_info(file_info: Dict[str, Any]) -> Dict[str, Any]:
     info = dict(file_info or {})
     meta = info.get('rapid_meta_json') if isinstance(info.get('rapid_meta_json'), dict) else {}
+    quality_source = _quality_source_from_shared_info(info)
+    if quality_source:
+        info['quality_source'] = quality_source
+        info.setdefault('quality', quality_source)
+        meta = dict(meta or {})
+        meta.setdefault('quality_source', quality_source)
+        meta.setdefault('quality', quality_source)
+        info['rapid_meta_json'] = meta
     preid = _norm_sha1(info.get('preid') or meta.get('preid') or meta.get('pre_sha1') or meta.get('pre_sha1_128k'))
     sha1 = _norm_sha1(info.get('sha1') or info.get('file_sha1') or meta.get('sha1') or meta.get('file_sha1'))
     if sha1:
@@ -1358,6 +1415,8 @@ def _cache_center_raw_as_local_mediainfo(file_info: Dict[str, Any], raw: Dict[st
     sha1 = _norm_sha1((file_info or {}).get('sha1'))
     if not sha1 or not isinstance(raw, dict) or not raw:
         return False
+    quality_source = _quality_source_from_shared_info(file_info or {})
+    raw_for_cache = _apply_quality_source_to_raw(raw, quality_source)
     file_node = {
         'fn': (file_info or {}).get('file_name') or (file_info or {}).get('name') or sha1,
         'file_name': (file_info or {}).get('file_name') or (file_info or {}).get('name') or sha1,
@@ -1367,10 +1426,10 @@ def _cache_center_raw_as_local_mediainfo(file_info: Dict[str, Any], raw: Dict[st
     }
     try:
         builder = _MediainfoBuilder()
-        emby_obj = builder._build_emby_mediainfo_from_ffprobe(raw, file_node, sha1=sha1)
+        emby_obj = builder._build_emby_mediainfo_from_ffprobe(raw_for_cache, file_node, sha1=sha1)
         if not emby_obj:
             return False
-        P115CacheManager.save_mediainfo_cache(sha1, emby_obj, raw)
+        P115CacheManager.save_mediainfo_cache(sha1, emby_obj, raw_for_cache, file_info=file_info)
         return True
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 中心 RAW 转本地 MediaInfo 失败: {file_node.get('file_name')} -> {e}")
@@ -1579,6 +1638,16 @@ def _current_organize_conflict_mode(default: str = 'skip') -> str:
     if mode not in ('skip', 'replace', 'keep_both'):
         return str(default or 'skip').strip().lower() or 'skip'
     return mode
+
+def _current_organize_skip_scope(default: str = 'directory') -> str:
+    """读取 skip 模式的跳过范围，并统一成 directory/library。"""
+    try:
+        scope = settings_db.get_washing_skip_scope(default=default)
+    except Exception:
+        scope = str(default or '').strip().lower()
+    if scope not in ('directory', 'library'):
+        return str(default or 'directory').strip().lower() or 'directory'
+    return scope
 
 def _preflight_context(source_kind: str, source_id: str, payload: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
     first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
@@ -2770,12 +2839,14 @@ def _filter_files_before_transfer(
 
     - keep_both：只排除本机源；不做缺集过滤、不做已入库过滤，命中订阅就秒传；
     - replace：电影/单集交给洗版预检比较；完结季保留整包进入洗版，不能被缺集列表裁成单集；
-    - skip：只要本地已存在同电影/同集，就拒绝该项入库。
+    - skip + library：只要本地已存在同电影/同集，就拒绝该项入库；
+    - skip + directory：不做全库已入库过滤，交给整理阶段按目标目录判断。
     """
     payload = payload if isinstance(payload, dict) else {}
     files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
     missing_set = set(_normalize_episode_numbers(requested_missing_episode_numbers))
     conflict_mode = _current_organize_conflict_mode(default='skip')
+    skip_scope = _current_organize_skip_scope(default='directory')
     normalized_source_kind = _normalize_source_kind(source_kind)
     is_completed_pack_source = normalized_source_kind == 'completed_season'
 
@@ -2788,6 +2859,25 @@ def _filter_files_before_transfer(
     }
     context = _preflight_context(source_kind, source_id, payload, files)
     source_label = f"{source_kind or '-'}:{source_id or '-'}"
+
+    if _boolish_local(payload.get('_virtual_auto_promote'), False):
+        logger.info(
+            f"  ➜ [共享资源] 虚拟入库转正：跳过缺集/已入库匹配过滤，保留 {len(files)}/{len(files)} 个文件进入洗版预检。"
+        )
+        return files, {
+            'checked': True,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'input_count': len(files),
+            'kept_count': len(files),
+            'skipped_count': 0,
+            'requested_missing_episode_numbers': sorted(missing_set),
+            'conflict_mode': conflict_mode,
+            'skip_scope': skip_scope,
+            'virtual_auto_promote': True,
+            'reason': 'virtual_auto_promote',
+            'message': '虚拟入库转正：已跳过缺集/已入库匹配过滤，交给洗版预检处理。',
+        }
 
     # keep_both 是显式多版本模式：订阅命中后只兜底排除本机源，其他一律交给秒传。
     if conflict_mode == 'keep_both':
@@ -2826,6 +2916,7 @@ def _filter_files_before_transfer(
             'skipped_count': total_skipped,
             'requested_missing_episode_numbers': sorted(missing_set),
             'conflict_mode': conflict_mode,
+            'skip_scope': skip_scope,
             'skipped': {k: v[:20] for k, v in skipped.items() if v},
             'reason': reason,
             'message': message,
@@ -2844,7 +2935,7 @@ def _filter_files_before_transfer(
 
         if is_movie:
             movie_tmdb = f.get('tmdb_id') or payload.get('tmdb_id') or context.get('tmdb_id')
-            if conflict_mode == 'skip' and _local_movie_in_library(movie_tmdb):
+            if conflict_mode == 'skip' and skip_scope == 'library' and _local_movie_in_library(movie_tmdb):
                 skipped['already_in_library'].append(file_name)
                 continue
             # replace 模式不在这里拦截已入库电影，交给洗版预检决定 ACCEPT/REPLACE/SKIP/REJECT。
@@ -2864,7 +2955,7 @@ def _filter_files_before_transfer(
                     skipped['unknown_identity'].append(file_name)
                     continue
 
-            if conflict_mode == 'skip':
+            if conflict_mode == 'skip' and skip_scope == 'library':
                 if e_num is None:
                     # skip 模式必须能确定集身份；否则无法证明“同集不存在”，宁可拒绝。
                     skipped['unknown_identity'].append(file_name)
@@ -2883,7 +2974,7 @@ def _filter_files_before_transfer(
     if total_skipped:
         logger.info(
             f"  ➜ [共享资源] 秒传前匹配过滤：source={source_label}, conflict_mode={conflict_mode}, "
-            f"输入 {len(files)}，保留 {len(kept)}，跳过 {total_skipped} "
+            f"skip_scope={skip_scope}, 输入 {len(files)}，保留 {len(kept)}，跳过 {total_skipped} "
             f"(非缺失集 {len(skipped['not_requested_episode'])}, 已入库 {len(skipped['already_in_library'])}, "
             f"本机源 {len(skipped['self_source'])}, 身份不明 {len(skipped['unknown_identity'])})"
         )
@@ -2905,7 +2996,7 @@ def _filter_files_before_transfer(
         elif skipped['already_in_library'] and len(skipped['already_in_library']) == len(files):
             reason = 'all_already_in_library'
             if conflict_mode == 'skip':
-                message = '本地已存在同电影/同集，conflict_mode=skip，已拒绝重复入库。'
+                message = '本地已存在同电影/同集，conflict_mode=skip 且 skip_scope=library，已拒绝重复入库。'
             else:
                 message = '中心返回的集本机均已入库，已跳过重复秒传。'
         else:
@@ -2915,7 +3006,10 @@ def _filter_files_before_transfer(
         if conflict_mode == 'replace':
             message = 'replace 模式：已保留候选进入洗版预检。'
         elif conflict_mode == 'skip':
-            message = 'skip 模式：已拒绝本地存在的同电影/同集，保留可入库候选。'
+            if skip_scope == 'library':
+                message = 'skip 模式：已拒绝本地存在的同电影/同集，保留可入库候选。'
+            else:
+                message = 'skip 模式：已跳过全库过滤，后续按目标目录判断是否已有同电影/同集。'
         else:
             message = '秒传前匹配过滤完成'
 
@@ -2928,6 +3022,7 @@ def _filter_files_before_transfer(
         'skipped_count': total_skipped,
         'requested_missing_episode_numbers': sorted(missing_set),
         'conflict_mode': conflict_mode,
+        'skip_scope': skip_scope,
         'skipped': {k: v[:20] for k, v in skipped.items() if v},
         'reason': reason,
         'message': message,
@@ -4212,6 +4307,49 @@ def _virtual_category_path(source: Dict[str, Any], files: List[Dict[str, Any]]) 
     return '电影' if media_type == 'movie' else '剧集'
 
 
+def _virtual_standard_paths_from_organizer(source: Dict[str, Any], file_info: Dict[str, Any]) -> tuple[str, str]:
+    source = source or {}
+    file_info = file_info or {}
+    item_type = str(source.get('item_type') or file_info.get('item_type') or '').strip()
+    source_kind = _normalize_source_kind(source.get('source_kind') or file_info.get('source_kind'))
+    season_num, _ = _guess_se_from_source(file_info, source)
+    media_type = 'movie' if item_type == 'Movie' or source_kind == 'movie' else 'tv'
+    tmdb_id = (
+        source.get('tmdb_id') or file_info.get('tmdb_id')
+        if media_type == 'movie'
+        else _source_parent_series_tmdb_id(file_info, source)
+    )
+    tmdb_text = str(tmdb_id or '').strip()
+    if not tmdb_text:
+        return '', ''
+
+    file_name = file_info.get('file_name') or file_info.get('name') or file_info.get('sha1') or 'video.mkv'
+    node = dict(file_info)
+    node.setdefault('fn', file_name)
+    node.setdefault('file_name', file_name)
+    if node.get('size') in (None, '') and node.get('file_size') not in (None, ''):
+        node['size'] = node.get('file_size')
+
+    p115 = P115Service.get_client()
+    organizer = SmartOrganizer(
+        p115,
+        int(tmdb_text) if tmdb_text.isdigit() else 0,
+        media_type,
+        source.get('title') or file_info.get('title') or file_name,
+        None,
+        False,
+    )
+    if media_type == 'tv' and season_num is not None:
+        organizer.forced_season = int(season_num)
+    organizer.current_sorting_filename = file_name
+    preview = organizer.build_standard_local_preview(node, season_num=season_num if media_type == 'tv' else None)
+    rel_dir = str((preview or {}).get('relative_dir') or '').strip()
+    safe_file = str((preview or {}).get('file_name') or '').strip()
+    if not rel_dir or not safe_file:
+        return '', ''
+    return rel_dir, _safe_path_component(safe_file)
+
+
 def _virtual_washing_identity(source: Dict[str, Any], file_info: Dict[str, Any], media_type: str, season_num=None, episode_num=None) -> Dict[str, Any]:
     tmdb_id = (
         source.get('tmdb_id') or file_info.get('tmdb_id')
@@ -4438,7 +4576,13 @@ def create_virtual_strm_files(source: Dict[str, Any], files: List[Dict[str, Any]
         sha1 = _norm_sha1((file_info or {}).get('sha1'))
         if not sha1:
             continue
-        rel_dir, safe_file = _virtual_standard_paths(source, file_info, category_path)
+        try:
+            rel_dir, safe_file = _virtual_standard_paths_from_organizer(source, file_info)
+        except Exception as e:
+            logger.debug(f"  ➜ [虚拟入库] 正式规则预览失败，使用旧兜底路径：{(file_info or {}).get('file_name') or (file_info or {}).get('name')} -> {e}")
+            rel_dir, safe_file = '', ''
+        if not rel_dir or not safe_file:
+            rel_dir, safe_file = _virtual_standard_paths(source, file_info, category_path)
         local_dir = os.path.join(local_root, rel_dir)
         os.makedirs(local_dir, exist_ok=True)
         strm_path = os.path.join(local_dir, os.path.splitext(safe_file)[0] + '.strm')

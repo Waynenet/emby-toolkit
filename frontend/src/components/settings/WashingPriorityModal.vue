@@ -31,7 +31,31 @@
                     <template #trigger>
                       <button type="button" class="mode-help" @click.stop>?</button>
                     </template>
-                    只要目标目录已有该集/该电影，新文件直接丢入未识别，不使用洗版优先级规则。
+                    按下方跳过范围判断是否已有该集/该电影；命中后新文件直接丢入未识别，不使用洗版优先级规则。
+                  </n-tooltip>
+                </n-radio>
+              </div>
+            </n-radio-group>
+          </n-form-item>
+          <n-form-item v-if="config.conflict_mode === 'skip'" label="跳过范围">
+            <n-radio-group v-model:value="config.skip_scope">
+              <div class="mode-options compact">
+                <n-radio value="directory" class="mode-radio">
+                  <span class="mode-title">同目录</span>
+                  <n-tooltip trigger="hover" placement="top" style="max-width: 320px;">
+                    <template #trigger>
+                      <button type="button" class="mode-help" @click.stop>?</button>
+                    </template>
+                    仅目标目录中已有同集/同电影时跳过，当前默认逻辑。
+                  </n-tooltip>
+                </n-radio>
+                <n-radio value="library" class="mode-radio">
+                  <span class="mode-title">全库</span>
+                  <n-tooltip trigger="hover" placement="top" style="max-width: 320px;">
+                    <template #trigger>
+                      <button type="button" class="mode-help" @click.stop>?</button>
+                    </template>
+                    只要媒体库已存在同集/同电影就跳过，不限定当前目标目录。
                   </n-tooltip>
                 </n-radio>
               </div>
@@ -200,6 +224,9 @@
                           <n-select v-model:value="priority.codec" multiple tag :options="codecOptions" placeholder="编码 (如 HEVC)" />
                         </n-gi>
                         <n-gi>
+                          <n-select v-model:value="priority.source" multiple tag :options="sourceOptions" placeholder="来源 (如 WEB-DL)" />
+                        </n-gi>
+                        <n-gi>
                           <n-select v-model:value="priority.effect" multiple tag :options="effectOptions" placeholder="特效 (如 DoVi P8)" />
                         </n-gi>
                         <n-gi>
@@ -299,7 +326,8 @@ const activeGroupId = ref(null);
 const categoryOptions = ref([]);
 const releaseGroupOptions = ref([]);
 const config = ref({
-  conflict_mode: 'replace'
+  conflict_mode: 'replace',
+  skip_scope: 'directory'
 });
 
 // 当前正在编辑的优先级卡片 UID
@@ -310,6 +338,15 @@ const activeGroup = computed(() => groups.value.find(g => g.id === activeGroupId
 // 选项字典
 const resOptions = [{label:'4K/2160p', value:'4k'}, {label:'1080p', value:'1080p'}, {label:'720p', value:'720p'}];
 const codecOptions = [{label:'HEVC/H.265', value:'hevc'}, {label:'AVC/H.264', value:'avc'}];
+const sourceOptions = [
+  { label: '蓝光原盘', value: 'BluRay原盘' },
+  { label: 'Remux', value: 'Remux' },
+  { label: 'UHD BluRay', value: 'UHD BluRay' },
+  { label: 'BluRay', value: 'BluRay' },
+  { label: 'UHD', value: 'UHD' },
+  { label: 'WEB-DL', value: 'WEB-DL' },
+  { label: 'HDTV', value: 'HDTV' }
+];
 const effectOptions = [{label:'DoVi P8', value:'dovi_p8'}, {label:'DoVi P7', value:'dovi_p7'}, {label:'DoVi P5', value:'dovi_p5'}, {label:'HDR10+', value:'hdr10+'}, {label:'HDR', value:'hdr'}, {label:'SDR', value:'sdr'}];
 const audioOptions = [{label:'国语', value:'chi'}, {label:'粤语', value:'yue'}, {label:'英语', value:'eng'}, {label:'日语', value:'jpn'}, {label:'韩语', value:'kor'}];
 const subOptions = [{label:'简体', value:'chi'}, {label:'繁体', value:'yue'}, {label:'英文', value:'eng'}, {label:'日文', value:'jpn'}, {label:'韩文', value:'kor'}];
@@ -336,6 +373,9 @@ const getPrioritySummary = (p) => {
   
   const codecLabels = getLabels(p.codec, codecOptions);
   if (codecLabels.length) tags.push({ type: 'info', label: codecLabels.join(' | ') });
+
+  const sourceLabels = getLabels(p.source, sourceOptions);
+  if (sourceLabels.length) tags.push({ type: 'primary', label: '源: ' + sourceLabels.join(' | ') });
   
   const effectLabels = getLabels(p.effect, effectOptions);
   if (effectLabels.length) tags.push({ type: 'warning', label: effectLabels.join(' | ') });
@@ -385,7 +425,8 @@ const open = async () => {
     // 2. 获取洗版覆盖模式配置
     const resConfig = await axios.get('/api/p115/washing_priority_config');
     config.value = {
-      conflict_mode: resConfig.data?.data?.conflict_mode || 'replace'
+      conflict_mode: resConfig.data?.data?.conflict_mode || 'replace',
+      skip_scope: resConfig.data?.data?.skip_scope || 'directory'
     };
 
     // 3. 获取洗版优先级组
@@ -397,6 +438,7 @@ const open = async () => {
       if (g.priorities) {
         g.priorities.forEach(p => {
           p._uid = Math.random().toString(36).substr(2, 9);
+          p.source = Array.isArray(p.source) ? p.source : (p.source ? [p.source] : []);
           p.release_group = Array.isArray(p.release_group) ? p.release_group : (p.release_group ? [p.release_group] : []);
         });
       }
@@ -421,6 +463,7 @@ const saveGroups = async () => {
         g.priorities = g.priorities.filter(p => {
           // 只要配置了任意一项条件，就认为是有效规则
           return (p.resolution && p.resolution.length > 0) ||
+                 (p.source && p.source.length > 0) ||
                  (p.codec && p.codec.length > 0) ||
                  (p.effect && p.effect.length > 0) ||
                  (p.audio && p.audio.length > 0) ||
@@ -529,7 +572,7 @@ const addPriority = () => {
     exempt_original_lang: false,
     clean_version: false,
     subtitle_effect: false,
-    resolution: [], codec: [], effect: [], audio: [], subtitle: [], release_group: [], min_size_gb: null, max_size_gb: null
+    resolution: [], source: [], codec: [], effect: [], audio: [], subtitle: [], release_group: [], min_size_gb: null, max_size_gb: null
   });
   
   // 新增后自动展开编辑

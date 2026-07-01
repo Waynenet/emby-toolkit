@@ -10,6 +10,7 @@ from database import connection
 from database import settings_db, watchlist_db
 import handler.moviepilot as moviepilot
 import tasks.helpers as helpers
+from tasks.p115_fingerprint_helpers import p115_fp_is_virtual_strm_target, p115_fp_read_strm_target
 
 from .config import AssistantConfig, from_watchlist_config
 from .engine import (
@@ -39,7 +40,13 @@ MANUAL_CHANGE_GRACE_SECONDS = 3600
 
 
 def get_config() -> AssistantConfig:
-    return from_watchlist_config(settings_db.get_setting("watchlist_config") or {})
+    cfg = from_watchlist_config(settings_db.get_setting("watchlist_config") or {})
+    strategy = settings_db.get_setting("subscription_strategy_config") or {}
+    sources = strategy.get("subscription_sources")
+    mp_config = settings_db.get_setting("mp_config") or {}
+    if not mp_config.get("moviepilot_url") or (isinstance(sources, list) and "mp" not in sources):
+        cfg.enabled = False
+    return cfg
 
 
 class SubscribeAssistantManager:
@@ -58,6 +65,7 @@ class SubscribeAssistantManager:
         old_status: str = None,
         all_tmdb_episodes: List[Dict[str, Any]] = None,
         real_next_episode: Dict[str, Any] = None,
+        triggering_episode_ids: List[str] = None,
     ) -> None:
         if not self.cfg.enabled:
             logger.debug("  ➜ [订阅助手] 已关闭，跳过 MoviePilot 同步。")
@@ -112,6 +120,13 @@ class SubscribeAssistantManager:
             )
             sub = existing_by_season.get(season_num)
             if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending"):
+                if self._triggering_episodes_are_virtual(triggering_episode_ids) or self._season_has_virtual_import(tmdb_id, season_num):
+                    logger.info(
+                        "  ➜ [订阅助手] 《%s》第 %s 季 仍处于虚拟入库状态，跳过自动创建 MP 订阅，等待正式入库。",
+                        series_name,
+                        season_num,
+                    )
+                    continue
                 sub = self._create_subscription(tmdb_id, series_name, season_num, decision)
                 if sub:
                     existing_by_season[season_num] = sub
@@ -143,7 +158,7 @@ class SubscribeAssistantManager:
                 total_episodes=total,
             ):
                 logger.info(
-                    "  ➜ [订阅助手] 《%s》S%s 已同步 MP 状态=%s，总集数=%s，原因=%s",
+                    "  ➜ [订阅助手] 《%s》第 %s 季 已同步 MP 状态=%s，总集数=%s，原因=%s",
                     series_name,
                     season_num,
                     decision["mp_state"],
@@ -271,7 +286,7 @@ class SubscribeAssistantManager:
             if locked:
                 title = self._series_title(tmdb_id, snapshot.get("subscribe_json"))
                 logger.info(
-                    "  ➜ [订阅助手] 《%s》S%s 已由豆瓣/手动锁定为 %s 集，自动纠错跳过 MP 恢复动作。",
+                    "  ➜ [订阅助手] 《%s》第 %s 季 已由豆瓣/手动锁定为 %s 集，自动纠错跳过 MP 恢复动作。",
                     title,
                     season,
                     locked.get("count") or "未知",
@@ -283,7 +298,7 @@ class SubscribeAssistantManager:
             fixed = self._repair_snapshot_subscription(snapshot, tmdb_id, season, old_total)
             if fixed:
                 logger.info(
-                    "  ➜ [订阅助手] 已根据完成快照纠正《%s》S%s 的 MP 订阅。",
+                    "  ➜ [订阅助手] 已根据完成快照纠正《%s》第 %s 季的 MP 订阅。",
                     self._series_title(tmdb_id, snapshot.get("subscribe_json")),
                     season,
                 )
@@ -348,7 +363,7 @@ class SubscribeAssistantManager:
             "name": metadata["title"],
         }, reason="download.added")
         logger.info(
-            "  ➜ [订阅助手] 已接收 MP 下载事件：订阅 %s，%s S%s，hash=%s。",
+            "  ➜ [订阅助手] 已接收 MP 下载事件：订阅 %s，%s 第 %s 季，hash=%s。",
             subscribe_id,
             self._series_title(metadata["tmdb_id"], source_info or metadata),
             season or "-",
@@ -408,7 +423,7 @@ class SubscribeAssistantManager:
         )
         if fields:
             self._mark_active_source(subscribe_id, SOURCE_MANUAL_MP, f"MP 手动修改：{','.join(str(x) for x in fields)}")
-        logger.info(
+        logger.debug(
             "  ➜ [订阅助手] 已记录 MP 订阅修改：%s，scene=%s，fields=%s。",
             self._format_subscribe_info(info),
             scene or "-",
@@ -836,6 +851,100 @@ class SubscribeAssistantManager:
             if s_num in existing_by_season or s_num == latest_season_num:
                 seasons.append(season)
         return seasons
+
+    def _triggering_episodes_are_virtual(self, episode_ids: List[str] = None) -> bool:
+        ids = [str(x or '').strip() for x in (episode_ids or []) if str(x or '').strip()]
+        if not ids:
+            return False
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT asset_details_json
+                        FROM media_metadata
+                        WHERE emby_item_ids_json ?| %s
+                        """,
+                        (ids,),
+                    )
+                    rows = cursor.fetchall() or []
+            if not rows:
+                return False
+            virtual_count = 0
+            for row in rows:
+                assets = row.get("asset_details_json") or []
+                if isinstance(assets, str):
+                    assets = json.loads(assets or "[]")
+                if isinstance(assets, dict):
+                    assets = [assets]
+                is_virtual = False
+                for asset in assets or []:
+                    if not isinstance(asset, dict):
+                        continue
+                    path = asset.get("path") or asset.get("Path")
+                    if p115_fp_is_virtual_strm_target(path) or p115_fp_is_virtual_strm_target(p115_fp_read_strm_target(path)):
+                        is_virtual = True
+                        break
+                if is_virtual:
+                    virtual_count += 1
+            return virtual_count > 0 and virtual_count == len(rows)
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 判断触发分集是否虚拟入库失败: %s", e)
+            return False
+
+    def _season_has_virtual_import(self, tmdb_id: str, season: int) -> bool:
+        tmdb_id = str(tmdb_id or '').strip()
+        season = _safe_int(season)
+        if not tmdb_id or season <= 0:
+            return False
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM shared_virtual_imports
+                        WHERE status IN ('virtual', 'promoting')
+                          AND LOWER(item_type) IN ('series', 'season', 'episode', 'tv')
+                          AND (tmdb_id = %s OR parent_series_tmdb_id = %s)
+                          AND (season_number = %s OR season_number IS NULL)
+                        LIMIT 1
+                        """,
+                        (tmdb_id, tmdb_id, season),
+                    )
+                    if cursor.fetchone():
+                        return True
+
+                    cursor.execute(
+                        """
+                        SELECT asset_details_json
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                          AND in_library = TRUE
+                        """,
+                        (tmdb_id, season),
+                    )
+                    rows = cursor.fetchall() or []
+            for row in rows:
+                assets = row.get("asset_details_json") or []
+                if isinstance(assets, str):
+                    try:
+                        assets = json.loads(assets or "[]")
+                    except Exception:
+                        assets = []
+                if isinstance(assets, dict):
+                    assets = [assets]
+                for asset in assets or []:
+                    if not isinstance(asset, dict):
+                        continue
+                    path = asset.get("path") or asset.get("Path")
+                    if p115_fp_is_virtual_strm_target(path) or p115_fp_is_virtual_strm_target(p115_fp_read_strm_target(path)):
+                        return True
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 判断季是否仍为虚拟入库失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
+        return False
 
     def _create_subscription(self, tmdb_id: str, series_name: str, season: int, decision: Dict[str, Any]) -> Optional[dict]:
         payload_kwargs = self._subscription_wash_kwargs(decision)
