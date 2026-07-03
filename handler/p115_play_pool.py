@@ -1105,11 +1105,13 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     }
     if preid:
         payload["preid"] = preid
+    rapid_backend_text = "OpenAPI" if str(account.get("access_token") or "").strip() else "Cookie"
     logger.info(
-        "  ➜ [小号播放] 准备播放：%s %s/%s",
+        "  ➜ [小号播放] 准备播放：%s %s/%s | 秒传后端=%s",
         _display_title(display_name),
         account.get("alias") or account.get("id") or "小号",
         _display_user_name(user_id),
+        rapid_backend_text,
     )
 
     resp = client.rapid_upload(payload)
@@ -1125,6 +1127,12 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             payload["preid"] = preid
             resp = client.rapid_upload(payload)
     if isinstance(resp, dict) and resp.get("_rapid_sign_required"):
+        logger.debug(
+            "  ➜ [小号播放] 小号%s秒传需要主号签名：sha1=%s..., sign_check=%s",
+            "OpenAPI" if resp.get("_rapid_sign_backend") == "play_pool_openapi" else "Cookie",
+            sha1[:12],
+            resp.get("_rapid_sign_check") or "-",
+        )
         main_client = P115Service.get_client()
         if not main_client:
             raise RuntimeError("小号秒传需要主号签名，但主号 115 客户端未初始化")

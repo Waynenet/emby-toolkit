@@ -45,12 +45,12 @@ def get_temp_dir_config():
     }
 
 
-def save_temp_dir_config(client, cleanup_cron=None):
+def save_temp_dir_config(client, cleanup_cron=DEFAULT_TEMP_CLEANUP_CRON):
     cid = ensure_temp_dir(client, create_if_missing=True)
     config = {
         "name": get_temp_dir_name(),
         "cid": cid,
-        "cleanup_cron": DEFAULT_TEMP_CLEANUP_CRON if cleanup_cron is None else str(cleanup_cron or "").strip(),
+        "cleanup_cron": str(cleanup_cron or "").strip(),
         "updated_at": datetime.now().isoformat(),
     }
     settings_db.save_setting(TEMP_DIR_CONFIG_KEY, config)

@@ -159,6 +159,13 @@ class P115PlayPoolClient:
         if not file_name:
             file_name = f"{sha1}.mkv"
         if self.openapi:
+            logger.debug(
+                "  ➜ [小号专用秒传] OpenAPI 初始化上传: %s | sha1=%s... | preid=%s | size=%s",
+                file_name,
+                sha1[:12],
+                (preid[:12] + "...") if preid else "-",
+                size,
+            )
             resp = self.openapi.rapid_upload({
                 "cid": target_cid,
                 "sha1": sha1,
@@ -168,6 +175,8 @@ class P115PlayPoolClient:
                 "preid": preid,
                 "sign_key": sign_key,
                 "sign_val": sign_val,
+                "_rapid_log_prefix": "小号专用秒传",
+                "_rapid_backend_label": "OpenAPI",
             })
             return _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_cid, pick_code)
         if not self.webapi or not hasattr(self.webapi, "upload_init"):
@@ -249,11 +258,13 @@ def _normalize_upload_init_response(resp, sha1, size, file_name, target_cid, pic
             "state": False,
             "error_msg": f"小号专用 initupload 返回非 dict: {type(resp).__name__}",
             "_rapid_upload_backend": "play_pool_cookie",
+            "_rapid_upload_backend_text": "Cookie",
             "response": str(resp)[:500],
         }
 
     out = dict(resp)
     out["_rapid_upload_backend"] = "play_pool_cookie"
+    out["_rapid_upload_backend_text"] = "Cookie"
     out.setdefault("sha1", sha1)
     out.setdefault("file_name", file_name)
     out.setdefault("target_cid", target_cid)
@@ -312,10 +323,12 @@ def _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_
             "state": False,
             "error_msg": f"小号专用 OpenAPI upload/init 返回非 dict: {type(resp).__name__}",
             "_rapid_upload_backend": "play_pool_openapi",
+            "_rapid_upload_backend_text": "OpenAPI",
         }
 
     out = dict(resp)
     out["_rapid_upload_backend"] = "play_pool_openapi"
+    out["_rapid_upload_backend_text"] = "OpenAPI"
     out.setdefault("sha1", sha1)
     out.setdefault("size", size)
     out.setdefault("file_name", file_name)
@@ -326,11 +339,20 @@ def _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_
     status, data = _status_from_cookie_init(out)
     if out.get("state") and str(status) == "2":
         out.setdefault("message", "小号专用 OpenAPI 秒传成功")
+        logger.debug("  ➜ [小号专用秒传] OpenAPI 秒传成功: %s", file_name)
         return out
 
     if str(status) == "7":
         sign_key = data.get("sign_key") or out.get("sign_key")
         sign_check = data.get("sign_check") or out.get("sign_check")
+        logger.debug(
+            "  ➜ [小号专用秒传] OpenAPI 返回 status=7：sha1=%s..., pc=%s..., sign_check=%s, sign_key_prefix=%s..., sign_key_len=%s",
+            sha1[:12],
+            (pick_code or "-")[:8],
+            sign_check or "-",
+            str(sign_key or "")[:12],
+            len(str(sign_key or "")),
+        )
         out["_rapid_sign_required"] = bool(sign_key and sign_check)
         out["_rapid_sign_key"] = sign_key
         out["_rapid_sign_check"] = sign_check

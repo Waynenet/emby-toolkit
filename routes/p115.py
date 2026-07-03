@@ -1258,7 +1258,10 @@ def save_temp_dir_config():
     if not client:
         return jsonify({'success': False, 'message': '115 客户端未初始化，请先配置 115 Cookie/OpenAPI'}), 500
     try:
-        config = save_temp_dir_config(client, cleanup_cron=data.get('cleanup_cron'))
+        if 'cleanup_cron' in data:
+            config = save_temp_dir_config(client, cleanup_cron=data.get('cleanup_cron'))
+        else:
+            config = save_temp_dir_config(client)
         account_results = p115_play_pool.ensure_all_account_temp_dirs()
         try:
             from scheduler_manager import scheduler_manager

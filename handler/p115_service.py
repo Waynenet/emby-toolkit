@@ -867,6 +867,8 @@ class P115OpenAPIClient:
                         return {}
             return {}
 
+        log_prefix = str(payload.pop('_rapid_log_prefix', '共享秒传') or '共享秒传')
+        backend_label = str(payload.pop('_rapid_backend_label', 'OpenAPI') or 'OpenAPI')
         rapid_meta = _as_dict(payload.get('rapid_meta_json') or payload.get('rapid_meta') or payload.get('meta'))
         source_meta = _as_dict(payload.get('source') or payload.get('source_json'))
 
@@ -960,7 +962,7 @@ class P115OpenAPIClient:
                 if not cache_row and fid and hasattr(cache_mgr, 'get_file_cache_by_id'):
                     cache_row = cache_mgr.get_file_cache_by_id(fid)
             except Exception as e:
-                logger.debug(f"  ➜ [共享秒传] 查询 p115_filesystem_cache 失败: {e}")
+                logger.debug(f"  ➜ [{log_prefix}] 查询 p115_filesystem_cache 失败: {e}")
 
         if cache_row:
             try:
@@ -1009,10 +1011,10 @@ class P115OpenAPIClient:
                     'fid': fid, 'pick_code': pick_code, 'sha1': sha1, 'file_name': file_name, 'size': size,
                 }) or preid
             except Exception as e:
-                logger.debug(f"  ➜ [共享秒传] 秒传前补齐 preid 失败: sha1={sha1[:12]}..., err={e}")
+                logger.debug(f"  ➜ [{log_prefix}] 秒传前补齐 preid 失败: sha1={sha1[:12]}..., err={e}")
 
-        logger.info(
-            f"  ➜ [共享秒传] 准备秒传到 CID={target_cid}: "
+        logger.debug(
+            f"  ➜ [{log_prefix}] {backend_label} 准备秒传到 CID={target_cid}: "
             f"{file_name} | sha1={sha1[:12]}... | preid={(preid[:12] + '...') if preid else '-'} | size={size}"
         )
 
@@ -1046,8 +1048,8 @@ class P115OpenAPIClient:
         if status == '7':
             sign_key_text = str(data.get('sign_key') or init_res.get('sign_key') or '')
             sign_check_text = str(data.get('sign_check') or init_res.get('sign_check') or '')
-            logger.warning(
-                f"  ➜ [共享秒传] OpenAPI 返回 status=7，需要 holder 二次校验；"
+            logger.debug(
+                f"  ➜ [{log_prefix}] {backend_label} 返回 status=7，需要 holder 二次校验；"
                 f"交给中心调度签名客户端："
                 f"sha1={sha1[:12]}..., preid={(preid or sha1)[:12]}..., "
                 f"pc={(pick_code or '-')[:8]}..., sign_check={sign_check_text or '-'}, "

@@ -2387,7 +2387,7 @@ const loadTempDirConfig = async () => {
     if (res.data?.success) {
       tempDirConfig.value = {
         cid: res.data.data?.cid || '',
-        cleanup_cron: res.data.data?.cleanup_cron || '0 * * * *',
+        cleanup_cron: res.data.data?.cleanup_cron ?? '',
         accounts: res.data.data?.accounts || []
       };
     }

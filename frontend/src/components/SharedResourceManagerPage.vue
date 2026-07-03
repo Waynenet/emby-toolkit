@@ -321,7 +321,7 @@
               <template #checked>开启</template>
               <template #unchecked>关闭</template>
             </n-switch>
-            <template #feedback>开启后中心资源仅生成虚拟 STRM 和媒体信息；点播时会秒传到临时目录，即播即删。</template>
+            <template #feedback>开启后中心资源仅生成虚拟 STRM 和媒体信息；点播时会秒传到临时目录，由临时目录清理cron定期删除。</template>
           </n-form-item>
           <n-form-item label="剧集自动转正">
             <n-input-number v-model:value="sharedConfigForm.p115_shared_virtual_auto_promote_episodes" :min="0" :precision="0" style="width: 180px" />
