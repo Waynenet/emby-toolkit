@@ -2458,7 +2458,44 @@ class P115Service:
                     normalizer=_p115_normalize_info_response,
                 )
                 if _p115_success(resp):
-                    return self._fill_info_parent_from_cache(resp, file_id)
+                    resp = self._fill_info_parent_from_cache(resp, file_id)
+                    data = resp.get('data')
+                    if isinstance(data, list):
+                        data = data[0] if data else {}
+                        resp['data'] = data
+
+                    parent_id = ''
+                    if isinstance(data, dict):
+                        parent_id = str(data.get('parent_id') or data.get('pid') or '').strip()
+
+                    # Cookie 详情本身没有父目录 ID；先走本地缓存/路径推导，仍推导不出时再用 OpenAPI 兜底。
+                    if not parent_id and get_115_api_priority() == 'cookie' and self._openapi:
+                        openapi_resp = self._call_api(
+                            'fs_get_info',
+                            file_id,
+                            normalizer=_p115_normalize_info_response,
+                            force_openapi=True,
+                        )
+                        if _p115_success(openapi_resp):
+                            openapi_data = openapi_resp.get('data')
+                            if isinstance(openapi_data, list):
+                                openapi_data = openapi_data[0] if openapi_data else {}
+                                openapi_resp['data'] = openapi_data
+                            if isinstance(openapi_data, dict):
+                                openapi_parent_id = str(openapi_data.get('parent_id') or openapi_data.get('pid') or '').strip()
+                                if openapi_parent_id:
+                                    if isinstance(data, dict):
+                                        data['parent_id'] = openapi_parent_id
+                                        data['pid'] = openapi_parent_id
+                                        data.setdefault('_parent_id_source', 'openapi_fallback')
+                                        for key, value in openapi_data.items():
+                                            data.setdefault(key, value)
+                                    else:
+                                        openapi_data.setdefault('_parent_id_source', 'openapi_fallback')
+                                        resp['data'] = openapi_data
+                                    logger.debug(f"  ➜ [115] Cookie 文件详情父目录推导失败，已兜底 OpenAPI 补齐: fid={file_id}, parent_id={openapi_parent_id}")
+                                    return resp
+                    return resp
                 return resp
 
             def _is_exists_error(self, resp):
