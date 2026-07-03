@@ -3827,7 +3827,16 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'washing_rejected': bool(preflight.get('washing_rejected')),
         }
 
-    is_package_transfer = source_kind in ('season_hub', 'logical_season') and len(files) > 1
+    partial_missing_episode_transfer = bool(
+        requested_missing_episode_numbers
+        and source_kind in ('season_hub', 'logical_season')
+        and len(files) > 0
+    )
+    is_package_transfer = (
+        source_kind in ('season_hub', 'logical_season')
+        and len(files) > 1
+        and not partial_missing_episode_transfer
+    )
     payload['source_kind'] = source_kind
     payload['source_id'] = source_id
     payload['source_ref_id'] = source_id
@@ -3905,7 +3914,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     # 到这里才进入 Rapid 秒传分支；季包秒传必须先创建标准临时剧目录。
     rapid_target = _prepare_rapid_target_dir_for_source(
         base_target_cid=base_target_cid,
-        source_kind=source_kind,
+        source_kind='logical_episode' if partial_missing_episode_transfer else source_kind,
         source_id=source_id,
         payload=payload,
         files=files,
@@ -3970,7 +3979,8 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 'abort_transfer': bool(result.get('abort_transfer')),
             }
             if result.get('no_retry') or result.get('abort_transfer'):
-                abort_event.set()
+                if not partial_missing_episode_transfer:
+                    abort_event.set()
                 logger.warning(
                     f"  ➜ [共享资源] 中心已终止本次秒传：{file_label}，"
                     f"reason={result.get('message') or '-'}"
@@ -4012,8 +4022,9 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             else:
                 errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
                 if (item.get('error') or {}).get('abort_transfer'):
-                    abort_event.set()
-                    break
+                    if not partial_missing_episode_transfer:
+                        abort_event.set()
+                        break
 
     report_errors = []
     report_results = []
