@@ -929,7 +929,23 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 3：自定义重命名 (移到这里) -->
+                    <!-- 卡片 3：映射管理 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                          <span class="card-title">映射管理</span>
+                          <n-button secondary type="info" @click="mappingManagerModalVisible = true">
+                            <template #icon><n-icon :component="SparklesIcon" /></template>
+                            管理映射
+                          </n-button>
+                        </div>
+                      </template>
+                      <n-alert type="info" :show-icon="true">
+                        统一管理关键词、工作室、国家地区、原语言、发布组与分级映射，识别和筛选逻辑会读取这里的配置。
+                      </n-alert>
+                    </n-card>
+
+                    <!-- ★ 卡片 4：自定义重命名 (移到这里) -->
                     <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -947,7 +963,7 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 4：小号播放池 -->
+                    <!-- ★ 卡片 5：小号播放池 -->
                     <n-card :bordered="false" class="dashboard-card">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -963,7 +979,7 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 5：自定义季集号识别 -->
+                    <!-- ★ 卡片 6：自定义季集号识别 -->
                     <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -981,7 +997,7 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- ★ 卡片 6：独立音乐库管理 -->
+                    <!-- ★ 卡片 7：独立音乐库管理 -->
                     <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -1696,6 +1712,17 @@
     />
     <!-- ★ 引入阶梯洗版优先级模态框 -->
     <WashingPriorityModal ref="washingPriorityModalRef" />
+    <!-- 映射管理模态框 -->
+    <n-modal
+      v-model:show="mappingManagerModalVisible"
+      preset="card"
+      title="映射规则管理"
+      :style="modalStyle(900)"
+      :bordered="false"
+      class="custom-modal glass-modal"
+    >
+      <MappingManager @close="mappingManagerModalVisible = false" />
+    </n-modal>
     <!-- 订阅源配置模态框 -->
     <MoviePilotConfigModal ref="mpModalRef" />
     <HDHiveConfigModal ref="hdhiveModalRef" />
@@ -2072,7 +2099,8 @@ import {
   PaperPlaneOutline as PaperPlaneIcon,
   CloudDownloadOutline as CloudDownloadIcon,
   LayersOutline as LayersIcon,
-  OptionsOutline as OptionsIcon
+  OptionsOutline as OptionsIcon,
+  SparklesOutline as SparklesIcon
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import RenameConfigModal from './RenameConfigModal.vue';
@@ -2080,6 +2108,7 @@ import EpisodeRegexConfigModal from './EpisodeRegexConfigModal.vue';
 import MusicManagerModal from './MusicManagerModal.vue';
 import RuleManagerModal from './RuleManagerModal.vue'; 
 import WashingPriorityModal from './WashingPriorityModal.vue';
+import MappingManager from '../modals/MappingManager.vue';
 import axios from 'axios';
 import MoviePilotConfigModal from './MoviePilotConfigModal.vue';
 import HDHiveConfigModal from './HDHiveConfigModal.vue';
@@ -2095,6 +2124,7 @@ const episodeRegexModalRef = ref(null);
 const defaultStreamModalRef = ref(null);
 const musicModalRef = ref(null);
 const ruleManagerRef = ref(null);
+const mappingManagerModalVisible = ref(false);
 const activeSettingsTab = ref('emby');
 
 const MOBILE_BREAKPOINT = 768;

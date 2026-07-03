@@ -115,13 +115,18 @@ class P115MediaAnalyzerMixin:
 
         # 6. 发布组 (Group)
         try:
-            for group_name, patterns in helpers.RELEASE_GROUPS.items():
-                for pattern in patterns:
-                    match = re.search(pattern, filename, re.IGNORECASE)
-                    if match:
-                        info_dict['group'] = match.group(0) 
-                        break
-                if info_dict['group']: break
+            group_token = helpers.extract_release_group_token_from_filename(filename)
+            normalized_group = helpers.normalize_release_group_name(group_token)
+            if group_token and normalized_group and normalized_group != group_token:
+                info_dict['group'] = group_token
+            if not info_dict['group']:
+                for group_name, patterns in helpers.get_release_group_mapping().items():
+                    for pattern in patterns:
+                        match = re.search(pattern, filename, re.IGNORECASE)
+                        if match:
+                            info_dict['group'] = match.group(0) 
+                            break
+                    if info_dict['group']: break
             if not info_dict['group']:
                 match_suffix = re.search(r'-([a-zA-Z0-9]+)$', os.path.splitext(filename)[0])
                 if match_suffix and len(match_suffix.group(1)) > 2 and match_suffix.group(1).upper() not in ['1080P', '2160P', '4K', 'HDR', 'H265', 'H264']:

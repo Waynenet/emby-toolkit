@@ -1693,7 +1693,7 @@ class WatchlistProcessor:
         include = str(include_regex or '').lower()
         if not include:
             return ''
-        for group_name, aliases in helpers.RELEASE_GROUPS.items():
+        for group_name, aliases in helpers.get_release_group_mapping().items():
             group_regex = helpers.build_exclusion_regex_from_groups([group_name])
             if group_regex and group_regex.lower() in include:
                 return str(group_name)
@@ -1705,7 +1705,7 @@ class WatchlistProcessor:
 
     def _is_known_release_group(self, group_name: str) -> bool:
         group = helpers.normalize_release_group_name(group_name)
-        return bool(group and group in helpers.RELEASE_GROUPS)
+        return bool(group and group in helpers.get_release_group_mapping())
 
     def _asset_release_groups(self, asset_details_json: Any) -> set:
         try:

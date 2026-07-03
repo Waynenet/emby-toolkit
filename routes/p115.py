@@ -1587,10 +1587,10 @@ def handle_washing_priority_groups():
 def handle_release_groups():
     """返回洗版优先级可选的发布组标准名。"""
     try:
-        from tasks.helpers import RELEASE_GROUPS
+        from tasks.helpers import get_release_group_names
         options = [
             {"label": str(group), "value": str(group)}
-            for group in RELEASE_GROUPS.keys()
+            for group in get_release_group_names()
             if str(group or "").strip()
         ]
         options.sort(key=lambda item: item["label"].lower())
