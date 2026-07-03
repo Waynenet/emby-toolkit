@@ -1784,7 +1784,9 @@ def play_115_video(pick_code, filename=None):
     try:
         # 1. 识别是否为 Emby 服务端 (Probe 或 ffmpeg Remux)
         is_emby_server = False
-        if any(kw in client_ua_lower for kw in ['emby', 'jellyfin', 'lavf', 'kodi']):
+        # Emby server-side fetches can omit User-Agent. Keep OpenAPI downurl and
+        # the follow-up Range GET on the same browser UA to avoid 115 403.
+        if not client_ua.strip() or any(kw in client_ua_lower for kw in ['emby', 'jellyfin', 'lavf', 'kodi']):
             is_emby_server = True
 
         # 2. 决定申请直链使用的 UA
