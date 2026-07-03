@@ -105,6 +105,13 @@ def _mask_cookie(cookie):
     return text[:8] + "***"
 
 
+def _has_account_auth(account):
+    return bool(
+        str((account or {}).get("cookie") or "").strip()
+        or str((account or {}).get("access_token") or "").strip()
+    )
+
+
 def _human_bytes(value):
     size = float(_safe_int(value, 0))
     if size <= 0:
@@ -382,6 +389,8 @@ def _load_config():
         account["id"] = str(account.get("id") or uuid.uuid4().hex)
         account["alias"] = str(account.get("alias") or "小号").strip()[:40] or "小号"
         account["cookie"] = str(account.get("cookie") or "").strip()
+        account["access_token"] = str(account.get("access_token") or "").strip()
+        account["refresh_token"] = str(account.get("refresh_token") or "").strip()
         account["app_type"] = str(account.get("app_type") or "alipaymini").strip() or "alipaymini"
         account["enabled"] = bool(account.get("enabled", True))
         account["owner_type"] = _normalize_owner_type(account.get("owner_type"))
@@ -424,8 +433,12 @@ def _public_account(account, config=None):
     config = config or _load_config()
     out = dict(account or {})
     out.pop("cookie", None)
+    out.pop("access_token", None)
+    out.pop("refresh_token", None)
     out.pop("allowed_effective_user_ids", None)
     out["cookie_mask"] = _mask_cookie(account.get("cookie"))
+    out["has_cookie"] = bool(str(account.get("cookie") or "").strip())
+    out["has_openapi"] = bool(str(account.get("access_token") or "").strip())
     out["owner_type"] = _normalize_owner_type(account.get("owner_type"))
     out["owner_type_text"] = "用户自有" if out["owner_type"] == "user" else "管理员小号"
     out["owner_user_id"] = str(account.get("owner_user_id") or "").strip()
@@ -448,7 +461,7 @@ def get_public_config():
     return {
         "enabled": config["enabled"],
         "accounts": [_public_account(x, config) for x in config["accounts"]],
-        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and x.get("cookie") and not _account_daily_limited(x, daily_limit_gb)]),
+        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and _has_account_auth(x) and not _account_daily_limited(x, daily_limit_gb)]),
         "temp_dir_name": get_temp_dir_name(),
         "auto_speedtest_enabled": True,
         "auto_speedtest_threshold_mbps": threshold_mbps,
@@ -535,6 +548,10 @@ def upsert_account(payload, account_id=None):
         target["alias"] = "小号"
     if "cookie" in payload:
         target["cookie"] = str(payload.get("cookie") or "").strip()
+    if "access_token" in payload:
+        target["access_token"] = str(payload.get("access_token") or "").strip()
+    if "refresh_token" in payload:
+        target["refresh_token"] = str(payload.get("refresh_token") or "").strip()
     if "app_type" in payload:
         target["app_type"] = str(payload.get("app_type") or "alipaymini").strip() or "alipaymini"
     elif not target.get("app_type"):
@@ -564,7 +581,7 @@ def upsert_account(payload, account_id=None):
     target["updated_at"] = _now_text()
     target.setdefault("temp_cid", "")
     _save_config(config)
-    if str(target.get("cookie") or "").strip() and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
+    if _has_account_auth(target) and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
         try:
             speedtest_account(target["id"])
             target = _find_account_by_id(target["id"]) or target
@@ -597,7 +614,11 @@ def _save_sessions(sessions):
 
 
 def _account_client(account):
-    return P115PlayPoolClient(account.get("cookie"), account.get("app_type") or "alipaymini")
+    return P115PlayPoolClient(
+        account.get("cookie"),
+        account.get("app_type") or "alipaymini",
+        account.get("access_token"),
+    )
 
 
 def _extract_cid(resp):
@@ -668,12 +689,12 @@ def ensure_all_account_temp_dirs():
     results = []
     changed = False
     for account in config.get("accounts") or []:
-        if not account.get("cookie"):
+        if not _has_account_auth(account):
             results.append({
                 "id": account.get("id"),
                 "alias": account.get("alias") or account.get("id") or "",
                 "success": False,
-                "message": "未配置 Cookie",
+                "message": "未配置 Cookie/OpenAPI",
             })
             continue
         try:
@@ -765,7 +786,7 @@ def _select_account(config, user_id=""):
 
     candidates = []
     for account in config.get("accounts") or []:
-        if not account.get("enabled") or not account.get("cookie"):
+        if not account.get("enabled") or not _has_account_auth(account):
             continue
         if not _account_allowed_for_user(account, user_id):
             continue
@@ -1010,7 +1031,7 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         account_usable = bool(
             account
             and account.get("enabled")
-            and account.get("cookie")
+            and _has_account_auth(account)
             and _account_allowed_for_user(account, user_id)
         )
         direct_url = str(reusable.get("direct_url") or "").strip()
@@ -1265,7 +1286,7 @@ def cleanup_expired_sessions():
 def cleanup_temp_dir_old_videos(older_than_hours=3):
     results = []
     for account in _load_config().get("accounts") or []:
-        if not account.get("cookie"):
+        if not _has_account_auth(account):
             continue
         try:
             client = _account_client(account)
@@ -1400,8 +1421,8 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
     account = next((x for x in config["accounts"] if str(x.get("id")) == str(account_id)), None)
     if not account:
         raise RuntimeError("小号不存在")
-    if not account.get("cookie"):
-        raise RuntimeError("小号未配置 Cookie")
+    if not _has_account_auth(account):
+        raise RuntimeError("小号未配置 Cookie/OpenAPI")
     sample_pick_code = str(sample_pick_code or "").strip()
     if not sample_pick_code:
         try:
@@ -1489,7 +1510,7 @@ def run_daily_speedtest_and_rewards(update_status=None):
         logger.info("  ➜ [小号池每日测速] 小号池未启用，跳过")
         return {"skipped": True, "reason": "小号池未启用", "results": []}
 
-    accounts = [x for x in config.get("accounts") or [] if str(x.get("cookie") or "").strip()]
+    accounts = [x for x in config.get("accounts") or [] if _has_account_auth(x)]
     total = len(accounts)
     results = []
     if update_status:

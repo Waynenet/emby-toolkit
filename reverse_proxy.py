@@ -420,9 +420,28 @@ def _extract_emby_token_from_request():
     )
     if token:
         return str(token).strip()
-    auth = request.headers.get('Authorization') or ''
-    match = re.search(r'(?:Token|token)="?([^",\s]+)', auth)
-    return match.group(1).strip() if match else ''
+    for header_name in ('Authorization', 'X-Emby-Authorization', 'X-MediaBrowser-Authorization'):
+        auth = request.headers.get(header_name) or ''
+        if not auth:
+            continue
+        match = re.search(r'(?:Token|token)\s*=\s*"?([^",\s]+)', auth)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r'Bearer\s+([^,\s]+)', auth, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ''
+
+
+def _extract_emby_auth_header_value(name):
+    for header_name in ('Authorization', 'X-Emby-Authorization', 'X-MediaBrowser-Authorization'):
+        auth = request.headers.get(header_name) or ''
+        if not auth:
+            continue
+        match = re.search(rf'{re.escape(name)}\s*=\s*"?([^",]+)', auth, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ''
 
 
 def _request_context_keys(full_path="", play_session_id=""):
@@ -435,7 +454,7 @@ def _request_context_keys(full_path="", play_session_id=""):
 
     token = _extract_emby_token_from_request()
     add("token", token)
-    add("device", request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id'))
+    add("device", request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or _extract_emby_auth_header_value('DeviceId'))
     add("play_session", play_session_id or request.args.get('PlaySessionId'))
 
     return list(dict.fromkeys(keys))

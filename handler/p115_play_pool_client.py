@@ -7,7 +7,9 @@ import requests
 from handler.p115_service import (
     P115CacheManager,
     P115Client,
+    P115OpenAPIClient,
     get_115_ua,
+    _p115_extract_down_url,
     _p115_as_list,
     _p115_is_severe_failure,
     _p115_normalize_common_response,
@@ -19,25 +21,27 @@ logger = logging.getLogger(__name__)
 
 
 class P115PlayPoolClient:
-    """小号播放池专用 Cookie 客户端。
+    """小号播放池专用客户端。
 
     这套客户端只服务小号播放，不走 P115Service 混合代理，避免和主号/共享资源
     链路共用客户端状态。主号仍只在外层负责 holder 签名。
     """
 
-    def __init__(self, cookie_str, app_type="alipaymini"):
-        if not cookie_str:
-            raise ValueError("Cookie 不能为空")
+    def __init__(self, cookie_str="", app_type="alipaymini", access_token=""):
+        if not cookie_str and not access_token:
+            raise ValueError("Cookie/OpenAPI 不能为空")
         self.cookie_str = str(cookie_str).strip()
+        self.access_token = str(access_token or "").strip()
         self.app_type = str(app_type or "alipaymini").strip() or "alipaymini"
         self.user_agent = get_115_ua(self.app_type)
         self.webapi = None
+        self.openapi = P115OpenAPIClient(self.access_token) if self.access_token else None
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        if P115Client:
+        if self.cookie_str and P115Client:
             self.webapi = P115Client(self.cookie_str, app=self.app_type)
             try:
                 self.webapi.headers["user-agent"] = self.user_agent
@@ -45,6 +49,11 @@ class P115PlayPoolClient:
                 pass
 
     def download_url(self, pick_code, user_agent=None):
+        if self.openapi:
+            resp = self.openapi.fs_downurl(pick_code, user_agent=user_agent)
+            url = _p115_extract_down_url(resp)
+            if url:
+                return url
         if self.webapi:
             url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
             return str(url_obj) if url_obj else None
@@ -75,6 +84,8 @@ class P115PlayPoolClient:
             params.update(payload)
         elif payload is not None:
             params["cid"] = payload
+        if self.openapi:
+            return _p115_normalize_list_response(self.openapi.fs_files(params))
         if self.webapi and hasattr(self.webapi, "fs_files"):
             try:
                 return _p115_normalize_list_response(self.webapi.fs_files(params))
@@ -85,6 +96,8 @@ class P115PlayPoolClient:
         return _p115_normalize_list_response(self._json_result(resp))
 
     def fs_mkdir(self, name, pid):
+        if self.openapi:
+            return _p115_normalize_mkdir_response(self.openapi.fs_mkdir(str(name), str(pid)))
         payload = {"cname": str(name), "pid": str(pid)}
         if self.webapi and hasattr(self.webapi, "fs_mkdir"):
             try:
@@ -97,6 +110,8 @@ class P115PlayPoolClient:
 
     def fs_delete(self, fids):
         ids = [str(i) for i in _p115_as_list(fids) if i is not None]
+        if self.openapi:
+            return _p115_normalize_common_response(self.openapi.fs_delete(ids))
         if self.webapi and hasattr(self.webapi, "fs_delete"):
             try:
                 return _p115_normalize_common_response(self.webapi.fs_delete(ids))
@@ -143,6 +158,18 @@ class P115PlayPoolClient:
             return {"state": False, "error_msg": "小号专用秒传缺少文件大小", "_rapid_upload_backend": "play_pool_cookie"}
         if not file_name:
             file_name = f"{sha1}.mkv"
+        if self.openapi:
+            resp = self.openapi.rapid_upload({
+                "cid": target_cid,
+                "sha1": sha1,
+                "size": size,
+                "file_name": file_name,
+                "pick_code": pick_code,
+                "preid": preid,
+                "sign_key": sign_key,
+                "sign_val": sign_val,
+            })
+            return _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_cid, pick_code)
         if not self.webapi or not hasattr(self.webapi, "upload_init"):
             return {"state": False, "error_msg": "小号专用客户端未初始化 upload_init", "_rapid_upload_backend": "play_pool_cookie"}
 
@@ -276,4 +303,46 @@ def _normalize_upload_init_response(resp, sha1, size, file_name, target_cid, pic
 
     out["state"] = False
     out.setdefault("error_msg", f"小号专用 initupload 未直接秒传，status={status or 'unknown'}")
+    return out
+
+
+def _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_cid, pick_code):
+    if not isinstance(resp, dict):
+        return {
+            "state": False,
+            "error_msg": f"小号专用 OpenAPI upload/init 返回非 dict: {type(resp).__name__}",
+            "_rapid_upload_backend": "play_pool_openapi",
+        }
+
+    out = dict(resp)
+    out["_rapid_upload_backend"] = "play_pool_openapi"
+    out.setdefault("sha1", sha1)
+    out.setdefault("size", size)
+    out.setdefault("file_name", file_name)
+    out.setdefault("target_cid", target_cid)
+    if pick_code:
+        out.setdefault("pick_code", pick_code)
+
+    status, data = _status_from_cookie_init(out)
+    if out.get("state") and str(status) == "2":
+        out.setdefault("message", "小号专用 OpenAPI 秒传成功")
+        return out
+
+    if str(status) == "7":
+        sign_key = data.get("sign_key") or out.get("sign_key")
+        sign_check = data.get("sign_check") or out.get("sign_check")
+        out["_rapid_sign_required"] = bool(sign_key and sign_check)
+        out["_rapid_sign_key"] = sign_key
+        out["_rapid_sign_check"] = sign_check
+        out["_rapid_sign_backend"] = "play_pool_openapi"
+        out.setdefault("error_msg", "小号专用 OpenAPI 要求二次校验")
+        return out
+
+    if str(status) == "1":
+        out.setdefault("state", False)
+        out.setdefault("error_msg", "小号专用 OpenAPI 返回普通上传(status=1)，Rapid v2 不上传明文文件")
+        return out
+
+    out.setdefault("state", False)
+    out.setdefault("error_msg", f"小号专用 OpenAPI upload/init 未直接秒传，status={status or 'unknown'}")
     return out

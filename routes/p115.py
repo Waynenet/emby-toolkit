@@ -268,9 +268,12 @@ _play_pool_cookie_qrcode_data = {
     "time": None,
     "sign": None,
     "app_type": "alipaymini",
+    "mode": "cookie",
+    "code_verifier": None,
 }
 _play_pool_cookie_qrcode_sessions = {}
 _play_pool_cookie_qrcode_lock = threading.Lock()
+PLAY_POOL_OPENAPI_CLIENT_ID = "100196261"
 
 @p115_bp.route('/cookie_qrcode', methods=['GET'])
 @admin_required
@@ -373,12 +376,27 @@ def save_manual_cookie():
 @p115_bp.route('/play_pool/cookie_qrcode', methods=['GET'])
 @emby_login_required
 def get_play_pool_cookie_qrcode():
+    mode = str(request.args.get('mode') or 'cookie').strip().lower()
     app_type = request.args.get('app', 'alipaymini')
     try:
-        from handler.p115_service import get_115_ua
-        headers = {"User-Agent": get_115_ua(app_type)}
-        url = f"https://qrcodeapi.115.com/api/1.0/{app_type}/1.0/token/?app={app_type}"
-        resp = requests.get(url, headers=headers, timeout=10).json()
+        verifier = None
+        if mode == "openapi":
+            verifier, challenge = _generate_pkce_pair()
+            resp = requests.post(
+                "https://passportapi.115.com/open/authDeviceCode",
+                data={
+                    "client_id": PLAY_POOL_OPENAPI_CLIENT_ID,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "sha256",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            ).json()
+        else:
+            from handler.p115_service import get_115_ua
+            headers = {"User-Agent": get_115_ua(app_type)}
+            url = f"https://qrcodeapi.115.com/api/1.0/{app_type}/1.0/token/?app={app_type}"
+            resp = requests.get(url, headers=headers, timeout=10).json()
         if resp.get('state') == 1:
             data = resp.get('data', {})
             uid = data.get('uid')
@@ -387,6 +405,8 @@ def get_play_pool_cookie_qrcode():
                 "time": data.get('time'),
                 "sign": data.get('sign'),
                 "app_type": app_type,
+                "mode": mode,
+                "code_verifier": verifier,
                 "created_at": time.time(),
             }
             with _play_pool_cookie_qrcode_lock:
@@ -411,6 +431,7 @@ def check_play_pool_cookie_qrcode_status():
         session = _play_pool_cookie_qrcode_sessions.get(request_uid) if request_uid else None
         if not session:
             session = dict(_play_pool_cookie_qrcode_data)
+    mode = str(request.args.get('mode') or session.get('mode') or 'cookie').strip().lower()
     app_type = request.args.get('app', session.get('app_type', 'alipaymini'))
     uid = session.get('uid')
     time_val = session.get('time')
@@ -418,6 +439,44 @@ def check_play_pool_cookie_qrcode_status():
     if not uid:
         return jsonify({"success": False, "status": "expired", "message": "请先获取二维码"})
     try:
+        if mode == "openapi":
+            resp = requests.get(
+                "https://qrcodeapi.115.com/get/status/",
+                params={"uid": uid, "time": time_val, "sign": sign},
+                timeout=10,
+            ).json()
+            state = resp.get('state')
+            if state == 0:
+                return jsonify({"success": False, "status": "expired", "message": "二维码已过期"})
+            if state == 1:
+                status = resp.get('data', {}).get('status')
+                if status == 1:
+                    return jsonify({"success": True, "status": "waiting", "message": "等待扫码"})
+                if status == 2:
+                    token_resp = requests.post(
+                        "https://passportapi.115.com/open/deviceCodeToToken",
+                        data={"uid": uid, "code_verifier": session.get("code_verifier")},
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=10,
+                    )
+                    token_data = token_resp.json()
+                    if token_data.get('state'):
+                        token = token_data.get('data') or {}
+                        access_token = str(token.get('access_token') or '').strip()
+                        refresh_token = str(token.get('refresh_token') or '').strip()
+                        if access_token:
+                            return jsonify({
+                                "success": True,
+                                "status": "success",
+                                "message": "OpenAPI 授权成功",
+                                "data": {
+                                    "access_token": access_token,
+                                    "refresh_token": refresh_token,
+                                }
+                            })
+                    return jsonify({"success": False, "status": "error", "message": token_data.get('message', '获取 Token 失败')})
+            return jsonify({"success": True, "status": "waiting", "message": "等待扫码"})
+
         from handler.p115_service import get_115_ua
         headers = {"User-Agent": get_115_ua(app_type)}
         url = f"https://qrcodeapi.115.com/get/status/?uid={uid}&time={time_val}&sign={sign}"
@@ -1060,8 +1119,8 @@ def save_play_pool_config():
 @admin_required
 def add_play_pool_account():
     data = request.json or {}
-    if not str(data.get('cookie') or '').strip():
-        return jsonify({'success': False, 'message': 'Cookie 不能为空'}), 400
+    if not str(data.get('cookie') or '').strip() and not str(data.get('access_token') or '').strip():
+        return jsonify({'success': False, 'message': 'Cookie/OpenAPI 不能为空'}), 400
     item = p115_play_pool.upsert_account(data)
     return jsonify({'success': True, 'data': item})
 
@@ -1074,9 +1133,11 @@ def save_user_play_pool_account():
     if not emby_user_id:
         return jsonify({'success': False, 'message': '未登录'}), 401
     cookie = str(data.get('cookie') or '').strip()
+    access_token = str(data.get('access_token') or '').strip()
+    refresh_token = str(data.get('refresh_token') or '').strip()
     existing = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
-    if not cookie and not existing.get('id'):
-        return jsonify({'success': False, 'message': 'Cookie 不能为空'}), 400
+    if not cookie and not access_token and not existing.get('id'):
+        return jsonify({'success': False, 'message': 'Cookie/OpenAPI 不能为空'}), 400
     shared = bool(data.get('shared', False))
     payload = {
         'alias': str(data.get('alias') or session.get('emby_username') or '用户小号').strip() or '用户小号',
@@ -1089,9 +1150,13 @@ def save_user_play_pool_account():
     if cookie:
         payload['cookie'] = cookie
         payload['enabled'] = True
+    if access_token:
+        payload['access_token'] = access_token
+        payload['refresh_token'] = refresh_token
+        payload['enabled'] = True
     item = p115_play_pool.upsert_account(payload, account_id=existing.get('id') if existing else None)
     reward_result = {}
-    if cookie:
+    if cookie or access_token:
         try:
             result = p115_play_pool.speedtest_account(item['id'])
             item['last_speed_bps'] = result.get('bps', 0)
@@ -1145,7 +1210,7 @@ def get_user_play_pool_rewards():
 @admin_required
 def update_play_pool_account(account_id):
     data = request.json or {}
-    if not str(data.get('cookie') or '').strip():
+    if not str(data.get('cookie') or '').strip() and not str(data.get('access_token') or '').strip():
         data['_skip_auto_speedtest'] = True
     item = p115_play_pool.upsert_account(data, account_id=account_id)
     return jsonify({'success': True, 'data': item})
