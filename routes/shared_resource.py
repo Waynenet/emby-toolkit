@@ -286,6 +286,18 @@ def _min_text(values: List[Any]) -> str:
     return min(vals) if vals else ''
 
 
+def _local_source_is_usable(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    status = str(row.get('status') or row.get('review_status') or '').strip().lower()
+    center_status = str(row.get('center_status') or '').strip().lower()
+    disabled = status in {'disabled', 'cancelled', 'canceled', 'deleted'} or center_status in {'disabled', 'cancelled', 'canceled'}
+    failed = status in {
+        'failed', 'error', 'dead', 'expired', 'rejected', 'inconsistent', 'incomplete',
+        'raw_missing', 'dirty_raw', 'dirty_summary', 'dirty_meta'
+    } or center_status in {'failed', 'error', 'dead', 'expired', 'rejected', 'raw_missing', 'dirty_raw', 'dirty_summary', 'dirty_meta'}
+    return status in {'active', 'available'} and not disabled and not failed
+
+
 def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """我的共享源展示聚合。"""
     # 【核心优化】直接使用轻量级字典，不执行任何耗时操作
@@ -299,7 +311,7 @@ def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         season = row.get('season_number')
         tmdb_id = str(row.get('tmdb_id') or '').strip()
         is_episode = source_kind == 'episode' or item_type == 'episode'
-        if is_episode and tmdb_id and season not in (None, ''):
+        if is_episode and tmdb_id and season not in (None, '') and _local_source_is_usable(row):
             key = f"episode-season:{tmdb_id}:{season}"
             g = groups.get(key)
             if not g:
@@ -338,8 +350,11 @@ def _aggregate_local_sources(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             if ep_no not in (None, ''):
                 g['episode_numbers'].append(_safe_int(ep_no, 0))
             count = max(1, _safe_int(row.get('item_count') or row.get('file_count'), 1))
+            reported_count = _safe_int(row.get('reported_count') or row.get('center_reported_count'), 0)
+            if reported_count <= 0 and str(row.get('center_status') or '').strip().lower() == 'reported':
+                reported_count = count
             g['item_count'] += count
-            g['reported_count'] += _safe_int(row.get('reported_count') or row.get('center_reported_count'), 0)
+            g['reported_count'] += reported_count
             g['center_reported_count'] = g['reported_count']
             g['raw_uploaded_count'] += _safe_int(row.get('raw_uploaded_count'), count)
             g['size_missing_count'] += _safe_int(row.get('size_missing_count'), 0)
