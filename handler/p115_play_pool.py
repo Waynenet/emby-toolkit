@@ -28,6 +28,8 @@ _PREPARE_LOCKS = {}
 _PREPARE_LOCKS_GUARD = threading.Lock()
 _SESSION_LOCKS = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
+_TOKEN_REFRESH_LOCKS = {}
+_TOKEN_REFRESH_LOCKS_GUARD = threading.Lock()
 _ALLOWED_USER_EXPAND_CACHE = {}
 _ALLOWED_USER_EXPAND_TTL_SECONDS = 60
 
@@ -613,11 +615,93 @@ def _save_sessions(sessions):
     settings_db.save_setting(PLAY_POOL_SESSIONS_KEY, sessions[-500:])
 
 
+def _get_token_refresh_lock(account_id):
+    key = str(account_id or "").strip() or "default"
+    with _TOKEN_REFRESH_LOCKS_GUARD:
+        lock = _TOKEN_REFRESH_LOCKS.get(key)
+        if not lock:
+            lock = threading.Lock()
+            _TOKEN_REFRESH_LOCKS[key] = lock
+        return lock
+
+
+def refresh_account_openapi_token(account_id, failed_token=None):
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        return {"ok": False, "message": "缺少小号账号 ID"}
+
+    with _get_token_refresh_lock(account_id):
+        config = _load_config()
+        target = None
+        for item in config.get("accounts") or []:
+            if str(item.get("id") or "") == account_id:
+                target = item
+                break
+        if not target:
+            return {"ok": False, "message": "小号账号不存在"}
+
+        current_access = str(target.get("access_token") or "").strip()
+        current_refresh = str(target.get("refresh_token") or "").strip()
+        if failed_token and current_access and current_access != str(failed_token or "").strip():
+            logger.info("  ➜ [115播放池] 小号 Token 已被其他线程续期，直接复用：%s", target.get("alias") or account_id)
+            return {
+                "ok": True,
+                "access_token": current_access,
+                "refresh_token": current_refresh,
+                "reused": True,
+            }
+        if not current_refresh:
+            return {"ok": False, "message": "小号缺少 refresh_token"}
+
+        try:
+            resp = requests.post(
+                "https://passportapi.115.com/open/refreshToken",
+                data={"refresh_token": current_refresh},
+                timeout=10,
+            ).json()
+        except Exception as e:
+            logger.warning("  ➜ [115播放池] 小号 Token 续期请求异常：%s -> %s", target.get("alias") or account_id, e)
+            return {"ok": False, "message": str(e)}
+
+        if not isinstance(resp, dict) or not resp.get("state"):
+            message = (resp or {}).get("message") or (resp or {}).get("error_msg") or "小号 Token 续期失败"
+            logger.warning("  ➜ [115播放池] 小号 Token 续期失败：%s -> %s", target.get("alias") or account_id, message)
+            return {"ok": False, "message": message}
+
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        new_access = str(data.get("access_token") or "").strip()
+        new_refresh = str(data.get("refresh_token") or "").strip()
+        if not new_access:
+            return {"ok": False, "message": "小号 Token 续期响应缺少 access_token"}
+
+        target["access_token"] = new_access
+        if new_refresh:
+            target["refresh_token"] = new_refresh
+        target["updated_at"] = _now_text()
+        target.pop("last_error", None)
+        _save_config(config)
+
+        expires_in = _safe_int(data.get("expires_in"), 0)
+        hours = round(expires_in / 3600, 1) if expires_in else 0
+        if hours:
+            logger.info("  ➜ [115播放池] 小号 Token 自动续期成功：%s，有效时长 %s 小时。", target.get("alias") or account_id, hours)
+        else:
+            logger.info("  ➜ [115播放池] 小号 Token 自动续期成功：%s。", target.get("alias") or account_id)
+        return {
+            "ok": True,
+            "access_token": new_access,
+            "refresh_token": target.get("refresh_token") or "",
+        }
+
+
 def _account_client(account):
     return P115PlayPoolClient(
         account.get("cookie"),
         account.get("app_type") or "alipaymini",
         account.get("access_token"),
+        account.get("refresh_token"),
+        account.get("id"),
+        refresh_account_openapi_token,
     )
 
 

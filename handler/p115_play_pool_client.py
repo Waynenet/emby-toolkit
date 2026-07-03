@@ -7,7 +7,6 @@ import requests
 from handler.p115_service import (
     P115CacheManager,
     P115Client,
-    P115OpenAPIClient,
     get_115_api_priority,
     get_115_ua,
     _p115_extract_down_url,
@@ -21,6 +20,124 @@ from handler.p115_service import (
 logger = logging.getLogger(__name__)
 
 
+class P115PlayPoolOpenAPIClient:
+    """小号播放池专用 OpenAPI 客户端。
+
+    只使用小号自己的 access_token / refresh_token，不依赖主号 P115Service。
+    """
+
+    TOKEN_EXPIRED_CODES = {40140123, 40140124, 40140125, 40140126}
+
+    def __init__(self, access_token="", refresh_token="", account_id="", token_updater=None):
+        access_token = str(access_token or "").strip()
+        if not access_token:
+            raise ValueError("小号 OpenAPI access_token 不能为空")
+        self.access_token = access_token
+        self.refresh_token = str(refresh_token or "").strip()
+        self.account_id = str(account_id or "").strip()
+        self.token_updater = token_updater
+        self.base_url = "https://proapi.115.com"
+        self.headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "User-Agent": "Emby-toolkit/1.0 (PlayPool OpenAPI)",
+        }
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=1)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    def _set_tokens(self, access_token="", refresh_token=""):
+        access_token = str(access_token or "").strip()
+        refresh_token = str(refresh_token or "").strip()
+        if access_token:
+            self.access_token = access_token
+            self.headers["Authorization"] = f"Bearer {access_token}"
+        if refresh_token:
+            self.refresh_token = refresh_token
+        return bool(access_token)
+
+    def _refresh_access_token(self, failed_token=None):
+        if not self.refresh_token or not callable(self.token_updater):
+            return False
+        result = self.token_updater(self.account_id, failed_token=failed_token)
+        if not isinstance(result, dict) or not result.get("ok"):
+            return False
+        return self._set_tokens(
+            result.get("access_token"),
+            result.get("refresh_token") or self.refresh_token,
+        )
+
+    def _request_json(self, method, url, **kwargs):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                current_token = self.access_token
+                request_kwargs = dict(kwargs)
+                req_headers = dict(self.headers)
+                req_headers.update(request_kwargs.pop("headers", {}) or {})
+                resp = self.session.request(method, url, headers=req_headers, timeout=30, **request_kwargs).json()
+                code = resp.get("code") if isinstance(resp, dict) else None
+                if isinstance(resp, dict) and not resp.get("state") and code in self.TOKEN_EXPIRED_CODES:
+                    logger.warning("  ➜ [115播放池] 检测到小号 Token 已过期，正在触发小号自动续期...")
+                    if self._refresh_access_token(current_token):
+                        logger.info("  ➜ [115播放池] 小号续期完成，重新发送刚才失败的请求...")
+                        retry_kwargs = dict(kwargs)
+                        retry_headers = dict(self.headers)
+                        retry_headers.update(retry_kwargs.pop("headers", {}) or {})
+                        return self.session.request(method, url, headers=retry_headers, timeout=30, **retry_kwargs).json()
+                    logger.error("  ➜ [115播放池] 小号 Token 续期失败，请重新扫码该小号。")
+                return resp if isinstance(resp, dict) else {"state": False, "error_msg": str(resp)}
+            except Exception as e:
+                err_str = str(e)
+                if ("NameResolutionError" in err_str or "Connection" in err_str or "Timeout" in err_str) and attempt < max_retries - 1:
+                    continue
+                return {"state": False, "error_msg": err_str}
+
+    def fs_files(self, payload):
+        params = {"show_dir": 1, "limit": 1000, "offset": 0}
+        if isinstance(payload, dict):
+            params.update(payload)
+        return self._request_json("GET", f"{self.base_url}/open/ufile/files", params=params)
+
+    def fs_downurl(self, pick_code, user_agent=None):
+        headers = {}
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        return self._request_json(
+            "POST",
+            f"{self.base_url}/open/ufile/downurl",
+            data={"pick_code": str(pick_code)},
+            headers=headers,
+        )
+
+    def fs_mkdir(self, name, pid):
+        resp = self._request_json(
+            "POST",
+            f"{self.base_url}/open/folder/add",
+            data={"pid": str(pid), "file_name": str(name)},
+        )
+        if resp.get("state") and isinstance(resp.get("data"), dict):
+            resp["cid"] = resp["data"].get("file_id")
+        return resp
+
+    def fs_delete(self, fids):
+        ids = ",".join([str(f) for f in fids]) if isinstance(fids, list) else str(fids)
+        return self._request_json("POST", f"{self.base_url}/open/ufile/delete", data={"file_ids": ids})
+
+    def fs_upload_init(self, file_name, file_size, target_cid, sha1, preid, sign_key=None, sign_val=None):
+        data = {
+            "file_name": str(file_name),
+            "file_size": int(file_size),
+            "target": f"U_1_{target_cid}",
+            "fileid": str(sha1),
+            "preid": str(preid or ""),
+        }
+        if sign_key and sign_val:
+            data["sign_key"] = str(sign_key)
+            data["sign_val"] = str(sign_val).upper()
+        return self._request_json("POST", f"{self.base_url}/open/upload/init", data=data)
+
+
 class P115PlayPoolClient:
     """小号播放池专用客户端。
 
@@ -28,15 +145,26 @@ class P115PlayPoolClient:
     链路共用客户端状态。主号仍只在外层负责 holder 签名。
     """
 
-    def __init__(self, cookie_str="", app_type="alipaymini", access_token=""):
+    def __init__(self, cookie_str="", app_type="alipaymini", access_token="", refresh_token="", account_id="", token_updater=None):
         if not cookie_str and not access_token:
             raise ValueError("Cookie/OpenAPI 不能为空")
         self.cookie_str = str(cookie_str).strip()
         self.access_token = str(access_token or "").strip()
+        self.refresh_token = str(refresh_token or "").strip()
+        self.account_id = str(account_id or "").strip()
+        self.token_updater = token_updater
         self.app_type = str(app_type or "alipaymini").strip() or "alipaymini"
         self.user_agent = get_115_ua(self.app_type)
         self.webapi = None
-        self.openapi = P115OpenAPIClient(self.access_token) if self.access_token else None
+        self.openapi = (
+            P115PlayPoolOpenAPIClient(
+                self.access_token,
+                refresh_token=self.refresh_token,
+                account_id=self.account_id,
+                token_updater=self.token_updater,
+            )
+            if self.access_token else None
+        )
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
         self.session.mount("http://", adapter)
@@ -196,18 +324,15 @@ class P115PlayPoolClient:
                 (preid[:12] + "...") if preid else "-",
                 size,
             )
-            resp = self.openapi.rapid_upload({
-                "cid": target_cid,
-                "sha1": sha1,
-                "size": size,
-                "file_name": file_name,
-                "pick_code": pick_code,
-                "preid": preid,
-                "sign_key": sign_key,
-                "sign_val": sign_val,
-                "_rapid_log_prefix": "小号专用秒传",
-                "_rapid_backend_label": "OpenAPI",
-            })
+            resp = self.openapi.fs_upload_init(
+                file_name,
+                size,
+                target_cid,
+                sha1,
+                preid,
+                sign_key=sign_key,
+                sign_val=sign_val,
+            )
             return _normalize_openapi_upload_init_response(resp, sha1, size, file_name, target_cid, pick_code)
         if not self.webapi or not hasattr(self.webapi, "upload_init"):
             return {"state": False, "error_msg": "小号专用客户端未初始化 upload_init", "_rapid_upload_backend": "play_pool_cookie"}
