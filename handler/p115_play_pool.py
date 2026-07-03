@@ -1107,7 +1107,7 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         payload["preid"] = preid
     rapid_backend_text = "OpenAPI" if str(account.get("access_token") or "").strip() else "Cookie"
     logger.info(
-        "  ➜ [小号播放] 准备播放：%s %s/%s | 秒传后端=%s",
+        "  ➜ [小号播放] 准备播放：%s %s/%s | 秒传接口=%s",
         _display_title(display_name),
         account.get("alias") or account.get("id") or "小号",
         _display_user_name(user_id),
