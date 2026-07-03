@@ -47,6 +47,43 @@ def translate_internal_status(status: str) -> str:
     """★★★ 新增：一个辅助函数，用于翻译内部状态，用于日志显示 ★★★"""
     return INTERNAL_STATUS_TRANSLATION.get(status, status)
 
+def _series_has_animation_genre(series_data: Dict[str, Any]) -> bool:
+    for genre in series_data.get('genres') or []:
+        if isinstance(genre, dict):
+            try:
+                if int(genre.get('id') or 0) == 16:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            text = str(genre.get('name') or '').strip().lower()
+        else:
+            text = str(genre or '').strip().lower()
+
+        if text in {'animation', 'animated'} or any(word in text for word in ('动画', '動漫', '动漫', 'anime', 'アニメ')):
+            return True
+    return False
+
+def _watchlist_mp_wash_kwargs(watchlist_cfg: Dict[str, Any], *, force_full: bool = False) -> Dict[str, Optional[int]]:
+    version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
+    episode_wash_enabled = bool(
+        watchlist_cfg.get(
+            'series_subscription_best_version',
+            watchlist_cfg.get('sync_mp_subscription_episode_wash', False),
+        )
+    ) or version_lock_mode == 'best'
+    full_wash_enabled = bool(
+        watchlist_cfg.get(
+            'series_subscription_best_version_full',
+            watchlist_cfg.get('sync_mp_subscription_full_wash', False),
+        )
+    )
+
+    if force_full or full_wash_enabled:
+        return {'best_version': 1, 'best_version_full': 1}
+    if episode_wash_enabled:
+        return {'best_version': 1, 'best_version_full': None}
+    return {'best_version': None, 'best_version_full': None}
+
 class WatchlistProcessor:
     """
     【V13 - media_metadata 适配版】
@@ -411,6 +448,10 @@ class WatchlistProcessor:
                     tmdb_ep_count = season_info.get('episode_count', 0)
                     is_updated_old_season = (new_season_num == local_max_season) and (tmdb_ep_count > local_max_season_episodes)
 
+                    if is_updated_old_season and not _series_has_animation_genre(tmdb_details):
+                        logger.info(f"  ➜ 《{series_name}》第 {new_season_num} 季集数增加，但非动画类型，跳过老季复活。")
+                        continue
+
                     # 如果既不是新季，老季也没更新，直接跳过
                     if not (is_new_season or is_updated_old_season): 
                         continue
@@ -448,7 +489,32 @@ class WatchlistProcessor:
                             revived_count += 1
                             status_desc = "已开播" if days_diff <= 0 else f"{days_diff}天后开播"
                             logger.info(f"  ➜ 发现《{series_name}》第 {new_season_num} 季{status_desc}，触发复活订阅流程。")
-                            
+
+                            if is_updated_old_season:
+                                mp_wash_kwargs = _watchlist_mp_wash_kwargs(watchlist_cfg)
+                                sub_success = moviepilot.subscribe_series_to_moviepilot(
+                                    series_info={'tmdb_id': tmdb_id, 'title': series_name},
+                                    season_number=new_season_num,
+                                    config=self.config,
+                                    **mp_wash_kwargs
+                                )
+                                if sub_success:
+                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
+                                    watchlist_db.update_specific_season_total_episodes(
+                                        tmdb_id,
+                                        new_season_num,
+                                        tmdb_ep_count,
+                                        locked=False
+                                    )
+                                    season_info['episode_count'] = tmdb_ep_count
+                                    self._update_watchlist_entry(tmdb_id, series_name, {
+                                        "watchlist_tmdb_status": "Returning Series"
+                                    })
+                                    logger.info(f"  ➜ 已为动画《{series_name}》第 {new_season_num} 季直接提交 MoviePilot 订阅，并恢复追剧状态。")
+                                else:
+                                    logger.error(f"  ➜ 动画《{series_name}》第 {new_season_num} 季提交 MoviePilot 订阅失败。")
+                                break
+
                             # 1. 构造媒体信息
                             season_tmdb_id = str(season_info.get('id'))
                             media_info = {
@@ -886,6 +952,7 @@ class WatchlistProcessor:
             enable_auto_pause = auto_pause_days > 0
             auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
             enable_sync_sub = watchlist_cfg.get('sync_mp_subscription', False)
+            mp_wash_kwargs = _watchlist_mp_wash_kwargs(watchlist_cfg, force_full=(final_status == STATUS_COMPLETED))
             
             # 获取配置的虚标集数 (默认99)
             fake_total_episodes = int(auto_pending_cfg.get('default_total_episodes', 99))
@@ -927,7 +994,8 @@ class WatchlistProcessor:
                         sub_success = moviepilot.subscribe_series_to_moviepilot(
                             series_info={'title': series_name, 'tmdb_id': tmdb_id},
                             season_number=s_num,
-                            config=self.config
+                            config=self.config,
+                            **mp_wash_kwargs,
                         )
                         if not sub_success:
                             logger.warning(f"  ➜ [MP同步] 补订 第 {s_num} 季 失败，跳过。")
