@@ -119,7 +119,31 @@
         <n-button dashed block class="mt-4" @click="addItem(languageList, 'language')">添加语言</n-button>
       </n-tab-pane>
 
-      <!-- Tab 5: 分级标签 -->
+      <!-- Tab 5: 发布组 -->
+      <n-tab-pane name="release_groups" tab="发布组">
+        <n-alert type="info" :bordered="false" class="mb-4">
+          管理文件名识别、版本锁定和洗版规则共用的发布组标准名与别名正则。
+        </n-alert>
+        <div class="list-header">
+          <div class="col-handle"></div>
+          <div class="col-label">标准名</div>
+          <div class="col-extra">别名或正则 (逗号分隔)</div>
+          <div class="col-action">操作</div>
+        </div>
+        <div ref="releaseGroupListRef" class="sortable-list">
+          <div v-for="(item, index) in releaseGroupList" :key="item.id" class="list-item">
+            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
+            <div class="col-label"><n-input v-model:value="item.label" placeholder="例如：朋友" /></div>
+            <div class="col-extra"><n-input v-model:value="item.aliases" placeholder="FRDS, Yumi, cXcY" /></div>
+            <div class="col-action">
+              <n-button circle text type="error" @click="removeItem(releaseGroupList, index)"><n-icon :component="DeleteIcon" /></n-button>
+            </div>
+          </div>
+        </div>
+        <n-button dashed block class="mt-4" @click="addItem(releaseGroupList, 'release_group')">添加发布组</n-button>
+      </n-tab-pane>
+
+      <!-- Tab 6: 分级标签 -->
       <n-tab-pane name="rating_labels" tab="分级标签">
         <n-alert type="info" :bordered="false" class="mb-4">
           定义系统中可用的<b>中文分级名称</b>（如“全年龄”、“限制级”）。<br/>
@@ -146,7 +170,7 @@
         <n-button dashed block class="mt-4" @click="addItem(ratingLabelList, 'simple')">添加分级标签</n-button>
       </n-tab-pane>
 
-      <!-- Tab 6: 分级制度 (映射) -->
+      <!-- Tab 7: 分级制度 (映射) -->
       <n-tab-pane name="ratings" tab="分级制度">
         <n-alert type="info" :bordered="false" class="mb-4">
           TMDb 返回各国分级数据。在此定义<b>优先级</b>和<b>中文映射</b>。<br/>
@@ -297,6 +321,7 @@ const keywordList = ref([]);
 const studioList = ref([]);
 const countryList = ref([]);
 const languageList = ref([]);
+const releaseGroupList = ref([]);
 const ratingLabelList = ref([]); // 新增：分级标签列表
 
 // 分级映射数据
@@ -312,6 +337,7 @@ const keywordListRef = ref(null);
 const studioListRef = ref(null);
 const countryListRef = ref(null);
 const languageListRef = ref(null);
+const releaseGroupListRef = ref(null);
 const ratingLabelListRef = ref(null);
 
 let sortables = [];
@@ -339,7 +365,7 @@ const processBackendData = (data, type) => {
   return list.map(item => {
     const base = { id: generateId(), label: item.label || '' };
     
-    if (type === 'country' || type === 'language') {
+    if (type === 'country' || type === 'language' || type === 'release_group') {
       base.value = item.value || '';
       base.aliases = Array.isArray(item.aliases) ? item.aliases.join(', ') : (item.aliases || '');
     } else if (type === 'simple') {
@@ -380,8 +406,10 @@ const processFrontendData = (list, type) => {
     if (!item.label || !item.label.trim()) return null;
     const base = { label: item.label.trim() };
 
-    if (type === 'country' || type === 'language') {
-      base.value = item.value ? item.value.trim() : '';
+    if (type === 'country' || type === 'language' || type === 'release_group') {
+      if (type !== 'release_group') {
+        base.value = item.value ? item.value.trim() : '';
+      }
       base.aliases = item.aliases ? item.aliases.split(',').map(s => s.trim()).filter(s => s) : [];
     } else if (type === 'simple') {
       // simple logic
@@ -456,6 +484,7 @@ const setupSortables = () => {
       if (studioListRef.value) initSortable(studioListRef.value, studioList);
       if (countryListRef.value) initSortable(countryListRef.value, countryList);
       if (languageListRef.value) initSortable(languageListRef.value, languageList);
+      if (releaseGroupListRef.value) initSortable(releaseGroupListRef.value, releaseGroupList);
       if (ratingLabelListRef.value) initSortable(ratingLabelListRef.value, ratingLabelList);
     }
   });
@@ -468,11 +497,12 @@ watch(activeTab, () => {
 // 初始化数据
 const fetchData = async () => {
   try {
-    const [kwRes, stRes, cnRes, lgRes, rMapRes, rPrioRes, rLabelRes] = await Promise.all([
+    const [kwRes, stRes, cnRes, lgRes, rgRes, rMapRes, rPrioRes, rLabelRes] = await Promise.all([
       axios.get('/api/custom_collections/config/keyword_mapping'),
       axios.get('/api/custom_collections/config/studio_mapping'),
       axios.get('/api/custom_collections/config/country_mapping'),
       axios.get('/api/custom_collections/config/language_mapping'),
+      axios.get('/api/custom_collections/config/release_group_mapping'),
       axios.get('/api/custom_collections/config/rating_mapping'),
       axios.get('/api/custom_collections/config/rating_priority'),
       axios.get('/api/custom_collections/config/unified_ratings')
@@ -482,6 +512,7 @@ const fetchData = async () => {
     studioList.value = processBackendData(stRes.data, 'studio');
     countryList.value = processBackendData(cnRes.data, 'country');
     languageList.value = processBackendData(lgRes.data, 'language');
+    releaseGroupList.value = processBackendData(rgRes.data, 'release_group');
     ratingLabelList.value = processBackendData(rLabelRes.data, 'simple');
     
     ratingMapping.value = rMapRes.data || {};
@@ -496,7 +527,7 @@ const fetchData = async () => {
 
 const addItem = (list, type = 'normal') => {
   const item = { id: generateId(), label: '' };
-  if (type === 'country' || type === 'language') {
+  if (type === 'country' || type === 'language' || type === 'release_group') {
     item.value = ''; item.aliases = '';
   } else if (type === 'simple') {
     // 仅需要 label
@@ -609,6 +640,7 @@ const handleRestoreDefaults = () => {
     'studios': { url: 'studio_mapping', list: studioList, type: 'studio' },
     'countries': { url: 'country_mapping', list: countryList, type: 'country' },
     'languages': { url: 'language_mapping', list: languageList, type: 'language' },
+    'release_groups': { url: 'release_group_mapping', list: releaseGroupList, type: 'release_group' },
     'rating_labels': { url: 'unified_ratings', list: ratingLabelList, type: 'simple' }
   };
   
@@ -641,6 +673,7 @@ const handleSave = async () => {
       axios.post('/api/custom_collections/config/studio_mapping', processFrontendData(studioList.value, 'studio')),
       axios.post('/api/custom_collections/config/country_mapping', processFrontendData(countryList.value, 'country')),
       axios.post('/api/custom_collections/config/language_mapping', processFrontendData(languageList.value, 'language')),
+      axios.post('/api/custom_collections/config/release_group_mapping', processFrontendData(releaseGroupList.value, 'release_group')),
       axios.post('/api/custom_collections/config/rating_mapping', ratingMapping.value),
       axios.post('/api/custom_collections/config/rating_priority', ratingPriority.value),
       axios.post('/api/custom_collections/config/unified_ratings', processFrontendData(ratingLabelList.value, 'simple'))

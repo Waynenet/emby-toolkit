@@ -1313,6 +1313,22 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
     deleted = 0
     items = []
 
+    def should_keep_violation_blacklist(row: Dict[str, Any], center_resp: Dict[str, Any]) -> bool:
+        try:
+            text = json.dumps({'row': row, 'center_response': center_resp}, ensure_ascii=False, default=str).lower()
+        except Exception:
+            text = ' '.join(str(x or '') for x in (
+                row.get('status'), row.get('center_status'), row.get('last_error'),
+                row.get('offline_reason'), center_resp,
+            )).lower()
+        return any(x in text for x in (
+            'review_failed', 'share_forbidden_by_provider',
+            '审核不通过', '审核失败', '审核未通过', '未通过审核',
+            '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖',
+            '风险', '禁止分享', '不允许分享', '不能分享', '封禁',
+            'risk', 'violation', 'forbidden',
+        ))
+
     def disable_center_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         local_id = int(row.get('id') or 0)
         source_kind = str(row.get('source_kind') or '').strip()
@@ -1438,12 +1454,36 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
             )
             continue
 
-        shared_share_db.disable_local_source(local_id, reason=reason, center_response=center_resp)
+        if should_keep_violation_blacklist(row, center_resp):
+            shared_share_db.disable_local_source(
+                local_id,
+                reason=f'provider_violation_blacklist: {reason}',
+                center_response=center_resp,
+                source='deleted_media_cleanup_blacklist',
+            )
+            disabled += 1
+            items.append({'id': local_id, 'source_kind': source_kind, 'center_source_id': center_source_id, 'title': title, 'reason': reason, 'blacklist_kept': True})
+            log_method = logger.debug if len(normal_rows) > 1 else logger.info
+            log_method(
+                "  ➜ [共享资源删除善后] 已保留违规失效共享源作黑名单: id=%s, kind=%s, center=%s, title=%s, reason=%s",
+                local_id, source_kind, center_source_id or '-', title, reason,
+            )
+            continue
+
+        deleted_row = shared_share_db.delete_local_source(local_id)
+        if not deleted_row:
+            failed += 1
+            logger.warning(
+                "  ➜ [共享资源删除善后] 本机失效共享源删除失败: id=%s, kind=%s, center=%s, title=%s, reason=%s",
+                local_id, source_kind, center_source_id or '-', title, reason,
+            )
+            continue
         disabled += 1
-        items.append({'id': local_id, 'source_kind': source_kind, 'center_source_id': center_source_id, 'title': title, 'reason': reason})
+        deleted += 1
+        items.append({'id': local_id, 'source_kind': source_kind, 'center_source_id': center_source_id, 'title': title, 'reason': reason, 'deleted': True})
         log_method = logger.debug if len(normal_rows) > 1 else logger.info
         log_method(
-            "  ➜ [共享资源删除善后] 已实时下架失效共享源: id=%s, kind=%s, center=%s, title=%s, reason=%s",
+            "  ➜ [共享资源删除善后] 已实时下架并删除失效共享源: id=%s, kind=%s, center=%s, title=%s, reason=%s",
             local_id, source_kind, center_source_id or '-', title, reason,
         )
 

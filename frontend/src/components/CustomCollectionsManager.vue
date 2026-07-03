@@ -17,10 +17,6 @@
               </template>
               快速同步媒体元数据
             </n-tooltip>
-            <n-button @click="showMappingModal = true" secondary type="info">
-              <template #icon><n-icon :component="SparklesIcon" /></template>
-              映射管理
-            </n-button>
             <n-button type="default" @click="handleGenerateAllCovers" :loading="isGeneratingCovers">
               <template #icon><n-icon :component="CoverIcon" /></template>
               生成所有封面
@@ -985,17 +981,6 @@
         </n-tabs>
       </div>
     </n-modal>
-    <!-- 映射管理模态框 (包裹新组件) -->
-    <n-modal
-      v-model:show="showMappingModal"
-      preset="card"
-      title="映射规则管理"
-      style="width: 900px; max-width: 95%;"
-      :bordered="false"
-    >
-      <!-- 探索助手 -->
-      <MappingManager @close="showMappingModal = false" />
-    </n-modal>
     <TmdbDiscoveryHelper
       v-model:show="showDiscoverHelper"
       :initial-url="currentEditingUrl"
@@ -1012,7 +997,6 @@ import { useConfig } from '../composables/useConfig.js';
 import Sortable from 'sortablejs';
 import { formatDistanceToNow } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import MappingManager from './modals/MappingManager.vue';
 import TmdbDiscoveryHelper from './modals/TmdbDiscoveryHelper.vue';
 import { 
   NLayout, NPageHeader, NButton, NIcon, NText, NTag, NSpace,
@@ -1081,7 +1065,6 @@ let sortableInstance = null;
 
 const unidentifiedMediaInModal = computed(() => filterMediaByStatus('unidentified'));
 const { configModel } = useConfig();
-const showMappingModal = ref(false);
 const studioMappingOptions = ref([]);
 // 探索助手控制状态
 const showDiscoverHelper = ref(false);
@@ -2264,17 +2247,6 @@ watch([selectedBuiltInLists, customUrlList], () => {
   });
   currentCollection.value.definition.item_type = Array.from(newItemTypes);
 }, { deep: true });
-
-watch(showMappingModal, (newVal) => {
-  if (!newVal) {
-    // 模态框关闭时，刷新下拉框数据
-    fetchKeywordOptions();
-    fetchStudioMappingOptions();
-    fetchCountryOptions();
-    fetchLanguageOptions();
-    fetchUnifiedRatingOptions();
-  }
-});
 
 onMounted(() => {
   fetchCollections();

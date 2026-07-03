@@ -1529,7 +1529,7 @@ def task_full_sync_strm_and_subs(processor=None):
                     if not os.path.exists(sub_path):
                         try:
                             import requests
-                            url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
+                            url_obj = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
                             if url_obj:
                                 headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
                                 resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
@@ -2093,7 +2093,7 @@ def task_sync_music_library(processor=None):
                             if not os.path.exists(aux_path):
                                 try:
                                     import requests
-                                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
+                                    url_obj = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
                                     if url_obj:
                                         headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
                                         resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
@@ -2520,7 +2520,7 @@ def task_monitor_115_life_events(processor=None):
                     sub_path = os.path.join(current_local_path, file_name)
                     if not os.path.exists(sub_path):
                         try:
-                            url_obj = client.download_url(pick_code, user_agent="Mozilla/5.0")
+                            url_obj = client.resolve_download_url(pick_code, user_agent="Mozilla/5.0")
                             if url_obj:
                                 import requests
                                 headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}

@@ -4671,7 +4671,7 @@ class MediaProcessor:
             client = P115Service.get_client()
             if not client:
                 return False
-            direct_url = client.download_url(pc, user_agent="Mozilla/5.0")
+            direct_url = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
             if not direct_url:
                 return False
 

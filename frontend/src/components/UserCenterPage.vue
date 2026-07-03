@@ -112,11 +112,14 @@
                         <n-button secondary size="small" :loading="userCookieSaving" @click="saveUserCookieSettings">
                           保存设置
                         </n-button>
-                        <n-button secondary size="small" :loading="userCookieQrcodeLoading" @click="refreshUserCookieQrcode">
-                          扫码保存 Cookie
+                        <n-button secondary size="small" :loading="userCookieQrcodeLoading && userCookieQrcodeMode === 'cookie'" @click="refreshUserCookieQrcode('cookie')">
+                          扫码获取 Cookie
+                        </n-button>
+                        <n-button secondary size="small" :loading="userCookieQrcodeLoading && userCookieQrcodeMode === 'openapi'" @click="refreshUserCookieQrcode('openapi')">
+                          扫码授权 OpenAPI
                         </n-button>
                         <n-button secondary type="error" size="small" :disabled="!userCookieAccountId" :loading="userCookieDeleting" @click="deleteUserCookie">
-                          删除 Cookie
+                          删除
                         </n-button>
                       </n-space>
                     </n-space>
@@ -126,7 +129,7 @@
                       </n-spin>
                       <template v-else-if="userCookieQrcodeStatus === 'waiting' || userCookieQrcodeStatus === 'success'">
                         <n-qr-code v-if="userCookieQrcodeUrl" :value="userCookieQrcodeUrl" :size="150" />
-                        <n-text depth="3">{{ userCookieQrcodeStatus === 'success' ? 'Cookie 已保存' : '使用 115 生活 APP 扫码并确认' }}</n-text>
+                        <n-text depth="3">{{ userCookieQrcodeStatus === 'success' ? (userCookieQrcodeMode === 'openapi' ? 'OpenAPI 已保存' : 'Cookie 已保存') : `使用 115 APP 扫码并确认${userCookieQrcodeMode === 'openapi' ? ' OpenAPI 授权' : '登录'}` }}</n-text>
                       </template>
                       <n-alert v-else-if="userCookieQrcodeStatus === 'expired'" type="warning" :show-icon="true">
                         二维码已过期，请重新获取。
@@ -300,11 +303,14 @@
                 <n-button secondary size="small" :loading="userCookieSaving" @click="saveUserCookieSettings">
                   保存设置
                 </n-button>
-                <n-button secondary size="small" :loading="userCookieQrcodeLoading" @click="refreshUserCookieQrcode">
-                  扫码保存 Cookie
+                <n-button secondary size="small" :loading="userCookieQrcodeLoading && userCookieQrcodeMode === 'cookie'" @click="refreshUserCookieQrcode('cookie')">
+                  扫码获取 Cookie
+                </n-button>
+                <n-button secondary size="small" :loading="userCookieQrcodeLoading && userCookieQrcodeMode === 'openapi'" @click="refreshUserCookieQrcode('openapi')">
+                  扫码授权 OpenAPI
                 </n-button>
                 <n-button secondary type="error" size="small" :disabled="!userCookieAccountId" :loading="userCookieDeleting" @click="deleteUserCookie">
-                  删除 Cookie
+                  删除
                 </n-button>
               </n-space>
             </n-space>
@@ -314,7 +320,7 @@
               </n-spin>
               <template v-else-if="userCookieQrcodeStatus === 'waiting' || userCookieQrcodeStatus === 'success'">
                 <n-qr-code v-if="userCookieQrcodeUrl" :value="userCookieQrcodeUrl" :size="150" />
-                <n-text depth="3">{{ userCookieQrcodeStatus === 'success' ? 'Cookie 已保存' : '使用 115 生活 APP 扫码并确认' }}</n-text>
+                <n-text depth="3">{{ userCookieQrcodeStatus === 'success' ? (userCookieQrcodeMode === 'openapi' ? 'OpenAPI 已保存' : 'Cookie 已保存') : `使用 115 APP 扫码并确认${userCookieQrcodeMode === 'openapi' ? ' OpenAPI 授权' : '登录'}` }}</n-text>
               </template>
               <n-alert v-else-if="userCookieQrcodeStatus === 'expired'" type="warning" :show-icon="true">
                 二维码已过期，请重新获取。
@@ -396,6 +402,7 @@ const userCookieQrcodeLoading = ref(false);
 const userCookieSaving = ref(false);
 const userCookieDeleting = ref(false);
 const userCookieQrcodePolling = ref(null);
+const userCookieQrcodeMode = ref('openapi');
 const userCookieStatusText = ref('');
 const userCookieReward = ref({
   total_days: 0,
@@ -572,18 +579,23 @@ const loadUserCookieAccount = async () => {
   }
 };
 
-const saveUserCookie = async (cookie, appType) => {
+const saveUserCookie = async (credential, appType) => {
   const alias = accountInfo.value?.name || authStore.username || '用户小号';
+  const data = credential || {};
+  const cookie = typeof data === 'string' ? data : '';
+  const isOpenapi = typeof data === 'object' && Boolean(data.access_token || data.refresh_token);
   const res = await axios.post('/api/p115/play_pool/user-account', {
     alias,
     cookie,
+    access_token: typeof data === 'object' ? (data.access_token || '') : '',
+    refresh_token: typeof data === 'object' ? (data.refresh_token || '') : '',
     app_type: appType || userCookieAppType.value || 'alipaymini',
     shared: Boolean(userCookieShared.value)
   });
   userCookieAccountId.value = res.data?.data?.id || userCookieAccountId.value;
   userCookieStatusText.value = res.data?.data?.enabled === false
-    ? `Cookie 已保存但当前不可用：${res.data?.data?.last_error || '测速未达标'}`
-    : `Cookie 已保存并启用${res.data?.data?.reward_days ? `，本日奖励 +${res.data.data.reward_days} 天` : ''}`;
+    ? `${isOpenapi ? 'OpenAPI' : 'Cookie'} 已保存但当前不可用：${res.data?.data?.last_error || '测速未达标'}`
+    : `${isOpenapi ? 'OpenAPI' : 'Cookie'} 已保存并启用${res.data?.data?.reward_days ? `，本日奖励 +${res.data.data.reward_days} 天` : ''}`;
   if (res.data?.data?.reward_summary) {
     userCookieReward.value = res.data.data.reward_summary;
   } else {
@@ -616,7 +628,7 @@ const saveUserCookieSettings = async () => {
 
 const deleteUserCookie = async () => {
   if (!userCookieAccountId.value) return;
-  if (!window.confirm('确认删除当前 115 Cookie？')) return;
+  if (!window.confirm('确认删除当前 115 播放凭据？这会同时删除 Cookie 和 OpenAPI 授权。')) return;
   userCookieDeleting.value = true;
   try {
     await axios.delete('/api/p115/play_pool/user-account');
@@ -626,29 +638,37 @@ const deleteUserCookie = async () => {
     userCookieQrcodeStatus.value = 'idle';
     userCookieQrcodeUrl.value = '';
     userCookieQrcodeUid.value = '';
-    userCookieStatusText.value = 'Cookie 已删除';
+    userCookieQrcodeMode.value = 'openapi';
+    userCookieStatusText.value = '115 播放凭据已删除';
     stopUserCookieQrcodePolling();
-    message.success('Cookie 已删除');
+    message.success('115 播放凭据已删除');
   } catch (error) {
-    message.error(error.response?.data?.message || '删除 Cookie 失败');
+    message.error(error.response?.data?.message || '删除 115 播放凭据失败');
   } finally {
     userCookieDeleting.value = false;
   }
 };
 
-const startUserCookieQrcodePolling = () => {
+const startUserCookieQrcodePolling = (mode = userCookieQrcodeMode.value) => {
   stopUserCookieQrcodePolling();
   userCookieQrcodePolling.value = setInterval(async () => {
     try {
       const uid = userCookieQrcodeUid.value ? `&uid=${encodeURIComponent(userCookieQrcodeUid.value)}` : '';
-      const appType = encodeURIComponent(userCookieAppType.value || 'alipaymini');
-      const res = await axios.get(`/api/p115/play_pool/cookie_qrcode/status?app=${appType}${uid}`);
+      const app = encodeURIComponent(userCookieAppType.value || 'alipaymini');
+      const res = await axios.get(`/api/p115/play_pool/cookie_qrcode/status?mode=${mode}&app=${app}${uid}`);
       if (res.data?.status === 'success') {
         const data = res.data.data || {};
-        await saveUserCookie(data.cookie || '', data.app_type || userCookieAppType.value);
+        if (mode === 'openapi') {
+          await saveUserCookie({
+            access_token: data.access_token || '',
+            refresh_token: data.refresh_token || ''
+          }, userCookieAppType.value);
+        } else {
+          await saveUserCookie(data.cookie || '', data.app_type || userCookieAppType.value);
+        }
         userCookieQrcodeStatus.value = 'success';
         stopUserCookieQrcodePolling();
-        message.success('115 Cookie 已保存');
+        message.success(mode === 'openapi' ? '115 OpenAPI 已保存' : '115 Cookie 已保存');
       } else if (res.data?.status === 'expired') {
         userCookieQrcodeStatus.value = 'expired';
         stopUserCookieQrcodePolling();
@@ -659,20 +679,22 @@ const startUserCookieQrcodePolling = () => {
   }, 2000);
 };
 
-const refreshUserCookieQrcode = async () => {
+const refreshUserCookieQrcode = async (mode = 'openapi') => {
+  mode = mode === 'cookie' ? 'cookie' : 'openapi';
   stopUserCookieQrcodePolling();
+  userCookieQrcodeMode.value = mode;
   userCookieQrcodeStatus.value = 'loading';
   userCookieQrcodeLoading.value = true;
   userCookieStatusText.value = '';
   userCookieQrcodeUid.value = '';
   try {
-    const appType = encodeURIComponent(userCookieAppType.value || 'alipaymini');
-    const res = await axios.get(`/api/p115/play_pool/cookie_qrcode?app=${appType}`);
+    const app = encodeURIComponent(userCookieAppType.value || 'alipaymini');
+    const res = await axios.get(`/api/p115/play_pool/cookie_qrcode?mode=${mode}&app=${app}`);
     if (res.data?.success) {
       userCookieQrcodeUrl.value = res.data.data?.qrcode || '';
       userCookieQrcodeUid.value = res.data.data?.uid || '';
       userCookieQrcodeStatus.value = 'waiting';
-      startUserCookieQrcodePolling();
+      startUserCookieQrcodePolling(mode);
     } else {
       userCookieQrcodeStatus.value = 'idle';
       message.error(res.data?.message || '获取二维码失败');
@@ -687,7 +709,7 @@ const refreshUserCookieQrcode = async () => {
 
 const handleUserCookieAppTypeChange = () => {
   if (userCookieQrcodeStatus.value !== 'idle') {
-    refreshUserCookieQrcode();
+    refreshUserCookieQrcode(userCookieQrcodeMode.value);
   }
 };
 

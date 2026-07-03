@@ -1,5 +1,5 @@
 <template>
-  <n-modal v-model:show="showModal" preset="card" title="小号 Cookie 池" style="width: 760px; max-width: calc(100vw - 24px);" :mask-closable="false" class="custom-modal glass-modal">
+  <n-modal v-model:show="showModal" preset="card" title="小号播放池" style="width: 760px; max-width: calc(100vw - 24px);" :mask-closable="false" class="custom-modal glass-modal">
     <n-space vertical :size="16">
       <n-alert>
         <li>有可用小号时，播放链路会优先使用小号秒传并获取直链；没有可用小号会回退主账号播放。</li>
@@ -76,7 +76,7 @@
           <n-input
             v-model:value="playPoolAccountForm.cookie"
             type="textarea"
-            placeholder="粘贴小号 Cookie，或扫码后自动回填：UID=...; CID=...; SEID=..."
+            placeholder="粘贴小号 Cookie，或使用下方扫码获取 OpenAPI 授权"
             :rows="3"
           />
 
@@ -96,9 +96,13 @@
 
           <n-space justify="space-between" :vertical="isMobile">
             <n-space>
-              <n-button secondary @click="refreshPlayPoolQrcode" :loading="playPoolQrcodeLoading">
+              <n-button secondary @click="refreshPlayPoolQrcode('cookie')" :loading="playPoolQrcodeLoading && playPoolQrcodeMode === 'cookie'">
                 <template #icon><n-icon :component="RefreshIcon" /></template>
                 扫码获取 Cookie
+              </n-button>
+              <n-button secondary @click="refreshPlayPoolQrcode('openapi')" :loading="playPoolQrcodeLoading && playPoolQrcodeMode === 'openapi'">
+                <template #icon><n-icon :component="RefreshIcon" /></template>
+                扫码授权 OpenAPI
               </n-button>
               <n-button v-if="playPoolAccountForm.id" tertiary @click="resetPlayPoolAccountForm">取消编辑</n-button>
             </n-space>
@@ -115,15 +119,15 @@
             <template v-else-if="playPoolQrcodeStatus === 'waiting' || playPoolQrcodeStatus === 'success'">
               <n-qr-code v-if="playPoolQrcodeUrl" :value="playPoolQrcodeUrl" :size="160" />
               <n-alert v-if="playPoolQrcodeStatus === 'waiting'" type="info" :show-icon="true">
-                使用 115 生活 APP 扫码，成功后 Cookie 会回填到上方输入框。
+                使用 115 APP 扫码并确认{{ playPoolQrcodeMode === 'openapi' ? ' OpenAPI 授权' : '登录' }}。
               </n-alert>
               <n-alert v-if="playPoolQrcodeStatus === 'success'" type="success" :show-icon="true">
-                Cookie 已获取，请确认别名后保存。
+                {{ playPoolQrcodeMode === 'openapi' ? 'OpenAPI 已授权' : 'Cookie 已获取' }}，请确认别名后保存。
               </n-alert>
             </template>
             <n-result v-else-if="playPoolQrcodeStatus === 'expired'" status="warning" title="二维码已过期">
               <template #footer>
-                <n-button type="primary" @click="refreshPlayPoolQrcode">重新获取</n-button>
+                <n-button type="primary" @click="refreshPlayPoolQrcode(playPoolQrcodeMode)">重新获取</n-button>
               </template>
             </n-result>
           </div>
@@ -132,17 +136,17 @@
 
       <div class="play-pool-list">
         <div v-if="!playPoolConfig.accounts.length" class="play-pool-empty">
-          暂未配置小号 Cookie
+          暂未配置小号
         </div>
         <div v-for="account in playPoolConfig.accounts" :key="account.id" class="play-pool-account">
           <div class="play-pool-account-main">
             <n-space align="center" :size="8">
               <strong>{{ account.alias || '小号' }}</strong>
-              <n-tag size="small" :type="account.enabled && account.cookie_mask ? 'success' : 'default'">
+              <n-tag size="small" :type="account.enabled && (account.cookie_mask || account.has_openapi) ? 'success' : 'default'">
                 {{ account.enabled ? '启用' : '停用' }}
               </n-tag>
               <n-tag v-if="account.daily_traffic_limited" size="small" type="warning">今日达限</n-tag>
-              <n-tag size="small" :bordered="false">{{ account.cookie_mask || '未配置 Cookie' }}</n-tag>
+              <n-tag size="small" :bordered="false">{{ account.cookie_mask || (account.has_openapi ? 'OpenAPI 已授权' : '未配置凭据') }}</n-tag>
               <n-tag size="small" :bordered="false" type="info">{{ accountScopeText(account) }}</n-tag>
             </n-space>
             <n-space class="play-pool-stats" :size="12">
@@ -190,6 +194,7 @@ const playPoolQrcodeStatus = ref('idle');
 const playPoolQrcodeLoading = ref(false);
 const playPoolQrcodePolling = ref(null);
 const playPoolQrcodeUid = ref('');
+const playPoolQrcodeMode = ref('openapi');
 const embyUsersLoading = ref(false);
 const embyUserOptions = ref([]);
 const playPoolConfig = ref({
@@ -204,6 +209,8 @@ const playPoolAccountForm = ref({
   id: '',
   alias: '',
   cookie: '',
+  access_token: '',
+  refresh_token: '',
   app_type: 'alipaymini',
   owner_type: 'admin',
   shared: true,
@@ -303,6 +310,7 @@ const close = () => {
   playPoolQrcodeStatus.value = 'idle';
   playPoolQrcodeUrl.value = '';
   playPoolQrcodeUid.value = '';
+  playPoolQrcodeMode.value = 'openapi';
   showModal.value = false;
 };
 
@@ -311,10 +319,13 @@ const resetPlayPoolAccountForm = () => {
   playPoolQrcodeStatus.value = 'idle';
   playPoolQrcodeUrl.value = '';
   playPoolQrcodeUid.value = '';
+  playPoolQrcodeMode.value = 'openapi';
   playPoolAccountForm.value = {
     id: '',
     alias: '',
     cookie: '',
+    access_token: '',
+    refresh_token: '',
     app_type: 'alipaymini',
     owner_type: 'admin',
     shared: true,
@@ -344,8 +355,9 @@ const savePlayPoolSettings = async () => {
 const savePlayPoolAccount = async () => {
   const form = playPoolAccountForm.value;
   const cookie = String(form.cookie || '').trim();
-  if (!form.id && !cookie) {
-    message.warning('请先扫码或粘贴小号 Cookie');
+  const accessToken = String(form.access_token || '').trim();
+  if (!form.id && !cookie && !accessToken) {
+    message.warning('请先扫码授权 OpenAPI 或粘贴小号 Cookie');
     return;
   }
   playPoolSaving.value = true;
@@ -359,6 +371,10 @@ const savePlayPoolAccount = async () => {
       allowed_user_ids: Array.isArray(form.allowed_user_ids) ? form.allowed_user_ids : []
     };
     if (cookie) payload.cookie = cookie;
+    if (accessToken) {
+      payload.access_token = accessToken;
+      payload.refresh_token = String(form.refresh_token || '').trim();
+    }
     if (form.id) {
       await axios.put(`/api/p115/play_pool/accounts/${form.id}`, payload);
       message.success('小号已保存');
@@ -380,10 +396,13 @@ const editPlayPoolAccount = (account) => {
   playPoolQrcodeStatus.value = 'idle';
   playPoolQrcodeUrl.value = '';
   playPoolQrcodeUid.value = '';
+  playPoolQrcodeMode.value = 'openapi';
   playPoolAccountForm.value = {
     id: account.id,
     alias: account.alias || '小号',
     cookie: '',
+    access_token: '',
+    refresh_token: '',
     app_type: account.app_type || 'alipaymini',
     owner_type: account.owner_type || 'admin',
     shared: Boolean(account.shared),
@@ -423,19 +442,21 @@ const speedtestPlayPoolAccount = async (account) => {
   }
 };
 
-const refreshPlayPoolQrcode = async () => {
+const refreshPlayPoolQrcode = async (mode = 'openapi') => {
+  mode = mode === 'cookie' ? 'cookie' : 'openapi';
   stopPlayPoolQrcodePolling();
+  playPoolQrcodeMode.value = mode;
   playPoolQrcodeStatus.value = 'loading';
   playPoolQrcodeLoading.value = true;
   playPoolQrcodeUid.value = '';
   try {
-    const appType = playPoolAccountForm.value.app_type || 'alipaymini';
-    const res = await axios.get(`/api/p115/play_pool/cookie_qrcode?app=${appType}`);
+    const app = encodeURIComponent(playPoolAccountForm.value.app_type || 'alipaymini');
+    const res = await axios.get(`/api/p115/play_pool/cookie_qrcode?mode=${mode}&app=${app}`);
     if (res.data?.success) {
       playPoolQrcodeUrl.value = res.data.data.qrcode;
       playPoolQrcodeUid.value = res.data.data.uid || '';
       playPoolQrcodeStatus.value = 'waiting';
-      startPlayPoolQrcodePolling();
+      startPlayPoolQrcodePolling(mode);
     } else {
       playPoolQrcodeStatus.value = 'error';
       message.error(res.data?.message || '获取小号二维码失败');
@@ -448,19 +469,24 @@ const refreshPlayPoolQrcode = async () => {
   }
 };
 
-const startPlayPoolQrcodePolling = () => {
+const startPlayPoolQrcodePolling = (mode = playPoolQrcodeMode.value) => {
   stopPlayPoolQrcodePolling();
   playPoolQrcodePolling.value = setInterval(async () => {
     try {
-      const appType = playPoolAccountForm.value.app_type || 'alipaymini';
       const uid = playPoolQrcodeUid.value ? `&uid=${encodeURIComponent(playPoolQrcodeUid.value)}` : '';
-      const res = await axios.get(`/api/p115/play_pool/cookie_qrcode/status?app=${appType}${uid}`);
+      const app = encodeURIComponent(playPoolAccountForm.value.app_type || 'alipaymini');
+      const res = await axios.get(`/api/p115/play_pool/cookie_qrcode/status?mode=${mode}&app=${app}${uid}`);
       if (res.data?.status === 'success') {
-        playPoolAccountForm.value.cookie = res.data.data?.cookie || '';
-        playPoolAccountForm.value.app_type = res.data.data?.app_type || appType;
+        if (mode === 'openapi') {
+          playPoolAccountForm.value.access_token = res.data.data?.access_token || '';
+          playPoolAccountForm.value.refresh_token = res.data.data?.refresh_token || '';
+        } else {
+          playPoolAccountForm.value.cookie = res.data.data?.cookie || '';
+          playPoolAccountForm.value.app_type = res.data.data?.app_type || playPoolAccountForm.value.app_type;
+        }
         playPoolQrcodeStatus.value = 'success';
         stopPlayPoolQrcodePolling();
-        message.success('小号 Cookie 获取成功');
+        message.success(mode === 'openapi' ? '小号 OpenAPI 授权成功' : '小号 Cookie 获取成功');
       } else if (res.data?.status === 'expired') {
         playPoolQrcodeStatus.value = 'expired';
         stopPlayPoolQrcodePolling();
@@ -480,7 +506,7 @@ const stopPlayPoolQrcodePolling = () => {
 
 const handlePlayPoolAppTypeChange = () => {
   if (playPoolQrcodeStatus.value !== 'idle') {
-    refreshPlayPoolQrcode();
+    refreshPlayPoolQrcode(playPoolQrcodeMode.value);
   }
 };
 

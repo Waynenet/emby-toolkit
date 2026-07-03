@@ -268,7 +268,7 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         return b''
 
     try:
-        from handler.p115_service import P115Service, get_115_api_priority, get_115_tokens, get_115_ua
+        from handler.p115_service import P115Service, get_115_tokens, get_115_ua
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 导入 115 客户端失败，无法计算 preid: {e}")
         return b''
@@ -278,7 +278,6 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         if not p115:
             return b''
 
-        priority = get_115_api_priority()
         try:
             _, _, _, app_type = get_115_tokens()
         except Exception:
@@ -296,65 +295,51 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         if not ua_candidates:
             ua_candidates.append('Mozilla/5.0')
 
-        if priority == 'cookie':
-            method_order = [('download_url', 'Cookie'), ('openapi_downurl', 'OpenAPI')]
-        else:
-            method_order = [('openapi_downurl', 'OpenAPI'), ('download_url', 'Cookie')]
-
         range_header = f'bytes={int(start)}-{int(end)}'
         last_status = None
 
-        for method_name, label in method_order:
-            method = getattr(p115, method_name, None)
-            if not callable(method):
+        for ua in ua_candidates:
+            down_url = ''
+            label = ''
+            try:
+                # 关键：获取直链和后续 Range GET 必须使用同一个 UA。
+                down_url, label = p115.resolve_download_url(pick_code, user_agent=ua, return_backend=True)
+            except Exception as e:
+                logger.debug(f"  ➜ [共享资源] 获取 115 直链失败: {e}")
+
+            if not down_url:
                 continue
 
-            for ua in ua_candidates:
-                down_url = ''
-                try:
-                    # 关键：获取直链和后续 Range GET 必须使用同一个 UA。
-                    down_url = _extract_p115_down_url(method(pick_code, user_agent=ua))
-                except TypeError:
-                    try:
-                        down_url = _extract_p115_down_url(method(pick_code, ua))
-                    except Exception as e:
-                        logger.debug(f"  ➜ [共享资源] 获取 115 直链失败({label}, positional-ua): {e}")
-                except Exception as e:
-                    logger.debug(f"  ➜ [共享资源] 获取 115 直链失败({label}): {e}")
-
-                if not down_url:
-                    continue
-
-                try:
-                    headers = {
-                        'Range': range_header,
-                        'User-Agent': ua,
-                        'Accept': '*/*',
-                        'Connection': 'close',
-                    }
-                    r = requests.get(down_url, headers=headers, timeout=45, allow_redirects=True)
-                    last_status = r.status_code
-                    if r.status_code == 206 and r.content:
-                        logger.debug(
-                            f"  ➜ [共享资源] preid Range 读取成功: api={label}, "
-                            f"range={range_header}, bytes={len(r.content)}, pc={pick_code[:8]}..."
-                        )
-                        return r.content or b''
-
-                    # 必须拒绝 200，避免服务端忽略 Range 后拉完整大文件。
-                    logger.warning(
-                        f"  ➜ [共享资源] 读取 preid Range 失败: api={label}, "
-                        f"HTTP={r.status_code}, range={range_header}, pc={pick_code[:8]}..."
-                    )
-                except Exception as e:
+            try:
+                headers = {
+                    'Range': range_header,
+                    'User-Agent': ua,
+                    'Accept': '*/*',
+                    'Connection': 'close',
+                }
+                r = requests.get(down_url, headers=headers, timeout=45, allow_redirects=True)
+                last_status = r.status_code
+                if r.status_code == 206 and r.content:
                     logger.debug(
-                        f"  ➜ [共享资源] Range GET 异常: api={label}, "
-                        f"range={range_header}, pc={pick_code[:8]}..., err={e}"
+                        f"  ➜ [共享资源] preid Range 读取成功: api={label}, "
+                        f"range={range_header}, bytes={len(r.content)}, pc={pick_code[:8]}..."
                     )
+                    return r.content or b''
+
+                # 必须拒绝 200，避免服务端忽略 Range 后拉完整大文件。
+                logger.warning(
+                    f"  ➜ [共享资源] 读取 preid Range 失败: api={label}, "
+                    f"HTTP={r.status_code}, range={range_header}, pc={pick_code[:8]}..."
+                )
+            except Exception as e:
+                logger.debug(
+                    f"  ➜ [共享资源] Range GET 异常: api={label}, "
+                    f"range={range_header}, pc={pick_code[:8]}..., err={e}"
+                )
 
         if last_status:
             logger.warning(
-                f"  ➜ [共享资源] 已按 {priority} 优先级尝试读取 preid Range，仍失败，"
+                f"  ➜ [共享资源] 已尝试读取 preid Range，仍失败，"
                 f"最后 HTTP={last_status}: pc={pick_code[:8]}..."
             )
         return b''
@@ -690,12 +675,12 @@ def _delete_completed_share_channels_for_source(row: Dict[str, Any], reason: str
         }
         if not channel_id:
             continue
+        if _keep_missing_share_code_channel(channel):
+            kept_audit += 1
+            item.update({'ok': True, 'kept_audit': True, 'reason': 'provider_violation_blacklist'})
+            items.append(item)
+            continue
         if not share_code:
-            if _keep_missing_share_code_channel(channel):
-                kept_audit += 1
-                item.update({'ok': True, 'kept_audit': True, 'reason': 'missing_share_code_audit'})
-                items.append(item)
-                continue
             deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
             deleted_local += 1 if deleted else 0
             item.update({'ok': True, 'deleted_local_channel': bool(deleted), 'reason': 'missing_share_code_no_115_share'})
@@ -2249,8 +2234,8 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
 
                 local_deleted = {}
                 center_ok = not (isinstance(center_resp, dict) and center_resp.get('ok') is False)
-                if terminal_status and should_report_center and center_ok and delete_resp.get('state') is not False:
-                    # 失效/违规也是分享通道终态。中心已同步后删除本地缓存，避免下轮继续打 115 API。
+                if status == 'expired' and should_report_center and center_ok and delete_resp.get('state') is not False:
+                    # 普通过期/取消才删除本地缓存；违规/审核失败要保留作黑名单，避免后续再次创建撞墙。
                     local_deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
                 if status == 'valid' and share_code:
                     valid_logical_share_channels.append({
@@ -2442,7 +2427,7 @@ def repair_logical_season_share_channels_from_115(*, max_pages: int = 20, dry_ru
             )
             local_deleted = {}
             center_ok = not (isinstance(center_resp, dict) and center_resp.get('ok') is False)
-            if terminal_status and center_ok and delete_resp.get('state') is not False:
+            if status == 'expired' and center_ok and delete_resp.get('state') is not False:
                 local_deleted = shared_share_db.delete_completed_season_share_channel(channel_id)
 
             backfilled_items.append({
@@ -7071,6 +7056,26 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
     if not rows:
         return {'ok': True, 'offline_found': 0, 'disabled': 0, 'failed': 0}
 
+    def should_keep_violation_blacklist(row: Dict[str, Any], share_cleanup: Dict[str, Any], center_resp: Dict[str, Any]) -> bool:
+        try:
+            text = json.dumps({
+                'row': row,
+                'share_cleanup': share_cleanup,
+                'center_response': center_resp,
+            }, ensure_ascii=False, default=str).lower()
+        except Exception:
+            text = ' '.join(str(x or '') for x in (
+                row.get('status'), row.get('center_status'), row.get('last_error'),
+                row.get('offline_reason'), share_cleanup, center_resp,
+            )).lower()
+        return any(x in text for x in (
+            'review_failed', 'share_forbidden_by_provider',
+            '审核不通过', '审核失败', '审核未通过', '未通过审核',
+            '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖',
+            '风险', '禁止分享', '不允许分享', '不能分享', '封禁',
+            'risk', 'violation', 'forbidden',
+        ))
+
     client = SharedCenterClient()
     disabled = 0
     failed = 0
@@ -7134,7 +7139,48 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
                 )
                 continue
 
-        shared_share_db.disable_local_source(local_id, reason=reason, center_response=center_resp)
+        if should_keep_violation_blacklist(row, share_cleanup, center_resp):
+            shared_share_db.disable_local_source(
+                local_id,
+                reason=f'provider_violation_blacklist: {reason}',
+                center_response=center_resp,
+                source='offline_cleanup_blacklist',
+            )
+            disabled += 1
+            item = {
+                'id': local_id,
+                'source_kind': source_kind,
+                'center_source_id': center_source_id,
+                'title': title,
+                'reason': reason,
+                'blacklist_kept': True,
+                'total_files': int(row.get('total_files') or 0),
+                'live_files': int(row.get('live_files') or 0),
+                'share_cleanup': share_cleanup,
+            }
+            items.append(item)
+            logger.info(
+                "  ➜ [共享资源维护] 已保留违规失效共享源作黑名单: id=%s, kind=%s, center=%s, title=%s, reason=%s",
+                local_id,
+                source_kind,
+                center_source_id or '-',
+                title,
+                reason,
+            )
+            continue
+
+        deleted = shared_share_db.delete_local_source(local_id)
+        if not deleted:
+            failed += 1
+            logger.warning(
+                "  ➜ [共享资源维护] 本机失效共享源删除失败: id=%s, kind=%s, center=%s, title=%s, reason=%s",
+                local_id,
+                source_kind,
+                center_source_id or '-',
+                title,
+                reason,
+            )
+            continue
         disabled += 1
         item = {
             'id': local_id,
@@ -7142,13 +7188,14 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
             'center_source_id': center_source_id,
             'title': title,
             'reason': reason,
+            'deleted': True,
             'total_files': int(row.get('total_files') or 0),
             'live_files': int(row.get('live_files') or 0),
             'share_cleanup': share_cleanup,
         }
         items.append(item)
         logger.info(
-            "  ➜ [共享资源维护] 已下架本机失效共享源: id=%s, kind=%s, center=%s, title=%s, files=%s/%s, reason=%s",
+            "  ➜ [共享资源维护] 已下架并删除本机失效共享源: id=%s, kind=%s, center=%s, title=%s, files=%s/%s, reason=%s",
             local_id,
             source_kind,
             center_source_id or '-',
@@ -7158,7 +7205,7 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
             reason,
         )
 
-    return {'ok': failed == 0, 'offline_found': len(rows), 'disabled': disabled, 'failed': failed, 'items': items[:50]}
+    return {'ok': failed == 0, 'offline_found': len(rows), 'disabled': disabled, 'deleted': disabled, 'failed': failed, 'items': items[:50]}
 
 
 

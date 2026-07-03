@@ -15,7 +15,7 @@ from flask import Blueprint, jsonify, request, redirect, Response, stream_with_c
 from extensions import admin_required, emby_login_required
 from database import settings_db, shared_credit_db, shared_virtual_db
 from handler import moviepilot, emby
-from handler.p115_service import P115Service, get_config, get_115_api_priority
+from handler.p115_service import P115Service, get_config
 from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
 from handler.p115_copy_play import (
@@ -268,9 +268,12 @@ _play_pool_cookie_qrcode_data = {
     "time": None,
     "sign": None,
     "app_type": "alipaymini",
+    "mode": "cookie",
+    "code_verifier": None,
 }
 _play_pool_cookie_qrcode_sessions = {}
 _play_pool_cookie_qrcode_lock = threading.Lock()
+PLAY_POOL_OPENAPI_CLIENT_ID = "100196261"
 
 @p115_bp.route('/cookie_qrcode', methods=['GET'])
 @admin_required
@@ -373,12 +376,27 @@ def save_manual_cookie():
 @p115_bp.route('/play_pool/cookie_qrcode', methods=['GET'])
 @emby_login_required
 def get_play_pool_cookie_qrcode():
+    mode = str(request.args.get('mode') or 'cookie').strip().lower()
     app_type = request.args.get('app', 'alipaymini')
     try:
-        from handler.p115_service import get_115_ua
-        headers = {"User-Agent": get_115_ua(app_type)}
-        url = f"https://qrcodeapi.115.com/api/1.0/{app_type}/1.0/token/?app={app_type}"
-        resp = requests.get(url, headers=headers, timeout=10).json()
+        verifier = None
+        if mode == "openapi":
+            verifier, challenge = _generate_pkce_pair()
+            resp = requests.post(
+                "https://passportapi.115.com/open/authDeviceCode",
+                data={
+                    "client_id": PLAY_POOL_OPENAPI_CLIENT_ID,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "sha256",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            ).json()
+        else:
+            from handler.p115_service import get_115_ua
+            headers = {"User-Agent": get_115_ua(app_type)}
+            url = f"https://qrcodeapi.115.com/api/1.0/{app_type}/1.0/token/?app={app_type}"
+            resp = requests.get(url, headers=headers, timeout=10).json()
         if resp.get('state') == 1:
             data = resp.get('data', {})
             uid = data.get('uid')
@@ -387,6 +405,8 @@ def get_play_pool_cookie_qrcode():
                 "time": data.get('time'),
                 "sign": data.get('sign'),
                 "app_type": app_type,
+                "mode": mode,
+                "code_verifier": verifier,
                 "created_at": time.time(),
             }
             with _play_pool_cookie_qrcode_lock:
@@ -411,6 +431,7 @@ def check_play_pool_cookie_qrcode_status():
         session = _play_pool_cookie_qrcode_sessions.get(request_uid) if request_uid else None
         if not session:
             session = dict(_play_pool_cookie_qrcode_data)
+    mode = str(request.args.get('mode') or session.get('mode') or 'cookie').strip().lower()
     app_type = request.args.get('app', session.get('app_type', 'alipaymini'))
     uid = session.get('uid')
     time_val = session.get('time')
@@ -418,6 +439,44 @@ def check_play_pool_cookie_qrcode_status():
     if not uid:
         return jsonify({"success": False, "status": "expired", "message": "请先获取二维码"})
     try:
+        if mode == "openapi":
+            resp = requests.get(
+                "https://qrcodeapi.115.com/get/status/",
+                params={"uid": uid, "time": time_val, "sign": sign},
+                timeout=10,
+            ).json()
+            state = resp.get('state')
+            if state == 0:
+                return jsonify({"success": False, "status": "expired", "message": "二维码已过期"})
+            if state == 1:
+                status = resp.get('data', {}).get('status')
+                if status == 1:
+                    return jsonify({"success": True, "status": "waiting", "message": "等待扫码"})
+                if status == 2:
+                    token_resp = requests.post(
+                        "https://passportapi.115.com/open/deviceCodeToToken",
+                        data={"uid": uid, "code_verifier": session.get("code_verifier")},
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=10,
+                    )
+                    token_data = token_resp.json()
+                    if token_data.get('state'):
+                        token = token_data.get('data') or {}
+                        access_token = str(token.get('access_token') or '').strip()
+                        refresh_token = str(token.get('refresh_token') or '').strip()
+                        if access_token:
+                            return jsonify({
+                                "success": True,
+                                "status": "success",
+                                "message": "OpenAPI 授权成功",
+                                "data": {
+                                    "access_token": access_token,
+                                    "refresh_token": refresh_token,
+                                }
+                            })
+                    return jsonify({"success": False, "status": "error", "message": token_data.get('message', '获取 Token 失败')})
+            return jsonify({"success": True, "status": "waiting", "message": "等待扫码"})
+
         from handler.p115_service import get_115_ua
         headers = {"User-Agent": get_115_ua(app_type)}
         url = f"https://qrcodeapi.115.com/get/status/?uid={uid}&time={time_val}&sign={sign}"
@@ -702,23 +761,16 @@ def _p115_pick_speedtest_sample_from_library():
 
 def _p115_resolve_download_url_for_speedtest(client, pick_code, user_agent):
     """按当前 115 API 优先级提取直链，失败自动切到另一套接口。"""
-    api_priority = get_115_api_priority('openapi')
-    use_openapi = (api_priority != 'cookie')
     last_error = ''
 
-    for _ in range(4):
-        backend = 'OpenAPI' if use_openapi else 'Cookie'
+    for _ in range(2):
         try:
-            if use_openapi:
-                real_url = client.openapi_downurl(pick_code, user_agent=user_agent)
-            else:
-                real_url = client.download_url(pick_code, user_agent=user_agent)
+            real_url, backend = client.resolve_download_url(pick_code, user_agent=user_agent, return_backend=True)
             if real_url:
                 return str(real_url), backend, last_error
         except Exception as e:
-            last_error = f"{backend}: {e}"
-            logger.warning(f"  ➜ [115测速] {backend} 提取直链异常: {e}")
-        use_openapi = not use_openapi
+            last_error = str(e)
+            logger.warning(f"  ➜ [115测速] 提取直链异常: {e}")
         time.sleep(0.3)
 
     return '', '', last_error or '无法提取下载直链'
@@ -1060,8 +1112,8 @@ def save_play_pool_config():
 @admin_required
 def add_play_pool_account():
     data = request.json or {}
-    if not str(data.get('cookie') or '').strip():
-        return jsonify({'success': False, 'message': 'Cookie 不能为空'}), 400
+    if not str(data.get('cookie') or '').strip() and not str(data.get('access_token') or '').strip():
+        return jsonify({'success': False, 'message': 'Cookie/OpenAPI 不能为空'}), 400
     item = p115_play_pool.upsert_account(data)
     return jsonify({'success': True, 'data': item})
 
@@ -1074,9 +1126,11 @@ def save_user_play_pool_account():
     if not emby_user_id:
         return jsonify({'success': False, 'message': '未登录'}), 401
     cookie = str(data.get('cookie') or '').strip()
+    access_token = str(data.get('access_token') or '').strip()
+    refresh_token = str(data.get('refresh_token') or '').strip()
     existing = p115_play_pool.get_public_account_by_owner('user', emby_user_id) or {}
-    if not cookie and not existing.get('id'):
-        return jsonify({'success': False, 'message': 'Cookie 不能为空'}), 400
+    if not cookie and not access_token and not existing.get('id'):
+        return jsonify({'success': False, 'message': 'Cookie/OpenAPI 不能为空'}), 400
     shared = bool(data.get('shared', False))
     payload = {
         'alias': str(data.get('alias') or session.get('emby_username') or '用户小号').strip() or '用户小号',
@@ -1089,9 +1143,13 @@ def save_user_play_pool_account():
     if cookie:
         payload['cookie'] = cookie
         payload['enabled'] = True
+    if access_token:
+        payload['access_token'] = access_token
+        payload['refresh_token'] = refresh_token
+        payload['enabled'] = True
     item = p115_play_pool.upsert_account(payload, account_id=existing.get('id') if existing else None)
     reward_result = {}
-    if cookie:
+    if cookie or access_token:
         try:
             result = p115_play_pool.speedtest_account(item['id'])
             item['last_speed_bps'] = result.get('bps', 0)
@@ -1145,7 +1203,7 @@ def get_user_play_pool_rewards():
 @admin_required
 def update_play_pool_account(account_id):
     data = request.json or {}
-    if not str(data.get('cookie') or '').strip():
+    if not str(data.get('cookie') or '').strip() and not str(data.get('access_token') or '').strip():
         data['_skip_auto_speedtest'] = True
     item = p115_play_pool.upsert_account(data, account_id=account_id)
     return jsonify({'success': True, 'data': item})
@@ -1193,7 +1251,10 @@ def save_temp_dir_config():
     if not client:
         return jsonify({'success': False, 'message': '115 客户端未初始化，请先配置 115 Cookie/OpenAPI'}), 500
     try:
-        config = save_temp_dir_config(client, cleanup_cron=data.get('cleanup_cron'))
+        if 'cleanup_cron' in data:
+            config = save_temp_dir_config(client, cleanup_cron=data.get('cleanup_cron'))
+        else:
+            config = save_temp_dir_config(client)
         account_results = p115_play_pool.ensure_all_account_temp_dirs()
         try:
             from scheduler_manager import scheduler_manager
@@ -1587,10 +1648,10 @@ def handle_washing_priority_groups():
 def handle_release_groups():
     """返回洗版优先级可选的发布组标准名。"""
     try:
-        from tasks.helpers import RELEASE_GROUPS
+        from tasks.helpers import get_release_group_names
         options = [
             {"label": str(group), "value": str(group)}
-            for group in RELEASE_GROUPS.keys()
+            for group in get_release_group_names()
             if str(group or "").strip()
         ]
         options.sort(key=lambda item: item["label"].lower())
@@ -1784,7 +1845,9 @@ def play_115_video(pick_code, filename=None):
     try:
         # 1. 识别是否为 Emby 服务端 (Probe 或 ffmpeg Remux)
         is_emby_server = False
-        if any(kw in client_ua_lower for kw in ['emby', 'jellyfin', 'lavf', 'kodi']):
+        # Emby server-side fetches can omit User-Agent. Keep OpenAPI downurl and
+        # the follow-up Range GET on the same browser UA to avoid 115 403.
+        if not client_ua.strip() or any(kw in client_ua_lower for kw in ['emby', 'jellyfin', 'lavf', 'kodi']):
             is_emby_server = True
 
         # 2. 决定申请直链使用的 UA
@@ -1853,18 +1916,16 @@ def play_115_video(pick_code, filename=None):
         if not play_pick_code:
             return "Copy play failed", 503
 
-        max_retries = 4
         real_url = None
-        api_priority = get_115_api_priority('openapi')
-        use_openapi = (api_priority != 'cookie')
         rebuilt_copy_play = False
         
-        for i in range(max_retries):
+        for i in range(2):
             try:
-                if use_openapi:
-                    real_url = client.openapi_downurl(play_pick_code, user_agent=request_ua)
-                else:
-                    real_url = client.download_url(play_pick_code, user_agent=request_ua)
+                real_url = client.resolve_download_url(
+                    play_pick_code,
+                    user_agent=request_ua,
+                    stop_on_exception=(is_copy_play_missing_error if str(play_pick_code) != str(pick_code) else None),
+                )
                     
                 if real_url:
                     if str(play_pick_code) == str(pick_code):
@@ -1881,11 +1942,9 @@ def play_115_video(pick_code, filename=None):
                     rebuilt_copy_play = True
                     if not play_pick_code:
                         return "Copy play failed", 503
-                    use_openapi = (api_priority != 'cookie')
                     continue
-                logger.warning(f"  ➜ [直链解析] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
+                logger.warning(f"  ➜ [直链解析] 获取直链异常: {e}")
             
-            use_openapi = not use_openapi
             time.sleep(0.5)
         
         if not real_url:
@@ -2060,16 +2119,13 @@ def play_virtual_115_video(virtual_id, sha1, filename=None):
                 logger.debug(f"  ➜ [虚拟播放] 上报中心虚拟播放失败：{e}")
 
         real_url = None
-        api_priority = get_115_api_priority('openapi')
-        use_openapi = (api_priority != 'cookie')
-        for _ in range(4):
+        for _ in range(2):
             try:
-                real_url = client.openapi_downurl(pick_code, user_agent=request_ua) if use_openapi else client.download_url(pick_code, user_agent=request_ua)
+                real_url = client.resolve_download_url(pick_code, user_agent=request_ua)
                 if real_url:
                     break
             except Exception as e:
-                logger.warning(f"  ➜ [虚拟播放] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
-            use_openapi = not use_openapi
+                logger.warning(f"  ➜ [虚拟播放] 获取直链异常: {e}")
             time.sleep(0.5)
         if not real_url:
             return "Failed to get virtual download URL", 404

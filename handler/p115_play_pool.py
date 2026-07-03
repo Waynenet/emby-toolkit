@@ -28,6 +28,8 @@ _PREPARE_LOCKS = {}
 _PREPARE_LOCKS_GUARD = threading.Lock()
 _SESSION_LOCKS = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
+_TOKEN_REFRESH_LOCKS = {}
+_TOKEN_REFRESH_LOCKS_GUARD = threading.Lock()
 _ALLOWED_USER_EXPAND_CACHE = {}
 _ALLOWED_USER_EXPAND_TTL_SECONDS = 60
 
@@ -103,6 +105,13 @@ def _mask_cookie(cookie):
         raw = uid.group(1)
         return f"UID={raw[:4]}***{raw[-3:]}" if len(raw) > 7 else "UID=***"
     return text[:8] + "***"
+
+
+def _has_account_auth(account):
+    return bool(
+        str((account or {}).get("cookie") or "").strip()
+        or str((account or {}).get("access_token") or "").strip()
+    )
 
 
 def _human_bytes(value):
@@ -382,6 +391,8 @@ def _load_config():
         account["id"] = str(account.get("id") or uuid.uuid4().hex)
         account["alias"] = str(account.get("alias") or "小号").strip()[:40] or "小号"
         account["cookie"] = str(account.get("cookie") or "").strip()
+        account["access_token"] = str(account.get("access_token") or "").strip()
+        account["refresh_token"] = str(account.get("refresh_token") or "").strip()
         account["app_type"] = str(account.get("app_type") or "alipaymini").strip() or "alipaymini"
         account["enabled"] = bool(account.get("enabled", True))
         account["owner_type"] = _normalize_owner_type(account.get("owner_type"))
@@ -424,8 +435,12 @@ def _public_account(account, config=None):
     config = config or _load_config()
     out = dict(account or {})
     out.pop("cookie", None)
+    out.pop("access_token", None)
+    out.pop("refresh_token", None)
     out.pop("allowed_effective_user_ids", None)
     out["cookie_mask"] = _mask_cookie(account.get("cookie"))
+    out["has_cookie"] = bool(str(account.get("cookie") or "").strip())
+    out["has_openapi"] = bool(str(account.get("access_token") or "").strip())
     out["owner_type"] = _normalize_owner_type(account.get("owner_type"))
     out["owner_type_text"] = "用户自有" if out["owner_type"] == "user" else "管理员小号"
     out["owner_user_id"] = str(account.get("owner_user_id") or "").strip()
@@ -448,7 +463,7 @@ def get_public_config():
     return {
         "enabled": config["enabled"],
         "accounts": [_public_account(x, config) for x in config["accounts"]],
-        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and x.get("cookie") and not _account_daily_limited(x, daily_limit_gb)]),
+        "usable_count": len([x for x in config["accounts"] if x.get("enabled") and _has_account_auth(x) and not _account_daily_limited(x, daily_limit_gb)]),
         "temp_dir_name": get_temp_dir_name(),
         "auto_speedtest_enabled": True,
         "auto_speedtest_threshold_mbps": threshold_mbps,
@@ -535,6 +550,10 @@ def upsert_account(payload, account_id=None):
         target["alias"] = "小号"
     if "cookie" in payload:
         target["cookie"] = str(payload.get("cookie") or "").strip()
+    if "access_token" in payload:
+        target["access_token"] = str(payload.get("access_token") or "").strip()
+    if "refresh_token" in payload:
+        target["refresh_token"] = str(payload.get("refresh_token") or "").strip()
     if "app_type" in payload:
         target["app_type"] = str(payload.get("app_type") or "alipaymini").strip() or "alipaymini"
     elif not target.get("app_type"):
@@ -564,7 +583,7 @@ def upsert_account(payload, account_id=None):
     target["updated_at"] = _now_text()
     target.setdefault("temp_cid", "")
     _save_config(config)
-    if str(target.get("cookie") or "").strip() and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
+    if _has_account_auth(target) and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
         try:
             speedtest_account(target["id"])
             target = _find_account_by_id(target["id"]) or target
@@ -596,8 +615,94 @@ def _save_sessions(sessions):
     settings_db.save_setting(PLAY_POOL_SESSIONS_KEY, sessions[-500:])
 
 
+def _get_token_refresh_lock(account_id):
+    key = str(account_id or "").strip() or "default"
+    with _TOKEN_REFRESH_LOCKS_GUARD:
+        lock = _TOKEN_REFRESH_LOCKS.get(key)
+        if not lock:
+            lock = threading.Lock()
+            _TOKEN_REFRESH_LOCKS[key] = lock
+        return lock
+
+
+def refresh_account_openapi_token(account_id, failed_token=None):
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        return {"ok": False, "message": "缺少小号账号 ID"}
+
+    with _get_token_refresh_lock(account_id):
+        config = _load_config()
+        target = None
+        for item in config.get("accounts") or []:
+            if str(item.get("id") or "") == account_id:
+                target = item
+                break
+        if not target:
+            return {"ok": False, "message": "小号账号不存在"}
+
+        current_access = str(target.get("access_token") or "").strip()
+        current_refresh = str(target.get("refresh_token") or "").strip()
+        if failed_token and current_access and current_access != str(failed_token or "").strip():
+            logger.info("  ➜ [115播放池] 小号 Token 已被其他线程续期，直接复用：%s", target.get("alias") or account_id)
+            return {
+                "ok": True,
+                "access_token": current_access,
+                "refresh_token": current_refresh,
+                "reused": True,
+            }
+        if not current_refresh:
+            return {"ok": False, "message": "小号缺少 refresh_token"}
+
+        try:
+            resp = requests.post(
+                "https://passportapi.115.com/open/refreshToken",
+                data={"refresh_token": current_refresh},
+                timeout=10,
+            ).json()
+        except Exception as e:
+            logger.warning("  ➜ [115播放池] 小号 Token 续期请求异常：%s -> %s", target.get("alias") or account_id, e)
+            return {"ok": False, "message": str(e)}
+
+        if not isinstance(resp, dict) or not resp.get("state"):
+            message = (resp or {}).get("message") or (resp or {}).get("error_msg") or "小号 Token 续期失败"
+            logger.warning("  ➜ [115播放池] 小号 Token 续期失败：%s -> %s", target.get("alias") or account_id, message)
+            return {"ok": False, "message": message}
+
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        new_access = str(data.get("access_token") or "").strip()
+        new_refresh = str(data.get("refresh_token") or "").strip()
+        if not new_access:
+            return {"ok": False, "message": "小号 Token 续期响应缺少 access_token"}
+
+        target["access_token"] = new_access
+        if new_refresh:
+            target["refresh_token"] = new_refresh
+        target["updated_at"] = _now_text()
+        target.pop("last_error", None)
+        _save_config(config)
+
+        expires_in = _safe_int(data.get("expires_in"), 0)
+        hours = round(expires_in / 3600, 1) if expires_in else 0
+        if hours:
+            logger.info("  ➜ [115播放池] 小号 Token 自动续期成功：%s，有效时长 %s 小时。", target.get("alias") or account_id, hours)
+        else:
+            logger.info("  ➜ [115播放池] 小号 Token 自动续期成功：%s。", target.get("alias") or account_id)
+        return {
+            "ok": True,
+            "access_token": new_access,
+            "refresh_token": target.get("refresh_token") or "",
+        }
+
+
 def _account_client(account):
-    return P115PlayPoolClient(account.get("cookie"), account.get("app_type") or "alipaymini")
+    return P115PlayPoolClient(
+        account.get("cookie"),
+        account.get("app_type") or "alipaymini",
+        account.get("access_token"),
+        account.get("refresh_token"),
+        account.get("id"),
+        refresh_account_openapi_token,
+    )
 
 
 def _extract_cid(resp):
@@ -668,12 +773,12 @@ def ensure_all_account_temp_dirs():
     results = []
     changed = False
     for account in config.get("accounts") or []:
-        if not account.get("cookie"):
+        if not _has_account_auth(account):
             results.append({
                 "id": account.get("id"),
                 "alias": account.get("alias") or account.get("id") or "",
                 "success": False,
-                "message": "未配置 Cookie",
+                "message": "未配置 Cookie/OpenAPI",
             })
             continue
         try:
@@ -765,7 +870,7 @@ def _select_account(config, user_id=""):
 
     candidates = []
     for account in config.get("accounts") or []:
-        if not account.get("enabled") or not account.get("cookie"):
+        if not account.get("enabled") or not _has_account_auth(account):
             continue
         if not _account_allowed_for_user(account, user_id):
             continue
@@ -1010,7 +1115,7 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         account_usable = bool(
             account
             and account.get("enabled")
-            and account.get("cookie")
+            and _has_account_auth(account)
             and _account_allowed_for_user(account, user_id)
         )
         direct_url = str(reusable.get("direct_url") or "").strip()
@@ -1084,11 +1189,13 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     }
     if preid:
         payload["preid"] = preid
+    rapid_backend_text = "OpenAPI" if str(account.get("access_token") or "").strip() else "Cookie"
     logger.info(
-        "  ➜ [小号播放] 准备播放：%s %s/%s",
+        "  ➜ [小号播放] 准备播放：%s %s/%s | 秒传接口=%s",
         _display_title(display_name),
         account.get("alias") or account.get("id") or "小号",
         _display_user_name(user_id),
+        rapid_backend_text,
     )
 
     resp = client.rapid_upload(payload)
@@ -1104,6 +1211,12 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             payload["preid"] = preid
             resp = client.rapid_upload(payload)
     if isinstance(resp, dict) and resp.get("_rapid_sign_required"):
+        logger.debug(
+            "  ➜ [小号播放] 小号%s秒传需要主号签名：sha1=%s..., sign_check=%s",
+            "OpenAPI" if resp.get("_rapid_sign_backend") == "play_pool_openapi" else "Cookie",
+            sha1[:12],
+            resp.get("_rapid_sign_check") or "-",
+        )
         main_client = P115Service.get_client()
         if not main_client:
             raise RuntimeError("小号秒传需要主号签名，但主号 115 客户端未初始化")
@@ -1185,7 +1298,7 @@ def get_direct_url(play_result, user_agent=""):
             session["direct_url_user_agent"] = fresh_session.get("direct_url_user_agent") or user_agent
             return cached_url
 
-        url = client.download_url(pick_code, user_agent=user_agent)
+        url = client.resolve_download_url(pick_code, user_agent=user_agent)
         if url and session_id:
             _patch_session(session_id, {
                 "direct_url": url,
@@ -1265,7 +1378,7 @@ def cleanup_expired_sessions():
 def cleanup_temp_dir_old_videos(older_than_hours=3):
     results = []
     for account in _load_config().get("accounts") or []:
-        if not account.get("cookie"):
+        if not _has_account_auth(account):
             continue
         try:
             client = _account_client(account)
@@ -1400,8 +1513,8 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
     account = next((x for x in config["accounts"] if str(x.get("id")) == str(account_id)), None)
     if not account:
         raise RuntimeError("小号不存在")
-    if not account.get("cookie"):
-        raise RuntimeError("小号未配置 Cookie")
+    if not _has_account_auth(account):
+        raise RuntimeError("小号未配置 Cookie/OpenAPI")
     sample_pick_code = str(sample_pick_code or "").strip()
     if not sample_pick_code:
         try:
@@ -1469,7 +1582,7 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
     if not clone.get("pick_code"):
         raise RuntimeError("测速样本秒传成功但未找到临时文件")
     try:
-        url = client.download_url(clone["pick_code"], user_agent=user_agent or "Mozilla/5.0")
+        url = client.resolve_download_url(clone["pick_code"], user_agent=user_agent or "Mozilla/5.0")
         if not url:
             raise RuntimeError("小号获取测速直链失败")
         result = _speedtest_url(url, user_agent=user_agent or "Mozilla/5.0")
@@ -1489,7 +1602,7 @@ def run_daily_speedtest_and_rewards(update_status=None):
         logger.info("  ➜ [小号池每日测速] 小号池未启用，跳过")
         return {"skipped": True, "reason": "小号池未启用", "results": []}
 
-    accounts = [x for x in config.get("accounts") or [] if str(x.get("cookie") or "").strip()]
+    accounts = [x for x in config.get("accounts") or [] if _has_account_auth(x)]
     total = len(accounts)
     results = []
     if update_status:
