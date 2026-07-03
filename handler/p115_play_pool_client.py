@@ -8,6 +8,7 @@ from handler.p115_service import (
     P115CacheManager,
     P115Client,
     P115OpenAPIClient,
+    get_115_api_priority,
     get_115_ua,
     _p115_extract_down_url,
     _p115_as_list,
@@ -49,15 +50,44 @@ class P115PlayPoolClient:
                 pass
 
     def download_url(self, pick_code, user_agent=None):
-        if self.openapi:
-            resp = self.openapi.fs_downurl(pick_code, user_agent=user_agent)
-            url = _p115_extract_down_url(resp)
+        return self.resolve_download_url(pick_code, user_agent=user_agent)
+
+    def resolve_download_url(self, pick_code, user_agent=None, return_backend=False, stop_on_exception=None):
+        method_order = (
+            [("_cookie_download_url", "Cookie"), ("_openapi_downurl", "OpenAPI")]
+            if get_115_api_priority() == "cookie"
+            else [("_openapi_downurl", "OpenAPI"), ("_cookie_download_url", "Cookie")]
+        )
+        last_error = None
+        for method_name, label in method_order:
+            method = getattr(self, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                url = method(pick_code, user_agent=user_agent)
+            except Exception as e:
+                if callable(stop_on_exception) and stop_on_exception(e):
+                    raise
+                last_error = e
+                logger.debug("  ➜ [115播放池直链] %s 获取下载直链失败: %s", label, e)
+                continue
             if url:
-                return url
-        if self.webapi:
-            url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
-            return str(url_obj) if url_obj else None
-        return None
+                return (url, label) if return_backend else url
+        if last_error:
+            logger.debug("  ➜ [115播放池直链] 所有接口获取下载直链失败: %s", last_error)
+        return ("", "") if return_backend else ""
+
+    def _openapi_downurl(self, pick_code, user_agent=None):
+        if not self.openapi:
+            return ""
+        resp = self.openapi.fs_downurl(pick_code, user_agent=user_agent)
+        return _p115_extract_down_url(resp) or ""
+
+    def _cookie_download_url(self, pick_code, user_agent=None):
+        if not self.webapi:
+            return ""
+        url_obj = self.webapi.download_url(pick_code, user_agent=user_agent)
+        return str(url_obj) if url_obj else ""
 
     def request(self, url, method="GET", **kwargs):
         headers = {

@@ -2950,6 +2950,41 @@ class P115Service:
             def rapid_save(self, target_cid, sha1, size, file_name, **kwargs):
                 return self.fs_rapid_upload(target_cid, sha1, size, file_name, **kwargs)
 
+            def resolve_download_url(self, pick_code, user_agent=None, return_backend=False, stop_on_exception=None):
+                """按全局 115 API 优先级解析下载直链，失败自动切备用接口。"""
+                method_order = (
+                    [('download_url', 'Cookie'), ('openapi_downurl', 'OpenAPI')]
+                    if get_115_api_priority() == 'cookie'
+                    else [('openapi_downurl', 'OpenAPI'), ('download_url', 'Cookie')]
+                )
+                last_error = None
+                for method_name, label in method_order:
+                    method = getattr(self, method_name, None)
+                    if not callable(method):
+                        continue
+                    try:
+                        direct_url = _p115_extract_down_url(method(pick_code, user_agent=user_agent))
+                    except TypeError:
+                        try:
+                            direct_url = _p115_extract_down_url(method(pick_code, user_agent))
+                        except Exception as e:
+                            if callable(stop_on_exception) and stop_on_exception(e):
+                                raise
+                            last_error = e
+                            logger.debug(f"  ➜ [115直链] {label} 获取下载直链失败: {e}")
+                            continue
+                    except Exception as e:
+                        if callable(stop_on_exception) and stop_on_exception(e):
+                            raise
+                        last_error = e
+                        logger.debug(f"  ➜ [115直链] {label} 获取下载直链失败: {e}")
+                        continue
+                    if direct_url:
+                        return (direct_url, label) if return_backend else direct_url
+                if last_error:
+                    logger.debug(f"  ➜ [115直链] 所有接口获取下载直链失败: {last_error}")
+                return ('', '') if return_backend else ''
+
             def download_url(self, pick_code, user_agent=None):
                 if not self._cookie:
                     raise Exception("未配置 115 Cookie，无法获取播放直链")
@@ -3339,6 +3374,45 @@ class P115CacheManager:
                     return row['id'] if row else None
         except Exception as e:
             logger.error(f"  ➜ 读取 115 DB 缓存失败: {e}")
+            return None
+
+    @staticmethod
+    def get_cid_by_exact_local_path(local_path, name=None):
+        """按标准相对路径精确查目录 CID，用于重命名格式生成的中间目录。"""
+        if not local_path:
+            return None
+        normalized = str(local_path).strip().replace('\\', '/').strip('/')
+        if not normalized:
+            return None
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    if name:
+                        cursor.execute(
+                            """
+                            SELECT id
+                            FROM p115_filesystem_cache
+                            WHERE local_path = %s AND name = %s
+                            ORDER BY updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (normalized, str(name)),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT id
+                            FROM p115_filesystem_cache
+                            WHERE local_path = %s
+                            ORDER BY updated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (normalized,),
+                        )
+                    row = cursor.fetchone()
+                    return row['id'] if row else None
+        except Exception as e:
+            logger.debug(f"  ➜ 读取 115 local_path 缓存失败: {normalized} -> {e}")
             return None
 
     @staticmethod
@@ -4240,63 +4314,82 @@ class P115CacheManager:
             if not ua_candidates:
                 ua_candidates.append('Mozilla/5.0')
 
-            priority = get_115_api_priority()
-            method_order = [('download_url', 'Cookie'), ('openapi_downurl', 'OpenAPI')] if priority == 'cookie' else [('openapi_downurl', 'OpenAPI'), ('download_url', 'Cookie')]
-            range_header = f'bytes={int(start)}-{int(end)}'
-            expected_len = int(end) - int(start) + 1
-            last_status = None
-
-            for method_name, label in method_order:
-                method = getattr(client, method_name, None)
-                if not callable(method):
+            for ua in ua_candidates:
+                try:
+                    down_url, label = client.resolve_download_url(pick_code, user_agent=ua, return_backend=True)
+                except Exception as e:
+                    logger.debug(f"  ➜ [115缓存] 获取 preid 直链失败: {e}")
                     continue
-                for ua in ua_candidates:
-                    try:
-                        down_url = _p115_extract_down_url(method(pick_code, user_agent=ua))
-                    except TypeError:
-                        try:
-                            down_url = _p115_extract_down_url(method(pick_code, ua))
-                        except Exception as e:
-                            logger.debug(f"  ➜ [115缓存] 获取 preid 直链失败({label}, positional-ua): {e}")
-                            down_url = ''
-                    except Exception as e:
-                        logger.debug(f"  ➜ [115缓存] 获取 preid 直链失败({label}): {e}")
-                        down_url = ''
-                    if not down_url:
-                        continue
-                    try:
-                        headers = {
-                            'Range': range_header,
-                            'Accept': '*/*',
-                            'Connection': 'close',
-                        }
-                        if ua:
-                            headers['User-Agent'] = ua
-                        with requests.get(down_url, headers=headers, timeout=45, allow_redirects=True, stream=True) as resp:
-                            last_status = resp.status_code
-                            if resp.status_code != 206:
-                                logger.warning(
-                                    f"  ➜ [115缓存] 读取 preid Range 失败: api={label}, "
-                                    f"HTTP={resp.status_code}, range={range_header}, pc={pick_code[:8]}..."
-                                )
-                                continue
-                            content = resp.raw.read(expected_len) or b''
-                            if content:
-                                logger.debug(
-                                    f"  ➜ [115缓存] preid Range 读取成功: api={label}, "
-                                    f"range={range_header}, bytes={len(content)}, pc={pick_code[:8]}..."
-                                )
-                                return content
-                    except Exception as e:
-                        logger.debug(
-                            f"  ➜ [115缓存] Range GET 异常: api={label}, "
-                            f"range={range_header}, pc={pick_code[:8]}..., err={e}"
-                        )
-            if last_status:
-                logger.warning(f"  ➜ [115缓存] 已尝试读取 preid Range 仍失败，最后 HTTP={last_status}: pc={pick_code[:8]}...")
+                if not down_url:
+                    continue
+                content = P115CacheManager._extract_preid_range_bytes_from_url(
+                    down_url,
+                    start,
+                    end,
+                    user_agent=ua,
+                    label=label or '直链',
+                    pick_code=pick_code,
+                )
+                if content:
+                    return content
         except Exception as e:
             logger.debug(f"  ➜ [115缓存] 计算 preid 前置读取失败: pc={pick_code[:8]}..., err={e}")
         return b''
+
+    @staticmethod
+    def _extract_preid_range_bytes_from_url(down_url, start=0, end=131071, *, user_agent=None, label='DirectURL', pick_code=''):
+        """复用已解析好的直链读取前 128KB，避免为 preid 再请求一次 downurl。"""
+        down_url = str(down_url or '').strip()
+        if not down_url:
+            return b''
+        range_header = f'bytes={int(start)}-{int(end)}'
+        expected_len = int(end) - int(start) + 1
+        pc_part = f", pc={str(pick_code or '')[:8]}..." if pick_code else ""
+        try:
+            headers = {
+                'Range': range_header,
+                'Accept': '*/*',
+                'Connection': 'close',
+            }
+            if user_agent:
+                headers['User-Agent'] = user_agent
+            with requests.get(down_url, headers=headers, timeout=45, allow_redirects=True, stream=True) as resp:
+                if resp.status_code != 206:
+                    logger.warning(
+                        f"  ➜ [115缓存] 读取 preid Range 失败: api={label}, "
+                        f"HTTP={resp.status_code}, range={range_header}{pc_part}"
+                    )
+                    return b''
+                content = resp.raw.read(expected_len) or b''
+                if content:
+                    logger.debug(
+                        f"  ➜ [115缓存] preid Range 读取成功: api={label}, "
+                        f"range={range_header}, bytes={len(content)}{pc_part}"
+                    )
+                return content
+        except Exception as e:
+            logger.debug(
+                f"  ➜ [115缓存] Range GET 异常: api={label}, "
+                f"range={range_header}{pc_part}, err={e}"
+            )
+            return b''
+
+    @staticmethod
+    def preid_from_direct_url(down_url, *, user_agent=None, file_name=None, sha1=None, pick_code=None, backend=None):
+        """用本次 ffprobe 已取得的临时直链计算 preid，不把直链写入持久缓存。"""
+        chunk = P115CacheManager._extract_preid_range_bytes_from_url(
+            down_url,
+            0,
+            131071,
+            user_agent=user_agent,
+            label=f"{backend or '直链'}复用",
+            pick_code=pick_code,
+        )
+        if not chunk:
+            return ''
+        preid = hashlib.sha1(chunk).hexdigest().upper()
+        logger.info(f"  ➜ [媒体信息缓存] 已复用 ffprobe 直链缓存秒传校验片段：{file_name or sha1 or pick_code}")
+        return preid
 
     @staticmethod
     def ensure_file_preid(file_info=None, *, sha1=None, fid=None, pick_code=None, file_name=None):
@@ -7219,8 +7312,14 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             
             # 逐级检查/创建目录
             for part_name in dir_parts:
+                next_rel_path = f"{base_rel_path}/{part_name}".strip("/")
                 # 查数据库缓存；跨任务目录状态不再使用进程内缓存。
                 part_cid = P115CacheManager.get_cid(temp_parent_cid, part_name)
+
+                if not part_cid:
+                    part_cid = P115CacheManager.get_cid_by_exact_local_path(next_rel_path, part_name)
+                    if part_cid:
+                        logger.debug(f"  ➜ [115整理] 命中目录路径缓存：{next_rel_path} -> {part_cid}")
 
                 # 缓存自愈检查
                 if part_cid and str(part_cid) == str(source_root_id) and str(temp_parent_cid) != str(root_item.get('pid') or root_item.get('parent_id')):
@@ -7274,7 +7373,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 if part_cid:
                     temp_parent_cid = part_cid
                     # ★ 核心修复：逐级累加路径并更新 DB，彻底解决年份目录 local_path 为 NULL 的问题！
-                    base_rel_path = f"{base_rel_path}/{part_name}"
+                    base_rel_path = next_rel_path
                     P115CacheManager.update_local_path(part_cid, base_rel_path)
                 else:
                     success_chain = False
@@ -8543,7 +8642,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     sub_filepath = os.path.join(local_dir, new_filename)
                                     if not os.path.exists(sub_filepath):
                                         try:
-                                            url_obj = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                                            url_obj = self.client.resolve_download_url(pick_code, user_agent="Mozilla/5.0")
                                             if url_obj:
                                                 import requests
                                                 headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
@@ -8800,7 +8899,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 try:
                     sub_filepath = os.path.join(local_dir, original_name)
                     if not os.path.exists(sub_filepath):
-                        url_obj = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                        url_obj = self.client.resolve_download_url(pick_code, user_agent="Mozilla/5.0")
                         if url_obj:
                             import requests
                             headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}

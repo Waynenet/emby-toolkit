@@ -223,21 +223,18 @@ class P115MediaAnalyzerMixin:
                 return None
 
             direct_url = None
+            direct_url_backend = None
+            ffprobe_ua = "Mozilla/5.0"
 
-            # 1. Cookie 直链优先
             try:
-                direct_url = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                direct_url, direct_url_backend = self.client.resolve_download_url(
+                    pick_code,
+                    user_agent=ffprobe_ua,
+                    return_backend=True,
+                )
             except Exception as e:
                 if not silent_log:
-                    logger.debug(f"  ➜ [ffprobe] Cookie 直链获取失败: {e}")
-
-            # 2. OpenAPI 直链兜底
-            if not direct_url:
-                try:
-                    direct_url = self.client.openapi_downurl(pick_code, user_agent="Mozilla/5.0")
-                except Exception as e:
-                    if not silent_log:
-                        logger.debug(f"  ➜ [ffprobe] OpenAPI 直链获取失败: {e}")
+                    logger.debug(f"  ➜ [ffprobe] 直链获取失败: {e}")
 
             if not direct_url:
                 if not silent_log:
@@ -283,6 +280,27 @@ class P115MediaAnalyzerMixin:
                 metadata_context=metadata_context,
                 sha1=sha1
             )
+            try:
+                preid = _get_p115_cache_manager().preid_from_direct_url(
+                    direct_url,
+                    user_agent=ffprobe_ua,
+                    file_name=original_name,
+                    sha1=sha1,
+                    pick_code=pick_code,
+                    backend=direct_url_backend,
+                )
+                if preid:
+                    ctx = probe_data.get("_etk") if isinstance(probe_data.get("_etk"), dict) else {}
+                    ctx = dict(ctx or {})
+                    if sha1:
+                        ctx.setdefault("sha1", str(sha1).upper())
+                    ctx["preid"] = preid
+                    probe_data["_etk"] = ctx
+                    if isinstance(file_node, dict):
+                        file_node["preid"] = preid
+            except Exception as e:
+                if not silent_log:
+                    logger.debug(f"  ➜ [ffprobe] 复用直链计算 preid 失败: {e}")
 
             # ========================================================
             # ★ 新增：开启缺失语言时的实时字幕流嗅探

@@ -268,7 +268,7 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         return b''
 
     try:
-        from handler.p115_service import P115Service, get_115_api_priority, get_115_tokens, get_115_ua
+        from handler.p115_service import P115Service, get_115_tokens, get_115_ua
     except Exception as e:
         logger.warning(f"  ➜ [共享资源] 导入 115 客户端失败，无法计算 preid: {e}")
         return b''
@@ -278,7 +278,6 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         if not p115:
             return b''
 
-        priority = get_115_api_priority()
         try:
             _, _, _, app_type = get_115_tokens()
         except Exception:
@@ -296,65 +295,51 @@ def _p115_range_bytes_by_pick_code(pick_code: str, start: int, end: int) -> byte
         if not ua_candidates:
             ua_candidates.append('Mozilla/5.0')
 
-        if priority == 'cookie':
-            method_order = [('download_url', 'Cookie'), ('openapi_downurl', 'OpenAPI')]
-        else:
-            method_order = [('openapi_downurl', 'OpenAPI'), ('download_url', 'Cookie')]
-
         range_header = f'bytes={int(start)}-{int(end)}'
         last_status = None
 
-        for method_name, label in method_order:
-            method = getattr(p115, method_name, None)
-            if not callable(method):
+        for ua in ua_candidates:
+            down_url = ''
+            label = ''
+            try:
+                # 关键：获取直链和后续 Range GET 必须使用同一个 UA。
+                down_url, label = p115.resolve_download_url(pick_code, user_agent=ua, return_backend=True)
+            except Exception as e:
+                logger.debug(f"  ➜ [共享资源] 获取 115 直链失败: {e}")
+
+            if not down_url:
                 continue
 
-            for ua in ua_candidates:
-                down_url = ''
-                try:
-                    # 关键：获取直链和后续 Range GET 必须使用同一个 UA。
-                    down_url = _extract_p115_down_url(method(pick_code, user_agent=ua))
-                except TypeError:
-                    try:
-                        down_url = _extract_p115_down_url(method(pick_code, ua))
-                    except Exception as e:
-                        logger.debug(f"  ➜ [共享资源] 获取 115 直链失败({label}, positional-ua): {e}")
-                except Exception as e:
-                    logger.debug(f"  ➜ [共享资源] 获取 115 直链失败({label}): {e}")
-
-                if not down_url:
-                    continue
-
-                try:
-                    headers = {
-                        'Range': range_header,
-                        'User-Agent': ua,
-                        'Accept': '*/*',
-                        'Connection': 'close',
-                    }
-                    r = requests.get(down_url, headers=headers, timeout=45, allow_redirects=True)
-                    last_status = r.status_code
-                    if r.status_code == 206 and r.content:
-                        logger.debug(
-                            f"  ➜ [共享资源] preid Range 读取成功: api={label}, "
-                            f"range={range_header}, bytes={len(r.content)}, pc={pick_code[:8]}..."
-                        )
-                        return r.content or b''
-
-                    # 必须拒绝 200，避免服务端忽略 Range 后拉完整大文件。
-                    logger.warning(
-                        f"  ➜ [共享资源] 读取 preid Range 失败: api={label}, "
-                        f"HTTP={r.status_code}, range={range_header}, pc={pick_code[:8]}..."
-                    )
-                except Exception as e:
+            try:
+                headers = {
+                    'Range': range_header,
+                    'User-Agent': ua,
+                    'Accept': '*/*',
+                    'Connection': 'close',
+                }
+                r = requests.get(down_url, headers=headers, timeout=45, allow_redirects=True)
+                last_status = r.status_code
+                if r.status_code == 206 and r.content:
                     logger.debug(
-                        f"  ➜ [共享资源] Range GET 异常: api={label}, "
-                        f"range={range_header}, pc={pick_code[:8]}..., err={e}"
+                        f"  ➜ [共享资源] preid Range 读取成功: api={label}, "
+                        f"range={range_header}, bytes={len(r.content)}, pc={pick_code[:8]}..."
                     )
+                    return r.content or b''
+
+                # 必须拒绝 200，避免服务端忽略 Range 后拉完整大文件。
+                logger.warning(
+                    f"  ➜ [共享资源] 读取 preid Range 失败: api={label}, "
+                    f"HTTP={r.status_code}, range={range_header}, pc={pick_code[:8]}..."
+                )
+            except Exception as e:
+                logger.debug(
+                    f"  ➜ [共享资源] Range GET 异常: api={label}, "
+                    f"range={range_header}, pc={pick_code[:8]}..., err={e}"
+                )
 
         if last_status:
             logger.warning(
-                f"  ➜ [共享资源] 已按 {priority} 优先级尝试读取 preid Range，仍失败，"
+                f"  ➜ [共享资源] 已尝试读取 preid Range，仍失败，"
                 f"最后 HTTP={last_status}: pc={pick_code[:8]}..."
             )
         return b''

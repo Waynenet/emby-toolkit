@@ -20,7 +20,7 @@ from database.connection import get_db_connection
 from handler.custom_collection import RecommendationEngine
 import config_manager
 import constants
-from handler.p115_service import P115Service, get_115_api_priority
+from handler.p115_service import P115Service
 from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
 from handler.p115_copy_play import (
@@ -275,16 +275,13 @@ def _resolve_virtual_play_url(virtual_info, *, item_id='', play_session_id='', u
             raise RuntimeError("Virtual temp pick_code not found")
 
         real_url = ''
-        api_priority = get_115_api_priority('openapi')
-        use_openapi = (api_priority != 'cookie')
-        for _ in range(4):
+        for _ in range(2):
             try:
-                real_url = client.openapi_downurl(pick_code, user_agent=user_agent) if use_openapi else client.download_url(pick_code, user_agent=user_agent)
+                real_url = client.resolve_download_url(pick_code, user_agent=user_agent)
                 if real_url:
                     break
             except Exception as e:
-                logger.warning("  ➜ [虚拟播放] %s 接口异常: %s", 'OpenAPI' if use_openapi else 'Cookie', e)
-            use_openapi = not use_openapi
+                logger.warning("  ➜ [虚拟播放] 获取直链异常: %s", e)
             time.sleep(0.5)
         if not real_url:
             raise RuntimeError("Failed to get virtual download URL")
@@ -1657,20 +1654,17 @@ def proxy_all(path):
                     if not play_pick_code:
                         return Response("Copy play failed.", status=503)
 
-                max_retries = 10 
+                max_retries = 2
                 retry_count = 0
-                
-                # ★ 动态读取配置，决定首次尝试的接口
-                api_priority = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_API_PRIORITY, 'openapi')
-                use_openapi = (api_priority != 'cookie') 
                 rebuilt_copy_play = False
 
                 while retry_count < max_retries:
                     try:
-                        if use_openapi:
-                            real_115_url = client.openapi_downurl(play_pick_code, user_agent=player_ua)
-                        else:
-                            real_115_url = client.download_url(play_pick_code, user_agent=player_ua)
+                        real_115_url = client.resolve_download_url(
+                            play_pick_code,
+                            user_agent=player_ua,
+                            stop_on_exception=(is_copy_play_missing_error if use_copy_play and str(play_pick_code) != str(pick_code) else None),
+                        )
                             
                         if real_115_url:
                             if str(play_pick_code) != str(pick_code):
@@ -1679,7 +1673,7 @@ def proxy_all(path):
                                 record_source_play(pick_code, **copy_play_kwargs)
                             break 
                         else:
-                            logger.warning(f"  ⚠️ [获取直链] {'OpenAPI' if use_openapi else 'Cookie'} 未拿到直链，切换接口重试 ({retry_count+1}/{max_retries})...")
+                            logger.warning(f"  ⚠️ [获取直链] 未拿到直链，重试 ({retry_count+1}/{max_retries})...")
                     except Exception as e:
                         err_str = str(e)
                         if use_copy_play and str(play_pick_code) != str(pick_code) and is_copy_play_missing_error(e):
@@ -1690,15 +1684,12 @@ def proxy_all(path):
                             rebuilt_copy_play = True
                             if not play_pick_code:
                                 return Response("Copy play failed.", status=503)
-                            use_openapi = (api_priority != 'cookie')
                             continue
                         if '405' in err_str or 'Method Not Allowed' in err_str:
-                            logger.warning(f"  🛑 [获取直链] 触发 115 风控，切换接口重试 ({retry_count+1}/{max_retries})...")
+                            logger.warning(f"  🛑 [获取直链] 触发 115 风控，重试 ({retry_count+1}/{max_retries})...")
                         else:
-                            logger.warning(f"  ⚠️ [获取直链] 发生异常: {e}，切换接口重试 ({retry_count+1}/{max_retries})...")
+                            logger.warning(f"  ⚠️ [获取直链] 发生异常: {e}，重试 ({retry_count+1}/{max_retries})...")
                     
-                    # 核心：切换接口，轮流尝试
-                    use_openapi = not use_openapi
                     retry_count += 1
                     time.sleep(1.0) # 稍微休眠一下防止请求过频
 

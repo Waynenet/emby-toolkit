@@ -1214,7 +1214,7 @@ def get_direct_url(play_result, user_agent=""):
             session["direct_url_user_agent"] = fresh_session.get("direct_url_user_agent") or user_agent
             return cached_url
 
-        url = client.download_url(pick_code, user_agent=user_agent)
+        url = client.resolve_download_url(pick_code, user_agent=user_agent)
         if url and session_id:
             _patch_session(session_id, {
                 "direct_url": url,
@@ -1498,7 +1498,7 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
     if not clone.get("pick_code"):
         raise RuntimeError("测速样本秒传成功但未找到临时文件")
     try:
-        url = client.download_url(clone["pick_code"], user_agent=user_agent or "Mozilla/5.0")
+        url = client.resolve_download_url(clone["pick_code"], user_agent=user_agent or "Mozilla/5.0")
         if not url:
             raise RuntimeError("小号获取测速直链失败")
         result = _speedtest_url(url, user_agent=user_agent or "Mozilla/5.0")

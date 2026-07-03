@@ -15,7 +15,7 @@ from flask import Blueprint, jsonify, request, redirect, Response, stream_with_c
 from extensions import admin_required, emby_login_required
 from database import settings_db, shared_credit_db, shared_virtual_db
 from handler import moviepilot, emby
-from handler.p115_service import P115Service, get_config, get_115_api_priority
+from handler.p115_service import P115Service, get_config
 from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
 from handler.p115_copy_play import (
@@ -761,23 +761,16 @@ def _p115_pick_speedtest_sample_from_library():
 
 def _p115_resolve_download_url_for_speedtest(client, pick_code, user_agent):
     """按当前 115 API 优先级提取直链，失败自动切到另一套接口。"""
-    api_priority = get_115_api_priority('openapi')
-    use_openapi = (api_priority != 'cookie')
     last_error = ''
 
-    for _ in range(4):
-        backend = 'OpenAPI' if use_openapi else 'Cookie'
+    for _ in range(2):
         try:
-            if use_openapi:
-                real_url = client.openapi_downurl(pick_code, user_agent=user_agent)
-            else:
-                real_url = client.download_url(pick_code, user_agent=user_agent)
+            real_url, backend = client.resolve_download_url(pick_code, user_agent=user_agent, return_backend=True)
             if real_url:
                 return str(real_url), backend, last_error
         except Exception as e:
-            last_error = f"{backend}: {e}"
-            logger.warning(f"  ➜ [115测速] {backend} 提取直链异常: {e}")
-        use_openapi = not use_openapi
+            last_error = str(e)
+            logger.warning(f"  ➜ [115测速] 提取直链异常: {e}")
         time.sleep(0.3)
 
     return '', '', last_error or '无法提取下载直链'
@@ -1923,18 +1916,16 @@ def play_115_video(pick_code, filename=None):
         if not play_pick_code:
             return "Copy play failed", 503
 
-        max_retries = 4
         real_url = None
-        api_priority = get_115_api_priority('openapi')
-        use_openapi = (api_priority != 'cookie')
         rebuilt_copy_play = False
         
-        for i in range(max_retries):
+        for i in range(2):
             try:
-                if use_openapi:
-                    real_url = client.openapi_downurl(play_pick_code, user_agent=request_ua)
-                else:
-                    real_url = client.download_url(play_pick_code, user_agent=request_ua)
+                real_url = client.resolve_download_url(
+                    play_pick_code,
+                    user_agent=request_ua,
+                    stop_on_exception=(is_copy_play_missing_error if str(play_pick_code) != str(pick_code) else None),
+                )
                     
                 if real_url:
                     if str(play_pick_code) == str(pick_code):
@@ -1951,11 +1942,9 @@ def play_115_video(pick_code, filename=None):
                     rebuilt_copy_play = True
                     if not play_pick_code:
                         return "Copy play failed", 503
-                    use_openapi = (api_priority != 'cookie')
                     continue
-                logger.warning(f"  ➜ [直链解析] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
+                logger.warning(f"  ➜ [直链解析] 获取直链异常: {e}")
             
-            use_openapi = not use_openapi
             time.sleep(0.5)
         
         if not real_url:
@@ -2130,16 +2119,13 @@ def play_virtual_115_video(virtual_id, sha1, filename=None):
                 logger.debug(f"  ➜ [虚拟播放] 上报中心虚拟播放失败：{e}")
 
         real_url = None
-        api_priority = get_115_api_priority('openapi')
-        use_openapi = (api_priority != 'cookie')
-        for _ in range(4):
+        for _ in range(2):
             try:
-                real_url = client.openapi_downurl(pick_code, user_agent=request_ua) if use_openapi else client.download_url(pick_code, user_agent=request_ua)
+                real_url = client.resolve_download_url(pick_code, user_agent=request_ua)
                 if real_url:
                     break
             except Exception as e:
-                logger.warning(f"  ➜ [虚拟播放] {'OpenAPI' if use_openapi else 'Cookie'} 接口异常: {e}")
-            use_openapi = not use_openapi
+                logger.warning(f"  ➜ [虚拟播放] 获取直链异常: {e}")
             time.sleep(0.5)
         if not real_url:
             return "Failed to get virtual download URL", 404
