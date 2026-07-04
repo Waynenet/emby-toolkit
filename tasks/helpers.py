@@ -1569,7 +1569,7 @@ def check_season_consistency(
             effect = next(iter(effects)) if effects else '未标注'
             result['message'] = f"季包一致性校验通过：{_season_label_text()} [{res} / {codec} / 制作组:{grp} / HDR/杜比:{effect}]。"
             if log_result:
-                logger.info(f"  ➜ [一致性检查] {_season_label_text()} 完美达标: [{res} / {codec} / 制作组:{grp} / HDR/杜比:{effect}]，跳过洗版/允许季包分享。")
+                logger.debug(f"  ➜ [一致性检查] {_season_label_text()} 完美达标: [{res} / {codec} / 制作组:{grp} / HDR/杜比:{effect}]，跳过洗版/允许季包分享。")
             return result
 
         detail_parts = [f"分辨率{sorted(resolutions)}", f"编码{sorted(codecs)}"]

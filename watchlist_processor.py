@@ -2979,10 +2979,6 @@ class WatchlistProcessor:
                     False,
                     reason="一致性已通过，完结洗版事务收口。",
                 )
-                logger.info(
-                    f"  ➜ [完结校验] 《{series_name}》S{last_s_num} 本地文件一致性通过；"
-                    "共享登记已交由 Webhook 单集上报，中心端自行聚合逻辑完结季。"
-                )
                 if set_waiting_flag is not True:
                     set_waiting_flag = False
                 continue

@@ -992,7 +992,7 @@ class SubscribeAssistantManager:
             if self._season_consistency_ok(tmdb_id, season, expected_count, series_name):
                 self._set_season_active_washing(tmdb_id, season, False, "一致性通过，不提交全集洗版。")
                 logger.info(
-                    "  ➜ [订阅助手] 《%s》S%s 一致性已通过，跳过分集转全集洗版。",
+                    "  ➜ [订阅助手] 《%s》第 %s 季 一致性已通过，跳过分集转全集洗版。",
                     series_name,
                     season,
                 )
