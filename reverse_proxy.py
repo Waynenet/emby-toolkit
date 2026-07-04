@@ -441,6 +441,20 @@ def _extract_emby_auth_header_value(name):
     return ''
 
 
+def _current_play_concurrency_device_id():
+    try:
+        device_id = (
+            request.args.get('DeviceId')
+            or request.args.get('X-Emby-Device-Id')
+            or request.headers.get('X-Emby-Device-Id')
+            or _extract_emby_auth_header_value('DeviceId')
+            or ''
+        )
+    except RuntimeError:
+        device_id = ''
+    return str(device_id or '').strip()
+
+
 def _request_context_keys(full_path="", play_session_id=""):
     keys = []
 
@@ -551,23 +565,14 @@ def _play_concurrency_session_key(user_id, item_id="", play_session_id="", devic
     item_id = str(item_id or "").strip()
     play_session_id = str(play_session_id or "").strip()
     if not device_id:
-        try:
-            device_id = (
-                request.args.get('DeviceId')
-                or request.args.get('X-Emby-Device-Id')
-                or request.headers.get('X-Emby-Device-Id')
-                or request.remote_addr
-                or ''
-            )
-        except RuntimeError:
-            device_id = ''
+        device_id = _current_play_concurrency_device_id()
     device_id = str(device_id or '').strip()
     if device_id:
         return f"{user_id}|client:{device_id}"
-    if item_id:
-        return f"{user_id}|item:{item_id}"
     if play_session_id:
         return f"{user_id}|ps:{play_session_id}"
+    if item_id:
+        return f"{user_id}|item:{item_id}"
     return user_id
 
 
@@ -582,9 +587,29 @@ def _clear_play_concurrency_session(user_id="", item_id="", play_session_id="", 
     user_id = str(user_id or "").strip()
     if not user_id:
         return
+    item_id = str(item_id or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    device_id = str(device_id or "").strip()
     key = _play_concurrency_session_key(user_id, item_id=item_id, play_session_id=play_session_id, device_id=device_id)
     with _PLAY_CONCURRENCY_LOCK:
-        _PLAY_CONCURRENCY_SESSIONS.pop(key, None)
+        _cleanup_play_concurrency_sessions()
+        for session_key, session_info in list(_PLAY_CONCURRENCY_SESSIONS.items()):
+            if str(session_info.get("user_id") or "") != user_id:
+                continue
+            if session_key == key:
+                _PLAY_CONCURRENCY_SESSIONS.pop(session_key, None)
+                continue
+            if play_session_id and str(session_info.get("play_session_id") or "") == play_session_id:
+                _PLAY_CONCURRENCY_SESSIONS.pop(session_key, None)
+                continue
+            if item_id and str(session_info.get("item_id") or "") == item_id:
+                _PLAY_CONCURRENCY_SESSIONS.pop(session_key, None)
+                continue
+            if device_id and (
+                str(session_info.get("device_id") or "") == device_id
+                or session_key == f"{user_id}|client:{device_id}"
+            ):
+                _PLAY_CONCURRENCY_SESSIONS.pop(session_key, None)
 
 
 def clear_play_concurrency_for_playback_stop(data):
@@ -616,7 +641,10 @@ def clear_play_concurrency_for_playback_stop(data):
                 _PLAY_CONCURRENCY_SESSIONS.pop(key, None)
                 removed += 1
                 continue
-            if device_id and key.startswith(f"{user_id}|{device_id}|"):
+            if device_id and (
+                str(session_info.get("device_id") or "") == device_id
+                or key == f"{user_id}|client:{device_id}"
+            ):
                 _PLAY_CONCURRENCY_SESSIONS.pop(key, None)
                 removed += 1
     if removed:
@@ -631,9 +659,27 @@ def _check_and_record_play_concurrency(user_id, item_id="", play_session_id=""):
     if max_streams <= 0:
         return None
     now = time.time()
-    key = _play_concurrency_session_key(user_id, item_id=item_id, play_session_id=play_session_id)
+    item_id = str(item_id or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    device_id = _current_play_concurrency_device_id()
+    key = _play_concurrency_session_key(user_id, item_id=item_id, play_session_id=play_session_id, device_id=device_id)
     with _PLAY_CONCURRENCY_LOCK:
         _cleanup_play_concurrency_sessions(now)
+        matched_key = None
+        for existing_key, session_info in _PLAY_CONCURRENCY_SESSIONS.items():
+            if str(session_info.get('user_id') or '') != user_id:
+                continue
+            if existing_key == key:
+                matched_key = existing_key
+                break
+            if play_session_id and str(session_info.get('play_session_id') or '') == play_session_id:
+                matched_key = existing_key
+                break
+            if device_id and str(session_info.get('device_id') or '') == device_id:
+                matched_key = existing_key
+                break
+        if matched_key and matched_key != key:
+            _PLAY_CONCURRENCY_SESSIONS.pop(matched_key, None)
         active_keys = [
             k for k, v in _PLAY_CONCURRENCY_SESSIONS.items()
             if str(v.get('user_id') or '') == user_id
@@ -647,8 +693,9 @@ def _check_and_record_play_concurrency(user_id, item_id="", play_session_id=""):
             return Response("Playback concurrency limit exceeded.", status=429)
         _PLAY_CONCURRENCY_SESSIONS[key] = {
             "user_id": user_id,
-            "item_id": str(item_id or ""),
-            "play_session_id": str(play_session_id or ""),
+            "item_id": item_id,
+            "play_session_id": play_session_id,
+            "device_id": device_id,
             "updated_at": now,
             "expires_at": now + _PLAY_CONCURRENCY_TTL_SECONDS,
         }

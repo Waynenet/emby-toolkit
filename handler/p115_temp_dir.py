@@ -105,19 +105,32 @@ def _item_is_dir(item):
 
 
 def _item_ts(item):
-    for key in ("utime", "update_time", "updated_at", "ptime", "create_time", "ctime", "time", "tp", "te"):
+    for key in (
+        "utime", "update_time", "updated_at", "upt", "uet", "uppt", "user_utime", "file_utime", "u_time",
+        "mtime", "modify_time", "modified_at", "t", "te",
+        "ptime", "create_time", "created_at", "user_ptime", "file_ptime", "p_time",
+        "ctime", "time", "tp", "open_time",
+    ):
         value = (item or {}).get(key)
         if value in (None, "", [], {}):
             continue
         try:
             if isinstance(value, (int, float)):
                 ts = float(value)
-                return ts / 1000.0 if ts > 100000000000 else ts
+                ts = ts / 1000.0 if ts > 100000000000 else ts
+                if ts > 946684800:
+                    return ts
+                continue
             text = str(value).strip()
             if text.isdigit():
                 ts = float(text)
-                return ts / 1000.0 if ts > 100000000000 else ts
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+                ts = ts / 1000.0 if ts > 100000000000 else ts
+                if ts > 946684800:
+                    return ts
+                continue
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            if ts > 946684800:
+                return ts
         except Exception:
             continue
     return 0.0
@@ -303,19 +316,47 @@ def cleanup_old_temp_videos_for_client(client, older_than_hours=3, label="", cid
     return {"deleted": len(delete_ids), "cid": cid, "label": label}
 
 
+def _is_virtual_play_enabled():
+    try:
+        cfg = settings_db.get_shared_resource_config() or {}
+        return bool(cfg.get("p115_shared_virtual_import_enabled"))
+    except Exception as e:
+        logger.debug("  ➜ [115临时目录] 读取虚拟播放开关失败：%s", e)
+        return False
+
+
 def cleanup_all_temp_videos(older_than_hours=3):
     total = 0
     details = []
-    from handler.p115_service import P115Service
     from handler import p115_play_pool
+    from handler.p115_copy_play import is_copy_play_enabled
+    from handler.p115_service import P115Service
 
-    client = P115Service.get_client()
-    if client:
-        result = cleanup_old_temp_videos_for_client(client, older_than_hours, "主号")
-        total += int(result.get("deleted") or 0)
-        details.append(result)
+    copy_play_enabled = is_copy_play_enabled()
+    virtual_play_enabled = _is_virtual_play_enabled()
+    play_pool_enabled = p115_play_pool.is_pool_enabled()
 
-    for result in p115_play_pool.cleanup_temp_dir_old_videos(older_than_hours):
-        total += int(result.get("deleted") or 0)
-        details.append(result)
-    return {"deleted": total, "details": details}
+    if copy_play_enabled or virtual_play_enabled:
+        client = P115Service.get_client()
+        if client:
+            result = cleanup_old_temp_videos_for_client(client, older_than_hours, "主号")
+            total += int(result.get("deleted") or 0)
+            details.append(result)
+    else:
+        logger.info("  ➜ [115临时目录] 跳过主号临时目录清理：复制播放和虚拟播放均未开启。")
+        details.append({"deleted": 0, "label": "主号", "skipped": True, "reason": "copy_play_and_virtual_play_disabled"})
+
+    if play_pool_enabled:
+        for result in p115_play_pool.cleanup_temp_dir_old_videos(older_than_hours):
+            total += int(result.get("deleted") or 0)
+            details.append(result)
+    else:
+        logger.info("  ➜ [115临时目录] 跳过小号临时目录清理：小号播放未开启。")
+        details.append({"deleted": 0, "label": "小号", "skipped": True, "reason": "play_pool_disabled"})
+
+    return {
+        "deleted": total,
+        "details": details,
+        "main_cleanup_enabled": bool(copy_play_enabled or virtual_play_enabled),
+        "play_pool_cleanup_enabled": bool(play_pool_enabled),
+    }

@@ -1377,14 +1377,17 @@ def cleanup_expired_sessions():
 
 def cleanup_temp_dir_old_videos(older_than_hours=3):
     results = []
-    for account in _load_config().get("accounts") or []:
+    config = _load_config()
+    changed = False
+    for account in config.get("accounts") or []:
         if not _has_account_auth(account):
             continue
         try:
             client = _account_client(account)
             temp_cid = str(account.get("temp_cid") or "").strip()
             if not temp_cid:
-                raise RuntimeError("小号临时目录 CID 未保存，请重新保存临时目录配置")
+                temp_cid = _confirm_temp_cid(account, client)
+                changed = True
             results.append(cleanup_old_temp_videos_for_client(
                 client,
                 older_than_hours,
@@ -1393,6 +1396,8 @@ def cleanup_temp_dir_old_videos(older_than_hours=3):
             ))
         except Exception as e:
             logger.warning("  ➜ [115临时目录] 清理小号临时目录失败: %s, err=%s", account.get("alias") or account.get("id"), e)
+    if changed:
+        _save_config(config)
     return results
 
 

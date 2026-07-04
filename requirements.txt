@@ -42,7 +42,7 @@ beautifulsoup4
 lxml
 
 # ---115 网盘支持 ---
-p115client>=0.0.8.4.6
+p115client==0.0.9.3.7
 
 # --- TG Bot ---
 telethon==1.33.1

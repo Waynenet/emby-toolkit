@@ -1599,11 +1599,6 @@ class WatchlistProcessor:
         if self._version_lock_has_hdr_effect(current_source) or not self._version_lock_has_hdr_effect(candidate_source):
             return False
 
-        current_mp = _safe_int((state or {}).get('mp_episode_priority'), None)
-        candidate_mp = _safe_int(row.get('mp_episode_priority'), None)
-        if current_mp is not None and candidate_mp is not None and candidate_mp < current_mp:
-            return False
-
         current_level = _safe_int((state or {}).get('washing_level'), None)
         candidate_level = _safe_int(row.get('washing_level'), None)
         if current_level is not None and candidate_level is not None and candidate_level > current_level:
@@ -1852,7 +1847,7 @@ class WatchlistProcessor:
         season_number: int,
         locked_release_group: str,
         series_name: str = '',
-        baseline_priority: Optional[int] = None,
+        locked_washing_level: Optional[int] = None,
         locked_release_group_alias: str = '',
         include_regex: str = '',
     ) -> Dict[str, Any]:
@@ -1869,6 +1864,7 @@ class WatchlistProcessor:
                         SELECT e.tmdb_id,
                                e.episode_number,
                                e.asset_details_json,
+                               e.washing_level,
                                e.active_washing,
                                COALESCE(r.original_name, c_pc.name, c_sha.name) AS source_name
                         FROM media_metadata
@@ -1931,6 +1927,7 @@ class WatchlistProcessor:
                     clear_ids = []
                     enable_episodes = []
                     clear_episodes = []
+                    episode_levels: Dict[int, int] = {}
                     skipped_unknown = 0
                     for row in rows:
                         episode_tmdb_id = str(row.get('tmdb_id') or '').strip()
@@ -1939,6 +1936,9 @@ class WatchlistProcessor:
                         episode_number = _safe_int(row.get('episode_number'))
                         if not episode_number:
                             continue
+                        level = _safe_int(row.get('washing_level'), None)
+                        if level is not None and level > 0:
+                            episode_levels[episode_number] = level
                         source_names = []
                         source_name = str(row.get('source_name') or '').strip()
                         if source_name:
@@ -1977,9 +1977,26 @@ class WatchlistProcessor:
                     conn.commit()
 
             mp_priority_ok = True
+            locked_level = _safe_int(locked_washing_level, None)
+            if locked_level is None or locked_level <= 0:
+                clear_levels = [episode_levels.get(ep) for ep in clear_episodes if episode_levels.get(ep)]
+                all_levels = [level for level in episode_levels.values() if level]
+                locked_level = min(clear_levels or all_levels or []) if (clear_levels or all_levels) else None
+            baseline_priority = max(101 - int(locked_level), 0) if locked_level else None
             if enable_episodes or clear_episodes:
-                if baseline_priority is None:
-                    baseline_priority = self._get_mp_episode_priority_baseline(tmdb_id, season_number)
+                priority_map: Dict[int, int] = {}
+                for ep in sorted(set(enable_episodes + clear_episodes)):
+                    level = episode_levels.get(ep)
+                    if level:
+                        priority = max(101 - int(level), 0)
+                    elif baseline_priority is not None:
+                        priority = baseline_priority
+                    else:
+                        priority = 0
+                    if ep in enable_episodes:
+                        locked_priority = baseline_priority if baseline_priority is not None else priority
+                        priority = min(priority, max(int(locked_priority) - 1, 0))
+                    priority_map[ep] = priority
                 mp_priority_ok = moviepilot.update_subscription_episode_priority(
                     tmdb_id,
                     season_number,
@@ -1987,6 +2004,7 @@ class WatchlistProcessor:
                     clear_episodes,
                     self.config,
                     baseline_priority=baseline_priority,
+                    episode_priority_map=priority_map,
                 )
 
             if enable_ids or clear_ids:
@@ -2003,6 +2021,7 @@ class WatchlistProcessor:
                 'washing_episodes': sorted(set(enable_episodes)),
                 'completed_episodes': sorted(set(clear_episodes)),
                 'baseline_priority': baseline_priority,
+                'locked_washing_level': locked_level,
                 'mp_priority_ok': bool(mp_priority_ok),
             }
         except Exception as e:
@@ -2114,7 +2133,7 @@ class WatchlistProcessor:
                             parts.append(f"WHEN {int(ep)} THEN {int(priority)}")
                         mp_priority_case = f"CASE e.episode_number {' '.join(parts)} ELSE NULL END"
                     order_sql = (
-                        f"mp_episode_priority DESC NULLS LAST, e.washing_level ASC NULLS LAST, source_has_hdr DESC, e.episode_number ASC NULLS LAST, e.last_updated_at ASC NULLS LAST"
+                        f"e.washing_level ASC NULLS LAST, source_has_hdr DESC, e.episode_number ASC NULLS LAST, e.last_updated_at ASC NULLS LAST"
                         if mode == 'best'
                         else "e.episode_number ASC NULLS LAST, e.last_updated_at ASC NULLS LAST"
                     )
@@ -2275,9 +2294,9 @@ class WatchlistProcessor:
             logger.warning(f"  ➜ [版本锁定] 按季反查新增分集失败：{log_title}: {e}")
             return {}
 
-    def _get_version_lock_threshold(self, watchlist_cfg: Dict[str, Any]) -> Tuple[List[int], int]:
+    def _get_version_lock_threshold(self, watchlist_cfg: Dict[str, Any]) -> int:
         decay_hours = _safe_int(watchlist_cfg.get('series_version_lock_decay_hours'), 48)
-        return [1, 2, 3], max(decay_hours, 0)
+        return max(decay_hours, 0)
 
     def _version_lock_consistency_check_enabled(self, watchlist_cfg: Dict[str, Any]) -> bool:
         assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg, dict) else {}
@@ -2397,9 +2416,9 @@ class WatchlistProcessor:
                 'episode': episode_number,
                 'season': season_number,
             }
-        levels, decay_hours = self._get_version_lock_threshold(watchlist_cfg)
-        if washing_level not in levels:
+        if washing_level <= 0:
             return False, {}
+        decay_hours = self._get_version_lock_threshold(watchlist_cfg)
         now = datetime.now(timezone.utc)
         state = self._get_version_lock_wait_state(tmdb_id, season_number)
         library_start_at = self._get_version_lock_library_start_at(tmdb_id, season_number)
@@ -2414,8 +2433,7 @@ class WatchlistProcessor:
             except Exception:
                 start_at = now
         elapsed_hours = max(int((now - start_at).total_seconds() // 3600), 0)
-        target_index = min((elapsed_hours // max(decay_hours or 1, 1)), len(levels) - 1)
-        target_level = levels[target_index]
+        target_level = 1 + (elapsed_hours // max(decay_hours or 1, 1))
         locked = washing_level <= target_level
         return locked, {
             'library_start_at': library_start_at,
@@ -2563,7 +2581,7 @@ class WatchlistProcessor:
                         season_number,
                         release_group,
                         series_name,
-                        _safe_int(state.get('mp_episode_priority_baseline')) or None,
+                        _safe_int(state.get('washing_level')) or None,
                         release_group_alias,
                         include_regex,
                     )
@@ -2636,7 +2654,7 @@ class WatchlistProcessor:
             release_group_info = self._version_lock_release_group_info(row.get('source_name'))
             release_group = release_group_info.get('group') or ''
             release_group_alias = release_group_info.get('alias') or ''
-            baseline_priority = self._get_mp_episode_priority_baseline(tmdb_id, season_number) if consistency_check_enabled else None
+            baseline_priority = max(101 - int(washing_level), 0) if consistency_check_enabled and washing_level else None
             ok = moviepilot.lock_series_subscription_version(
                 tmdb_id,
                 season_number,
@@ -2674,7 +2692,7 @@ class WatchlistProcessor:
                     season_number,
                     release_group,
                     series_name,
-                    baseline_priority,
+                    washing_level,
                     release_group_alias,
                     include_regex,
                 )
@@ -2978,10 +2996,6 @@ class WatchlistProcessor:
                     last_s_num,
                     False,
                     reason="一致性已通过，完结洗版事务收口。",
-                )
-                logger.info(
-                    f"  ➜ [完结校验] 《{series_name}》S{last_s_num} 本地文件一致性通过；"
-                    "共享登记已交由 Webhook 单集上报，中心端自行聚合逻辑完结季。"
                 )
                 if set_waiting_flag is not True:
                     set_waiting_flag = False
@@ -3911,14 +3925,23 @@ class WatchlistProcessor:
                 logger.info(f"  ➜ [版本锁定] 《{item_name}》本轮有新增分集，但未能匹配到所在季，跳过锁定。")
         elif final_status in lockable_statuses and version_lock_mode in ('best', 'any'):
             locked_seasons = self._get_locked_version_lock_seasons(tmdb_id)
-            if locked_seasons:
+            version_lock_seasons = sorted({int(s) for s in (locked_seasons or []) if s})
+            if not version_lock_seasons:
+                version_lock_seasons = sorted({int(s) for s in active_seasons if s})
+                if version_lock_seasons:
+                    logger.info(
+                        f"  ➜ [版本锁定] 《{item_name}》本轮无新增分集，按活跃季 {version_lock_seasons} 执行单项刷新锁版检查。"
+                    )
+            if version_lock_seasons:
                 self._apply_watchlist_version_lock(
                     tmdb_id=tmdb_id,
                     series_name=item_name,
-                    seasons=locked_seasons,
+                    seasons=version_lock_seasons,
                     mode=version_lock_mode,
                     episode_ids_by_season={},
                 )
+            else:
+                logger.debug(f"  ➜ [版本锁定] 《{item_name}》未找到可检查的活跃季，跳过锁版。")
 
     # --- 统一的、公开的追剧处理入口 ★★★
     def process_watching_list(self, item_id: Optional[str] = None):
