@@ -565,6 +565,15 @@ class SubscribeAssistantManager:
         if season <= 0 or _safe_int((info or {}).get("best_version_full")) != 1:
             return False
         title = self._series_title(tmdb_id, info)
+        if self._has_download_pending(subscribe_id):
+            self._set_season_active_washing(tmdb_id, season, True, "全集洗版下载中，等待整理入库后再做一致性收口。")
+            self._mark_full_washing_started(subscribe_id, tmdb_id, season, info, reason="full_washing_downloading")
+            logger.info(
+                "  ➜ [订阅助手] 《%s》S%s 全集洗版已开始下载，暂不做一致性收口，等待入库回流。",
+                title,
+                season,
+            )
+            return True
         if total <= 0:
             logger.warning("  ➜ [订阅助手] 《%s》S%s 全集洗版完成事件缺少总集数，按一致性不通过处理。", title, season)
         elif self._season_consistency_ok(tmdb_id, season, total, title):
@@ -1337,6 +1346,14 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _has_download_pending(self, subscribe_id: int) -> bool:
+        if not subscribe_id:
+            return False
+        data = store.read_state(STATE_SUBSCRIBES)
+        task = data.get(str(subscribe_id), {}) if isinstance(data, dict) else {}
+        sources = task.get("active_sources") or {} if isinstance(task, dict) else {}
+        return SOURCE_DOWNLOAD_PENDING in sources
 
     def _parse_subscribe_source(self, source: Any) -> Dict[str, Any]:
         text = str(source or "")
