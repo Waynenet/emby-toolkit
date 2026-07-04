@@ -1297,6 +1297,13 @@ def _p115_truthy_dir_flag(value):
     return text in {'1', 'true', 'yes', 'y', 'folder', 'dir', 'directory'}
 
 
+def _p115_first(*values):
+    for value in values:
+        if value not in (None, '', [], {}):
+            return value
+    return None
+
+
 def _p115_normalize_item(item):
     """把 Cookie(webapi/appapi) / OpenAPI 的文件字段统一成 ETK 内部习惯字段。
 
@@ -1321,6 +1328,19 @@ def _p115_normalize_item(item):
     pick_code = item.get('pc') or item.get('pick_code') or item.get('pickcode')
     sha1 = item.get('sha1') or item.get('sha') or item.get('file_sha1')
     size = item.get('fs') or item.get('size') or item.get('file_size') or item.get('s')
+    updated_time = _p115_first(
+        item.get('utime'), item.get('update_time'), item.get('updated_at'),
+        item.get('upt'), item.get('uet'), item.get('uppt'),
+        item.get('user_utime'), item.get('file_utime'), item.get('u_time'),
+        item.get('mtime'), item.get('modify_time'), item.get('modified_at'),
+        item.get('t'), item.get('te')
+    )
+    created_time = _p115_first(
+        item.get('ptime'), item.get('create_time'), item.get('created_at'),
+        item.get('uppt'), item.get('upt'), item.get('uet'),
+        item.get('user_ptime'), item.get('file_ptime'), item.get('p_time'),
+        item.get('ctime'), item.get('tp'), item.get('open_time')
+    )
 
     # fc: ETK 内部约定 0=目录，1=文件。
     fc = item.get('fc')
@@ -1377,6 +1397,13 @@ def _p115_normalize_item(item):
     if size is not None:
         item.setdefault('fs', size)
         item.setdefault('size', size)
+    if updated_time is not None:
+        item.setdefault('utime', updated_time)
+        item.setdefault('update_time', updated_time)
+        item.setdefault('updated_at', updated_time)
+    if created_time is not None:
+        item.setdefault('ptime', created_time)
+        item.setdefault('create_time', created_time)
     if fc is not None:
         item['fc'] = str(fc)
         item.setdefault('file_category', str(fc))

@@ -105,19 +105,32 @@ def _item_is_dir(item):
 
 
 def _item_ts(item):
-    for key in ("utime", "update_time", "updated_at", "ptime", "create_time", "ctime", "time", "tp", "te"):
+    for key in (
+        "utime", "update_time", "updated_at", "upt", "uet", "uppt", "user_utime", "file_utime", "u_time",
+        "mtime", "modify_time", "modified_at", "t", "te",
+        "ptime", "create_time", "created_at", "user_ptime", "file_ptime", "p_time",
+        "ctime", "time", "tp", "open_time",
+    ):
         value = (item or {}).get(key)
         if value in (None, "", [], {}):
             continue
         try:
             if isinstance(value, (int, float)):
                 ts = float(value)
-                return ts / 1000.0 if ts > 100000000000 else ts
+                ts = ts / 1000.0 if ts > 100000000000 else ts
+                if ts > 946684800:
+                    return ts
+                continue
             text = str(value).strip()
             if text.isdigit():
                 ts = float(text)
-                return ts / 1000.0 if ts > 100000000000 else ts
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+                ts = ts / 1000.0 if ts > 100000000000 else ts
+                if ts > 946684800:
+                    return ts
+                continue
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            if ts > 946684800:
+                return ts
         except Exception:
             continue
     return 0.0
