@@ -6012,7 +6012,9 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
             try:
                 err_text = str(e)[:1000]
                 stale_holder = any(x in err_text for x in (
-                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code'
+                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code',
+                    'Range GET HTTP=403', 'Range GET HTTP=404', 'expected=206',
+                    '未能获取源文件直链', '签名取链超时'
                 ))
                 submit = client.submit_rapid_sign_job(job_id, {
                     'status': 'failed',
@@ -6053,11 +6055,11 @@ def _sign_listener_loop():
             if not _enabled():
                 _LISTENER_STOP.wait(5)
                 continue
-            poll_and_process_rapid_sign_jobs_once(timeout=15, limit=10)
+            poll_and_process_rapid_sign_jobs_once(timeout=3, limit=10)
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
-            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=3)
+            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=1)
             if _listener_should_log_failure(consecutive_failures):
                 if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
                     logger.warning(

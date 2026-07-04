@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -375,16 +376,26 @@ class SharedCenterClient:
         url = f"{self.base_url}{path}"
         headers = self._headers()
         headers['Connection'] = 'close'
-        session = _new_center_http_session()
-        resp = None
-        try:
-            resp = session.get(url, headers=headers, params=params or {}, **_request_kwargs(timeout))
-            _raise_for_center_error(resp)
-            return resp.json() if resp.text else {}
-        finally:
-            if resp is not None:
-                resp.close()
-            session.close()
+        last_error = None
+        for attempt in range(2):
+            session = _new_center_http_session()
+            resp = None
+            try:
+                resp = session.get(url, headers=headers, params=params or {}, **_request_kwargs(timeout))
+                _raise_for_center_error(resp)
+                return resp.json() if resp.text else {}
+            except (requests.exceptions.ReadTimeout, requests.exceptions.SSLError, requests.exceptions.ConnectionError) as exc:
+                last_error = exc
+                if attempt >= 1:
+                    raise
+                time.sleep(0.2)
+            finally:
+                if resp is not None:
+                    resp.close()
+                session.close()
+        if last_error is not None:
+            raise last_error
+        return {}
 
     def register_device(self, name: str = '') -> Dict[str, Any]:
         if not self.base_url:
@@ -780,7 +791,12 @@ class SharedCenterClient:
         )
 
     def poll_rapid_sign_jobs(self, *, timeout: int = 1, limit: int = 3) -> Dict[str, Any]:
-        return self._long_poll_get('/api/v1/rapid-sign/jobs/poll', {'timeout': max(0, min(int(timeout or 1), 55)), 'limit': max(1, min(int(limit or 3), 20))}, timeout=max(8, int(timeout or 1) + 8))
+        poll_timeout = max(0, min(int(timeout or 1), 10))
+        return self._long_poll_get(
+            '/api/v1/rapid-sign/jobs/poll',
+            {'timeout': poll_timeout, 'limit': max(1, min(int(limit or 3), 20))},
+            timeout=max(6, poll_timeout + 4),
+        )
 
     def submit_rapid_sign_job(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(f"/api/v1/rapid-sign/jobs/{urllib.parse.quote(str(job_id))}/submit", payload or {}, timeout=15)

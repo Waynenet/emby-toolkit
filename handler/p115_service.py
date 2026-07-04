@@ -2930,9 +2930,9 @@ class P115Service:
 
                 primary = get_115_api_priority()
                 order = (
-                    [(_sign_openapi_downurl, 'OpenAPI优先签名'), (_sign_cookie_downurl, 'Cookie备用签名')]
+                    [(_sign_cookie_downurl, 'Cookie优先签名'), (_sign_openapi_downurl, 'OpenAPI备用签名')]
                     if primary == 'cookie'
-                    else [(_sign_cookie_downurl, 'Cookie优先签名'), (_sign_openapi_downurl, 'OpenAPI备用签名')]
+                    else [(_sign_openapi_downurl, 'OpenAPI优先签名'), (_sign_cookie_downurl, 'Cookie备用签名')]
                 )
                 last_error = None
                 for method, label in order:
