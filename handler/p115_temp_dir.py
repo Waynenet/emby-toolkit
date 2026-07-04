@@ -316,19 +316,47 @@ def cleanup_old_temp_videos_for_client(client, older_than_hours=3, label="", cid
     return {"deleted": len(delete_ids), "cid": cid, "label": label}
 
 
+def _is_virtual_play_enabled():
+    try:
+        cfg = settings_db.get_shared_resource_config() or {}
+        return bool(cfg.get("p115_shared_virtual_import_enabled"))
+    except Exception as e:
+        logger.debug("  ➜ [115临时目录] 读取虚拟播放开关失败：%s", e)
+        return False
+
+
 def cleanup_all_temp_videos(older_than_hours=3):
     total = 0
     details = []
-    from handler.p115_service import P115Service
     from handler import p115_play_pool
+    from handler.p115_copy_play import is_copy_play_enabled
+    from handler.p115_service import P115Service
 
-    client = P115Service.get_client()
-    if client:
-        result = cleanup_old_temp_videos_for_client(client, older_than_hours, "主号")
-        total += int(result.get("deleted") or 0)
-        details.append(result)
+    copy_play_enabled = is_copy_play_enabled()
+    virtual_play_enabled = _is_virtual_play_enabled()
+    play_pool_enabled = p115_play_pool.is_pool_enabled()
 
-    for result in p115_play_pool.cleanup_temp_dir_old_videos(older_than_hours):
-        total += int(result.get("deleted") or 0)
-        details.append(result)
-    return {"deleted": total, "details": details}
+    if copy_play_enabled or virtual_play_enabled:
+        client = P115Service.get_client()
+        if client:
+            result = cleanup_old_temp_videos_for_client(client, older_than_hours, "主号")
+            total += int(result.get("deleted") or 0)
+            details.append(result)
+    else:
+        logger.info("  ➜ [115临时目录] 跳过主号临时目录清理：复制播放和虚拟播放均未开启。")
+        details.append({"deleted": 0, "label": "主号", "skipped": True, "reason": "copy_play_and_virtual_play_disabled"})
+
+    if play_pool_enabled:
+        for result in p115_play_pool.cleanup_temp_dir_old_videos(older_than_hours):
+            total += int(result.get("deleted") or 0)
+            details.append(result)
+    else:
+        logger.info("  ➜ [115临时目录] 跳过小号临时目录清理：小号播放未开启。")
+        details.append({"deleted": 0, "label": "小号", "skipped": True, "reason": "play_pool_disabled"})
+
+    return {
+        "deleted": total,
+        "details": details,
+        "main_cleanup_enabled": bool(copy_play_enabled or virtual_play_enabled),
+        "play_pool_cleanup_enabled": bool(play_pool_enabled),
+    }
