@@ -2476,10 +2476,10 @@ def _normalize_episode_numbers(value) -> List[int]:
 def _requested_missing_episodes_from_payload(payload: Dict[str, Any], event: Dict[str, Any] = None) -> List[int]:
     event = event or {}
     for container in (payload or {}, event or {}):
-        for key in (
-            '_requested_missing_episode_numbers', 'requested_missing_episode_numbers',
-            'missing_episode_numbers', 'missing_episodes', 'episode_numbers'
-        ):
+        # Only explicit request fields mean "filter to local missing episodes".
+        # Center display rows may also carry missing_episodes / episode_numbers to
+        # describe the shared version's own progress; those are not local state.
+        for key in ('_requested_missing_episode_numbers', 'requested_missing_episode_numbers'):
             nums = _normalize_episode_numbers(container.get(key)) if isinstance(container, dict) else []
             if nums:
                 return nums
