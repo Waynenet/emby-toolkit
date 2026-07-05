@@ -231,6 +231,8 @@ const saving = ref(false);
 const importingMp = ref(false);
 const exportingMp = ref(false);
 const activeTemplate = ref('main_dir_template');
+const backendPreview = ref({});
+let previewTimer = null;
 
 const defaultConfig = {
   keep_original_name: false,
@@ -545,11 +547,14 @@ const cleanupEmptySeparators = (text) => {
     const next = cleaned
       .replace(/\s*([·•])\s*(?:\1\s*)+/g, ' $1 ')
       .replace(/\s+-\s*(?:-\s*)+/g, ' - ')
+      .replace(/\.{2,}/g, '.')
       .replace(/\s+\.\s*(?:\.\s*)+/g, ' . ')
+      .replace(/\s*\.\s*-\s*/g, ' - ')
       .replace(/\s+([·•.-])\s+([·•.-])\s+/g, ' $2 ')
-      .replace(/\s+[·•-]\s*(\.[A-Za-z0-9]{1,8})$/g, '$1')
+      .replace(/\.+(?=\.[A-Za-z0-9]{1,8}$)/g, '')
+      .replace(/\s*[·•-]\s*(\.[A-Za-z0-9]{1,8})$/g, '$1')
       .replace(/\s+\.\s+(\.[A-Za-z0-9]{1,8})$/g, '$1')
-      .replace(/^[\s·•-]+|[\s·•-]+$/g, '');
+      .replace(/^[\s·•.-]+|[\s·•.-]+$/g, '');
     if (next === cleaned) break;
     cleaned = next;
   }
@@ -558,6 +563,30 @@ const cleanupEmptySeparators = (text) => {
 
 const movieFileTemplate = computed(() => templateValue('movie_file_template', 'file_template'));
 const tvFileTemplate = computed(() => templateValue('tv_file_template', 'file_template'));
+
+const fallbackPreviewMovieDir = computed(() =>
+  renderTemplate(config.value.main_dir_template, renamePreviewData(mockMovie)) || '未配置主目录规则'
+);
+
+const fallbackPreviewTvDir = computed(() =>
+  renderTemplate(config.value.main_dir_template, renamePreviewData(mockTv)) || '未配置主目录规则'
+);
+
+const fallbackPreviewTvSeason = computed(() =>
+  renderTemplate(config.value.season_dir_template, renamePreviewData(mockTv)) || '未配置季目录规则'
+);
+
+const fallbackPreviewMovieFile = computed(() =>
+  config.value.keep_original_name
+    ? mockMovie.originalFile
+    : withExt(renderTemplate(movieFileTemplate.value, renamePreviewData(mockMovie)), mockMovie, movieFileTemplate.value)
+);
+
+const fallbackPreviewTvFile = computed(() =>
+  config.value.keep_original_name
+    ? mockTv.originalFile
+    : withExt(renderTemplate(tvFileTemplate.value, renamePreviewData(mockTv)), mockTv, tvFileTemplate.value)
+);
 
 const withExt = (name, data, template) => {
   if (!name) return data.originalFile;
@@ -568,27 +597,23 @@ const withExt = (name, data, template) => {
 };
 
 const previewMovieDir = computed(() =>
-  renderTemplate(config.value.main_dir_template, renamePreviewData(mockMovie)) || '未配置主目录规则'
+  backendPreview.value.movie_dir || fallbackPreviewMovieDir.value
 );
 
 const previewTvDir = computed(() =>
-  renderTemplate(config.value.main_dir_template, renamePreviewData(mockTv)) || '未配置主目录规则'
+  backendPreview.value.tv_dir || fallbackPreviewTvDir.value
 );
 
 const previewTvSeason = computed(() =>
-  renderTemplate(config.value.season_dir_template, renamePreviewData(mockTv)) || '未配置季目录规则'
+  backendPreview.value.tv_season || fallbackPreviewTvSeason.value
 );
 
 const previewMovieFile = computed(() =>
-  config.value.keep_original_name
-    ? mockMovie.originalFile
-    : withExt(renderTemplate(movieFileTemplate.value, renamePreviewData(mockMovie)), mockMovie, movieFileTemplate.value)
+  backendPreview.value.movie_file || fallbackPreviewMovieFile.value
 );
 
 const previewTvFile = computed(() =>
-  config.value.keep_original_name
-    ? mockTv.originalFile
-    : withExt(renderTemplate(tvFileTemplate.value, renamePreviewData(mockTv)), mockTv, tvFileTemplate.value)
+  backendPreview.value.tv_file || fallbackPreviewTvFile.value
 );
 
 const previewMovieStrm = computed(() => {
@@ -600,6 +625,48 @@ const previewTvStrm = computed(() => {
   const baseUrl = 'http://127.0.0.1:5257/api/p115/play/def456uvw';
   return config.value.strm_url_fmt === 'with_name' ? `${baseUrl}/${previewTvFile.value}` : baseUrl;
 });
+
+const refreshBackendPreview = async () => {
+  const templates = {
+    main_dir_template: config.value.main_dir_template,
+    season_dir_template: config.value.season_dir_template,
+    movie_file_template: movieFileTemplate.value,
+    tv_file_template: tvFileTemplate.value,
+    file_template: config.value.file_template,
+  };
+  try {
+    const res = await axios.post('/api/p115/rename_config/preview', {
+      config: config.value,
+      templates,
+    });
+    if (res.data.success) {
+      backendPreview.value = res.data.data || {};
+    }
+  } catch (e) {
+    backendPreview.value = {};
+  }
+};
+
+const scheduleBackendPreview = () => {
+  if (!isVisible.value) return;
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshBackendPreview, 250);
+};
+
+watch(
+  () => ({
+    main: config.value.main_dir_template,
+    season: config.value.season_dir_template,
+    movie: movieFileTemplate.value,
+    tv: tvFileTemplate.value,
+    file: config.value.file_template,
+    keep: config.value.keep_original_name,
+    codec: config.value.video_codec_style,
+    hideAudio: config.value.hide_audio_channels,
+  }),
+  scheduleBackendPreview,
+  { deep: true }
+);
 
 const ensureTemplateDefaults = (data) => {
   const next = { ...defaultConfig, ...(data || {}) };
@@ -618,6 +685,7 @@ const open = async () => {
     const res = await axios.get('/api/p115/rename_config');
     if (res.data.success) {
       config.value = ensureTemplateDefaults(res.data.data);
+      await refreshBackendPreview();
     }
   } catch (e) {
     message.error('加载配置失败');

@@ -1512,6 +1512,7 @@ def update_subscription_episode_priority(
     *,
     baseline_priority: Optional[int] = None,
     episode_priority_map: Optional[Dict[int, int]] = None,
+    preserve_best_version_full: bool = False,
 ) -> bool:
     """Synchronize MP per-episode priority after ETK locks a release group."""
     tmdb_id = str(tmdb_id or '').strip()
@@ -1550,13 +1551,21 @@ def update_subscription_episode_priority(
             if priority.get(key) != value:
                 priority[key] = value
                 changed = True
+        target_current_priority = None
+        if preserve_best_version_full and baseline_priority is not None:
+            target_current_priority = int(baseline_priority)
+            if _safe_int_value(existing.get("current_priority"), -1) != target_current_priority:
+                changed = True
         if not changed:
             return True
 
         payload = dict(existing)
         payload["episode_priority"] = priority
         payload["best_version"] = 1
-        payload.pop("best_version_full", None)
+        if target_current_priority is not None:
+            payload["current_priority"] = target_current_priority
+        if not preserve_best_version_full:
+            payload.pop("best_version_full", None)
         payload["season"] = int(season)
         payload["tmdbid"] = int(tmdb_id)
         return update_subscription(payload, config)
@@ -1592,7 +1601,10 @@ def update_subscription_episode_priority(
     payload = dict(existing)
     payload["episode_priority"] = priority
     payload["best_version"] = 1
-    payload.pop("best_version_full", None)
+    if preserve_best_version_full:
+        payload["current_priority"] = int(baseline_priority)
+    if not preserve_best_version_full:
+        payload.pop("best_version_full", None)
     payload["season"] = int(season)
     payload["tmdbid"] = int(tmdb_id)
     return update_subscription(payload, config)

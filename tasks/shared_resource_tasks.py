@@ -6012,7 +6012,9 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
             try:
                 err_text = str(e)[:1000]
                 stale_holder = any(x in err_text for x in (
-                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code'
+                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code',
+                    'Range GET HTTP=403', 'Range GET HTTP=404', 'expected=206',
+                    '未能获取源文件直链', '签名取链超时'
                 ))
                 submit = client.submit_rapid_sign_job(job_id, {
                     'status': 'failed',
@@ -6053,11 +6055,11 @@ def _sign_listener_loop():
             if not _enabled():
                 _LISTENER_STOP.wait(5)
                 continue
-            poll_and_process_rapid_sign_jobs_once(timeout=15, limit=10)
+            poll_and_process_rapid_sign_jobs_once(timeout=3, limit=10)
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
-            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=3)
+            wait_seconds = _listener_failure_backoff_seconds(consecutive_failures, base=1)
             if _listener_should_log_failure(consecutive_failures):
                 if consecutive_failures >= _LISTENER_FAILURE_WARN_THRESHOLD:
                     logger.warning(
@@ -6079,7 +6081,7 @@ def _event_listener_loop():
                 _LISTENER_STOP.wait(15)
                 continue
             poll_and_consume_once(
-                timeout=15,
+                timeout=3,
                 limit=5,
                 stop_event=_LISTENER_STOP,
                 lease_max_wait_seconds=20,
@@ -7685,13 +7687,6 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             failed_items = followup.get('failed_items') if isinstance(followup.get('failed_items'), list) else []
             names = '、'.join([str(x.get('title') or '').strip() for x in failed_items[:3] if isinstance(x, dict) and str(x.get('title') or '').strip()])
             parts.append(f"补登失败={followup.get('failed')}" + (f"（{names}）" if names else ''))
-    quality_backfill = result.get('quality_source_backfill') if isinstance(result.get('quality_source_backfill'), dict) else {}
-    if quality_backfill:
-        parts.append(f"来源补齐={quality_backfill.get('reregistered', 0)}/{quality_backfill.get('checked', 0)}")
-        if quality_backfill.get('skipped'):
-            parts.append(f"来源跳过={quality_backfill.get('skipped')}")
-        if quality_backfill.get('failed'):
-            parts.append(f"来源补齐失败={quality_backfill.get('failed')}")
     display_meta = result.get('display_meta_backfill') if isinstance(result.get('display_meta_backfill'), dict) else {}
     if display_meta:
         parts.append(f"海报元数据补齐={display_meta.get('uploaded_meta_items', 0)}/{display_meta.get('prepared_meta_items', 0)}")
@@ -7724,7 +7719,7 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             parts.append(f"分享全量对账跳过={share_reconcile.get('message')}")
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'quality_source_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -7752,10 +7747,6 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         result['airing_episode_backfill'] = _backfill_airing_episode_sources(limit=500)
     except Exception as e:
         result['airing_episode_backfill_error'] = str(e)
-    try:
-        result['quality_source_backfill'] = _backfill_center_missing_quality_sources(limit=300)
-    except Exception as e:
-        result['quality_source_backfill_error'] = str(e)
     try:
         result['display_meta_backfill'] = _backfill_center_display_metadata(limit=3000)
     except Exception as e:

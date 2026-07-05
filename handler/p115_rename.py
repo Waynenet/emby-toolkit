@@ -86,11 +86,14 @@ class P115RenameRenderer:
         for _ in range(4):
             next_text = re.sub(r'\s*([·•])\s*(?:\1\s*)+', r' \1 ', cleaned)
             next_text = re.sub(r'\s+-\s*(?:-\s*)+', ' - ', next_text)
+            next_text = re.sub(r'\.{2,}', '.', next_text)
             next_text = re.sub(r'\s+\.\s*(?:\.\s*)+', ' . ', next_text)
+            next_text = re.sub(r'\s*\.\s*-\s*', ' - ', next_text)
             next_text = re.sub(r'\s+([·•.-])\s+([·•.-])\s+', r' \2 ', next_text)
-            next_text = re.sub(r'\s+[·•-]\s*(\.[A-Za-z0-9]{1,8})$', r'\1', next_text)
+            next_text = re.sub(r'\.+(?=\.[A-Za-z0-9]{1,8}$)', '', next_text)
+            next_text = re.sub(r'\s*[·•-]\s*(\.[A-Za-z0-9]{1,8})$', r'\1', next_text)
             next_text = re.sub(r'\s+\.\s+(\.[A-Za-z0-9]{1,8})$', r'\1', next_text)
-            next_text = next_text.strip(' ·•-')
+            next_text = next_text.strip(' ·•.-')
             if next_text == cleaned:
                 break
             cleaned = next_text
@@ -208,6 +211,8 @@ class P115RenameRenderer:
             'fps': video_info.get('fps') or '',
             'group': group,
             'original_name': original_name_text,
+            'original_upper': original_name_text.upper(),
+            'name_upper': name_from_file.upper(),
             'part': part,
             'file_ext': ext_with_dot,
             'fileExt': ext_with_dot,

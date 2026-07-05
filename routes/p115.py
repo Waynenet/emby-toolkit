@@ -16,6 +16,7 @@ from extensions import admin_required, emby_login_required
 from database import settings_db, shared_credit_db, shared_virtual_db
 from handler import moviepilot, emby
 from handler.p115_service import P115Service, get_config
+from handler.p115_rename import P115RenameRenderer
 from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
 from handler.p115_copy_play import (
@@ -2252,6 +2253,157 @@ def handle_rename_config():
             settings_db.save_washing_priority_config({"conflict_mode": legacy_conflict_mode})
         settings_db.save_setting('p115_rename_config', new_config)
         return jsonify({"success": True, "message": "重命名规则已保存"})
+
+
+def _rename_preview_payload(is_tv=False):
+    if is_tv:
+        return {
+            "details": {
+                "title": "绝命毒师",
+                "title_en": "Breaking Bad",
+                "original_title": "Breaking Bad",
+                "date": "2008-01-20",
+            },
+            "tmdb_id": "1396",
+            "original_title": "Breaking Bad",
+            "safe_title": "绝命毒师",
+            "original_name": "Breaking.Bad.S01E01.2160p.NF.WEB-DL.HDR.60fps.HEVC.Atmos-HHWEB.mp4",
+            "season_num": 1,
+            "episode_num": 1,
+            "file_ext": ".mp4",
+            "video_info": {
+                "resolution": "2160p",
+                "source": "WEB-DL",
+                "stream": "NF",
+                "effect": "HDR",
+                "codec": "HEVC",
+                "videoCodec": "HEVC",
+                "videoBit": "10bit",
+                "audio_count": "2Audios",
+                "audio": "Atmos",
+                "audioCodec": "Atmos",
+                "fps": "60",
+                "group": "HHWEB",
+            },
+        }
+
+    return {
+        "details": {
+            "title": "寄生虫",
+            "title_en": "Parasite",
+            "original_title": "기생충",
+            "date": "2019-05-30",
+        },
+        "tmdb_id": "496243",
+        "original_title": "Parasite",
+        "safe_title": "寄生虫",
+        "original_name": "Parasite.2019.1080p.BluRay.HDR.AVC.DDP5.1-CMCT.mkv",
+        "season_num": None,
+        "episode_num": None,
+        "file_ext": ".mkv",
+        "video_info": {
+            "resolution": "1080p",
+            "source": "BluRay",
+            "stream": "AMZN",
+            "effect": "HDR",
+            "codec": "AVC",
+            "videoCodec": "AVC",
+            "videoBit": "8bit",
+            "audio_count": "2Audios",
+            "audio": "DDP 5.1",
+            "audioCodec": "DDP 5.1",
+            "fps": "23.976",
+            "group": "CMCT",
+        },
+    }
+
+
+@p115_bp.route('/rename_config/preview', methods=['POST'])
+@admin_required
+def preview_rename_config():
+    data = request.json if isinstance(request.json, dict) else {}
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    templates = data.get("templates") if isinstance(data.get("templates"), dict) else {}
+
+    try:
+        movie_ctx = _rename_preview_payload(False)
+        tv_ctx = _rename_preview_payload(True)
+        movie_renderer = P115RenameRenderer(
+            movie_ctx["details"],
+            movie_ctx["tmdb_id"],
+            movie_ctx["original_title"],
+            config,
+        )
+        tv_renderer = P115RenameRenderer(
+            tv_ctx["details"],
+            tv_ctx["tmdb_id"],
+            tv_ctx["original_title"],
+            config,
+        )
+
+        movie_dir = movie_renderer.render_template(
+            templates.get("main_dir_template") or "",
+            original_title=movie_ctx["original_title"],
+            original_name=movie_ctx["original_name"],
+            video_info=movie_ctx["video_info"],
+            safe_title=movie_ctx["safe_title"],
+            file_ext=movie_ctx["file_ext"],
+        )
+        tv_dir = tv_renderer.render_template(
+            templates.get("main_dir_template") or "",
+            is_tv=True,
+            season_num=tv_ctx["season_num"],
+            episode_num=tv_ctx["episode_num"],
+            original_title=tv_ctx["original_title"],
+            original_name=tv_ctx["original_name"],
+            video_info=tv_ctx["video_info"],
+            safe_title=tv_ctx["safe_title"],
+            file_ext=tv_ctx["file_ext"],
+        )
+        tv_season = tv_renderer.render_template(
+            templates.get("season_dir_template") or "",
+            is_tv=True,
+            season_num=tv_ctx["season_num"],
+            episode_num=tv_ctx["episode_num"],
+            original_title=tv_ctx["original_title"],
+            original_name=tv_ctx["original_name"],
+            video_info=tv_ctx["video_info"],
+            safe_title=tv_ctx["safe_title"],
+            file_ext=tv_ctx["file_ext"],
+        )
+        movie_file = movie_ctx["original_name"] if config.get("keep_original_name") else movie_renderer.render_template(
+            templates.get("movie_file_template") or "",
+            original_title=movie_ctx["original_title"],
+            original_name=movie_ctx["original_name"],
+            video_info=movie_ctx["video_info"],
+            safe_title=movie_ctx["safe_title"],
+            file_ext=movie_ctx["file_ext"],
+        )
+        tv_file = tv_ctx["original_name"] if config.get("keep_original_name") else tv_renderer.render_template(
+            templates.get("tv_file_template") or templates.get("file_template") or "",
+            is_tv=True,
+            season_num=tv_ctx["season_num"],
+            episode_num=tv_ctx["episode_num"],
+            original_title=tv_ctx["original_title"],
+            original_name=tv_ctx["original_name"],
+            video_info=tv_ctx["video_info"],
+            safe_title=tv_ctx["safe_title"],
+            file_ext=tv_ctx["file_ext"],
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "movie_dir": movie_dir or "未配置主目录规则",
+                "tv_dir": tv_dir or "未配置主目录规则",
+                "tv_season": tv_season or "未配置季目录规则",
+                "movie_file": movie_file or movie_ctx["original_name"],
+                "tv_file": tv_file or tv_ctx["original_name"],
+            }
+        })
+    except Exception as e:
+        logger.warning(f"  ➜ [重命名预览] Jinja2 渲染失败: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 400
     
 def _split_mp_template_from_right(template, separator_count):
     text = str(template or "").strip()
