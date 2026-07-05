@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 STATE_SUBSCRIBES = "subscribes"
 STATE_TORRENTS = "torrents"
+STATE_HISTORY_RECONCILE = "history_reconcile"
 SOURCE_PENDING_JUDGE = "pending_judge"
 SOURCE_GUARD_VETO = "guard_veto"
 SOURCE_DOWNLOAD_PENDING = "download_pending"
@@ -204,6 +205,7 @@ class SubscribeAssistantManager:
             "released_pending": 0,
             "download_checked": 0,
             "washing_timeouts": 0,
+            "history_reconciled": 0,
             "snapshots_checked": 0,
             "snapshots_cleaned": 0,
             "delete_records_cleaned": 0,
@@ -211,11 +213,225 @@ class SubscribeAssistantManager:
         stats["delete_records_cleaned"] = store.cleanup_delete_records()
         stats["snapshots_cleaned"] = store.cleanup_snapshots(self.cfg.snapshot_retention_days)
         stats["washing_timeouts"] = self.run_full_washing_timeout_check()
+        stats["history_reconciled"] = self.run_transfer_history_reconcile(limit=limit)
         if self.cfg.download_monitor_enabled:
             stats["download_checked"] = self.run_download_check()
         if self.cfg.verify_enabled:
             stats["snapshots_checked"] = self.run_snapshot_verify(limit=limit)
         return stats
+
+    def run_transfer_history_reconcile(self, limit: int = 100) -> int:
+        now = time.time()
+        retry_ttl = 6 * 3600
+        reconcile_state = store.read_state(STATE_HISTORY_RECONCILE)
+        if not isinstance(reconcile_state, dict):
+            reconcile_state = {}
+        last_retry = reconcile_state.get("last_retry") if isinstance(reconcile_state.get("last_retry"), dict) else {}
+
+        page_size = max(20, min(_safe_int(limit, 100), 200))
+        failed_records = moviepilot.list_transfer_history(
+            self.app_config,
+            page_limit=10,
+            page_size=page_size,
+            status=False,
+        )
+        recent_records = moviepilot.list_transfer_history(
+            self.app_config,
+            page_limit=5,
+            page_size=page_size,
+        )
+        records = []
+        seen_history_ids = set()
+        for rec in list(failed_records or []) + list(recent_records or []):
+            history_id = _safe_int(rec.get("id"))
+            dedupe_key = history_id or self._transfer_history_fingerprint(
+                rec,
+                _first_text(rec, "pickcode", "pick_code", "pc", "PickCode"),
+                _first_text(rec, "fileid", "file_id", "fid", "FileId"),
+            )
+            if dedupe_key in seen_history_ids:
+                continue
+            seen_history_ids.add(dedupe_key)
+            records.append(rec)
+        if not records:
+            return 0
+
+        keys = []
+        redo_history_ids = []
+        seen = set()
+        failed_seen = 0
+        retry_skipped = 0
+        for rec in records:
+            history_id = _safe_int(rec.get("id"))
+            pick_code = _first_text(rec, "pickcode", "pick_code", "pc", "PickCode")
+            file_id = _first_text(rec, "fileid", "file_id", "fid", "FileId")
+            title = _first_text(rec, "title", "name", "src", "path", "dest")
+            status_value = rec.get("status")
+            errmsg = _first_text(rec, "errmsg", "error", "message")
+            fingerprint = self._transfer_history_fingerprint(rec, pick_code, file_id)
+            is_failed = (
+                status_value is False
+                or str(status_value).strip().lower() in {"false", "failed", "fail", "error", "0"}
+                or bool(errmsg)
+            )
+            if is_failed:
+                failed_seen += 1
+            if now - float(last_retry.get(fingerprint) or 0) < retry_ttl:
+                if is_failed:
+                    retry_skipped += 1
+                continue
+            if is_failed and history_id > 0:
+                redo_history_ids.append(history_id)
+                last_retry[fingerprint] = now
+                logger.info(
+                    "  ➜ [订阅助手对账] 发现 MP 失败整理历史，准备重整理：%s（ID=%s，原因=%s）",
+                    title or pick_code or file_id or "-",
+                    history_id,
+                    errmsg or "-",
+                )
+                if len(redo_history_ids) >= max(1, min(_safe_int(limit, 100), 20)):
+                    break
+                continue
+            if not pick_code and not file_id:
+                continue
+            key = (pick_code, file_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            keys.append({
+                "history_id": history_id,
+                "pick_code": pick_code,
+                "file_id": file_id,
+                "fingerprint": fingerprint,
+                "title": title,
+                "status": str(status_value),
+            })
+            if len(keys) >= max(1, _safe_int(limit, 100)):
+                break
+        if not keys and not redo_history_ids:
+            if failed_seen or retry_skipped:
+                logger.info(
+                    "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 0 条。",
+                    len(failed_records or []),
+                    len(recent_records or []),
+                    len(records),
+                    failed_seen,
+                    retry_skipped,
+                )
+            return 0
+
+        fixed = 0
+        retry_needed = bool(redo_history_ids)
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for item in keys:
+                        pick_code = item.get("pick_code")
+                        file_id = item.get("file_id")
+                        if pick_code:
+                            cursor.execute(
+                                """
+                                SELECT id, file_id, pick_code, original_name, status, fail_reason
+                                FROM p115_organize_records
+                                WHERE pick_code = %s
+                                ORDER BY processed_at DESC
+                                LIMIT 1
+                                """,
+                                (pick_code,),
+                            )
+                        elif file_id:
+                            cursor.execute(
+                                """
+                                SELECT id, file_id, pick_code, original_name, status, fail_reason
+                                FROM p115_organize_records
+                                WHERE file_id = %s
+                                ORDER BY processed_at DESC
+                                LIMIT 1
+                                """,
+                                (file_id,),
+                            )
+                        else:
+                            continue
+
+                        row = cursor.fetchone()
+                        if row and str(row.get("status") or "").lower() == "success":
+                            continue
+
+                        if row:
+                            cursor.execute("DELETE FROM p115_organize_records WHERE id = %s", (row.get("id"),))
+                            fixed += 1
+                            retry_needed = True
+                            last_retry[item.get("fingerprint")] = now
+                            history_id = _safe_int(item.get("history_id"))
+                            if history_id > 0:
+                                redo_history_ids.append(history_id)
+                            logger.info(
+                                "  ➜ [订阅助手对账] 已清理 ETK 异常整理记录，准备重整理：%s（状态=%s，原因=%s）",
+                                row.get("original_name") or item.get("title") or pick_code or file_id,
+                                row.get("status") or "-",
+                                row.get("fail_reason") or "-",
+                            )
+                        else:
+                            history_id = _safe_int(item.get("history_id"))
+                            if history_id > 0:
+                                redo_history_ids.append(history_id)
+                                fixed += 1
+                                retry_needed = True
+                                last_retry[item.get("fingerprint")] = now
+                                logger.info(
+                                    "  ➜ [订阅助手对账] MP 已有整理历史但 ETK 缺少整理记录，准备重整理：%s（ID=%s）",
+                                    item.get("title") or pick_code or file_id,
+                                    history_id,
+                                )
+                    conn.commit()
+        except Exception as e:
+            logger.warning(f"  ➜ [订阅助手对账] 巡检失败：{e}", exc_info=True)
+            return fixed
+
+        if retry_needed:
+            last_retry = {
+                k: v for k, v in (last_retry or {}).items()
+                if k and now - float(v or 0) < retry_ttl
+            }
+            store.write_state(STATE_HISTORY_RECONCILE, {"last_retry": last_retry})
+            if redo_history_ids:
+                redo_ids = []
+                for history_id in redo_history_ids:
+                    if history_id not in redo_ids:
+                        redo_ids.append(history_id)
+                if moviepilot.redo_transfer_history(self.app_config, redo_ids):
+                    fixed += max(0, len(redo_ids) - fixed)
+                else:
+                    try:
+                        import task_manager
+                        task_manager.trigger_115_organize_task(reason="subscribe_assistant_reconcile")
+                    except Exception as e:
+                        logger.warning(f"  ➜ [订阅助手对账] 触发 115 整理重跑失败：{e}", exc_info=True)
+                logger.info(
+                    "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 %s 条。",
+                    len(failed_records or []),
+                    len(recent_records or []),
+                    len(records),
+                    failed_seen,
+                    retry_skipped,
+                    len(redo_ids),
+                )
+                return fixed
+            try:
+                import task_manager
+                task_manager.trigger_115_organize_task(reason="subscribe_assistant_reconcile")
+            except Exception as e:
+                logger.warning(f"  ➜ [订阅助手对账] 触发 115 整理重跑失败：{e}", exc_info=True)
+        logger.info(
+            "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 %s 条。",
+            len(failed_records or []),
+            len(recent_records or []),
+            len(records),
+            failed_seen,
+            retry_skipped,
+            len(redo_history_ids),
+        )
+        return fixed
 
     def run_full_washing_timeout_check(self) -> int:
         timeout_hours = _safe_int(self.cfg.full_washing_timeout_hours)
@@ -1569,6 +1785,16 @@ class SubscribeAssistantManager:
         ])
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
+    def _transfer_history_fingerprint(self, rec: Dict[str, Any], pick_code: str, file_id: str) -> str:
+        raw = "|".join([
+            str(rec.get("id") or ""),
+            str(pick_code or ""),
+            str(file_id or ""),
+            _first_text(rec, "title", "name", "src", "path"),
+            _first_text(rec, "date", "time", "created_at", "updated_at"),
+        ])
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
 
 def _progress_value(info: Dict[str, Any]) -> float:
     for key in ("progress", "percent", "completed"):
@@ -1579,6 +1805,16 @@ def _progress_value(info: Dict[str, Any]) -> float:
         except (TypeError, ValueError):
             pass
     return 0.0
+
+
+def _first_text(data: Dict[str, Any], *keys: str) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, "", [], {}):
+            return str(value).strip()
+    return ""
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
