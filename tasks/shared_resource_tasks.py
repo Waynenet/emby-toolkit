@@ -6081,7 +6081,7 @@ def _event_listener_loop():
                 _LISTENER_STOP.wait(15)
                 continue
             poll_and_consume_once(
-                timeout=15,
+                timeout=3,
                 limit=5,
                 stop_event=_LISTENER_STOP,
                 lease_max_wait_seconds=20,

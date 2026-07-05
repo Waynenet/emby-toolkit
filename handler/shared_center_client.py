@@ -23,6 +23,7 @@ _CENTER_HTTP_LOCAL = threading.local()
 
 def _new_center_http_session() -> requests.Session:
     session = requests.Session()
+    session.trust_env = False
     adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16, pool_block=False)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
@@ -183,13 +184,10 @@ def _request_kwargs(timeout: int) -> Dict[str, Any]:
         read_timeout = max(1, int(timeout or 15))
     except Exception:
         read_timeout = 15
-    kwargs = {'timeout': (5, read_timeout)}
-    getter = getattr(config_manager, 'get_proxies_for_requests', None)
-    if callable(getter):
-        proxies = getter()
-        if proxies:
-            kwargs['proxies'] = proxies
-    return kwargs
+    # Shared-center traffic is app-to-center control traffic. Do not route it
+    # through the global media/API proxy; long polling is sensitive to proxy TLS
+    # EOFs and idle connection handling.
+    return {'timeout': (5, read_timeout)}
 
 
 def _shared_cfg() -> Dict[str, Any]:
@@ -802,7 +800,12 @@ class SharedCenterClient:
         return self._post(f"/api/v1/rapid-sign/jobs/{urllib.parse.quote(str(job_id))}/submit", payload or {}, timeout=15)
 
     def poll_device_events(self, *, timeout: int = 25, limit: int = 5) -> Dict[str, Any]:
-        return self._long_poll_get('/api/v1/device-events/poll', {'timeout': max(1, min(int(timeout or 25), 55)), 'limit': max(1, min(int(limit or 5), 50))}, timeout=max(10, int(timeout or 25) + 10))
+        poll_timeout = max(0, min(int(timeout or 1), 10))
+        return self._long_poll_get(
+            '/api/v1/device-events/poll',
+            {'timeout': poll_timeout, 'limit': max(1, min(int(limit or 5), 50))},
+            timeout=max(6, poll_timeout + 4),
+        )
 
     def ack_device_events(self, event_ids: List[str], result: str = 'ok', message: str = '') -> Dict[str, Any]:
         return self._post('/api/v1/device-events/ack', {'event_ids': event_ids or [], 'result': result or 'ok', 'message': message or ''}, timeout=15)
