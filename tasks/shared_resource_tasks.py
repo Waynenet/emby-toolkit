@@ -7687,13 +7687,6 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             failed_items = followup.get('failed_items') if isinstance(followup.get('failed_items'), list) else []
             names = '、'.join([str(x.get('title') or '').strip() for x in failed_items[:3] if isinstance(x, dict) and str(x.get('title') or '').strip()])
             parts.append(f"补登失败={followup.get('failed')}" + (f"（{names}）" if names else ''))
-    quality_backfill = result.get('quality_source_backfill') if isinstance(result.get('quality_source_backfill'), dict) else {}
-    if quality_backfill:
-        parts.append(f"来源补齐={quality_backfill.get('reregistered', 0)}/{quality_backfill.get('checked', 0)}")
-        if quality_backfill.get('skipped'):
-            parts.append(f"来源跳过={quality_backfill.get('skipped')}")
-        if quality_backfill.get('failed'):
-            parts.append(f"来源补齐失败={quality_backfill.get('failed')}")
     display_meta = result.get('display_meta_backfill') if isinstance(result.get('display_meta_backfill'), dict) else {}
     if display_meta:
         parts.append(f"海报元数据补齐={display_meta.get('uploaded_meta_items', 0)}/{display_meta.get('prepared_meta_items', 0)}")
@@ -7726,7 +7719,7 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             parts.append(f"分享全量对账跳过={share_reconcile.get('message')}")
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'quality_source_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -7754,10 +7747,6 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         result['airing_episode_backfill'] = _backfill_airing_episode_sources(limit=500)
     except Exception as e:
         result['airing_episode_backfill_error'] = str(e)
-    try:
-        result['quality_source_backfill'] = _backfill_center_missing_quality_sources(limit=300)
-    except Exception as e:
-        result['quality_source_backfill_error'] = str(e)
     try:
         result['display_meta_backfill'] = _backfill_center_display_metadata(limit=3000)
     except Exception as e:
