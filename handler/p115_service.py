@@ -29,6 +29,7 @@ except ImportError:
     P115Client = None
 
 logger = logging.getLogger(__name__)
+FORCE_GENERATE_MEDIAINFO = True
 
 from collections import OrderedDict
 
@@ -1509,16 +1510,12 @@ def get_115_api_priority(default='openapi'):
 
 def is_p115_mediainfo_assisted_recognition_enabled():
     """
-    媒体信息辅助识别开关。
-    必须同时开启：
-    1. 媒体信息格式化
-    2. 媒体信息辅助识别
-    才允许使用 raw_ffprobe_json._etk 参与识别。
+    媒体信息辅助识别开关。媒体信息/RAW 已是强制基础能力，
+    这里只控制是否允许 raw_ffprobe_json._etk 参与识别。
     """
     cfg = config_manager.APP_CONFIG or {}
-    generate_enabled = bool(cfg.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False))
     assisted_enabled = bool(cfg.get(constants.CONFIG_OPTION_115_MEDIAINFO_ASSISTED_RECOGNITION, False))
-    return generate_enabled and assisted_enabled
+    return assisted_enabled
 
 
 # ======================================================================
@@ -4421,6 +4418,50 @@ class P115CacheManager:
         return preid
 
     @staticmethod
+    def _lookup_preid_from_shared_rapid_tables(sha1):
+        sha1 = str(sha1 or '').strip().upper()
+        if not sha1:
+            return '', ''
+
+        preid_expr = "COALESCE(preid, rapid_meta_json->>'preid', rapid_meta_json->>'pre_sha1', rapid_meta_json->>'pre_sha1_128k')"
+        queries = (
+            (
+                'shared_rapid_source_files',
+                f"""
+                SELECT UPPER({preid_expr}) AS preid
+                FROM shared_rapid_source_files
+                WHERE UPPER(sha1) = %s
+                  AND UPPER({preid_expr}) ~ '^[A-F0-9]{{40}}$'
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+            ),
+            (
+                'shared_rapid_sources',
+                f"""
+                SELECT UPPER({preid_expr}) AS preid
+                FROM shared_rapid_sources
+                WHERE UPPER(sha1) = %s
+                  AND UPPER({preid_expr}) ~ '^[A-F0-9]{{40}}$'
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+            ),
+        )
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for source, sql in queries:
+                        cursor.execute(sql, (sha1,))
+                        row = cursor.fetchone()
+                        preid = P115CacheManager._norm_preid((row or {}).get('preid') if row else '')
+                        if preid:
+                            return preid, source
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 查询共享秒传 preid 持久表失败: sha1={sha1[:12]}..., err={e}")
+        return '', ''
+
+    @staticmethod
     def ensure_file_preid(file_info=None, *, sha1=None, fid=None, pick_code=None, file_name=None):
         """确保文件拥有 preid，并返回 preid。
 
@@ -4509,6 +4550,26 @@ class P115CacheManager:
                     file_name = file_name or str(row.get('name') or '').strip()
             except Exception as e:
                 logger.debug(f"  ➜ [115缓存] 查询文件身份失败: {e}")
+
+        shared_preid, shared_preid_source = P115CacheManager._lookup_preid_from_shared_rapid_tables(sha1)
+        if shared_preid:
+            P115CacheManager.register_preid_hint(
+                item,
+                sha1=sha1,
+                preid=shared_preid,
+                fid=fid,
+                pick_code=pick_code,
+                file_name=file_name,
+                size=item.get('size') or item.get('fs') or item.get('file_size') or item.get('filesize') or 0,
+                source=shared_preid_source,
+            )
+            if isinstance(file_info, dict):
+                file_info['preid'] = shared_preid
+            logger.debug(
+                f"  ➜ [115缓存] 命中共享秒传持久表 preid，跳过直链 Range: "
+                f"{file_name or sha1 or pick_code} -> {shared_preid[:12]}... ({shared_preid_source})"
+            )
+            return shared_preid
 
         if not pick_code:
             return ''
@@ -8613,7 +8674,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                             file_sha1 = info_res['data'].get('sha1')
                                     except Exception: pass
 
-                                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                                if FORCE_GENERATE_MEDIAINFO:
                                     try:
                                         mediainfo_filename = os.path.splitext(new_filename)[0] + "-mediainfo.json"
                                         mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
@@ -8891,7 +8952,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     pass
 
                 # 生成 Mediainfo
-                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                if FORCE_GENERATE_MEDIAINFO:
                     try:
                         mediainfo_text = None
                         if sha1:

@@ -64,6 +64,7 @@ STREAM_CHECK_MAX_RETRIES = 6   # 最大重试次数
 STREAM_CHECK_INTERVAL = 10      # 每次轮询间隔(秒)
 STREAM_CHECK_SEMAPHORE = Semaphore(5) # 限制并发预检的数量，防止大量入库时查挂 Emby
 # 神医 API 专属排队锁 (严格串行，防止 Emby 429 报错)
+ENABLE_LEGACY_SYNDROME_MEDIAINFO_SYNC = False
 SYNDROME_API_LOCK = Semaphore(1)
 
 
@@ -1486,7 +1487,6 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
     app_config = config_manager.APP_CONFIG
     emby_url = app_config.get("emby_server_url")
     emby_key = app_config.get("emby_api_key")
-    p115_generate_mediainfo = app_config.get("p115_generate_mediainfo", False)
     processor = extensions.media_processor_instance
     emby_user_id = processor.emby_user_id
 
@@ -1504,7 +1504,8 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
         except Exception as e:
             logger.warning(f"  ➜ [预检] 获取路径失败: {e}")
     
-    if not p115_generate_mediainfo:
+    # ETK 已全面接管媒体信息/RAW 提取，旧的神医媒体信息恢复链路不再触发。
+    if ENABLE_LEGACY_SYNDROME_MEDIAINFO_SYNC:
         try:
             # =========================================================
             # 1. 统一调用核心处理器的双指纹提取方法

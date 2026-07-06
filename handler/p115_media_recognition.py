@@ -510,7 +510,6 @@ class P115RecognitionRuleTests(unittest.TestCase):
             p115_service.constants.CONFIG_OPTION_LOCAL_STRM_ROOT: "",
             p115_service.constants.CONFIG_OPTION_ETK_SERVER_URL: "http://127.0.0.1:5257",
             p115_service.constants.CONFIG_OPTION_115_DOWNLOAD_SUBS: True,
-            p115_service.constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO: False,
         }
 
         with mock.patch.object(p115_service, "get_config", return_value=fake_config):
