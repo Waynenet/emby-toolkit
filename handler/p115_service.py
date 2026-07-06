@@ -324,7 +324,8 @@ def _p115_lookup_local_holder_file_for_sign(*, sha1='', size=0, pick_code='', fi
                     SELECT id, parent_id, name, sha1, pick_code, local_path, size
                     FROM p115_filesystem_cache
                     WHERE {' OR '.join(clauses)}
-                    ORDER BY updated_at DESC NULLS LAST
+                    ORDER BY CASE WHEN COALESCE(pick_code, '') <> '' THEN 0 ELSE 1 END,
+                             updated_at DESC NULLS LAST
                     LIMIT 1
                     """,
                     args,
@@ -3962,7 +3963,8 @@ class P115CacheManager:
                         SELECT id, parent_id, name, sha1, pick_code, local_path, size, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE UPPER(sha1) = UPPER(%s)
-                        ORDER BY updated_at DESC NULLS LAST
+                        ORDER BY CASE WHEN COALESCE(pick_code, '') <> '' THEN 0 ELSE 1 END,
+                                 updated_at DESC NULLS LAST
                         LIMIT 1
                     """, (str(sha1),))
                     return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
