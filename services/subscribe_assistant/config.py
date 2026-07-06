@@ -5,7 +5,6 @@ from typing import Any, Dict, List
 @dataclass
 class AssistantConfig:
     enabled: bool = True
-    notify: bool = True
     guard_mode: str = "balanced"
     season_cooldown_days: int = 14
     volatility_enabled: bool = True
@@ -32,7 +31,6 @@ class AssistantConfig:
     delete_exclude_tags: List[str] = None
     tracker_keywords: List[str] = None
     best_version_type: str = "tv_episode"
-    best_version_backfill_enabled: bool = False
     best_version_episode_to_full: bool = True
     best_version_full_consistency_check_enabled: bool = True
     full_washing_timeout_hours: int = 72
@@ -41,8 +39,6 @@ class AssistantConfig:
     verify_enabled: bool = True
     verify_interval_hours: int = 12
     snapshot_retention_days: int = 180
-    recognition_guard_enabled: bool = False
-    recognition_guard_mode: str = "audit"
 
     def __post_init__(self):
         if self.no_download_actions is None:
@@ -134,7 +130,6 @@ def from_watchlist_config(raw: Dict[str, Any] = None) -> AssistantConfig:
     cfg.tracker_keywords = _as_list(assistant.get("tracker_keywords")) or cfg.tracker_keywords
 
     cfg.best_version_type = str(assistant.get("best_version_type") or cfg.best_version_type)
-    cfg.best_version_backfill_enabled = _as_bool(assistant.get("best_version_backfill_enabled"), cfg.best_version_backfill_enabled)
     cfg.best_version_episode_to_full = _as_bool(assistant.get("best_version_episode_to_full"), cfg.best_version_episode_to_full)
     cfg.best_version_full_consistency_check_enabled = _as_bool(
         assistant.get("best_version_full_consistency_check_enabled"),
@@ -154,6 +149,4 @@ def from_watchlist_config(raw: Dict[str, Any] = None) -> AssistantConfig:
     cfg.verify_enabled = _as_bool(assistant.get("verify_enabled"), cfg.verify_enabled)
     cfg.verify_interval_hours = _as_int(assistant.get("verify_interval_hours"), cfg.verify_interval_hours)
     cfg.snapshot_retention_days = _as_int(assistant.get("snapshot_retention_days"), cfg.snapshot_retention_days)
-    cfg.recognition_guard_enabled = _as_bool(assistant.get("recognition_guard_enabled"), cfg.recognition_guard_enabled)
-    cfg.recognition_guard_mode = str(assistant.get("recognition_guard_mode") or cfg.recognition_guard_mode)
     return cfg

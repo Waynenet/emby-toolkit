@@ -546,10 +546,6 @@
                       <div class="sub-label">洗版模式</div>
                       <n-select v-model:value="watchlistConfig.subscribe_assistant.best_version_type" :options="bestVersionTypeOptions" size="small" />
                     </n-grid-item>
-                    <n-grid-item>
-                      <div class="sub-label">回填已存在集</div>
-                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_backfill_enabled" size="small" />
-                    </n-grid-item>
                     <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_type !== 'no'">
                       <div class="sub-label">一致性校验</div>
                       <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_full_consistency_check_enabled" size="small" />
@@ -631,21 +627,6 @@
                   </n-grid>
                 </div>
 
-                <n-divider style="margin: 0" />
-
-                <div class="assistant-section">
-                  <div class="assistant-section-title">识别增强</div>
-                  <n-grid :x-gap="12" :y-gap="12" :cols="2" responsive="screen">
-                    <n-grid-item>
-                      <div class="sub-label">候选准入</div>
-                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.recognition_guard_enabled" size="small" />
-                    </n-grid-item>
-                    <n-grid-item>
-                      <div class="sub-label">识别策略</div>
-                      <n-select v-model:value="watchlistConfig.subscribe_assistant.recognition_guard_mode" :options="recognitionModeOptions" size="small" />
-                    </n-grid-item>
-                  </n-grid>
-                </div>
               </div>
 
             </div>
@@ -784,11 +765,6 @@ const versionLockModeOptions = [
   { label: '最佳版本', value: 'best' },
   { label: '任意版本', value: 'any' }
 ];
-const recognitionModeOptions = [
-  { label: '仅记录', value: 'audit' },
-  { label: '拦截高风险', value: 'block_high_risk' },
-  { label: '严格拦截', value: 'strict' }
-];
 const cleanupTypeOptions = [
   { label: '保留历史', value: 'none' },
   { label: '仅当前剧集', value: 'current' },
@@ -832,7 +808,6 @@ const defaultSubscribeAssistant = () => ({
   delete_exclude_tags: ['H&R'],
   tracker_keywords: ['torrent not registered with this tracker', 'torrent banned'],
   best_version_type: 'tv_episode',
-  best_version_backfill_enabled: false,
   best_version_episode_to_full: true,
   best_version_full_consistency_check_enabled: true,
   full_washing_timeout_hours: 72,
@@ -840,13 +815,14 @@ const defaultSubscribeAssistant = () => ({
   subscription_cleanup_history_scenes: ['completed'],
   verify_enabled: true,
   verify_interval_hours: 12,
-  snapshot_retention_days: 180,
-  recognition_guard_enabled: false,
-  recognition_guard_mode: 'audit'
+  snapshot_retention_days: 180
 });
 
 const buildWatchlistConfig = (data = {}) => {
   const assistant = { ...defaultSubscribeAssistant(), ...(data.subscribe_assistant || {}) };
+  delete assistant.best_version_backfill_enabled;
+  delete assistant.recognition_guard_enabled;
+  delete assistant.recognition_guard_mode;
   return {
     auto_pending: {
       enabled: assistant.pending_enhanced_enabled,
