@@ -4556,6 +4556,8 @@ class P115CacheManager:
                     )
                 if preid and isinstance(file_info, dict):
                     file_info['preid'] = preid
+                if preid:
+                    P115CacheManager._update_preid_for_existing_cache(preid, sha1=sha1)
                 if preid and isinstance(raw_ffprobe_json, dict):
                     ctx = raw_ffprobe_json.get('_etk') if isinstance(raw_ffprobe_json.get('_etk'), dict) else {}
                     ctx = dict(ctx or {})
