@@ -4013,58 +4013,6 @@ class P115CacheManager:
         return None
 
     @staticmethod
-    def get_file_cache_by_local_path_stem(local_path):
-        """按 local_path 去掉扩展名后的路径尾部匹配文件缓存行。"""
-        if not local_path:
-            return None
-
-        normalized = str(local_path).strip().replace('\\', '/')
-        normalized = re.sub(r'/+', '/', normalized).strip('/')
-        if not normalized:
-            return None
-        stem = os.path.splitext(normalized)[0].strip('/')
-        if not stem:
-            return None
-
-        try:
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, washing_level, washing_snapshot_json
-                        FROM p115_filesystem_cache
-                        WHERE local_path IS NOT NULL
-                          AND lower(regexp_replace(replace(local_path, '\\', '/'), '\\.[^./]+$', '')) = lower(%s)
-                        ORDER BY CASE
-                                     WHEN COALESCE(sha1, '') <> '' AND COALESCE(size, 0) > 0 THEN 0
-                                     ELSE 1
-                                 END,
-                                 updated_at DESC NULLS LAST
-                        LIMIT 1
-                    """, (stem,))
-                    row = cursor.fetchone()
-                    if row:
-                        return P115CacheManager._filesystem_cache_row_to_dict(row)
-
-                    cursor.execute("""
-                        SELECT id, parent_id, name, sha1, pick_code, local_path, size, washing_level, washing_snapshot_json
-                        FROM p115_filesystem_cache
-                        WHERE local_path IS NOT NULL
-                          AND lower(regexp_replace(replace(local_path, '\\', '/'), '\\.[^./]+$', '')) LIKE lower(%s)
-                        ORDER BY CASE
-                                     WHEN COALESCE(sha1, '') <> '' AND COALESCE(size, 0) > 0 THEN 0
-                                     ELSE 1
-                                 END,
-                                 length(local_path) DESC,
-                                 updated_at DESC NULLS LAST
-                        LIMIT 1
-                    """, ('%/' + stem,))
-                    return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
-        except Exception as e:
-            logger.debug(f"  ➜ 读取 115 文件缓存失败(local_path_stem={stem}): {e}")
-
-        return None
-
-    @staticmethod
     def save_transfer_context(root_name, tmdb_id, media_type, title, season_number=None, episode_number=None, *, pick_code=None, sha1=None, source='', source_kind='', source_kinds=None, confidence='high', authority_role='expected', identify_title=None, clean_title=None, matched_rules=None, evidence=None, conflict_reason='', alias_titles=None, parse_version='transfer-context-v1', is_special=None):
         payload = _coerce_transfer_context_dict({
             "root_name": root_name,
