@@ -1792,6 +1792,82 @@ class WatchlistProcessor:
                 name = os.path.basename(value.replace('\\', '/')).strip()
                 if name and name not in names:
                     names.append(name)
+            signature = self._asset_version_lock_signature(asset)
+            if signature and signature not in names:
+                names.append(signature)
+        return names
+
+    def _asset_version_lock_signature(self, asset: Dict[str, Any]) -> str:
+        tokens: List[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or '').strip()
+            if text and text.lower() not in {t.lower() for t in tokens}:
+                tokens.append(text)
+
+        add(asset.get('quality_display'))
+
+        resolution = str(asset.get('resolution_display') or '').strip().lower()
+        width = _safe_int(asset.get('width'))
+        height = _safe_int(asset.get('height'))
+        if resolution in ('4k', '2160p') or width >= 3800 or height >= 2000:
+            add('2160p')
+        elif resolution == '1080p' or height >= 1000:
+            add('1080p')
+        elif resolution == '720p' or height >= 700:
+            add('720p')
+
+        codec = str(asset.get('codec_display') or asset.get('video_codec') or '').strip().lower()
+        if codec in ('hevc', 'h265', 'h.265', 'x265'):
+            add('H265')
+        elif codec in ('avc', 'h264', 'h.264', 'x264'):
+            add('H264')
+        elif codec:
+            add(codec.upper())
+
+        bit_depth = _safe_int(asset.get('bit_depth'))
+        if bit_depth >= 10:
+            add('10bit')
+        elif bit_depth == 8:
+            add('8bit')
+
+        effect = str(asset.get('effect_display') or '').strip()
+        if effect and effect.upper() != 'SDR':
+            add(effect)
+
+        tracks = asset.get('audio_tracks') if isinstance(asset.get('audio_tracks'), list) else []
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            audio_codec = str(track.get('codec') or '').strip().lower()
+            if audio_codec in ('eac3', 'ec-3', 'ddp', 'dd+'):
+                add('DDP')
+            elif audio_codec == 'aac':
+                add('AAC')
+            elif audio_codec == 'truehd':
+                add('TrueHD')
+            elif audio_codec.startswith('dts'):
+                add('DTS')
+
+        for name in self._asset_path_like_names(asset):
+            group_info = self._version_lock_release_group_info(name)
+            add(group_info.get('alias') or group_info.get('group'))
+            if group_info.get('group'):
+                for alias in helpers.get_keywords_by_group_name(group_info.get('group'))[:3]:
+                    if re.fullmatch(r'[A-Za-z0-9._-]+', str(alias or '')):
+                        add(alias)
+
+        return ' '.join(tokens)
+
+    def _asset_path_like_names(self, asset: Dict[str, Any]) -> List[str]:
+        names = []
+        for key in ('source_name', 'original_name', 'filename', 'name', 'path'):
+            value = str((asset or {}).get(key) or '').strip()
+            if not value:
+                continue
+            name = os.path.basename(value.replace('\\', '/')).strip()
+            if name and name not in names:
+                names.append(name)
         return names
 
     def _version_lock_include_matches(self, include_regex: str, filename: str) -> bool:
