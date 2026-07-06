@@ -105,6 +105,95 @@ def _get_mp_base_and_headers(config: Dict[str, Any] = None) -> Tuple[str, Option
     return moviepilot_url, {"Authorization": f"Bearer {access_token}"}, ""
 
 
+def list_transfer_history(
+    config: Dict[str, Any] = None,
+    title: str = None,
+    page_limit: int = 3,
+    page_size: int = 100,
+    status: Any = None,
+) -> List[Dict[str, Any]]:
+    """Read MoviePilot transfer history records without mutating MP state."""
+    try:
+        moviepilot_url, headers, err = _get_mp_base_and_headers(config)
+        if not moviepilot_url or not headers:
+            if err:
+                logger.warning(f"  ➜ [MP整理历史] 读取失败：{err}")
+            return []
+
+        page_limit = max(1, min(int(page_limit or 1), 20))
+        page_size = max(1, min(int(page_size or 100), 500))
+        search_url = f"{moviepilot_url}/api/v1/history/transfer"
+        records = []
+        for page in range(1, page_limit + 1):
+            params = {"page": page, "count": page_size}
+            if title:
+                params["title"] = str(title)
+            if status is not None:
+                params["status"] = status
+            res = requests.get(search_url, headers=headers, params=params, timeout=30)
+            if res.status_code != 200:
+                logger.warning(f"  ➜ [MP整理历史] 读取失败：HTTP {res.status_code} - {res.text[:200]}")
+                break
+            data = res.json()
+            if not data:
+                break
+
+            records_list = []
+            if isinstance(data, dict):
+                inner_data = data.get("data")
+                if isinstance(inner_data, list):
+                    records_list = inner_data
+                elif isinstance(inner_data, dict) and isinstance(inner_data.get("list"), list):
+                    records_list = inner_data.get("list") or []
+            elif isinstance(data, list):
+                records_list = data
+
+            if not records_list:
+                break
+            records.extend([x for x in records_list if isinstance(x, dict)])
+            if len(records_list) < page_size:
+                break
+        return records
+    except Exception as e:
+        logger.warning(f"  ➜ [MP整理历史] 读取异常：{e}")
+        return []
+
+
+def redo_transfer_history(config: Dict[str, Any] = None, history_ids: List[int] = None) -> bool:
+    """Trigger MoviePilot AI redo for transfer history records."""
+    ids = []
+    for value in history_ids or []:
+        try:
+            history_id = int(value)
+            if history_id > 0 and history_id not in ids:
+                ids.append(history_id)
+        except Exception:
+            continue
+    if not ids:
+        return False
+
+    try:
+        moviepilot_url, headers, err = _get_mp_base_and_headers(config)
+        if not moviepilot_url or not headers:
+            if err:
+                logger.warning(f"  ➜ [MP整理历史] 重整理失败：{err}")
+            return False
+        res = requests.post(
+            f"{moviepilot_url}/api/v1/history/transfer/ai-redo",
+            headers=headers,
+            json={"history_ids": ids},
+            timeout=30,
+        )
+        if res.status_code not in (200, 201, 202):
+            logger.warning(f"  ➜ [MP整理历史] 重整理失败：HTTP {res.status_code} - {res.text[:200]}")
+            return False
+        logger.info(f"  ➜ [MP整理历史] 已触发 {len(ids)} 条整理历史重整理。")
+        return True
+    except Exception as e:
+        logger.warning(f"  ➜ [MP整理历史] 重整理异常：{e}", exc_info=True)
+        return False
+
+
 def _extract_setting_value(data):
     if not isinstance(data, dict):
         return None
@@ -259,7 +348,7 @@ def set_rename_templates(movie_template: str, tv_template: str, config: Dict[str
     return True, ""
 
 
-def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) -> bool:
+def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, consume_quota: bool = False) -> bool:
     """
     【核心订阅函数】直接接收一个完整的订阅 payload 并提交。
     所有其他订阅函数最终都应调用此函数。
@@ -273,6 +362,10 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) 
             logger.error("  ➜ MoviePilot订阅失败：认证失败，未能获取到 Token。")
             return False
 
+        if consume_quota and settings_db.get_subscription_quota() <= 0:
+            logger.warning("  ➜ MoviePilot订阅失败：每日 MP 订阅额度已用尽。")
+            return False
+
         subscribe_url = f"{moviepilot_url}/api/v1/subscribe/"
         subscribe_headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -282,6 +375,8 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) 
         
         if sub_response.status_code in [200, 201, 204]:
             logger.info(f"  ➜ MoviePilot 已接受订阅任务。")
+            if consume_quota:
+                settings_db.decrement_subscription_quota()
             return True
         else:
             try:
@@ -453,6 +548,7 @@ def subscribe_series_to_moviepilot(
     config: Dict[str, Any] = None,
     best_version: Optional[int] = None,
     best_version_full: Optional[int] = None,
+    consume_quota: bool = False,
 ) -> bool:
     """订阅单季或整部剧集"""
     title = series_info.get('title') or series_info.get('item_name')
@@ -481,7 +577,7 @@ def subscribe_series_to_moviepilot(
         log_msg += f" 第 {season_number} 季"
     logger.info(log_msg)
     
-    return subscribe_with_custom_payload(payload, config)
+    return subscribe_with_custom_payload(payload, config, consume_quota=consume_quota)
 
 def update_subscription_status(tmdb_id: int, season: Optional[int], status: str, config: Dict[str, Any] = None, total_episodes: Optional[int] = None) -> bool:
     """

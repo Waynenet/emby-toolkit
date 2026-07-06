@@ -6,13 +6,11 @@ import time
 import os
 import re
 import json
-import random
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from typing import Optional, List
 from gevent import spawn_later, spawn, sleep
 from gevent.event import Event
-from gevent.lock import Semaphore
 
 import task_manager
 import handler.emby as emby
@@ -59,14 +57,6 @@ WEBHOOK_PENDING_TASKS_DRAINER = None
 UPDATE_DEBOUNCE_TIMERS = {}
 UPDATE_DEBOUNCE_LOCK = threading.Lock()
 UPDATE_DEBOUNCE_TIME = 15
-# --- 视频流预检常量 ---
-STREAM_CHECK_MAX_RETRIES = 6   # 最大重试次数 
-STREAM_CHECK_INTERVAL = 10      # 每次轮询间隔(秒)
-STREAM_CHECK_SEMAPHORE = Semaphore(5) # 限制并发预检的数量，防止大量入库时查挂 Emby
-# 神医 API 专属排队锁 (严格串行，防止 Emby 429 报错)
-SYNDROME_API_LOCK = Semaphore(1)
-
-
 # --- MP 单文件上传智能合并缓冲池 ---
 MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
@@ -595,12 +585,9 @@ def _flush_mp_batch(key):
             )
 
             if target_cid:
-                organizer.execute(file_nodes, target_cid)
+                organizer.execute(file_nodes, target_cid, skip_gc=True)
             else:
                 logger.info("  ➜ [MP合并整理] 未命中分类规则，保持原样。")
-
-        from handler.p115_service import P115DeleteBuffer
-        P115DeleteBuffer.add(check_save_path=True)
 
     except Exception as e:
         logger.error(f"  ➜ [MP合并整理] 失败: {e}", exc_info=True)
@@ -653,9 +640,6 @@ def _process_mp_passthrough_immediate(file_info):
         ok = organizer.execute_mp_passthrough(file_nodes)
         if not ok:
             logger.warning("  ➜ [MP直出] 直出处理未完全成功。")
-
-        from handler.p115_service import P115DeleteBuffer
-        P115DeleteBuffer.add(check_save_path=True)
 
     except Exception as e:
         logger.error(f"  ➜ [MP直出] 失败: {e}", exc_info=True)
@@ -1474,7 +1458,7 @@ def _dispatch_item(item_id, item_name, item_type):
 
 def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=None):
     """
-    预检视频流数据 + 本地媒体信息缓存神医联动
+    预检本地 -mediainfo.json，确认 ETK 已完成媒体信息提取后分发入库处理。
     """
     if item_type not in ['Movie', 'Episode']:
         _dispatch_item(item_id, item_name, item_type)
@@ -1486,7 +1470,6 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
     app_config = config_manager.APP_CONFIG
     emby_url = app_config.get("emby_server_url")
     emby_key = app_config.get("emby_api_key")
-    p115_generate_mediainfo = app_config.get("p115_generate_mediainfo", False)
     processor = extensions.media_processor_instance
     emby_user_id = processor.emby_user_id
 
@@ -1503,187 +1486,18 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
                     file_path = item_details["MediaSources"][0].get("Path")
         except Exception as e:
             logger.warning(f"  ➜ [预检] 获取路径失败: {e}")
-    
-    if not p115_generate_mediainfo:
-        try:
-            # =========================================================
-            # 1. 统一调用核心处理器的双指纹提取方法
-            # 只支持 ETK 官方 STRM/HTTP PC 播放地址。
-            # =========================================================
-            pc, sha1 = processor._extract_115_fingerprints(file_path)
-            
-            if pc or sha1:
-                logger.debug(f"  ➜ [路径解析] 成功提取指纹 -> PC: {pc}, SHA1: {sha1}")
-            else:
-                # =========================================================
-                # 2. 养子 (数据库兜底) - 通过 Emby ID 查 PC 码
-                # =========================================================
-                if item_id:
-                    pc = media_db.get_pickcode_by_emby_id(item_id)
-                    if pc:
-                        logger.debug(f"  ➜ [数据库兜底] 成功通过 Emby ID ({item_id}) 查到 PC 码。")
 
-            # =========================================================
-            # 3. 补全 SHA1 (内部自带 115 API 兜底)
-            # =========================================================
-            if not sha1 and pc:
-                sha1 = processor._get_sha1_by_pickcode(pc)
-                logger.debug(f"  ➜ [路径解析] 成功提取SHA1: {sha1}")
-            
-            if sha1:
-                media_data = None
-                is_from_local = False
-                
-                # --- 提前查询 115 真实文件大小 (供本地严格比对使用) ---
-                file_size_115 = 0
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("SELECT size FROM p115_filesystem_cache WHERE sha1 = %s", (sha1,))
-                            row = cursor.fetchone()
-                            if row and row['size']:
-                                file_size_115 = row['size']
-                except Exception as e_db:
-                    logger.warning(f"  ➜ [数据校验] 查询本地文件大小失败: {e_db}")
+    if not file_path:
+        logger.warning(f"  ➜ [预检] 拒绝入库：'{item_name}' 未取得媒体路径，无法确认 -mediainfo.json。")
+        return
 
-                # --- 第一步：优先查询本地数据库缓存 ---
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1 = %s", (sha1,))
-                            row = cursor.fetchone()
-                            if row and row.get('mediainfo_json'):
-                                media_data = row['mediainfo_json']
-                                if isinstance(media_data, str):
-                                    media_data = json.loads(media_data)
-                                is_from_local = True
-                                logger.info(f"  ➜ [本地缓存] 命中本地数据库 (SHA1: {sha1})，下发给神医恢复...")
-                                # 更新命中次数
-                                cursor.execute("UPDATE p115_mediainfo_cache SET hit_count = hit_count + 1 WHERE sha1 = %s", (sha1,))
-                                conn.commit()
-                except Exception as e_db:
-                    logger.warning(f"  ➜ [本地缓存] 查询本地数据库失败: {e_db}")
+    mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
+    if os.path.exists(mediainfo_path):
+        logger.info(f"  ➜ [预检] 已检测到 -mediainfo.json，准备分发：{item_name}")
+        _dispatch_item(item_id, item_name, item_type)
+        return
 
-                # --- 第二步：轮询调用神医接口，死等纯净数据 ---
-                res_json = None
-                max_api_polls = 15  
-                
-                for poll_attempt in range(max_api_polls):
-                    with SYNDROME_API_LOCK:
-                        res_json = emby.sync_item_media_info(
-                            item_id=item_id, 
-                            media_data=media_data, 
-                            base_url=emby_url,
-                            api_key=emby_key
-                        )
-                        sleep(1)
-                        
-                    if res_json == []:
-                        logger.info(f"  ➜ [神医] 已触发媒体信息提取，等待数据返回... ({poll_attempt+1}/{max_api_polls})")
-                        sleep(5) 
-                        continue
-                    elif not res_json:
-                        break
-
-                    # =========================================================
-                    # ★★★ 神医返回数据 Size 校验机制 (0.5% 科学容错版) ★★★
-                    # =========================================================
-                    syndrome_size = 0
-                    if isinstance(res_json, list) and len(res_json) > 0:
-                        syndrome_size = res_json[0].get("MediaSourceInfo", {}).get("Size", 0)
-                    elif isinstance(res_json, dict):
-                        syndrome_size = res_json.get("MediaSourceInfo", {}).get("Size", res_json.get("Size", 0))
-                    
-                    if syndrome_size > 0 and file_size_115 > 0:
-                        diff = abs(syndrome_size - file_size_115)
-                        error_margin = diff / file_size_115
-                        
-                        # ★ 采用使用 0.5% (0.005) 的百分比容错率
-                        if error_margin > 0.005:
-                            logger.error(f"  🚨 [数据校验] 严重警告！神医大小({syndrome_size})与115真实大小({file_size_115})误差达 {error_margin*100:.3f}%！")
-                            logger.error(f"  🚨 [数据校验] 判定为同名异版脏数据！正在调用神医接口清除错误缓存，强制重新提取...")
-                            
-                            # 1. 清除旧的脏数据
-                            emby.clear_item_media_info(item_id, emby_url, emby_key)
-                            
-                            # 重置变量，利用 continue 进入下一轮循环
-                            res_json = None
-                            media_data = None # ★ 必须置空，让神医去提取物理文件，而不是再次注入脏数据
-                            is_from_local = False
-                            
-                            sleep(2) 
-                            continue
-
-                    break
-
-                if res_json:
-                    if media_data:
-                        logger.info(f"  ➜ [神医] 媒体信息恢复成功！(数据源: 本地数据库)")
-                    else:
-                        logger.info(f"  ➜ [神医] 媒体信息提取成功！")
-
-                    if not is_from_local:
-                        try:
-                            json_str = json.dumps(res_json, ensure_ascii=False)
-                            with get_db_connection() as conn:
-                                with conn.cursor() as cursor:
-                                    cursor.execute("""
-                                        INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                        VALUES (%s, %s::jsonb)
-                                        ON CONFLICT (sha1) DO UPDATE SET mediainfo_json = EXCLUDED.mediainfo_json
-                                    """, (sha1, json_str))
-                                    conn.commit()
-                            logger.info(f"  ➜ [本地缓存] 媒体信息已备份至本地数据库。")
-                        except Exception as e_db:
-                            logger.warning(f"  ➜ [本地缓存] 写入数据库失败: {e_db}")
-                    
-        except Exception as e:
-            logger.error(f"  ➜ [媒体信息] 预检联动异常: {e}")
-
-    # =========================================================
-    # 2. 物理文件与视频流兜底检查逻辑 
-    # =========================================================
-    for i in range(STREAM_CHECK_MAX_RETRIES):
-        try:
-            has_valid_video_stream = False
-            
-            # 1. 优先检查物理文件
-            if file_path:
-                mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                if os.path.exists(mediainfo_path):
-                    has_valid_video_stream = True
-            
-            # 2. 兜底检查：实时查询 Emby 的 MediaSources
-            if not has_valid_video_stream:
-                current_details = emby.get_emby_item_details(
-                    item_id, emby_url, emby_key, emby_user_id, fields="MediaSources"
-                )
-                if current_details and current_details.get("MediaSources"):
-                    for source in current_details["MediaSources"]:
-                        for stream in source.get("MediaStreams", []):
-                            if stream.get("Type") == "Video" and stream.get("Width") and stream.get("Height"):
-                                has_valid_video_stream = True
-                                break
-                        if has_valid_video_stream:
-                            break
-            
-            if has_valid_video_stream:
-                logger.info(f"  ➜ [预检] 成功检测到 '{item_name}' 的有效视频流数据，准备分发。")
-                # 调用智能分发
-                _dispatch_item(item_id, item_name, item_type)
-                return
-            
-            logger.debug(f"  ➜ [预检] '{item_name}' 暂无有效视频流数据，等待提取 ({i+1}/{STREAM_CHECK_MAX_RETRIES})...")
-            sleep(STREAM_CHECK_INTERVAL + random.uniform(0, 2))
-
-        except Exception as e:
-            logger.error(f"  ➜ [预检] 检查 '{item_name}' 时发生错误: {e}")
-            sleep(STREAM_CHECK_INTERVAL + random.uniform(0, 2))
-
-    # 超时强制入库
-    logger.warning(f"  ➜ [预检] 超时！未检测到 '{item_name}' 的有效视频流数据。强制分发。")
-    # ★ 修改：改为调用智能分发
-    _dispatch_item(item_id, item_name, item_type)
+    logger.warning(f"  ➜ [预检] 拒绝入库：未检测到 -mediainfo.json -> {mediainfo_path}")
 
 # --- Webhook 路由 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])

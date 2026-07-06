@@ -29,6 +29,7 @@ except ImportError:
     P115Client = None
 
 logger = logging.getLogger(__name__)
+FORCE_GENERATE_MEDIAINFO = True
 
 from collections import OrderedDict
 
@@ -324,7 +325,8 @@ def _p115_lookup_local_holder_file_for_sign(*, sha1='', size=0, pick_code='', fi
                     SELECT id, parent_id, name, sha1, pick_code, local_path, size
                     FROM p115_filesystem_cache
                     WHERE {' OR '.join(clauses)}
-                    ORDER BY updated_at DESC NULLS LAST
+                    ORDER BY CASE WHEN COALESCE(pick_code, '') <> '' THEN 0 ELSE 1 END,
+                             updated_at DESC NULLS LAST
                     LIMIT 1
                     """,
                     args,
@@ -1508,16 +1510,12 @@ def get_115_api_priority(default='openapi'):
 
 def is_p115_mediainfo_assisted_recognition_enabled():
     """
-    媒体信息辅助识别开关。
-    必须同时开启：
-    1. 媒体信息格式化
-    2. 媒体信息辅助识别
-    才允许使用 raw_ffprobe_json._etk 参与识别。
+    媒体信息辅助识别开关。媒体信息/RAW 已是强制基础能力，
+    这里只控制是否允许 raw_ffprobe_json._etk 参与识别。
     """
     cfg = config_manager.APP_CONFIG or {}
-    generate_enabled = bool(cfg.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False))
     assisted_enabled = bool(cfg.get(constants.CONFIG_OPTION_115_MEDIAINFO_ASSISTED_RECOGNITION, False))
-    return generate_enabled and assisted_enabled
+    return assisted_enabled
 
 
 # ======================================================================
@@ -3962,7 +3960,8 @@ class P115CacheManager:
                         SELECT id, parent_id, name, sha1, pick_code, local_path, size, washing_level, washing_snapshot_json
                         FROM p115_filesystem_cache
                         WHERE UPPER(sha1) = UPPER(%s)
-                        ORDER BY updated_at DESC NULLS LAST
+                        ORDER BY CASE WHEN COALESCE(pick_code, '') <> '' THEN 0 ELSE 1 END,
+                                 updated_at DESC NULLS LAST
                         LIMIT 1
                     """, (str(sha1),))
                     return P115CacheManager._filesystem_cache_row_to_dict(cursor.fetchone())
@@ -4419,6 +4418,50 @@ class P115CacheManager:
         return preid
 
     @staticmethod
+    def _lookup_preid_from_shared_rapid_tables(sha1):
+        sha1 = str(sha1 or '').strip().upper()
+        if not sha1:
+            return '', ''
+
+        preid_expr = "COALESCE(preid, rapid_meta_json->>'preid', rapid_meta_json->>'pre_sha1', rapid_meta_json->>'pre_sha1_128k')"
+        queries = (
+            (
+                'shared_rapid_source_files',
+                f"""
+                SELECT UPPER({preid_expr}) AS preid
+                FROM shared_rapid_source_files
+                WHERE UPPER(sha1) = %s
+                  AND UPPER({preid_expr}) ~ '^[A-F0-9]{{40}}$'
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+            ),
+            (
+                'shared_rapid_sources',
+                f"""
+                SELECT UPPER({preid_expr}) AS preid
+                FROM shared_rapid_sources
+                WHERE UPPER(sha1) = %s
+                  AND UPPER({preid_expr}) ~ '^[A-F0-9]{{40}}$'
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+            ),
+        )
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for source, sql in queries:
+                        cursor.execute(sql, (sha1,))
+                        row = cursor.fetchone()
+                        preid = P115CacheManager._norm_preid((row or {}).get('preid') if row else '')
+                        if preid:
+                            return preid, source
+        except Exception as e:
+            logger.debug(f"  ➜ [115缓存] 查询共享秒传 preid 持久表失败: sha1={sha1[:12]}..., err={e}")
+        return '', ''
+
+    @staticmethod
     def ensure_file_preid(file_info=None, *, sha1=None, fid=None, pick_code=None, file_name=None):
         """确保文件拥有 preid，并返回 preid。
 
@@ -4508,6 +4551,26 @@ class P115CacheManager:
             except Exception as e:
                 logger.debug(f"  ➜ [115缓存] 查询文件身份失败: {e}")
 
+        shared_preid, shared_preid_source = P115CacheManager._lookup_preid_from_shared_rapid_tables(sha1)
+        if shared_preid:
+            P115CacheManager.register_preid_hint(
+                item,
+                sha1=sha1,
+                preid=shared_preid,
+                fid=fid,
+                pick_code=pick_code,
+                file_name=file_name,
+                size=item.get('size') or item.get('fs') or item.get('file_size') or item.get('filesize') or 0,
+                source=shared_preid_source,
+            )
+            if isinstance(file_info, dict):
+                file_info['preid'] = shared_preid
+            logger.debug(
+                f"  ➜ [115缓存] 命中共享秒传持久表 preid，跳过直链 Range: "
+                f"{file_name or sha1 or pick_code} -> {shared_preid[:12]}... ({shared_preid_source})"
+            )
+            return shared_preid
+
         if not pick_code:
             return ''
         chunk = P115CacheManager._extract_preid_range_bytes(pick_code, 0, 131071)
@@ -4554,6 +4617,8 @@ class P115CacheManager:
                     )
                 if preid and isinstance(file_info, dict):
                     file_info['preid'] = preid
+                if preid:
+                    P115CacheManager._update_preid_for_existing_cache(preid, sha1=sha1)
                 if preid and isinstance(raw_ffprobe_json, dict):
                     ctx = raw_ffprobe_json.get('_etk') if isinstance(raw_ffprobe_json.get('_etk'), dict) else {}
                     ctx = dict(ctx or {})
@@ -5281,6 +5346,7 @@ class P115DeleteBuffer:
     _check_save_path = False # ★ 新增：是否检查待整理根目录
     _timer = None
     _last_add_time = 0
+    _is_flushing = False
 
     @classmethod
     def add(cls, fids=None, base_cids=None, check_save_path=False):
@@ -5303,6 +5369,10 @@ class P115DeleteBuffer:
     @classmethod
     def _check_and_flush(cls):
         with cls._lock:
+            if cls._is_flushing:
+                cls._timer = spawn_later(10.0, cls._check_and_flush)
+                return
+
             now = time.time()
             # ★ 智能防抖：如果距离最后一次整理还不到 10 秒，说明大部队还在干活，继续等！
             if now - cls._last_add_time < 10.0:
@@ -5317,7 +5387,20 @@ class P115DeleteBuffer:
             cls._cids_to_check.clear()
             cls._check_save_path = False
             cls._timer = None
+            cls._is_flushing = True
 
+        try:
+            cls._flush_items(fids, cids, check_save)
+        finally:
+            with cls._lock:
+                cls._is_flushing = False
+                if cls._fids_to_delete or cls._cids_to_check or cls._check_save_path:
+                    cls._last_add_time = time.time()
+                    if cls._timer is None:
+                        cls._timer = spawn_later(10.0, cls._check_and_flush)
+
+    @classmethod
+    def _flush_items(cls, fids, cids, check_save):
         client = P115Service.get_client()
         if not client: return
 
@@ -5346,6 +5429,10 @@ class P115DeleteBuffer:
 
         if not fids and not cids:
             return
+        logger.info(
+            f"  ➜ [清理空目录] 开始执行范围清理：文件 {len(fids)} 个，目录 {len(cids)} 个，"
+            f"全局待整理扫描={'是' if check_save else '否'}。"
+        )
 
         def _safe_batch_delete(ids, is_dir=False):
             if not ids: return []
@@ -5393,16 +5480,21 @@ class P115DeleteBuffer:
             media_count = 0
             def count_media(current_cid):
                 nonlocal media_count
+                if media_count > 0:
+                    return
                 for attempt in range(3):
                     try:
                         res = client.fs_files({'cid': current_cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
                         for item in res.get('data', []):
+                            if media_count > 0:
+                                return
                             if str(item.get('fc')) == '1':
                                 ext = str(item.get('fn', '')).split('.')[-1].lower()
                                 if ext in media_exts:
                                     item_size = _parse_115_size(item.get('fs') or item.get('size'))
                                     if item_size == 0 or item_size > 10 * 1024 * 1024:
                                         media_count += 1
+                                        return
                             elif str(item.get('fc')) == '0':
                                 count_media(item.get('fid'))
                         return 
@@ -8609,7 +8701,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                             file_sha1 = info_res['data'].get('sha1')
                                     except Exception: pass
 
-                                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                                if FORCE_GENERATE_MEDIAINFO:
                                     try:
                                         mediainfo_filename = os.path.splitext(new_filename)[0] + "-mediainfo.json"
                                         mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
@@ -8887,7 +8979,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     pass
 
                 # 生成 Mediainfo
-                if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                if FORCE_GENERATE_MEDIAINFO:
                     try:
                         mediainfo_text = None
                         if sha1:

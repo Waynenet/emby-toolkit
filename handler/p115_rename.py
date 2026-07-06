@@ -32,11 +32,12 @@ class P115RenameRenderer:
     def normalize_mp_jinja_template(template):
         if not isinstance(template, str):
             return ""
-        return re.sub(
+        text = re.sub(
             r"{{\s*([A-Za-z_]\w*)\s*\|\s*string\s*}\s*\.zfill\((\d+)\)\s*}}",
             r"{{ (\1|string).zfill(\2) }}",
             template,
         )
+        return re.sub(r"{{\s*fps\s*}}(?:\s*fps|\s*FPS|\s*Fps)", "{{ fps }}", text)
 
     @staticmethod
     def template_uses_file_ext(format_value):
@@ -65,6 +66,17 @@ class P115RenameRenderer:
             text = re.sub(r'(?<!\d)(?:7[\.\s_]?1|5[\.\s_]?1|2[\.\s_]?0|1[\.\s_]?0)(?!\d)', '', text)
             text = re.sub(r'[\s._-]+$', '', text)
         return re.sub(r'\s+', ' ', text).strip()
+
+    @staticmethod
+    def format_fps_label(fps):
+        text = str(fps or '').strip()
+        if not text:
+            return '', ''
+        match = re.search(r'\d+(?:\.\d+)?', text)
+        if not match:
+            return text, text
+        value = match.group(0)
+        return f"{value}fps", value
 
     @classmethod
     def sanitize_name_component(cls, text):
@@ -123,6 +135,7 @@ class P115RenameRenderer:
         codec_raw = video_info.get('codec') or video_info.get('videoCodec') or ''
         codec = self.format_video_codec_label(codec_raw, self.config.get('video_codec_style'))
         audio = self.format_audio_label(video_info.get('audio') or video_info.get('audioCodec') or '', self.config.get('hide_audio_channels'))
+        fps_display, fps_value = self.format_fps_label(video_info.get('fps') or video_info.get('frame_rate') or '')
         group = video_info.get('group') or ''
         ext_with_dot = f".{str(file_ext).lstrip('.')}" if file_ext else ""
         title_year = f"{title_zh} ({year})" if title_zh and year else title_zh
@@ -208,7 +221,9 @@ class P115RenameRenderer:
             'codec': codec,
             'audio_count': video_info.get('audio_count') or '',
             'audio': audio,
-            'fps': video_info.get('fps') or '',
+            'fps': fps_display,
+            'fps_value': fps_value,
+            'frame_rate': fps_value,
             'group': group,
             'original_name': original_name_text,
             'original_upper': original_name_text.upper(),

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import queue
 import re
 import threading
 import time
@@ -562,6 +563,233 @@ PRO_QUOTA_AUTH_EVENT_TYPE = 'pro_quota_auth_check'
 _COMPLETED_SHARE_SYNC_LOCK = threading.Lock()
 _COMPLETED_SHARE_DELETE_RETRY_SECONDS = 300
 _COMPLETED_SHARE_DELETE_ATTEMPTS: Dict[str, float] = {}
+_LOGICAL_SHARE_CREATE_QUEUE = queue.Queue()
+_LOGICAL_SHARE_CREATE_QUEUE_LOCK = threading.Lock()
+_LOGICAL_SHARE_CREATE_QUEUED_KEYS = set()
+_LOGICAL_SHARE_CREATE_WORKER = None
+_LOGICAL_SHARE_CREATE_IDLE_GRACE_SECONDS = 12
+_LOGICAL_SHARE_CREATE_BUSY_WAIT_SECONDS = 5
+
+
+def _logical_share_create_queue_key(event: Dict[str, Any]) -> str:
+    payload = _event_source_payload(event)
+    event_id = str((event or {}).get('event_id') or '').strip()
+    channel_id = str(payload.get('channel_id') or (event or {}).get('source_ref_id') or '').strip()
+    group_id = str(payload.get('group_id') or payload.get('source_id') or payload.get('source_ref_id') or '').strip()
+    manifest_hash = str(payload.get('package_fingerprint') or payload.get('manifest_hash') or '').strip()
+    return channel_id or event_id or f"{group_id}:{manifest_hash}"
+
+
+def _logical_share_create_media_busy() -> bool:
+    try:
+        if task_manager.is_task_running():
+            return True
+    except Exception:
+        pass
+    try:
+        status = task_manager.get_task_status() or {}
+        return bool(status.get('is_running'))
+    except Exception:
+        return False
+
+
+def _wait_for_logical_share_create_slot(log_label: str = '', stage: str = '') -> None:
+    idle_since = None
+    logged_busy = False
+    label = str(log_label or '逻辑季 115 文件列表分享').strip()
+    stage_text = f"（{stage}）" if stage else ''
+    while True:
+        if not _enabled():
+            idle_since = None
+            if not logged_busy:
+                logger.info(f"  ➜ [共享资源] 共享资源未启用，暂停创建 115 文件列表分享队列：{label}{stage_text}")
+                logged_busy = True
+            time.sleep(15)
+            continue
+        if _logical_share_create_media_busy():
+            idle_since = None
+            if not logged_busy:
+                logger.info(f"  ➜ [共享资源] 媒体任务运行中，延后创建 115 文件列表分享：{label}{stage_text}")
+                logged_busy = True
+            time.sleep(_LOGICAL_SHARE_CREATE_BUSY_WAIT_SECONDS)
+            continue
+        now = time.time()
+        if idle_since is None:
+            idle_since = now
+        remaining = _LOGICAL_SHARE_CREATE_IDLE_GRACE_SECONDS - (now - idle_since)
+        if remaining <= 0:
+            return
+        time.sleep(min(1, max(0.2, remaining)))
+
+
+def _ensure_logical_share_create_worker() -> None:
+    global _LOGICAL_SHARE_CREATE_WORKER
+    with _LOGICAL_SHARE_CREATE_QUEUE_LOCK:
+        if _LOGICAL_SHARE_CREATE_WORKER and _LOGICAL_SHARE_CREATE_WORKER.is_alive():
+            return
+        _LOGICAL_SHARE_CREATE_WORKER = threading.Thread(
+            target=_logical_share_create_worker_loop,
+            name='shared-logical-share-create',
+            daemon=True,
+        )
+        _LOGICAL_SHARE_CREATE_WORKER.start()
+
+
+def _enqueue_logical_share_create_event(
+    event: Dict[str, Any],
+    *,
+    ack: bool = True,
+    recovered: bool = False,
+) -> Dict[str, Any]:
+    client = SharedCenterClient()
+    payload = _event_source_payload(event)
+    event_id = str((event or {}).get('event_id') or '').strip()
+    channel_id = str(payload.get('channel_id') or (event or {}).get('source_ref_id') or '').strip()
+    group_id = str(payload.get('group_id') or payload.get('source_id') or payload.get('source_ref_id') or '').strip()
+    title = str(payload.get('title') or payload.get('share_title') or group_id or channel_id or '逻辑完结季').strip()
+    if not channel_id or not group_id:
+        message = '创建逻辑季分享事件缺少 channel_id/group_id'
+        if ack and event_id:
+            client.ack_device_events([event_id], result='failed', message=message)
+        return {'ok': False, 'event_id': event_id, 'message': message}
+
+    key = _logical_share_create_queue_key(event)
+    log_label = _logical_share_filelist_log_label(payload, fallback_title=title)
+    queued = False
+    with _LOGICAL_SHARE_CREATE_QUEUE_LOCK:
+        if key not in _LOGICAL_SHARE_CREATE_QUEUED_KEYS:
+            _LOGICAL_SHARE_CREATE_QUEUED_KEYS.add(key)
+            _LOGICAL_SHARE_CREATE_QUEUE.put({
+                'key': key,
+                'event': dict(event or {}),
+                'log_label': log_label,
+            })
+            queued = True
+
+    payload_file_ids = payload.get('file_ids') if isinstance(payload.get('file_ids'), list) else []
+    expected_count = (
+        _safe_int_or_none(payload.get('file_count'))
+        or _safe_int_or_none(payload.get('episode_total'))
+        or _safe_int_or_none(payload.get('expected_episode_count'))
+        or _safe_int_or_none(payload.get('total_episodes'))
+        or len(payload_file_ids)
+    )
+    receive_code = str(payload.get('receive_code') or '').strip() or _completed_share_receive_code(channel_id, group_id)
+    shared_share_db.upsert_completed_season_share_channel({
+        'channel_id': channel_id,
+        'center_source_id': group_id,
+        'hub_id': payload.get('hub_id') or '',
+        'manifest_hash': payload.get('package_fingerprint') or payload.get('manifest_hash') or '',
+        'status': 'creating',
+        'status_message': f'已加入低优先级队列，等待整理空闲后创建逻辑季 115 文件列表分享：{title}',
+        'receive_code': receive_code,
+        'root_fid': '',
+        'root_name': title,
+        'file_count': expected_count or 0,
+        'total_size': payload.get('total_size') or 0,
+        'raw_json': {
+            'share_kind': 'logical_season',
+            'event': payload,
+            'queued_event': event,
+            'queued_for_shared_115_create': True,
+            'queued_recovered': bool(recovered),
+            'queued_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+        },
+    })
+
+    _ensure_logical_share_create_worker()
+    message = f'逻辑季 115 文件列表分享已排队，等待整理空闲后创建：{title}'
+    if ack and event_id:
+        client.ack_device_events([event_id], result='ok', message=message[:500])
+    if queued:
+        logger.info(f"  ➜ [共享资源] 已排队创建 115 文件列表分享：{log_label}。")
+    else:
+        logger.debug(f"  ➜ [共享资源] 115 文件列表分享创建任务已在队列中，跳过重复入队：{log_label}。")
+    return {
+        'ok': True,
+        'queued': True,
+        'deduped': not queued,
+        'event_id': event_id,
+        'channel_id': channel_id,
+        'group_id': group_id,
+        'message': message,
+    }
+
+
+def _logical_share_create_worker_loop() -> None:
+    while True:
+        item = _LOGICAL_SHARE_CREATE_QUEUE.get()
+        key = str((item or {}).get('key') or '')
+        event = (item or {}).get('event') if isinstance((item or {}).get('event'), dict) else {}
+        log_label = str((item or {}).get('log_label') or '').strip()
+        try:
+            _wait_for_logical_share_create_slot(log_label, stage='开始前')
+            handle_create_logical_season_filelist_share_event(
+                event,
+                ack=False,
+                _from_queue=True,
+                _respect_media_idle=True,
+            )
+        except Exception as e:
+            payload = _event_source_payload(event)
+            channel_id = str(payload.get('channel_id') or (event or {}).get('source_ref_id') or '').strip()
+            group_id = str(payload.get('group_id') or payload.get('source_id') or payload.get('source_ref_id') or '').strip()
+            message = f'排队创建逻辑季 115 分享异常：{e}'
+            logger.warning(f"  ➜ [共享资源] {message}", exc_info=True)
+            if channel_id and group_id:
+                try:
+                    _report_logical_share_failure(
+                        SharedCenterClient(),
+                        group_id=group_id,
+                        channel_id=channel_id,
+                        status='failed',
+                        message=message,
+                        raw_json={'queued_event': event, 'queue_error': str(e)},
+                        event_id=str((event or {}).get('event_id') or ''),
+                        payload=payload,
+                    )
+                except Exception:
+                    shared_share_db.update_completed_season_share_channel(
+                        channel_id,
+                        status='failed',
+                        status_message=message,
+                        raw_json={'queued_event': event, 'queue_error': str(e)},
+                    )
+        finally:
+            with _LOGICAL_SHARE_CREATE_QUEUE_LOCK:
+                if key:
+                    _LOGICAL_SHARE_CREATE_QUEUED_KEYS.discard(key)
+            _LOGICAL_SHARE_CREATE_QUEUE.task_done()
+
+
+def _resume_queued_logical_share_creates(limit: int = 100) -> int:
+    resumed = 0
+    try:
+        rows = shared_share_db.list_completed_season_share_channels(statuses=['creating'], limit=limit, need_check=False)
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 恢复排队创建 115 分享失败: {e}")
+        return 0
+    for row in rows or []:
+        raw = _json_object(row.get('raw_json'))
+        if not raw.get('queued_for_shared_115_create') or row.get('share_code'):
+            continue
+        event = raw.get('queued_event') if isinstance(raw.get('queued_event'), dict) else {}
+        if not event:
+            payload = raw.get('event') if isinstance(raw.get('event'), dict) else {}
+            if payload:
+                event = {
+                    'event_type': LOGICAL_SEASON_SHARE_CREATE_EVENT_TYPE,
+                    'source_ref_id': row.get('channel_id') or '',
+                    'payload_json': payload,
+                }
+        if not event:
+            continue
+        res = _enqueue_logical_share_create_event(event, ack=False, recovered=True)
+        if res.get('queued') and not res.get('deduped'):
+            resumed += 1
+    if resumed:
+        logger.info(f"  ➜ [共享资源] 已恢复排队中的 115 文件列表分享创建任务：{resumed} 个。")
+    return resumed
 
 
 def _completed_share_event_type(event: Dict[str, Any]) -> str:
@@ -1385,6 +1613,13 @@ def _local_existing_logical_share_for_create(group_id: str, manifest_hash: str =
     for item in rows or []:
         if not _share_channel_is_logical(item):
             continue
+        raw = _json_object(item.get('raw_json'))
+        if (
+            str(item.get('status') or '').strip().lower() == 'creating'
+            and raw.get('queued_for_shared_115_create')
+            and not str(item.get('share_code') or '').strip()
+        ):
+            continue
         item_manifest = str(item.get('manifest_hash') or '').strip()
         if manifest_hash and item_manifest == manifest_hash:
             return item
@@ -1395,6 +1630,13 @@ def _local_existing_logical_share_for_create(group_id: str, manifest_hash: str =
     rows = shared_share_db.list_completed_season_share_channels(statuses=statuses, limit=1000, need_check=False)
     for item in rows or []:
         if not _share_channel_is_logical(item):
+            continue
+        raw = _json_object(item.get('raw_json'))
+        if (
+            str(item.get('status') or '').strip().lower() == 'creating'
+            and raw.get('queued_for_shared_115_create')
+            and not str(item.get('share_code') or '').strip()
+        ):
             continue
         if manifest_hash and str(item.get('manifest_hash') or '').strip() == manifest_hash:
             return item
@@ -1677,7 +1919,13 @@ def _logical_share_filelist_log_label(payload: Dict[str, Any], fallback_title: s
     return label
 
 
-def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str, Any]:
+def handle_create_logical_season_filelist_share_event(
+    event: Dict[str, Any],
+    *,
+    ack: bool = True,
+    _from_queue: bool = False,
+    _respect_media_idle: bool = False,
+) -> Dict[str, Any]:
     """处理中心端 create_logical_season_filelist_share 事件：按中心传入的 file_id 列表创建 115 分享。"""
     client = SharedCenterClient()
     event_id = str((event or {}).get('event_id') or '')
@@ -1691,6 +1939,9 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         if ack and event_id:
             client.ack_device_events([event_id], result='failed', message=message)
         return {'ok': False, 'event_id': event_id, 'message': message}
+
+    if not _from_queue:
+        return _enqueue_logical_share_create_event(event, ack=ack)
 
     manifest_hash = str(payload.get('package_fingerprint') or payload.get('manifest_hash') or '').strip()
     share_ids = _logical_share_file_ids_from_payload(client, group_id, payload)
@@ -1771,6 +2022,13 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
         if ack and event_id:
             client.ack_device_events([event_id], result='ok', message=message[:500])
         return {'ok': False, 'event_id': event_id, 'message': message, 'report': report}
+    if len(share_ids) < 2:
+        message = f'逻辑季分享至少需要 2 个文件，拒绝创建单文件 115 分享：{title}'
+        report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status='failed', message=message,
+                                               raw_json={'share_ids': share_ids, 'payload': payload}, event_id=event_id, payload=payload)
+        if ack and event_id:
+            client.ack_device_events([event_id], result='ok', message=message[:500])
+        return {'ok': False, 'event_id': event_id, 'message': message, 'report': report}
 
     receive_code = str(payload.get('receive_code') or '').strip() or _completed_share_receive_code(channel_id, group_id)
     shared_share_db.upsert_completed_season_share_channel({
@@ -1795,6 +2053,8 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
             raise RuntimeError('115 客户端未初始化')
         logger.info(f"  ➜ [共享资源] 开始创建 115 文件列表分享：{log_label}。")
         logger.debug(f"  ➜ [共享资源] 文件列表分享通道：{channel_id}")
+        if _respect_media_idle:
+            _wait_for_logical_share_create_slot(log_label, stage='创建分享')
         create_resp = p115.share_create(share_ids, share_duration=-1, receive_code=receive_code)
     except Exception as e:
         failure_status = _logical_share_provider_forbidden_status(str(e))
@@ -1811,6 +2071,8 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
 
     share_payload = _extract_completed_share_payload(create_resp, receive_code=receive_code)
     if not share_payload.get('share_code'):
+        if _respect_media_idle:
+            _wait_for_logical_share_create_slot(log_label, stage='恢复分享码')
         recovered_item = _find_completed_share_list_item_by_receive_and_count(
             p115,
             receive_code=receive_code,
@@ -1843,8 +2105,50 @@ def handle_create_logical_season_filelist_share_event(event: Dict[str, Any], *, 
             client.ack_device_events([event_id], result='ok', message=message[:500])
         return {'ok': False, 'event_id': event_id, 'message': message, 'report': report, 'create_response': create_resp}
 
+    create_data = create_resp.get('data') if isinstance(create_resp.get('data'), dict) else {}
+    actual_file_count = _completed_share_list_item_file_count(
+        recovered_item if recovered_from_share_list else create_data
+    )
+    if actual_file_count > 0 and actual_file_count != len(share_ids):
+        if _respect_media_idle:
+            _wait_for_logical_share_create_slot(log_label, stage='删除错误分享')
+        delete_resp = _delete_completed_share_from_115(p115, share_payload.get('share_code'))
+        message = (
+            f"115 实际创建的分享文件数不匹配：{actual_file_count}/{len(share_ids)}，"
+            f"已删除错误分享：{title}"
+        )
+        report = _report_logical_share_failure(
+            client,
+            group_id=group_id,
+            channel_id=channel_id,
+            status='failed',
+            message=message,
+            raw_json={
+                'share_ids': share_ids,
+                'create_response': create_resp,
+                'recovered_from_share_list': recovered_from_share_list,
+                'actual_file_count': actual_file_count,
+                'expected_file_count': len(share_ids),
+                'share_delete_response': delete_resp,
+            },
+            event_id=event_id,
+            payload=payload,
+        )
+        if ack and event_id:
+            client.ack_device_events([event_id], result='ok', message=message[:500])
+        return {
+            'ok': False,
+            'event_id': event_id,
+            'message': message,
+            'report': report,
+            'create_response': create_resp,
+            'share_delete_response': delete_resp,
+        }
+
     info_resp = {}
     try:
+        if _respect_media_idle:
+            _wait_for_logical_share_create_slot(log_label, stage='检查分享状态')
         info_resp = p115.share_info(share_payload.get('share_code'))
     except Exception as e:
         info_resp = {'state': False, 'error_msg': str(e), 'stage': 'share_info_after_create'}
@@ -3874,6 +4178,65 @@ def _missing_pick_code_reject_result(files: List[Dict[str, Any]]) -> Dict[str, A
     }
 
 
+def _lookup_local_sign_holder_by_sha1(file_info: Dict[str, Any]) -> Dict[str, Any]:
+    """登记中心前按签名端同口径确认 SHA1 能反查到本机 pick_code。"""
+    file_info = file_info if isinstance(file_info, dict) else {}
+    sha1 = _norm_sha1(file_info.get('sha1'))
+    if not sha1:
+        return {}
+    try:
+        from handler.p115_service import _p115_lookup_local_holder_file_for_sign
+        return _p115_lookup_local_holder_file_for_sign(
+            sha1=sha1,
+            size=_rapid_size_to_int(file_info.get('size') or file_info.get('file_size'), 0),
+            pick_code='',
+            file_name=file_info.get('file_name') or file_info.get('name') or '',
+        ) or {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 签名 holder 预检查询失败: sha1={sha1[:12]}..., err={e}")
+    return {}
+
+
+def _files_without_local_sign_holder(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    missing = []
+    for f in files or []:
+        if not isinstance(f, dict):
+            continue
+        sha1 = _norm_sha1(f.get('sha1'))
+        file_name = f.get('file_name') or f.get('name') or sha1
+        if not sha1:
+            missing.append({'sha1': '', 'file_name': file_name, 'reason': 'missing_sha1'})
+            continue
+        local = _lookup_local_sign_holder_by_sha1(f)
+        pc = str((local or {}).get('pick_code') or '').strip()
+        if not pc:
+            missing.append({'sha1': sha1, 'file_name': file_name, 'reason': 'local_pick_code_not_found'})
+            continue
+        # 后续登记 payload 和本地 source_files 统一使用当前可签名 PC，避免写入旧 PC。
+        f['pick_code'] = pc
+        f['pc'] = pc
+        if local.get('fid') and not f.get('fid'):
+            f['fid'] = local.get('fid')
+        if local.get('file_name') and not f.get('file_name'):
+            f['file_name'] = local.get('file_name')
+        if local.get('size') and not _rapid_size_to_int(f.get('size'), 0):
+            f['size'] = local.get('size')
+    return missing
+
+
+def _missing_sign_holder_reject_result(files: List[Dict[str, Any]], missing: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    missing = missing if isinstance(missing, list) else _files_without_local_sign_holder(files)
+    names = '、'.join([str(x.get('file_name') or x.get('sha1') or 'unknown') for x in missing[:5]])
+    if len(missing) > 5:
+        names += f" 等 {len(missing)} 个"
+    return {
+        'ok': False,
+        'message': f'本机无法按 SHA1 反查可签名 pick_code，已拒绝登记中心：{names}',
+        'missing_sign_holder': missing,
+        'fingerprint_repair': {},
+    }
+
+
 def _file_payload_common(file_info: Dict[str, Any], raw_uploaded: bool = False, animation_meta: Dict[str, Any] = None) -> Dict[str, Any]:
     raw = _raw_for_file(file_info) if raw_uploaded else {}
     sig = _media_signature(raw, file_info) if raw else {}
@@ -5419,6 +5782,13 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
             '、'.join([str(x.get('file_name') or x.get('sha1') or 'unknown') for x in missing_pick_code[:5]]),
         )
         return _missing_pick_code_reject_result(files)
+    missing_sign_holder = _files_without_local_sign_holder(files)
+    if missing_sign_holder:
+        logger.warning(
+            "  ➜ [共享资源] 跳过本机不可签名的资源登记: %s",
+            '、'.join([str(x.get('file_name') or x.get('sha1') or 'unknown') for x in missing_sign_holder[:5]]),
+        )
+        return _missing_sign_holder_reject_result(files, missing_sign_holder)
 
     root = shared_share_db.candidate_root_from_files(files)
     client = SharedCenterClient()
@@ -6011,6 +6381,9 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
             )
             try:
                 err_text = str(e)[:1000]
+                missing_local_holder = any(x in err_text for x in (
+                    '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code',
+                ))
                 stale_holder = any(x in err_text for x in (
                     '本机不是可签名 holder', '未找到 sha1', '未找到 pick_code', '对应 pick_code',
                     'Range GET HTTP=403', 'Range GET HTTP=404', 'expected=206',
@@ -6019,8 +6392,23 @@ def poll_and_process_rapid_sign_jobs_once(timeout: int = 1, limit: int = 3) -> D
                 submit = client.submit_rapid_sign_job(job_id, {
                     'status': 'failed',
                     'message': err_text,
-                    'result_meta_json': {'stale_holder': stale_holder, 'file_name': file_name},
+                    'result_meta_json': {'stale_holder': stale_holder, 'missing_local_holder': missing_local_holder, 'file_name': file_name},
                 })
+                if missing_local_holder and sha1:
+                    try:
+                        cleanup = _cleanup_unresolvable_sign_holder_sources(limit=20, sha1=sha1)
+                        if cleanup.get('disabled'):
+                            logger.info(
+                                "  ➜ [负载均衡签名] 已快速下架本机不可签名共享源：sha1=%s, disabled=%s",
+                                sha1[:12] + '...',
+                                cleanup.get('disabled'),
+                            )
+                    except Exception as cleanup_err:
+                        logger.debug(
+                            "  ➜ [负载均衡签名] 快速清理本机不可签名共享源失败：sha1=%s, err=%s",
+                            sha1[:12] + '...',
+                            cleanup_err,
+                        )
             except Exception as submit_err:
                 submit = {'ok': False, 'error': str(submit_err)}
             results.append({'job_id': job_id, 'ok': False, 'error': str(e), 'submit': submit})
@@ -6126,6 +6514,7 @@ def ensure_shared_device_event_listener() -> bool:
             )
             _LISTENER_THREAD.start()
             started = True
+        _resume_queued_logical_share_creates()
         return True
 
 
@@ -7212,6 +7601,172 @@ def _cleanup_offline_local_sources(limit: int = 300) -> Dict[str, Any]:
 
 
 
+def _cleanup_unresolvable_sign_holder_sources(limit: int = 300, sha1: str = '') -> Dict[str, Any]:
+    """下架本机已登记但当前无法按 SHA1 反查 pick_code 的 Rapid 源。"""
+    try:
+        limit = max(1, min(int(limit or 300), 2000))
+    except Exception:
+        limit = 300
+    sha1 = _norm_sha1(sha1)
+    sha_filter = ''
+    args: List[Any] = []
+    if sha1:
+        sha_filter = """
+          AND (
+                UPPER(COALESCE(s.sha1, ''))=%s
+             OR EXISTS (
+                    SELECT 1
+                    FROM shared_rapid_source_files sf
+                    WHERE sf.local_source_id=s.id
+                      AND UPPER(COALESCE(sf.sha1, ''))=%s
+                )
+          )
+        """
+        args.extend([sha1, sha1])
+    args.append(limit)
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH candidate_sources AS (
+                        SELECT *
+                        FROM shared_rapid_sources s
+                        WHERE COALESCE(s.status, '') NOT IN ('disabled', 'cancelled', 'canceled', 'deleted')
+                          AND COALESCE(s.center_status, '') <> 'disabled'
+                          AND s.source_kind IN ('movie', 'episode')
+                          {sha_filter}
+                        ORDER BY s.updated_at ASC NULLS LAST, s.id ASC
+                        LIMIT %s
+                    ),
+                    file_identities AS (
+                        SELECT DISTINCT s.id AS local_source_id, x.sha1
+                        FROM candidate_sources s
+                        CROSS JOIN LATERAL (
+                            SELECT NULLIF(UPPER(COALESCE(s.sha1, '')), '') AS sha1
+                            UNION ALL
+                            SELECT NULLIF(UPPER(COALESCE(f.sha1, '')), '') AS sha1
+                            FROM shared_rapid_source_files f
+                            WHERE f.local_source_id=s.id
+                        ) x
+                        WHERE x.sha1 IS NOT NULL
+                    ),
+                    signability AS (
+                        SELECT
+                            fi.local_source_id,
+                            COUNT(*)::integer AS sign_file_count,
+                            COUNT(*) FILTER (
+                                WHERE EXISTS (
+                                    SELECT 1
+                                    FROM p115_filesystem_cache p
+                                    WHERE UPPER(COALESCE(p.sha1, ''))=fi.sha1
+                                      AND COALESCE(p.pick_code, '') <> ''
+                                )
+                            )::integer AS signable_file_count,
+                            ARRAY_REMOVE(
+                                ARRAY_AGG(DISTINCT fi.sha1) FILTER (
+                                    WHERE NOT EXISTS (
+                                        SELECT 1
+                                        FROM p115_filesystem_cache p
+                                        WHERE UPPER(COALESCE(p.sha1, ''))=fi.sha1
+                                          AND COALESCE(p.pick_code, '') <> ''
+                                    )
+                                ),
+                                NULL
+                            ) AS missing_sign_sha1s
+                        FROM file_identities fi
+                        GROUP BY fi.local_source_id
+                    )
+                    SELECT s.*, sg.sign_file_count, sg.signable_file_count, sg.missing_sign_sha1s
+                    FROM candidate_sources s
+                    JOIN signability sg ON sg.local_source_id=s.id
+                    WHERE sg.sign_file_count > 0
+                      AND sg.signable_file_count < sg.sign_file_count
+                    ORDER BY s.updated_at ASC NULLS LAST, s.id ASC
+                    """,
+                    args,
+                )
+                rows = [dict(r) for r in (cur.fetchall() or [])]
+    except Exception as e:
+        logger.warning(f"  ➜ [共享资源维护] 查询本机不可签名共享源失败: {e}")
+        return {'ok': False, 'checked': 0, 'disabled': 0, 'failed': 1, 'message': str(e), 'items': []}
+
+    if not rows:
+        return {'ok': True, 'checked': 0, 'disabled': 0, 'failed': 0, 'items': []}
+
+    client = SharedCenterClient()
+    disabled = 0
+    failed = 0
+    items = []
+    for row in rows:
+        local_id = int(row.get('id') or 0)
+        source_kind = str(row.get('source_kind') or '').strip()
+        center_source_id = str(row.get('center_source_id') or '').strip()
+        title = str(row.get('title') or row.get('file_name') or row.get('tmdb_id') or local_id)
+        missing_sha1s = [str(x or '').strip().upper() for x in (row.get('missing_sign_sha1s') or []) if _norm_sha1(x)]
+        reason = '本机已无法按 SHA1 反查可签名 pick_code'
+        if missing_sha1s:
+            reason += '：' + '、'.join([x[:12] + '...' for x in missing_sha1s[:5]])
+        center_resp = {}
+
+        if center_source_id:
+            try:
+                center_resp = client.disable_source(source_kind, center_source_id, message=reason) or {}
+                if center_resp.get('ok') is False:
+                    raise RuntimeError(center_resp.get('message') or center_resp.get('error') or center_resp)
+            except Exception as e:
+                failed += 1
+                try:
+                    shared_share_db.update_local_source(local_id, last_error=f'中心下架不可签名源失败: {e}')
+                except Exception:
+                    pass
+                logger.warning(
+                    "  ➜ [共享资源维护] 本机不可签名共享源中心下架失败: id=%s, kind=%s, center=%s, title=%s, err=%s",
+                    local_id,
+                    source_kind,
+                    center_source_id,
+                    title,
+                    e,
+                )
+                items.append({
+                    'id': local_id,
+                    'source_kind': source_kind,
+                    'center_source_id': center_source_id,
+                    'title': title,
+                    'ok': False,
+                    'error': str(e),
+                    'missing_sign_sha1s': missing_sha1s,
+                })
+                continue
+
+        shared_share_db.disable_local_source(
+            local_id,
+            reason=reason,
+            center_response=center_resp,
+            source='sign_holder_cleanup',
+        )
+        disabled += 1
+        items.append({
+            'id': local_id,
+            'source_kind': source_kind,
+            'center_source_id': center_source_id,
+            'title': title,
+            'ok': True,
+            'missing_sign_sha1s': missing_sha1s,
+        })
+        logger.info(
+            "  ➜ [共享资源维护] 已下架本机不可签名共享源: id=%s, kind=%s, center=%s, title=%s, missing_sha1=%s",
+            local_id,
+            source_kind,
+            center_source_id or '-',
+            title,
+            len(missing_sha1s),
+        )
+
+    return {'ok': failed == 0, 'checked': len(rows), 'disabled': disabled, 'failed': failed, 'items': items[:50]}
+
+
 def _center_request_headers_for_display_meta() -> Dict[str, str]:
     return {
         'X-Server-ID-Hash': _current_server_id_hash(),
@@ -7660,6 +8215,11 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
         parts.append(f"失效清理={cleanup.get('disabled', 0)}/{cleanup.get('offline_found', 0)}")
         if cleanup.get('failed'):
             parts.append(f"下架失败={cleanup.get('failed')}")
+    sign_cleanup = result.get('sign_holder_cleanup') if isinstance(result.get('sign_holder_cleanup'), dict) else {}
+    if sign_cleanup:
+        parts.append(f"不可签名清理={sign_cleanup.get('disabled', 0)}/{sign_cleanup.get('checked', 0)}")
+        if sign_cleanup.get('failed'):
+            parts.append(f"不可签名下架失败={sign_cleanup.get('failed')}")
     credit = result.get('credit') if isinstance(result.get('credit'), dict) else {}
     snapshot = credit.get('snapshot') if isinstance(credit.get('snapshot'), dict) else {}
     if snapshot:
@@ -7719,7 +8279,7 @@ def _shared_maintenance_log_summary(result: Dict[str, Any]) -> str:
             parts.append(f"分享全量对账跳过={share_reconcile.get('message')}")
     if credit:
         parts.append(f"同步流水={credit.get('synced_ledger', 0)}")
-    for key in ('listener_error', 'offline_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
+    for key in ('listener_error', 'offline_cleanup_error', 'sign_holder_cleanup_error', 'non_effective_reregister_error', 'airing_episode_backfill_error', 'display_meta_backfill_error', 'raw_repair_backfill_error', 'intro_backfill_error', 'logical_season_share_repair_error', 'credit_error'):
         if result.get(key):
             parts.append(f"{key}={result.get(key)}")
     return '，'.join(parts)
@@ -7739,6 +8299,10 @@ def task_shared_resource_maintenance(processor=None, maintenance_silent: bool = 
         result['offline_cleanup'] = _cleanup_offline_local_sources(limit=300)
     except Exception as e:
         result['offline_cleanup_error'] = str(e)
+    try:
+        result['sign_holder_cleanup'] = _cleanup_unresolvable_sign_holder_sources(limit=300)
+    except Exception as e:
+        result['sign_holder_cleanup_error'] = str(e)
     try:
         result['non_effective_reregister'] = _reregister_non_effective_local_sources(limit=300)
     except Exception as e:

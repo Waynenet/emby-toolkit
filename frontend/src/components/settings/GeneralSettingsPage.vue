@@ -822,36 +822,25 @@
                             <n-text depth="3" style="font-size:0.8em;">最短5分钟。过短可能触发风控。</n-text>
                         </template>
                     </n-form-item>
-                    <n-form-item label="媒体信息格式化" path="p115_generate_mediainfo">
-                      <n-switch v-model:value="configModel.p115_generate_mediainfo" :disabled="organizeDependentDisabled">
-                          <template #checked>生成自定义媒体信息</template>
-                          <template #unchecked>保留原版媒体信息</template>
-                      </n-switch>
-                      <template #feedback>
-                          <n-text depth="3" style="font-size:0.8em;">
-                              同步生成 -mediainfo.json 文件，勿配置神医'可选媒体信息 JSON 根目录'。
-                          </n-text>
-                      </template>
-                  </n-form-item>
                   <n-form-item label="媒体信息辅助识别" path="p115_mediainfo_assisted_recognition">
                       <n-switch
                           v-model:value="configModel.p115_mediainfo_assisted_recognition"
-                          :disabled="organizeDependentDisabled || !configModel.p115_generate_mediainfo"
+                          :disabled="organizeDependentDisabled"
                       >
                           <template #checked>启用辅助识别</template>
                           <template #unchecked>不参与识别</template>
                       </n-switch>
                       <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
-                              允许整理流程复用媒体信息缓存中的 _etk 身份辅助识别 TMDb 与季集号；仅在“媒体信息格式化”开启时生效。
+                              允许整理流程复用媒体信息缓存中的 _etk 身份辅助识别 TMDb 与季集号。
                           </n-text>
                       </template>
                   </n-form-item>
                   <n-form-item label="默认音轨/字幕">
                       <n-button
                           @click="openDefaultStreamConfig"
-                          :type="configModel.p115_generate_mediainfo ? 'primary' : 'warning'"
-                          :disabled="organizeDependentDisabled || !configModel.p115_generate_mediainfo"
+                          type="primary"
+                          :disabled="organizeDependentDisabled"
                           ghost
                       >
                           <template #icon><n-icon :component="OptionsIcon" /></template>
@@ -859,7 +848,7 @@
                       </n-button>
                       <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
-                              自定义默认音轨语言、特征词，及字幕的优先级排序；仅在“媒体信息格式化”开启时生效。
+                              自定义默认音轨语言、特征词，及字幕的优先级排序。
                           </n-text>
                       </template>
                   </n-form-item>
@@ -2340,10 +2329,6 @@ const message = useMessage();
 const dialog = useDialog();
 
 const openDefaultStreamConfig = () => {
-  if (!configModel.value?.p115_generate_mediainfo) {
-    message.warning('默认音轨/字幕配置需要先启用“同步生成媒体信息”。');
-    return;
-  }
   defaultStreamModalRef.value?.open();
 };
 
@@ -2763,15 +2748,6 @@ watch(() => configModel.value?.refresh_emby_after_update, (isRefreshEnabled) => 
     configModel.value.auto_lock_cast_after_update = false;
   }
 });
-watch(
-  () => configModel.value?.p115_generate_mediainfo,
-  (enabled) => {
-    if (configModel.value && !enabled) {
-      configModel.value.p115_mediainfo_assisted_recognition = false;
-    }
-  }
-);
-
 watch(
   () => [configModel.value?.p115_shared_resource_enabled, configModel.value?.p115_shared_resource_mode],
   ([enabled, mode]) => {
@@ -3514,10 +3490,6 @@ const save = async () => {
     if (configModel.value) {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
-    }
-    if (!cleanConfigPayload.p115_generate_mediainfo) {
-        cleanConfigPayload.p115_mediainfo_assisted_recognition = false;
-        if (configModel.value) configModel.value.p115_mediainfo_assisted_recognition = false;
     }
     if (cleanConfigPayload.p115_shared_resource_enabled) {
         if (!['permanent', 'virtual'].includes(cleanConfigPayload.p115_shared_resource_mode)) {

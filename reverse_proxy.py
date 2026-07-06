@@ -455,6 +455,24 @@ def _current_play_concurrency_device_id():
     return str(device_id or '').strip()
 
 
+def _current_play_concurrency_client_signature():
+    try:
+        parts = [
+            request.remote_addr or "",
+            request.headers.get('X-Emby-Client') or _extract_emby_auth_header_value('Client'),
+            request.headers.get('X-Emby-Device-Name') or _extract_emby_auth_header_value('Device'),
+            request.headers.get('User-Agent') or "",
+        ]
+    except RuntimeError:
+        return ""
+    normalized = []
+    for part in parts:
+        text = re.sub(r"\s+", " ", str(part or "").strip().lower())
+        if text:
+            normalized.append(text)
+    return "|".join(normalized)
+
+
 def _request_context_keys(full_path="", play_session_id=""):
     keys = []
 
@@ -567,10 +585,10 @@ def _play_concurrency_session_key(user_id, item_id="", play_session_id="", devic
     if not device_id:
         device_id = _current_play_concurrency_device_id()
     device_id = str(device_id or '').strip()
-    if device_id:
-        return f"{user_id}|client:{device_id}"
     if play_session_id:
         return f"{user_id}|ps:{play_session_id}"
+    if device_id:
+        return f"{user_id}|client:{device_id}"
     if item_id:
         return f"{user_id}|item:{item_id}"
     return user_id
@@ -581,6 +599,35 @@ def _cleanup_play_concurrency_sessions(now=None):
     for key, session_info in list(_PLAY_CONCURRENCY_SESSIONS.items()):
         if float(session_info.get('expires_at') or 0) < now:
             _PLAY_CONCURRENCY_SESSIONS.pop(key, None)
+
+
+def _is_same_play_concurrency_record(session_info, item_id="", play_session_id="", device_id="", client_signature=""):
+    item_id = str(item_id or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    device_id = str(device_id or "").strip()
+    client_signature = str(client_signature or "").strip()
+    existing_item_id = str((session_info or {}).get("item_id") or "").strip()
+    existing_play_session_id = str((session_info or {}).get("play_session_id") or "").strip()
+    existing_device_id = str((session_info or {}).get("device_id") or "").strip()
+    existing_client_signature = str((session_info or {}).get("client_signature") or "").strip()
+
+    if play_session_id and existing_play_session_id:
+        return play_session_id == existing_play_session_id
+    if not item_id or item_id != existing_item_id:
+        return False
+    if device_id and existing_device_id:
+        return device_id == existing_device_id
+
+    # Browser playback can issue a follow-up stream probe without PlaySessionId
+    # or DeviceId. Only merge that weak same-item request for the same player.
+    if not client_signature or not existing_client_signature or client_signature != existing_client_signature:
+        return False
+    return bool(
+        not play_session_id
+        or not existing_play_session_id
+        or not device_id
+        or not existing_device_id
+    )
 
 
 def _clear_play_concurrency_session(user_id="", item_id="", play_session_id="", device_id=""):
@@ -662,6 +709,7 @@ def _check_and_record_play_concurrency(user_id, item_id="", play_session_id=""):
     item_id = str(item_id or "").strip()
     play_session_id = str(play_session_id or "").strip()
     device_id = _current_play_concurrency_device_id()
+    client_signature = _current_play_concurrency_client_signature()
     key = _play_concurrency_session_key(user_id, item_id=item_id, play_session_id=play_session_id, device_id=device_id)
     with _PLAY_CONCURRENCY_LOCK:
         _cleanup_play_concurrency_sessions(now)
@@ -672,30 +720,36 @@ def _check_and_record_play_concurrency(user_id, item_id="", play_session_id=""):
             if existing_key == key:
                 matched_key = existing_key
                 break
-            if play_session_id and str(session_info.get('play_session_id') or '') == play_session_id:
+            if _is_same_play_concurrency_record(
+                session_info,
+                item_id=item_id,
+                play_session_id=play_session_id,
+                device_id=device_id,
+                client_signature=client_signature,
+            ):
                 matched_key = existing_key
                 break
-            if device_id and str(session_info.get('device_id') or '') == device_id:
-                matched_key = existing_key
-                break
-        if matched_key and matched_key != key:
-            _PLAY_CONCURRENCY_SESSIONS.pop(matched_key, None)
+        record_key = key
+        if matched_key:
+            record_key = matched_key
         active_keys = [
             k for k, v in _PLAY_CONCURRENCY_SESSIONS.items()
             if str(v.get('user_id') or '') == user_id
         ]
-        if key not in _PLAY_CONCURRENCY_SESSIONS and len(active_keys) >= max_streams:
+        if record_key not in _PLAY_CONCURRENCY_SESSIONS and len(active_keys) >= max_streams:
             user_name = user_db.get_username_by_id(user_id) or user_id
             logger.warning(
                 "  ➜ [并发控制] 用户播放并发超限: user=%s(%s), active=%s, limit=%s, item_id=%s, key=%s",
                 user_name, user_id, len(active_keys), max_streams, item_id or "-", key
             )
             return Response("Playback concurrency limit exceeded.", status=429)
-        _PLAY_CONCURRENCY_SESSIONS[key] = {
+        existing_info = _PLAY_CONCURRENCY_SESSIONS.get(record_key) or {}
+        _PLAY_CONCURRENCY_SESSIONS[record_key] = {
             "user_id": user_id,
-            "item_id": item_id,
-            "play_session_id": play_session_id,
-            "device_id": device_id,
+            "item_id": item_id or str(existing_info.get("item_id") or ""),
+            "play_session_id": play_session_id or str(existing_info.get("play_session_id") or ""),
+            "device_id": device_id or str(existing_info.get("device_id") or ""),
+            "client_signature": client_signature or str(existing_info.get("client_signature") or ""),
             "updated_at": now,
             "expires_at": now + _PLAY_CONCURRENCY_TTL_SECONDS,
         }

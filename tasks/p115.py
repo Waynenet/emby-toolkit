@@ -31,6 +31,7 @@ from handler.p115_media_analyzer import P115MediaAnalyzerMixin
 from handler.tg_media_candidate import candidate_to_recognition_hints, lookup_candidate_hint_for_name
 
 logger = logging.getLogger(__name__)
+FORCE_GENERATE_MEDIAINFO = True
 
 TV_HINT_RE = re.compile(
     r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|'
@@ -710,8 +711,11 @@ def task_scan_and_organize_115(processor=None):
         def process_root_item(root_item):
             top_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name')
             top_id = root_item.get('fid') or root_item.get('file_id')
+            cleanup_cids = set()
             fc_val = str(root_item.get('fc') if root_item.get('fc') is not None else root_item.get('type'))
             is_folder = (fc_val == '0')
+            if is_folder and top_id:
+                cleanup_cids.add(str(top_id))
             force_nested_package_scan = bool(is_folder and _should_force_nested_package_scan(top_name))
             transfer_context = P115CacheManager.get_transfer_context(top_name)
             transfer_context_hints = _transfer_context_to_recognition_hints(transfer_context)
@@ -784,9 +788,6 @@ def task_scan_and_organize_115(processor=None):
                                     gathered_files.append(child)
                                 else:
                                     sync_scan(c_id, depth + 1, child_rel_dir)
-                                
-                                # 将目录加入垃圾回收器
-                                P115DeleteBuffer.add(fids=[], base_cids=[c_id])
                             else:
                                 c_ext = c_name.split('.')[-1].lower() if '.' in c_name else ''
                                 if c_ext in allowed_exts:
@@ -923,6 +924,9 @@ def task_scan_and_organize_115(processor=None):
                 except Exception as e:
                     logger.error(f"  ➜ 整理出错 (组: {g_top_name}): {e}")
 
+            if cleanup_cids:
+                P115DeleteBuffer.add(fids=[], base_cids=list(cleanup_cids))
+
             # 移入未识别
             if local_unidentified and unidentified_cid:
                 u_fids = [i.get('fid') or i.get('file_id') for i in local_unidentified]
@@ -973,9 +977,6 @@ def task_scan_and_organize_115(processor=None):
                 prog = 10 + int((completed_roots / total_root_items) * 90)
                 update_progress(prog, f"正在并发整理... ({completed_roots}/{total_root_items})")
 
-        # ★ 任务结束前，触发一次全局待整理目录清理
-        P115DeleteBuffer.add(check_save_path=True)
-        
         final_msg = f"扫描结束！成功归类 {total_processed} 个，移入未识别 {total_unidentified} 个。"
         logger.info(f"=== {final_msg} ===")
         update_progress(100, final_msg)
@@ -1241,6 +1242,41 @@ def task_full_sync_strm_and_subs(processor=None):
                     return value
             return None
 
+        def get_raw_cache_status(sha1_value):
+            sha1_text = str(sha1_value or '').strip().upper()
+            status = {
+                'has_raw_media': False,
+                'has_preid': False,
+            }
+            if not sha1_text:
+                return status
+            try:
+                raw_probe = P115CacheManager.get_raw_ffprobe_cache(sha1_text)
+                if not isinstance(raw_probe, dict):
+                    return status
+                status['has_raw_media'] = isinstance(raw_probe.get('format'), dict) and isinstance(raw_probe.get('streams'), list)
+                status['has_preid'] = bool(P115CacheManager._extract_preid_from_raw_etk(raw_probe))
+                return status
+            except Exception as e:
+                logger.debug(f"  ➜ [全量同步] 检查 RAW 完整性失败: sha1={sha1_text[:12]}..., err={e}")
+                return status
+
+        def ensure_raw_preid(sha1_value, probe_item):
+            sha1_text = str(sha1_value or '').strip().upper()
+            if not sha1_text:
+                return ''
+            try:
+                return P115CacheManager.ensure_file_preid(
+                    probe_item,
+                    sha1=sha1_text,
+                    fid=probe_item.get('fid') or probe_item.get('file_id') or probe_item.get('id'),
+                    pick_code=probe_item.get('pc') or probe_item.get('pick_code'),
+                    file_name=probe_item.get('fn') or probe_item.get('name') or probe_item.get('file_name'),
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [全量同步] 补齐 RAW preid 失败: sha1={sha1_text[:12]}..., err={e}")
+                return ''
+
         def node_id(node):
             if not isinstance(node, dict):
                 return ''
@@ -1479,29 +1515,87 @@ def task_full_sync_strm_and_subs(processor=None):
                     sha1 = item.get('sha1') or item.get('sha')
 
                     # 生成 Mediainfo (等同 MP 直出逻辑)
-                    if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                    if FORCE_GENERATE_MEDIAINFO:
                         mediainfo_filename = os.path.splitext(name)[0] + "-mediainfo.json"
                         mediainfo_filepath = os.path.join(current_local_path, mediainfo_filename)
+                        probe_item = {
+                            'fid': fid,
+                            'file_id': fid,
+                            'id': fid,
+                            'pc': pc,
+                            'pick_code': pc,
+                            'sha1': sha1,
+                            'fn': name,
+                            'name': name,
+                            'file_name': name,
+                            'fs': raw_size,
+                            'size': file_size,
+                        }
 
                         if os.path.exists(mediainfo_filepath):
                             valid_local_files.add(os.path.abspath(mediainfo_filepath))
+                            raw_cache_status = get_raw_cache_status(sha1) if sha1 else {}
+                            if sha1 and not raw_cache_status.get('has_raw_media'):
+                                try:
+                                    prober = _StandaloneProber(client)
+                                    probe_result = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=sha1, silent_log=True)
+                                    raw_ffprobe_json = None
+                                    if isinstance(probe_result, tuple) and len(probe_result) >= 2:
+                                        mediainfo_obj, raw_ffprobe_json = probe_result[0], probe_result[1]
+                                    else:
+                                        mediainfo_obj = probe_result
+                                    if mediainfo_obj:
+                                        P115CacheManager.save_mediainfo_cache(
+                                            str(sha1).upper(),
+                                            mediainfo_obj,
+                                            raw_ffprobe_json=raw_ffprobe_json,
+                                            file_info=probe_item,
+                                            fid=fid,
+                                            pick_code=pc,
+                                            file_name=name,
+                                        )
+                                        logger.info(f"  ➜ [全量同步] RAW 已补齐 -> {name}")
+                                except Exception as e:
+                                    logger.error(f"  ➜ [全量同步] 补齐 RAW 失败: {name} -> {e}")
+                            elif sha1 and not raw_cache_status.get('has_preid'):
+                                preid = ensure_raw_preid(sha1, probe_item)
+                                if preid:
+                                    logger.info(f"  ➜ [全量同步] RAW preid 已补齐 -> {name}")
                         else:
                             try:
                                 mediainfo_text = None
+                                raw_cache_status = {}
                                 if sha1:
                                     mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
+                                    raw_cache_status = get_raw_cache_status(sha1)
 
-                                if not mediainfo_text:
+                                if not mediainfo_text or not raw_cache_status.get('has_raw_media'):
                                     prober = _StandaloneProber(client)
-                                    probe_item = {'fid': fid, 'pc': pc, 'sha1': sha1, 'fn': name, 'fs': raw_size}
-                                    mediainfo_obj = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=sha1, silent_log=True)
+                                    probe_result = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=sha1, silent_log=True)
+                                    raw_ffprobe_json = None
+                                    if isinstance(probe_result, tuple) and len(probe_result) >= 2:
+                                        mediainfo_obj, raw_ffprobe_json = probe_result[0], probe_result[1]
+                                    else:
+                                        mediainfo_obj = probe_result
                                     if mediainfo_obj:
                                         probe_sha1 = sha1 or probe_item.get('sha1')
                                         if probe_sha1:
                                             probe_sha1 = str(probe_sha1).upper()
-                                            P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                            P115CacheManager.save_mediainfo_cache(
+                                                probe_sha1,
+                                                mediainfo_obj,
+                                                raw_ffprobe_json=raw_ffprobe_json,
+                                                file_info=probe_item,
+                                                fid=fid,
+                                                pick_code=pc,
+                                                file_name=name,
+                                            )
                                             sha1 = probe_sha1
                                         mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
+                                elif sha1 and not raw_cache_status.get('has_preid'):
+                                    preid = ensure_raw_preid(sha1, probe_item)
+                                    if preid:
+                                        logger.info(f"  ➜ [全量同步] RAW preid 已补齐 -> {name}")
 
                                 if mediainfo_text:
                                     with open(mediainfo_filepath, "w", encoding="utf-8") as f:
@@ -2477,7 +2571,7 @@ def task_monitor_115_life_events(processor=None):
                     # ==================================================
                     # ★ 生成 Mediainfo (等同 MP 直出逻辑)
                     # ==================================================
-                    if config.get(constants.CONFIG_OPTION_115_GENERATE_MEDIAINFO, False):
+                    if FORCE_GENERATE_MEDIAINFO:
                         try:
                             mediainfo_filename = os.path.splitext(file_name)[0] + "-mediainfo.json"
                             mediainfo_filepath = os.path.join(current_local_path, mediainfo_filename)
@@ -2495,12 +2589,25 @@ def task_monitor_115_life_events(processor=None):
                                         'fn': file_name, 'file_name': file_name,
                                         'fs': file_size, 'size': file_size
                                     }
-                                    mediainfo_obj = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=file_sha1, silent_log=False)
+                                    probe_result = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=file_sha1, silent_log=False)
+                                    raw_ffprobe_json = None
+                                    if isinstance(probe_result, tuple) and len(probe_result) >= 2:
+                                        mediainfo_obj, raw_ffprobe_json = probe_result[0], probe_result[1]
+                                    else:
+                                        mediainfo_obj = probe_result
                                     if mediainfo_obj:
                                         probe_sha1 = file_sha1 or probe_item.get('sha1') or probe_item.get('sha')
                                         if probe_sha1:
                                             probe_sha1 = str(probe_sha1).upper()
-                                            P115CacheManager.save_mediainfo_cache(probe_sha1, mediainfo_obj)
+                                            P115CacheManager.save_mediainfo_cache(
+                                                probe_sha1,
+                                                mediainfo_obj,
+                                                raw_ffprobe_json=raw_ffprobe_json,
+                                                file_info=probe_item,
+                                                fid=file_id,
+                                                pick_code=pick_code,
+                                                file_name=file_name,
+                                            )
                                             file_sha1 = probe_sha1
                                         mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
 

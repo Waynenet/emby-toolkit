@@ -183,6 +183,24 @@ def record_deleted_resource(
         conn.commit()
 
 
+def has_deleted_resource(fingerprint: str) -> bool:
+    if not fingerprint:
+        return False
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM subscribe_assistant_delete_records
+                WHERE fingerprint = %s
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                LIMIT 1
+                """,
+                (fingerprint,),
+            )
+            return cursor.fetchone() is not None
+
+
 def cleanup_delete_records() -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cursor:

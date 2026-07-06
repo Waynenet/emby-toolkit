@@ -1184,8 +1184,7 @@ def _execute_resubscribe(processor, task_name: str, target):
             # ======================================================================
 
             # 提交新订阅
-            if moviepilot.subscribe_with_custom_payload(payload, config):
-                settings_db.decrement_subscription_quota()
+            if moviepilot.subscribe_with_custom_payload(payload, config, consume_quota=True):
                 resubscribed_count += 1
                 
                 logger.info(f"  ➜ 成功提交订阅到 MoviePilot: {item_name}")

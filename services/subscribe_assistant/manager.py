@@ -7,9 +7,10 @@ from typing import Any, Dict, List, Optional
 from gevent import spawn
 
 from database import connection
-from database import settings_db, watchlist_db
+from database import media_db, settings_db, watchlist_db
 import handler.moviepilot as moviepilot
 import tasks.helpers as helpers
+from tasks.helpers import process_subscription_items_and_update_db
 from tasks.p115_fingerprint_helpers import p115_fp_is_virtual_strm_target, p115_fp_read_strm_target
 
 from .config import AssistantConfig, from_watchlist_config
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 STATE_SUBSCRIBES = "subscribes"
 STATE_TORRENTS = "torrents"
+STATE_HISTORY_RECONCILE = "history_reconcile"
+STATE_SNAPSHOT_RESTORE_SUPPRESSIONS = "snapshot_restore_suppressions"
 SOURCE_PENDING_JUDGE = "pending_judge"
 SOURCE_GUARD_VETO = "guard_veto"
 SOURCE_DOWNLOAD_PENDING = "download_pending"
@@ -127,7 +130,20 @@ class SubscribeAssistantManager:
                         season_num,
                     )
                     continue
-                sub = self._create_subscription(tmdb_id, series_name, season_num, decision)
+                if self._should_create_full_washing_for_partial_completed_season(
+                    tmdb_id,
+                    season_num,
+                    season_info,
+                    signal,
+                ):
+                    decision = dict(decision)
+                    decision["completed_full_washing"] = True
+                    logger.info(
+                        "  ➜ [订阅助手] 《%s》第 %s 季 已确认完结但本地未集齐，自动补订改为全集洗版。",
+                        series_name,
+                        season_num,
+                    )
+                sub = self._create_subscription(tmdb_id, series_name, season_num, decision, consume_quota=True)
                 if sub:
                     existing_by_season[season_num] = sub
             if not sub:
@@ -203,7 +219,10 @@ class SubscribeAssistantManager:
         stats = {
             "released_pending": 0,
             "download_checked": 0,
+            "no_download_checked": 0,
+            "mp_subscriptions_synced": 0,
             "washing_timeouts": 0,
+            "history_reconciled": 0,
             "snapshots_checked": 0,
             "snapshots_cleaned": 0,
             "delete_records_cleaned": 0,
@@ -211,11 +230,227 @@ class SubscribeAssistantManager:
         stats["delete_records_cleaned"] = store.cleanup_delete_records()
         stats["snapshots_cleaned"] = store.cleanup_snapshots(self.cfg.snapshot_retention_days)
         stats["washing_timeouts"] = self.run_full_washing_timeout_check()
+        stats["history_reconciled"] = self.run_transfer_history_reconcile(limit=limit)
+        stats["mp_subscriptions_synced"] = self.run_moviepilot_subscription_sync()
+        stats["no_download_checked"] = self.run_no_download_check()
         if self.cfg.download_monitor_enabled:
             stats["download_checked"] = self.run_download_check()
         if self.cfg.verify_enabled:
             stats["snapshots_checked"] = self.run_snapshot_verify(limit=limit)
         return stats
+
+    def run_transfer_history_reconcile(self, limit: int = 100) -> int:
+        now = time.time()
+        retry_ttl = 6 * 3600
+        reconcile_state = store.read_state(STATE_HISTORY_RECONCILE)
+        if not isinstance(reconcile_state, dict):
+            reconcile_state = {}
+        last_retry = reconcile_state.get("last_retry") if isinstance(reconcile_state.get("last_retry"), dict) else {}
+
+        page_size = max(20, min(_safe_int(limit, 100), 200))
+        failed_records = moviepilot.list_transfer_history(
+            self.app_config,
+            page_limit=10,
+            page_size=page_size,
+            status=False,
+        )
+        recent_records = moviepilot.list_transfer_history(
+            self.app_config,
+            page_limit=5,
+            page_size=page_size,
+        )
+        records = []
+        seen_history_ids = set()
+        for rec in list(failed_records or []) + list(recent_records or []):
+            history_id = _safe_int(rec.get("id"))
+            dedupe_key = history_id or self._transfer_history_fingerprint(
+                rec,
+                _first_text(rec, "pickcode", "pick_code", "pc", "PickCode"),
+                _first_text(rec, "fileid", "file_id", "fid", "FileId"),
+            )
+            if dedupe_key in seen_history_ids:
+                continue
+            seen_history_ids.add(dedupe_key)
+            records.append(rec)
+        if not records:
+            return 0
+
+        keys = []
+        redo_history_ids = []
+        seen = set()
+        failed_seen = 0
+        retry_skipped = 0
+        for rec in records:
+            history_id = _safe_int(rec.get("id"))
+            pick_code = _first_text(rec, "pickcode", "pick_code", "pc", "PickCode")
+            file_id = _first_text(rec, "fileid", "file_id", "fid", "FileId")
+            title = _first_text(rec, "title", "name", "src", "path", "dest")
+            status_value = rec.get("status")
+            errmsg = _first_text(rec, "errmsg", "error", "message")
+            fingerprint = self._transfer_history_fingerprint(rec, pick_code, file_id)
+            is_failed = (
+                status_value is False
+                or str(status_value).strip().lower() in {"false", "failed", "fail", "error", "0"}
+                or bool(errmsg)
+            )
+            if is_failed:
+                failed_seen += 1
+            if now - float(last_retry.get(fingerprint) or 0) < retry_ttl:
+                if is_failed:
+                    retry_skipped += 1
+                continue
+            if is_failed and history_id > 0:
+                redo_history_ids.append(history_id)
+                last_retry[fingerprint] = now
+                logger.info(
+                    "  ➜ [订阅助手对账] 发现 MP 失败整理历史，准备重整理：%s（ID=%s，原因=%s）",
+                    title or pick_code or file_id or "-",
+                    history_id,
+                    errmsg or "-",
+                )
+                if len(redo_history_ids) >= max(1, min(_safe_int(limit, 100), 20)):
+                    break
+                continue
+            if not pick_code and not file_id:
+                continue
+            key = (pick_code, file_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            keys.append({
+                "history_id": history_id,
+                "pick_code": pick_code,
+                "file_id": file_id,
+                "fingerprint": fingerprint,
+                "title": title,
+                "status": str(status_value),
+            })
+            if len(keys) >= max(1, _safe_int(limit, 100)):
+                break
+        if not keys and not redo_history_ids:
+            if failed_seen or retry_skipped:
+                logger.info(
+                    "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 0 条。",
+                    len(failed_records or []),
+                    len(recent_records or []),
+                    len(records),
+                    failed_seen,
+                    retry_skipped,
+                )
+            return 0
+
+        fixed = 0
+        retry_needed = bool(redo_history_ids)
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for item in keys:
+                        pick_code = item.get("pick_code")
+                        file_id = item.get("file_id")
+                        if pick_code:
+                            cursor.execute(
+                                """
+                                SELECT id, file_id, pick_code, original_name, status, fail_reason
+                                FROM p115_organize_records
+                                WHERE pick_code = %s
+                                ORDER BY processed_at DESC
+                                LIMIT 1
+                                """,
+                                (pick_code,),
+                            )
+                        elif file_id:
+                            cursor.execute(
+                                """
+                                SELECT id, file_id, pick_code, original_name, status, fail_reason
+                                FROM p115_organize_records
+                                WHERE file_id = %s
+                                ORDER BY processed_at DESC
+                                LIMIT 1
+                                """,
+                                (file_id,),
+                            )
+                        else:
+                            continue
+
+                        row = cursor.fetchone()
+                        if row and str(row.get("status") or "").lower() == "success":
+                            continue
+
+                        if row:
+                            cursor.execute("DELETE FROM p115_organize_records WHERE id = %s", (row.get("id"),))
+                            fixed += 1
+                            retry_needed = True
+                            last_retry[item.get("fingerprint")] = now
+                            history_id = _safe_int(item.get("history_id"))
+                            if history_id > 0:
+                                redo_history_ids.append(history_id)
+                            logger.info(
+                                "  ➜ [订阅助手对账] 已清理 ETK 异常整理记录，准备重整理：%s（状态=%s，原因=%s）",
+                                row.get("original_name") or item.get("title") or pick_code or file_id,
+                                row.get("status") or "-",
+                                row.get("fail_reason") or "-",
+                            )
+                        else:
+                            history_id = _safe_int(item.get("history_id"))
+                            if history_id > 0:
+                                redo_history_ids.append(history_id)
+                                fixed += 1
+                                retry_needed = True
+                                last_retry[item.get("fingerprint")] = now
+                                logger.info(
+                                    "  ➜ [订阅助手对账] MP 已有整理历史但 ETK 缺少整理记录，准备重整理：%s（ID=%s）",
+                                    item.get("title") or pick_code or file_id,
+                                    history_id,
+                                )
+                    conn.commit()
+        except Exception as e:
+            logger.warning(f"  ➜ [订阅助手对账] 巡检失败：{e}", exc_info=True)
+            return fixed
+
+        if retry_needed:
+            last_retry = {
+                k: v for k, v in (last_retry or {}).items()
+                if k and now - float(v or 0) < retry_ttl
+            }
+            store.write_state(STATE_HISTORY_RECONCILE, {"last_retry": last_retry})
+            if redo_history_ids:
+                redo_ids = []
+                for history_id in redo_history_ids:
+                    if history_id not in redo_ids:
+                        redo_ids.append(history_id)
+                if moviepilot.redo_transfer_history(self.app_config, redo_ids):
+                    fixed += max(0, len(redo_ids) - fixed)
+                else:
+                    try:
+                        import task_manager
+                        task_manager.trigger_115_organize_task(reason="subscribe_assistant_reconcile")
+                    except Exception as e:
+                        logger.warning(f"  ➜ [订阅助手对账] 触发 115 整理重跑失败：{e}", exc_info=True)
+                logger.info(
+                    "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 %s 条。",
+                    len(failed_records or []),
+                    len(recent_records or []),
+                    len(records),
+                    failed_seen,
+                    retry_skipped,
+                    len(redo_ids),
+                )
+                return fixed
+            try:
+                import task_manager
+                task_manager.trigger_115_organize_task(reason="subscribe_assistant_reconcile")
+            except Exception as e:
+                logger.warning(f"  ➜ [订阅助手对账] 触发 115 整理重跑失败：{e}", exc_info=True)
+        logger.info(
+            "  ➜ [订阅助手对账] MP 整理历史扫描：失败页 %s 条，最近页 %s 条，合并 %s 条，失败 %s 条，缓存跳过 %s 条，触发 %s 条。",
+            len(failed_records or []),
+            len(recent_records or []),
+            len(records),
+            failed_seen,
+            retry_skipped,
+            len(redo_history_ids),
+        )
+        return fixed
 
     def run_full_washing_timeout_check(self) -> int:
         timeout_hours = _safe_int(self.cfg.full_washing_timeout_hours)
@@ -253,22 +488,120 @@ class SubscribeAssistantManager:
 
             sub = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
             subscribe_id = _safe_int(task.get("subscribe_id") or ((sub[0] or {}).get("id") if sub else 0))
+            if not subscribe_id:
+                self._mark_snapshot_restore_suppressed(
+                    tmdb_id,
+                    season,
+                    0,
+                    f"洗版超时 {timeout_hours} 小时，MP 订阅已不存在",
+                )
+                self._set_season_active_washing(tmdb_id, season, False, "洗版超时且 MP 订阅已不存在，停止洗版。")
+                self._clear_full_washing_state(_safe_int(task.get("subscribe_id")))
+                logger.warning(
+                    "  ➜ [订阅助手] 《%s》S%s 洗版已超时 %s 小时，MP 订阅已不存在，已清理本地洗版状态。",
+                    title,
+                    season,
+                    timeout_hours,
+                )
+                changed += 1
+                continue
+            self._mark_snapshot_restore_suppressed(
+                tmdb_id,
+                season,
+                subscribe_id,
+                f"洗版超时 {timeout_hours} 小时，按配置删除 MP 订阅",
+            )
             if subscribe_id and moviepilot.delete_subscription_by_id(subscribe_id, self.app_config):
+                self._set_season_active_washing(tmdb_id, season, False, "洗版超时，停止全集洗版。")
+                self._remove_subscription_state(subscribe_id, info, reason="full_washing_timeout")
+                self._clear_torrents_for_subscription(subscribe_id, "洗版超时删除 MP 订阅")
+                self._clear_full_washing_state(subscribe_id)
                 logger.warning(
                     "  ➜ [订阅助手] 《%s》S%s 洗版已超时 %s 小时，已删除 MP 洗版订阅。",
                     title,
                     season,
                     timeout_hours,
                 )
+                changed += 1
             else:
+                self._clear_snapshot_restore_suppression(tmdb_id, season, subscribe_id)
                 logger.warning(
                     "  ➜ [订阅助手] 《%s》S%s 洗版已超时 %s 小时，但删除 MP 洗版订阅失败。",
                     title,
                     season,
                     timeout_hours,
                 )
-            self._clear_full_washing_state(subscribe_id)
+        return changed
+
+    def run_no_download_check(self) -> int:
+        wait_days = _safe_int(self.cfg.tv_no_download_days)
+        actions = {str(x).strip().lower() for x in (self.cfg.no_download_actions or []) if str(x).strip()}
+        if wait_days <= 0 or not actions:
+            return 0
+        data = store.read_state(STATE_SUBSCRIBES)
+        if not isinstance(data, dict) or not data:
+            return 0
+
+        now = time.time()
+        wait_seconds = wait_days * 86400
+        changed = 0
+        for key, task in list(data.items()):
+            if not isinstance(task, dict) or task.get("deleted") or task.get("full_washing"):
+                continue
+            subscribe_id = _safe_int(task.get("subscribe_id") or key)
+            tmdb_id = str(task.get("tmdb_id") or "").strip()
+            season = _safe_int(task.get("season"))
+            info = task.get("subscribe_info") if isinstance(task.get("subscribe_info"), dict) else {}
+            state = str(task.get("mp_state") or info.get("state") or "").strip().upper()
+            if state and state != "R":
+                continue
+            if float(task.get("download_started_at") or 0) > 0:
+                continue
+            started_at = float(task.get("created_at") or task.get("updated_at") or 0)
+            if subscribe_id <= 0 or not tmdb_id or season <= 0 or started_at <= 0:
+                continue
+            if now - started_at < wait_seconds:
+                continue
+            if now - float(task.get("no_download_action_at") or 0) < 86400:
+                continue
+
+            title = self._series_title(tmdb_id, info)
+            action_text = []
+            if "search" in actions and moviepilot.search_subscription(subscribe_id, self.app_config):
+                action_text.append("补搜")
+            target_state = "P" if "pending" in actions else ("S" if "pause" in actions else "")
+            if target_state:
+                if moviepilot.update_subscription_status(int(tmdb_id), season, target_state, self.app_config):
+                    action_text.append("转待定" if target_state == "P" else "暂停")
+                    task["expected_mp_update"] = {
+                        "fields": ["state"],
+                        "state": target_state,
+                        "total_episode": None,
+                        "updated_at": now,
+                    }
+                    task["mp_state"] = target_state
+                    info["state"] = target_state
+                    task["subscribe_info"] = info
+            if not action_text:
+                continue
+
+            sources = task.get("active_sources") if isinstance(task.get("active_sources"), dict) else {}
+            sources[SOURCE_NO_DOWNLOAD] = f"{wait_days} 天无下载，已执行：{','.join(action_text)}"
+            task["active_sources"] = sources
+            task["no_download_action_at"] = now
+            task["last_reason"] = sources[SOURCE_NO_DOWNLOAD]
+            task["updated_at"] = now
+            data[str(subscribe_id)] = task
             changed += 1
+            logger.info(
+                "  ➜ [订阅助手] 《%s》S%s 已等待 %s 天无下载，执行动作：%s。",
+                title,
+                season,
+                wait_days,
+                "、".join(action_text),
+            )
+        if changed:
+            store.write_state(STATE_SUBSCRIBES, data)
         return changed
 
     def run_download_check(self) -> int:
@@ -290,6 +623,18 @@ class SubscribeAssistantManager:
                 if not info:
                     if self.cfg.manual_delete_listen:
                         self._clear_download_pending(task.get("subscribe_id"), torrent_hash, "下载任务已不存在")
+                        data.pop(torrent_hash, None)
+                        changed += 1
+                    continue
+                if self._download_task_has_excluded_tag(info):
+                    self._clear_download_pending(task.get("subscribe_id"), torrent_hash, "下载任务命中排除标签")
+                    data.pop(torrent_hash, None)
+                    changed += 1
+                    logger.info("  ➜ [订阅助手] 下载任务 %s 命中排除标签，跳过下载巡检删种。", str(torrent_hash)[:8])
+                    continue
+                tracker_keyword = self._download_task_tracker_keyword(info) if self.cfg.tracker_response_listen else ""
+                if tracker_keyword:
+                    if self._delete_monitored_download_task(torrent_hash, task, f"Tracker响应命中：{tracker_keyword}"):
                         data.pop(torrent_hash, None)
                         changed += 1
                     continue
@@ -316,24 +661,29 @@ class SubscribeAssistantManager:
                 if retry_count >= self.cfg.download_retry_limit:
                     logger.warning("  ➜ [订阅助手] 下载任务 %s 连续停滞，已达到人工保护阈值。", str(torrent_hash)[:8])
                     continue
-                if moviepilot.delete_download_tasks("", self.app_config, hashes=[torrent_hash]):
-                    fingerprint = self._delete_fingerprint(task)
-                    store.record_deleted_resource(
-                        fingerprint,
-                        tmdb_id=str(task.get("tmdb_id") or ""),
-                        season_number=task.get("season"),
-                        episodes=task.get("episodes") or [],
-                        reason="timeout",
-                        retention_hours=self.cfg.delete_record_retention_hours,
-                    )
-                    if self.cfg.auto_search_when_delete and task.get("subscribe_id"):
-                        moviepilot.search_subscription(_safe_int(task.get("subscribe_id")), self.app_config)
-                    self._clear_download_pending(task.get("subscribe_id"), torrent_hash, "下载超时删种")
+                if self._delete_monitored_download_task(torrent_hash, task, "下载超时停滞"):
                     data.pop(torrent_hash, None)
                     changed += 1
             return data
 
         store.update_state(STATE_TORRENTS, updater)
+        return changed
+
+    def run_moviepilot_subscription_sync(self) -> int:
+        subscriptions = moviepilot.list_subscriptions(self.app_config) or []
+        changed = 0
+        scanned = 0
+        for sub in subscriptions:
+            if not isinstance(sub, dict):
+                continue
+            scanned += 1
+            subscribe_id = _safe_int(sub.get("id"))
+            if subscribe_id:
+                self._remember_subscription(subscribe_id, sub, reason="mp.history_sync")
+            if self._sync_mp_subscription_to_etk(sub, reason="history"):
+                changed += 1
+        if scanned or changed:
+            logger.info("  ➜ [订阅助手] MP 历史订阅同步完成：扫描=%s，同步=%s。", scanned, changed)
         return changed
 
     def run_snapshot_verify(self, limit: int = 100) -> int:
@@ -455,7 +805,13 @@ class SubscribeAssistantManager:
         if subscribe_id <= 0:
             return False
         info = self._enrich_subscribe_info(info, media, subscribe_id)
+        self._clear_snapshot_restore_suppression(
+            str(info.get("tmdbid") or info.get("tmdb_id") or ""),
+            _safe_int(info.get("season")),
+            subscribe_id,
+        )
         self._remember_subscription(subscribe_id, info, reason="subscribe.added")
+        self._sync_mp_subscription_to_etk(info, reason="subscribe.added")
         logger.info("  ➜ [订阅助手] 已接管 MP 新增订阅：%s。", self._format_subscribe_info(info))
         return True
 
@@ -488,6 +844,7 @@ class SubscribeAssistantManager:
         )
         if fields:
             self._mark_active_source(subscribe_id, SOURCE_MANUAL_MP, f"MP 手动修改：{','.join(str(x) for x in fields)}")
+        self._sync_mp_subscription_to_etk(info, reason="subscribe.modified")
         logger.debug(
             "  ➜ [订阅助手] 已记录 MP 订阅修改：%s，scene=%s，fields=%s。",
             self._format_subscribe_info(info),
@@ -505,6 +862,10 @@ class SubscribeAssistantManager:
         self._clear_torrents_for_subscription(subscribe_id, "订阅已删除")
         tmdb_id = str(info.get("tmdbid") or info.get("tmdb_id") or "").strip()
         season = _safe_int(info.get("season"))
+        if self._snapshot_restore_suppressed(tmdb_id, season, subscribe_id):
+            logger.info("  ➜ [订阅助手] MP 订阅删除属于订阅助手主动收口，跳过完成快照恢复：%s。", self._format_subscribe_info(info))
+            logger.info("  ➜ [订阅助手] 已记录 MP 订阅删除：%s。", self._format_subscribe_info(info))
+            return True
         if self.cfg.verify_enabled and tmdb_id and season > 0:
             snapshot = store.get_latest_snapshot(
                 tmdb_id=tmdb_id,
@@ -658,12 +1019,26 @@ class SubscribeAssistantManager:
     def _repair_snapshot_subscription(self, snapshot: Dict[str, Any], tmdb_id: str, season: int, snapshot_total: int) -> bool:
         if snapshot_total <= 0:
             return False
+        if self._snapshot_restore_suppressed(tmdb_id, season, _safe_int(snapshot.get("subscribe_id"))):
+            logger.debug(
+                "  ➜ [订阅助手] 《%s》S%s 已按配置完成后删除订阅，跳过完成快照恢复。",
+                self._series_title(tmdb_id, snapshot.get("subscribe_json")),
+                season,
+            )
+            return False
 
         subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
         sub = subscriptions[0] if subscriptions else None
         if not sub:
             snap_sub = snapshot.get("subscribe_json") or {}
             title = snap_sub.get("name") or snap_sub.get("title") or snap_sub.get("keyword") or tmdb_id
+            decision = {"mp_state": "R", "sources": {}, "reason": "自动纠错恢复订阅"}
+            if _safe_int(snap_sub.get("best_version_full")) == 1 or self._has_full_washing_state(
+                tmdb_id,
+                season,
+                _safe_int(snapshot.get("subscribe_id")),
+            ):
+                decision["completed_full_washing"] = True
             logger.warning(
                 "  ➜ [订阅助手] 完成快照对应的 MP 订阅已消失：《%s》S%s，正在按快照恢复订阅。",
                 self._series_title(tmdb_id, snap_sub),
@@ -673,7 +1048,7 @@ class SubscribeAssistantManager:
                 str(tmdb_id),
                 str(title),
                 season,
-                {"mp_state": "R", "sources": {}, "reason": "自动纠错恢复订阅"},
+                decision,
             )
             if not created:
                 return False
@@ -722,6 +1097,7 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_TORRENTS, updater)
+        self._mark_download_observed(subscribe_id)
         self._mark_active_source(subscribe_id, SOURCE_DOWNLOAD_PENDING, "下载已发起，等待整理入库")
 
     def _remember_subscription(self, subscribe_id: int, info: Dict[str, Any], reason: str = "", extra: Dict[str, Any] = None) -> None:
@@ -730,6 +1106,8 @@ class SubscribeAssistantManager:
 
         def updater(data):
             task = data.get(str(subscribe_id), {})
+            if not task.get("created_at"):
+                task["created_at"] = time.time()
             task["subscribe_id"] = subscribe_id
             task["subscribe_info"] = info or {}
             task["tmdb_id"] = str((info or {}).get("tmdbid") or (info or {}).get("tmdb_id") or task.get("tmdb_id") or "")
@@ -739,6 +1117,24 @@ class SubscribeAssistantManager:
             task["updated_at"] = time.time()
             if extra:
                 task.update(extra)
+            data[str(subscribe_id)] = task
+            return data
+
+        store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _mark_download_observed(self, subscribe_id: int) -> None:
+        if not subscribe_id:
+            return
+        now = time.time()
+
+        def updater(data):
+            task = data.get(str(subscribe_id), {})
+            if not task.get("created_at"):
+                task["created_at"] = now
+            task["subscribe_id"] = subscribe_id
+            task["download_started_at"] = now
+            task.pop("no_download_action_at", None)
+            task["updated_at"] = now
             data[str(subscribe_id)] = task
             return data
 
@@ -790,6 +1186,23 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _has_full_washing_state(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> bool:
+        data = store.read_state(STATE_SUBSCRIBES)
+        if not isinstance(data, dict):
+            return False
+        if subscribe_id:
+            task = data.get(str(subscribe_id)) or {}
+            if isinstance(task, dict) and bool(task.get("full_washing")):
+                return True
+        tmdb_id = str(tmdb_id or "").strip()
+        season = _safe_int(season)
+        for task in data.values():
+            if not isinstance(task, dict) or not task.get("full_washing"):
+                continue
+            if str(task.get("tmdb_id") or "").strip() == tmdb_id and _safe_int(task.get("season")) == season:
+                return True
+        return False
 
     def _keep_full_washing_subscription_active(
         self,
@@ -843,6 +1256,79 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _snapshot_restore_suppression_keys(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> List[str]:
+        keys = []
+        tmdb = str(tmdb_id or "").strip()
+        if tmdb and _safe_int(season) > 0:
+            keys.append(f"tmdb:{tmdb}:S{_safe_int(season)}")
+        if _safe_int(subscribe_id) > 0:
+            keys.append(f"sub:{_safe_int(subscribe_id)}")
+        return keys
+
+    def _mark_snapshot_restore_suppressed(
+        self,
+        tmdb_id: str,
+        season: int,
+        subscribe_id: int,
+        reason: str,
+    ) -> None:
+        keys = self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id)
+        if not keys:
+            return
+        now = time.time()
+        expires_at = now + max(1, _safe_int(self.cfg.snapshot_retention_days, 180)) * 86400
+
+        def updater(data):
+            for key in list(data.keys()):
+                if float((data.get(key) or {}).get("expires_at") or 0) <= now:
+                    data.pop(key, None)
+            for key in keys:
+                data[key] = {
+                    "tmdb_id": str(tmdb_id or ""),
+                    "season": _safe_int(season),
+                    "subscribe_id": _safe_int(subscribe_id),
+                    "reason": reason,
+                    "created_at": now,
+                    "expires_at": expires_at,
+                }
+            return data
+
+        store.update_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, updater)
+
+    def _clear_snapshot_restore_suppression(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> None:
+        keys = set(self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id))
+        if not keys:
+            return
+
+        def updater(data):
+            for key in keys:
+                data.pop(key, None)
+            return data
+
+        store.update_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, updater)
+
+    def _snapshot_restore_suppressed(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> bool:
+        keys = set(self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id))
+        if not keys:
+            return False
+        now = time.time()
+        state = store.read_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS)
+        changed = False
+        suppressed = False
+        if not isinstance(state, dict):
+            return False
+        for key, item in list(state.items()):
+            expires_at = float((item or {}).get("expires_at") or 0)
+            if expires_at <= now:
+                state.pop(key, None)
+                changed = True
+                continue
+            if key in keys:
+                suppressed = True
+        if changed:
+            store.write_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, state)
+        return suppressed
 
     def _has_recent_manual_mp_change(self, subscribe_id: int, field: str) -> bool:
         if not subscribe_id:
@@ -928,6 +1414,181 @@ class SubscribeAssistantManager:
         if removed:
             logger.info("  ➜ [订阅助手] 已清理订阅 %s 的下载监控：%s，数量=%s。", subscribe_id, reason, removed)
         return removed
+
+    def _delete_monitored_download_task(self, torrent_hash: str, task: Dict[str, Any], reason: str) -> bool:
+        fingerprint = self._delete_fingerprint(task)
+        if self.cfg.skip_deletion and store.has_deleted_resource(fingerprint):
+            self._clear_download_pending(task.get("subscribe_id"), torrent_hash, "近期已删除过同类任务，跳过重复删种")
+            logger.info(
+                "  ➜ [订阅助手] 下载任务 %s 近期已处理过同类删除，跳过重复删种。",
+                str(torrent_hash)[:8],
+            )
+            return True
+        if not moviepilot.delete_download_tasks("", self.app_config, hashes=[torrent_hash]):
+            return False
+        store.record_deleted_resource(
+            fingerprint,
+            tmdb_id=str(task.get("tmdb_id") or ""),
+            season_number=task.get("season"),
+            episodes=task.get("episodes") or [],
+            reason=reason,
+            retention_hours=self.cfg.delete_record_retention_hours,
+        )
+        if self.cfg.auto_search_when_delete and task.get("subscribe_id"):
+            moviepilot.search_subscription(_safe_int(task.get("subscribe_id")), self.app_config)
+        self._clear_download_pending(task.get("subscribe_id"), torrent_hash, reason)
+        return True
+
+    def _download_task_has_excluded_tag(self, info: Dict[str, Any]) -> bool:
+        tags = {x.lower() for x in self._download_task_tokens(info, ("tag", "tags", "label", "labels", "category", "categories"))}
+        for tag in self.cfg.delete_exclude_tags or []:
+            text = str(tag or "").strip().lower()
+            if text and any(text == token or text in token for token in tags):
+                return True
+        return False
+
+    def _download_task_tracker_keyword(self, info: Dict[str, Any]) -> str:
+        blob = json.dumps(info or {}, ensure_ascii=False, default=str).lower()
+        for keyword in self.cfg.tracker_keywords or []:
+            text = str(keyword or "").strip().lower()
+            if text and text in blob:
+                return str(keyword)
+        return ""
+
+    def _download_task_tokens(self, data: Any, keys: tuple) -> List[str]:
+        found = []
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if str(key).lower() in keys:
+                    found.extend(self._download_task_tokens(value, keys))
+                elif isinstance(value, (dict, list, tuple)):
+                    found.extend(self._download_task_tokens(value, keys))
+        elif isinstance(data, (list, tuple)):
+            for item in data:
+                found.extend(self._download_task_tokens(item, keys))
+        elif data not in (None, ""):
+            found.append(str(data).strip())
+        return [x for x in found if x]
+
+    def _sync_mp_subscription_to_etk(self, info: Dict[str, Any], reason: str = "") -> bool:
+        if not isinstance(info, dict):
+            return False
+        tmdb_id = str(info.get("tmdbid") or info.get("tmdb_id") or "").strip()
+        if not tmdb_id:
+            return False
+        subscribe_id = _safe_int(info.get("id") or info.get("subscribe_id"))
+        item_type = self._mp_subscription_item_type(info)
+        if not item_type:
+            return False
+
+        source = {
+            "type": "moviepilot",
+            "subscribe_id": subscribe_id or None,
+            "reason": reason or "sync",
+        }
+        history_sync = reason == "history"
+
+        tmdb_items = []
+        if item_type == "Movie":
+            tmdb_items.append({"tmdb_id": tmdb_id, "media_type": "Movie"})
+        elif item_type == "Season":
+            season = _safe_int(info.get("season"))
+            if season <= 0:
+                return False
+            tmdb_items.append({"tmdb_id": tmdb_id, "media_type": "Series", "season": season})
+        else:
+            logger.debug("  ➜ [订阅助手] 跳过无季号 MP 剧集订阅同步：%s。", self._format_subscribe_info(info))
+            return False
+
+        try:
+            before_keys = self._subscription_sync_keys(tmdb_items)
+            skip_statuses = {"PAUSED", "IGNORED", "PENDING_RELEASE"} if history_sync else set()
+            process_subscription_items_and_update_db(
+                tmdb_items=tmdb_items,
+                tmdb_to_emby_item_map=media_db.get_tmdb_to_emby_map(),
+                subscription_source=source,
+                tmdb_api_key=self.app_config.get("tmdb_api_key") or "",
+                target_status="SUBSCRIBED",
+                skip_existing_statuses=skip_statuses,
+                skip_in_library=False,
+            )
+            after_keys = self._subscription_sync_keys(tmdb_items)
+            changed = after_keys != before_keys
+        except Exception as e:
+            logger.warning(
+                "  ➜ [订阅助手] 同步 MP 订阅到 ETK 失败：%s -> %s",
+                self._format_subscribe_info(info),
+                e,
+                exc_info=True,
+            )
+            return False
+
+        if changed and not history_sync:
+            logger.info(
+                "  ➜ [订阅助手] 已同步 MP 订阅到 ETK：%s，来源=%s。",
+                self._format_subscribe_info(info),
+                reason or "sync",
+            )
+        return changed
+
+    def _mp_subscription_item_type(self, info: Dict[str, Any]) -> str:
+        type_text = str(info.get("type") or info.get("media_type") or "").strip().lower()
+        season = _safe_int(info.get("season"))
+        if "电影" in type_text or type_text in ("movie", "movies"):
+            return "Movie"
+        if "电视" in type_text or "剧" in type_text or type_text in ("tv", "series", "电视剧"):
+            return "Season" if season > 0 else "Series"
+        return "Season" if season > 0 else ""
+
+    def _subscription_sync_keys(self, tmdb_items: List[Dict[str, Any]]) -> Dict[str, str]:
+        try:
+            expected = []
+            for item in tmdb_items or []:
+                tmdb_id = str((item or {}).get("tmdb_id") or "").strip()
+                media_type = str((item or {}).get("media_type") or "").strip()
+                season = _safe_int((item or {}).get("season"))
+                if media_type == "Movie" and tmdb_id:
+                    expected.append((tmdb_id, "Movie"))
+                elif media_type == "Series" and tmdb_id:
+                    expected.append((tmdb_id, "Series"))
+                    if season > 0:
+                        expected.append((tmdb_id, f"SeasonByParent:{season}"))
+            if not expected:
+                return {}
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    rows = []
+                    for tmdb_id, item_type in expected:
+                        if item_type.startswith("SeasonByParent:"):
+                            season = _safe_int(item_type.split(":", 1)[1])
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json::text AS sources
+                                FROM media_metadata
+                                WHERE parent_series_tmdb_id = %s
+                                  AND item_type = 'Season'
+                                  AND season_number = %s
+                                """,
+                                (tmdb_id, season),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json::text AS sources
+                                FROM media_metadata
+                                WHERE tmdb_id = %s
+                                  AND item_type = %s
+                                """,
+                                (tmdb_id, item_type),
+                            )
+                        rows.extend(cursor.fetchall() or [])
+            return {
+                f"{row.get('tmdb_id')}|{row.get('item_type')}": f"{row.get('subscription_status')}|{row.get('sources') or ''}"
+                for row in rows
+            }
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 读取同步前后状态失败：%s", e)
+            return {}
 
     def _enrich_subscribe_info(self, info: Dict[str, Any], media: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         enriched = dict(info or {})
@@ -1143,12 +1804,57 @@ class SubscribeAssistantManager:
             logger.debug("  ➜ [订阅助手] 判断季是否仍为虚拟入库失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
         return False
 
-    def _create_subscription(self, tmdb_id: str, series_name: str, season: int, decision: Dict[str, Any]) -> Optional[dict]:
+    def _should_create_full_washing_for_partial_completed_season(
+        self,
+        tmdb_id: str,
+        season: int,
+        season_info: Dict[str, Any],
+        signal: CompletionSignal,
+    ) -> bool:
+        if not signal or not signal.completed:
+            return False
+        expected_count = _safe_int((season_info or {}).get("episode_count")) or _safe_int(signal.scope_total)
+        if expected_count <= 0:
+            return False
+        local_count = self._local_in_library_episode_count(tmdb_id, season)
+        return 0 < local_count < expected_count
+
+    def _local_in_library_episode_count(self, tmdb_id: str, season: int) -> int:
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(DISTINCT episode_number) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                          AND in_library = TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+            return _safe_int(row.get("count"))
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 查询本地在库集数失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
+            return 0
+
+    def _create_subscription(
+        self,
+        tmdb_id: str,
+        series_name: str,
+        season: int,
+        decision: Dict[str, Any],
+        consume_quota: bool = False,
+    ) -> Optional[dict]:
         payload_kwargs = self._subscription_wash_kwargs(decision)
         if not moviepilot.subscribe_series_to_moviepilot(
             {"title": series_name, "tmdb_id": tmdb_id},
             season,
             self.app_config,
+            consume_quota=consume_quota,
             **payload_kwargs,
         ):
             logger.warning("  ➜ [订阅助手] 《%s》S%s 自动补订失败。", series_name, season)
@@ -1345,11 +2051,18 @@ class SubscribeAssistantManager:
         if not subscribe_id:
             subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
             subscribe_id = _safe_int((subscriptions[0] or {}).get("id") if subscriptions else 0)
+        self._mark_snapshot_restore_suppressed(
+            tmdb_id,
+            season,
+            subscribe_id,
+            "分集洗版一致性通过，按配置删除 MP 订阅",
+        )
         if subscribe_id and moviepilot.delete_subscription_by_id(subscribe_id, self.app_config):
             self._remove_subscription_state(subscribe_id, subscribe or {}, reason="episode_washing_consistency_ok")
             self._clear_torrents_for_subscription(subscribe_id, "分集洗版一致性通过，删除 MP 订阅")
             logger.info("  ➜ [订阅助手] 《%s》S%s 分集洗版一致性通过，已按配置删除 MP 订阅。", series_name, season)
         else:
+            self._clear_snapshot_restore_suppression(tmdb_id, season, subscribe_id)
             logger.warning("  ➜ [订阅助手] 《%s》S%s 分集洗版一致性通过，但删除 MP 订阅失败。", series_name, season)
 
     def _season_consistency_ok(self, tmdb_id: str, season: int, expected_count: int, series_name: str) -> bool:
@@ -1569,6 +2282,16 @@ class SubscribeAssistantManager:
         ])
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
+    def _transfer_history_fingerprint(self, rec: Dict[str, Any], pick_code: str, file_id: str) -> str:
+        raw = "|".join([
+            str(rec.get("id") or ""),
+            str(pick_code or ""),
+            str(file_id or ""),
+            _first_text(rec, "title", "name", "src", "path"),
+            _first_text(rec, "date", "time", "created_at", "updated_at"),
+        ])
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
 
 def _progress_value(info: Dict[str, Any]) -> float:
     for key in ("progress", "percent", "completed"):
@@ -1579,6 +2302,16 @@ def _progress_value(info: Dict[str, Any]) -> float:
         except (TypeError, ValueError):
             pass
     return 0.0
+
+
+def _first_text(data: Dict[str, Any], *keys: str) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, "", [], {}):
+            return str(value).strip()
+    return ""
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
