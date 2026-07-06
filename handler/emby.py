@@ -3060,40 +3060,6 @@ def get_playback_reporting_data(base_url: str, api_key: str, user_id: str, days:
         logger.error(f"获取个人播放数据失败: {e}")
         return {"error": str(e)}
 
-# ✨✨✨ 神医插件: 同步/提取媒体信息 ✨✨✨
-def sync_item_media_info(item_id: str, media_data: Optional[Dict[str, Any]], base_url: str, api_key: str) -> Optional[Dict[str, Any]]:
-    # 只需要校验 item_id, base_url, api_key
-    if not all([item_id, base_url, api_key]):
-        return None
-
-    # 严格按照作者的写法，把参数直接拼在 URL 上，只传 Id
-    api_url = f"{base_url.rstrip('/')}/emby/Items/SyncMediaInfo?Id={item_id}&api_key={api_key}"
-        
-    headers = {"Content-Type": "application/json"}
-    custom_timeout = 600.0 # 真实提取耗时较长
-    
-    try:
-        response = emby_client.post(api_url, json=media_data, headers=headers, timeout=custom_timeout)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            # 备用接口同样只传 Id
-            api_url_fallback = f"{base_url.rstrip('/')}/Items/SyncMediaInfo?Id={item_id}&api_key={api_key}"
-            try:
-                response_fallback = emby_client.post(api_url_fallback, json=media_data, headers=headers, timeout=custom_timeout)
-                response_fallback.raise_for_status()
-                return response_fallback.json()
-            except Exception as ex:
-                logger.error(f"  ➜ 神医备用接口调用失败: {ex}")
-                return None
-        else:
-            logger.error(f"  ➜ 神医接口报错: HTTP {e.response.status_code} - {e.response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"  ➜ 调用神医接口时发生网络异常: {e}")
-        return None
-
 # ✨✨✨ 神医插件: 清除媒体信息 (强制重新提取) ✨✨✨
 def clear_item_media_info(item_id: str, base_url: str, api_key: str) -> bool:
     """

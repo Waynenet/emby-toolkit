@@ -348,7 +348,7 @@ def set_rename_templates(movie_template: str, tv_template: str, config: Dict[str
     return True, ""
 
 
-def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) -> bool:
+def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, consume_quota: bool = False) -> bool:
     """
     【核心订阅函数】直接接收一个完整的订阅 payload 并提交。
     所有其他订阅函数最终都应调用此函数。
@@ -362,6 +362,10 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) 
             logger.error("  ➜ MoviePilot订阅失败：认证失败，未能获取到 Token。")
             return False
 
+        if consume_quota and settings_db.get_subscription_quota() <= 0:
+            logger.warning("  ➜ MoviePilot订阅失败：每日 MP 订阅额度已用尽。")
+            return False
+
         subscribe_url = f"{moviepilot_url}/api/v1/subscribe/"
         subscribe_headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -371,6 +375,8 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None) 
         
         if sub_response.status_code in [200, 201, 204]:
             logger.info(f"  ➜ MoviePilot 已接受订阅任务。")
+            if consume_quota:
+                settings_db.decrement_subscription_quota()
             return True
         else:
             try:
@@ -542,6 +548,7 @@ def subscribe_series_to_moviepilot(
     config: Dict[str, Any] = None,
     best_version: Optional[int] = None,
     best_version_full: Optional[int] = None,
+    consume_quota: bool = False,
 ) -> bool:
     """订阅单季或整部剧集"""
     title = series_info.get('title') or series_info.get('item_name')
@@ -570,7 +577,7 @@ def subscribe_series_to_moviepilot(
         log_msg += f" 第 {season_number} 季"
     logger.info(log_msg)
     
-    return subscribe_with_custom_payload(payload, config)
+    return subscribe_with_custom_payload(payload, config, consume_quota=consume_quota)
 
 def update_subscription_status(tmdb_id: int, season: Optional[int], status: str, config: Dict[str, Any] = None, total_episodes: Optional[int] = None) -> bool:
     """
