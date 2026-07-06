@@ -5346,6 +5346,7 @@ class P115DeleteBuffer:
     _check_save_path = False # ★ 新增：是否检查待整理根目录
     _timer = None
     _last_add_time = 0
+    _is_flushing = False
 
     @classmethod
     def add(cls, fids=None, base_cids=None, check_save_path=False):
@@ -5368,6 +5369,10 @@ class P115DeleteBuffer:
     @classmethod
     def _check_and_flush(cls):
         with cls._lock:
+            if cls._is_flushing:
+                cls._timer = spawn_later(10.0, cls._check_and_flush)
+                return
+
             now = time.time()
             # ★ 智能防抖：如果距离最后一次整理还不到 10 秒，说明大部队还在干活，继续等！
             if now - cls._last_add_time < 10.0:
@@ -5382,7 +5387,20 @@ class P115DeleteBuffer:
             cls._cids_to_check.clear()
             cls._check_save_path = False
             cls._timer = None
+            cls._is_flushing = True
 
+        try:
+            cls._flush_items(fids, cids, check_save)
+        finally:
+            with cls._lock:
+                cls._is_flushing = False
+                if cls._fids_to_delete or cls._cids_to_check or cls._check_save_path:
+                    cls._last_add_time = time.time()
+                    if cls._timer is None:
+                        cls._timer = spawn_later(10.0, cls._check_and_flush)
+
+    @classmethod
+    def _flush_items(cls, fids, cids, check_save):
         client = P115Service.get_client()
         if not client: return
 
@@ -5411,6 +5429,10 @@ class P115DeleteBuffer:
 
         if not fids and not cids:
             return
+        logger.info(
+            f"  ➜ [清理空目录] 开始执行范围清理：文件 {len(fids)} 个，目录 {len(cids)} 个，"
+            f"全局待整理扫描={'是' if check_save else '否'}。"
+        )
 
         def _safe_batch_delete(ids, is_dir=False):
             if not ids: return []
@@ -5458,16 +5480,21 @@ class P115DeleteBuffer:
             media_count = 0
             def count_media(current_cid):
                 nonlocal media_count
+                if media_count > 0:
+                    return
                 for attempt in range(3):
                     try:
                         res = client.fs_files({'cid': current_cid, 'limit': 1000, 'record_open_time': 0, 'count_folders': 0})
                         for item in res.get('data', []):
+                            if media_count > 0:
+                                return
                             if str(item.get('fc')) == '1':
                                 ext = str(item.get('fn', '')).split('.')[-1].lower()
                                 if ext in media_exts:
                                     item_size = _parse_115_size(item.get('fs') or item.get('size'))
                                     if item_size == 0 or item_size > 10 * 1024 * 1024:
                                         media_count += 1
+                                        return
                             elif str(item.get('fc')) == '0':
                                 count_media(item.get('fid'))
                         return 

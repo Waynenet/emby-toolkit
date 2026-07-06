@@ -585,12 +585,9 @@ def _flush_mp_batch(key):
             )
 
             if target_cid:
-                organizer.execute(file_nodes, target_cid)
+                organizer.execute(file_nodes, target_cid, skip_gc=True)
             else:
                 logger.info("  ➜ [MP合并整理] 未命中分类规则，保持原样。")
-
-        from handler.p115_service import P115DeleteBuffer
-        P115DeleteBuffer.add(check_save_path=True)
 
     except Exception as e:
         logger.error(f"  ➜ [MP合并整理] 失败: {e}", exc_info=True)
@@ -643,9 +640,6 @@ def _process_mp_passthrough_immediate(file_info):
         ok = organizer.execute_mp_passthrough(file_nodes)
         if not ok:
             logger.warning("  ➜ [MP直出] 直出处理未完全成功。")
-
-        from handler.p115_service import P115DeleteBuffer
-        P115DeleteBuffer.add(check_save_path=True)
 
     except Exception as e:
         logger.error(f"  ➜ [MP直出] 失败: {e}", exc_info=True)

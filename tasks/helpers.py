@@ -1966,7 +1966,10 @@ def process_subscription_items_and_update_db(
     tmdb_items: List[Dict[str, Any]], 
     tmdb_to_emby_item_map: Dict[str, Any], 
     subscription_source: Dict[str, Any], 
-    tmdb_api_key: str
+    tmdb_api_key: str,
+    target_status: str = 'WANTED',
+    skip_existing_statuses: Optional[Set[str]] = None,
+    skip_in_library: bool = True,
 ) -> Set[str]:
     """
     通用订阅处理器：接收一组 TMDb 条目，自动处理元数据、父剧集占位、在库检查，并更新 request_db。
@@ -1975,12 +1978,18 @@ def process_subscription_items_and_update_db(
     :param tmdb_to_emby_item_map: 全量本地媒体映射表 (用于判断是否在库)
     :param subscription_source: 订阅源对象 (用于写入数据库 source 字段)
     :param tmdb_api_key: TMDb API Key
+    :param target_status: 写入目标状态，默认 WANTED；传 SUBSCRIBED 时用于同步外部已订阅状态。
+    :param skip_existing_statuses: 已存在这些状态时跳过；None 使用默认订阅去重集合。
+    :param skip_in_library: 是否跳过已在库项目；同步外部订阅时可关闭。
     :return: processed_active_ids (Set[str]) - 本次处理中确认活跃的 ID 集合 (用于调用方做清理/Diff)
     """
     if not tmdb_items:
         return set()
 
     logger.info(f"  ➜ [通用订阅] 开始处理 {len(tmdb_items)} 个媒体条目...")
+    target_status = str(target_status or 'WANTED').strip().upper()
+    if target_status not in {'WANTED', 'SUBSCRIBED'}:
+        target_status = 'WANTED'
 
     # 1. 提前加载所有在库的“季”的信息 (用于精准判断季是否存在)
     in_library_seasons_set = set()
@@ -1996,14 +2005,21 @@ def process_subscription_items_and_update_db(
     # 2. 获取所有在库的 Key 集合 (Movie/Series)
     in_library_keys = set(tmdb_to_emby_item_map.keys())
 
-    # 3. 获取已订阅/暂停的 Key 集合 (防止重复请求 API)
-    subscribed_or_paused_keys = set()
+    # 3. 获取需要跳过的 Key 集合 (防止重复请求 API)
+    existing_status_keys = set()
     try:
+        if skip_existing_statuses is None:
+            status_filter = {'SUBSCRIBED', 'PAUSED', 'WANTED', 'IGNORED', 'PENDING_RELEASE'}
+        else:
+            status_filter = {str(x or '').strip().upper() for x in skip_existing_statuses if str(x or '').strip()}
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT tmdb_id, item_type FROM media_metadata WHERE subscription_status IN ('SUBSCRIBED', 'PAUSED', 'WANTED', 'IGNORED', 'PENDING_RELEASE')")
+            cursor.execute(
+                "SELECT tmdb_id, item_type FROM media_metadata WHERE subscription_status = ANY(%s)",
+                (list(status_filter) or ['__none__'],),
+            )
             for row in cursor.fetchall():
-                subscribed_or_paused_keys.add(f"{row['tmdb_id']}_{row['item_type']}")
+                existing_status_keys.add(f"{row['tmdb_id']}_{row['item_type']}")
     except Exception as e_sub:
         logger.error(f"  ➜ [通用订阅] 获取订阅状态失败: {e_sub}")
     
@@ -2044,7 +2060,7 @@ def process_subscription_items_and_update_db(
             if current_key in in_library_keys:
                 is_in_library = True
         
-        if is_in_library: continue
+        if skip_in_library and is_in_library: continue
 
         # --- B. 获取详情并构建请求 ---
         try:
@@ -2097,11 +2113,20 @@ def process_subscription_items_and_update_db(
                     
                     # 二次检查订阅状态 (检查季ID是否已订阅)
                     s_key = f"{real_season_id}_Season"
-                    if s_key in subscribed_or_paused_keys: continue
+                    if s_key in existing_status_keys: continue
             
-            # 分支 2: 电影
+            # 分支 2: 整剧/父剧集占位
+            elif media_type == 'Series':
+                if f"{tmdb_id}_Series" in existing_status_keys:
+                    continue
+                details = get_tv_details(tmdb_id, tmdb_api_key)
+                if details:
+                    target_db_id = str(details.get('id') or tmdb_id)
+                    processed_active_ids.add(target_db_id)
+
+            # 分支 3: 电影
             elif media_type == 'Movie':
-                if f"{tmdb_id}_Movie" in subscribed_or_paused_keys: continue
+                if f"{tmdb_id}_Movie" in existing_status_keys: continue
                 details = get_movie_details(tmdb_id, tmdb_api_key)
                 if details:
                     target_db_id = str(details.get('id'))
@@ -2131,7 +2156,9 @@ def process_subscription_items_and_update_db(
                 item_details_for_db['title'] = details.get('name') or f"第 {season_num} 季"
 
             # --- D. 分流 ---
-            if release_date and release_date > today_str:
+            if target_status == 'SUBSCRIBED':
+                missing_released_items.append(item_details_for_db)
+            elif release_date and release_date > today_str:
                 missing_unreleased_items.append(item_details_for_db)
             else:
                 missing_released_items.append(item_details_for_db)
@@ -2140,7 +2167,7 @@ def process_subscription_items_and_update_db(
             logger.error(f"  ➜ [通用订阅] 处理条目 {tmdb_id} ({media_type}) 时出错: {e}")
 
     # 4. 执行数据库操作 (批量写入)
-    if parent_series_to_ensure_exist:
+    if parent_series_to_ensure_exist and target_status != 'SUBSCRIBED':
         logger.info(f"  ➜ [通用订阅] 正在确保 {len(parent_series_to_ensure_exist)} 个父剧集元数据存在...")
         request_db.set_media_status_none(
             tmdb_ids=list(parent_series_to_ensure_exist.keys()),
@@ -2161,11 +2188,18 @@ def process_subscription_items_and_update_db(
             ids = [req['tmdb_id'] for req in requests]
             if status == 'WANTED':
                 request_db.set_media_status_wanted(ids, itype, media_info_list=requests, source=subscription_source)
+            elif status == 'SUBSCRIBED':
+                request_db.set_media_status_subscribed(ids, itype, media_info_list=requests, source=subscription_source)
             elif status == 'PENDING_RELEASE':
                 request_db.set_media_status_pending_release(ids, itype, media_info_list=requests, source=subscription_source)
 
-    group_and_update(missing_released_items, 'WANTED')
-    group_and_update(missing_unreleased_items, 'PENDING_RELEASE')
+    if target_status == 'SUBSCRIBED':
+        if parent_series_to_ensure_exist:
+            group_and_update(list(parent_series_to_ensure_exist.values()), 'SUBSCRIBED')
+        group_and_update(missing_released_items, 'SUBSCRIBED')
+    else:
+        group_and_update(missing_released_items, 'WANTED')
+        group_and_update(missing_unreleased_items, 'PENDING_RELEASE')
     
     return processed_active_ids
 

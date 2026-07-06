@@ -2850,6 +2850,64 @@ class WatchlistProcessor:
             logger.error(f"  ➜ [完结洗版] {action} S{season_number} active_washing 标记失败: {e}", exc_info=True)
             return False
 
+    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str) -> int:
+        """已完结且没有洗版事务时，收口 ETK 订阅状态。"""
+        if final_status != STATUS_COMPLETED:
+            return 0
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type IN ('Season', 'Episode')
+                          AND active_washing = TRUE
+                        """,
+                        (str(tmdb_id),),
+                    )
+                    row = cursor.fetchone() or {}
+                    active_count = _safe_int(row.get('count'))
+                    if active_count > 0:
+                        logger.info(
+                            "  ➜ [订阅收口] 《%s》仍有 %s 条全集/分集洗版事务，保留订阅状态。",
+                            series_name or tmdb_id,
+                            active_count,
+                        )
+                        return 0
+
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata
+                        SET subscription_status = 'NONE',
+                            subscription_sources_json = '[]'::jsonb,
+                            ignore_reason = NULL
+                        WHERE (
+                              (tmdb_id = %s AND item_type = 'Series')
+                           OR (
+                                  parent_series_tmdb_id = %s
+                              AND item_type = 'Season'
+                              AND watching_status = 'Completed'
+                           )
+                        )
+                          AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                        """,
+                        (str(tmdb_id), str(tmdb_id)),
+                    )
+                    changed = cursor.rowcount
+                    conn.commit()
+            if changed > 0:
+                logger.info(
+                    "  ➜ [订阅收口] 《%s》已完结且无洗版事务，已清理 %s 条 ETK 订阅状态。",
+                    series_name or tmdb_id,
+                    changed,
+                )
+            return changed
+        except Exception as e:
+            logger.warning("  ➜ [订阅收口] 《%s》完结订阅状态收口失败：%s", series_name or tmdb_id, e, exc_info=True)
+            return 0
+
     def _season_has_active_washing(self, tmdb_id: str, season_number: int) -> bool:
         """判断指定季是否仍处于完结洗版事务中。
 
@@ -3977,6 +4035,7 @@ class WatchlistProcessor:
             real_next_episode=real_next_episode_to_air,
             triggering_episode_ids=subscription_triggering_episode_ids or airing_episode_emby_ids or [],
         )
+        self._close_completed_subscription_status(tmdb_id, item_name, final_status)
         subscribe_assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
         version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
         lockable_statuses = {STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING}

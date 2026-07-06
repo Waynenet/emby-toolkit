@@ -711,8 +711,11 @@ def task_scan_and_organize_115(processor=None):
         def process_root_item(root_item):
             top_name = root_item.get('fn') or root_item.get('n') or root_item.get('file_name')
             top_id = root_item.get('fid') or root_item.get('file_id')
+            cleanup_cids = set()
             fc_val = str(root_item.get('fc') if root_item.get('fc') is not None else root_item.get('type'))
             is_folder = (fc_val == '0')
+            if is_folder and top_id:
+                cleanup_cids.add(str(top_id))
             force_nested_package_scan = bool(is_folder and _should_force_nested_package_scan(top_name))
             transfer_context = P115CacheManager.get_transfer_context(top_name)
             transfer_context_hints = _transfer_context_to_recognition_hints(transfer_context)
@@ -785,9 +788,6 @@ def task_scan_and_organize_115(processor=None):
                                     gathered_files.append(child)
                                 else:
                                     sync_scan(c_id, depth + 1, child_rel_dir)
-                                
-                                # 将目录加入垃圾回收器
-                                P115DeleteBuffer.add(fids=[], base_cids=[c_id])
                             else:
                                 c_ext = c_name.split('.')[-1].lower() if '.' in c_name else ''
                                 if c_ext in allowed_exts:
@@ -924,6 +924,9 @@ def task_scan_and_organize_115(processor=None):
                 except Exception as e:
                     logger.error(f"  ➜ 整理出错 (组: {g_top_name}): {e}")
 
+            if cleanup_cids:
+                P115DeleteBuffer.add(fids=[], base_cids=list(cleanup_cids))
+
             # 移入未识别
             if local_unidentified and unidentified_cid:
                 u_fids = [i.get('fid') or i.get('file_id') for i in local_unidentified]
@@ -974,9 +977,6 @@ def task_scan_and_organize_115(processor=None):
                 prog = 10 + int((completed_roots / total_root_items) * 90)
                 update_progress(prog, f"正在并发整理... ({completed_roots}/{total_root_items})")
 
-        # ★ 任务结束前，触发一次全局待整理目录清理
-        P115DeleteBuffer.add(check_save_path=True)
-        
         final_msg = f"扫描结束！成功归类 {total_processed} 个，移入未识别 {total_unidentified} 个。"
         logger.info(f"=== {final_msg} ===")
         update_progress(100, final_msg)
