@@ -1061,6 +1061,13 @@ def _force_refresh_preid(source_row, pick_code, sha1, file_name):
     return preid
 
 
+def _has_complete_source_row(row):
+    row = row if isinstance(row, dict) else {}
+    sha1 = str(row.get("sha1") or "").strip().upper()
+    size = _safe_int(row.get("size"), 0)
+    return bool(re.fullmatch(r"[A-F0-9]{40}", sha1 or "") and size > 0)
+
+
 def prepare_play_pool_pick_code(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", user_agent=""):
     lock_key = _prepare_lock_key(source_pick_code, item_id, play_session_id, user_id, client_key)
     lock = _get_prepare_lock(lock_key)
@@ -1086,6 +1093,16 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         return {}
 
     source_row = P115CacheManager.get_file_cache_by_pickcode(source_pick_code) or {}
+    if not _has_complete_source_row(source_row) and file_name:
+        fallback_row = P115CacheManager.get_file_cache_by_local_path_stem(file_name) or {}
+        if _has_complete_source_row(fallback_row):
+            logger.warning(
+                "  ➜ [小号播放] PC 未命中完整缓存，已按 local_path 去扩展名兜底：pc=%s..., file=%s -> cache_pc=%s...",
+                str(source_pick_code or "")[:8],
+                file_name,
+                str(fallback_row.get("pick_code") or "")[:8],
+            )
+            source_row = fallback_row
     sha1 = str(source_row.get("sha1") or "").strip().upper()
     size = _safe_int(source_row.get("size"), 0)
     preid = ""
