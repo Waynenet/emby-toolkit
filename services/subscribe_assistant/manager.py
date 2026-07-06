@@ -9,6 +9,7 @@ from gevent import spawn
 from database import connection
 from database import settings_db, watchlist_db
 import handler.moviepilot as moviepilot
+import handler.tmdb as tmdb
 import tasks.helpers as helpers
 from tasks.p115_fingerprint_helpers import p115_fp_is_virtual_strm_target, p115_fp_read_strm_target
 
@@ -56,6 +57,7 @@ class SubscribeAssistantManager:
         self.app_config = app_config or {}
         self.cfg = assistant_config or get_config()
         self._title_cache: Dict[str, str] = {}
+        self._tmdb_tv_cache: Dict[str, Dict[str, Any]] = {}
 
     def sync_series(
         self,
@@ -206,6 +208,7 @@ class SubscribeAssistantManager:
             "released_pending": 0,
             "download_checked": 0,
             "no_download_checked": 0,
+            "mp_subscriptions_synced": 0,
             "washing_timeouts": 0,
             "history_reconciled": 0,
             "snapshots_checked": 0,
@@ -216,6 +219,7 @@ class SubscribeAssistantManager:
         stats["snapshots_cleaned"] = store.cleanup_snapshots(self.cfg.snapshot_retention_days)
         stats["washing_timeouts"] = self.run_full_washing_timeout_check()
         stats["history_reconciled"] = self.run_transfer_history_reconcile(limit=limit)
+        stats["mp_subscriptions_synced"] = self.run_moviepilot_subscription_sync()
         stats["no_download_checked"] = self.run_no_download_check()
         if self.cfg.download_monitor_enabled:
             stats["download_checked"] = self.run_download_check()
@@ -653,6 +657,23 @@ class SubscribeAssistantManager:
         store.update_state(STATE_TORRENTS, updater)
         return changed
 
+    def run_moviepilot_subscription_sync(self) -> int:
+        subscriptions = moviepilot.list_subscriptions(self.app_config) or []
+        changed = 0
+        scanned = 0
+        for sub in subscriptions:
+            if not isinstance(sub, dict):
+                continue
+            scanned += 1
+            subscribe_id = _safe_int(sub.get("id"))
+            if subscribe_id:
+                self._remember_subscription(subscribe_id, sub, reason="mp.history_sync")
+            if self._sync_mp_subscription_to_etk(sub, reason="history"):
+                changed += 1
+        if scanned or changed:
+            logger.info("  ➜ [订阅助手] MP 历史订阅同步完成：扫描=%s，同步=%s。", scanned, changed)
+        return changed
+
     def run_snapshot_verify(self, limit: int = 100) -> int:
         checked = 0
         for snapshot in store.get_snapshots_due(self.cfg.verify_interval_hours, limit=limit):
@@ -778,6 +799,7 @@ class SubscribeAssistantManager:
             subscribe_id,
         )
         self._remember_subscription(subscribe_id, info, reason="subscribe.added")
+        self._sync_mp_subscription_to_etk(info, reason="subscribe.added")
         logger.info("  ➜ [订阅助手] 已接管 MP 新增订阅：%s。", self._format_subscribe_info(info))
         return True
 
@@ -791,6 +813,7 @@ class SubscribeAssistantManager:
         scene = str(data.get("scene") or "")
         if self._consume_expected_mp_update(subscribe_id, info, fields):
             self._remember_subscription(subscribe_id, info, reason="subscribe.modified.expected")
+            self._sync_mp_subscription_to_etk(info, reason="subscribe.modified.expected")
             logger.debug("  ➜ [订阅助手] 已确认 ETK 预期内的 MP 订阅修改：%s。", self._format_subscribe_info(info))
             return True
 
@@ -810,6 +833,7 @@ class SubscribeAssistantManager:
         )
         if fields:
             self._mark_active_source(subscribe_id, SOURCE_MANUAL_MP, f"MP 手动修改：{','.join(str(x) for x in fields)}")
+        self._sync_mp_subscription_to_etk(info, reason="subscribe.modified")
         logger.debug(
             "  ➜ [订阅助手] 已记录 MP 订阅修改：%s，scene=%s，fields=%s。",
             self._format_subscribe_info(info),
@@ -1434,6 +1458,277 @@ class SubscribeAssistantManager:
         elif data not in (None, ""):
             found.append(str(data).strip())
         return [x for x in found if x]
+
+    def _sync_mp_subscription_to_etk(self, info: Dict[str, Any], reason: str = "") -> bool:
+        if not isinstance(info, dict):
+            return False
+        tmdb_id = str(info.get("tmdbid") or info.get("tmdb_id") or "").strip()
+        if not tmdb_id:
+            return False
+        subscribe_id = _safe_int(info.get("id") or info.get("subscribe_id"))
+        item_type = self._mp_subscription_item_type(info)
+        if not item_type:
+            return False
+
+        source = {
+            "type": "moviepilot",
+            "subscribe_id": subscribe_id or None,
+            "reason": reason or "sync",
+        }
+        changed = False
+        history_sync = reason == "history"
+        if item_type == "Movie":
+            media_info = self._mp_movie_media_info(tmdb_id, info)
+            changed = self._upsert_etk_subscribed_media(str(tmdb_id), "Movie", media_info, source, history_sync=history_sync) or changed
+        elif item_type == "Series":
+            media_info = self._mp_series_media_info(tmdb_id, info)
+            changed = self._upsert_etk_subscribed_media(str(tmdb_id), "Series", media_info, source, history_sync=history_sync) or changed
+        elif item_type == "Season":
+            season = _safe_int(info.get("season"))
+            if season <= 0:
+                return False
+            series_info = self._mp_series_media_info(tmdb_id, info)
+            changed = self._upsert_etk_subscribed_media(str(tmdb_id), "Series", series_info, source, history_sync=history_sync) or changed
+            season_id, season_info = self._mp_season_media_info(tmdb_id, season, info)
+            changed = self._upsert_etk_subscribed_media(str(season_id), "Season", season_info, source, history_sync=history_sync) or changed
+
+        if changed and not history_sync:
+            logger.info(
+                "  ➜ [订阅助手] 已同步 MP 订阅到 ETK：%s，来源=%s。",
+                self._format_subscribe_info(info),
+                reason or "sync",
+            )
+        return changed
+
+    def _mp_subscription_item_type(self, info: Dict[str, Any]) -> str:
+        type_text = str(info.get("type") or info.get("media_type") or "").strip().lower()
+        season = _safe_int(info.get("season"))
+        if "电影" in type_text or type_text in ("movie", "movies"):
+            return "Movie"
+        if "电视" in type_text or "剧" in type_text or type_text in ("tv", "series", "电视剧"):
+            return "Season" if season > 0 else "Series"
+        return "Season" if season > 0 else ""
+
+    def _mp_movie_media_info(self, tmdb_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        return self._mp_base_media_info(tmdb_id, info)
+
+    def _mp_series_media_info(self, tmdb_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        return self._mp_base_media_info(tmdb_id, info)
+
+    def _mp_season_media_info(self, tmdb_id: str, season: int, info: Dict[str, Any]) -> tuple:
+        local = self._find_local_season_info(tmdb_id, season)
+        if local:
+            season_id = str(local.get("tmdb_id") or f"{tmdb_id}_S{season}")
+            return season_id, {
+                "tmdb_id": season_id,
+                "title": local.get("title") or f"第 {season} 季",
+                "season_number": season,
+                "parent_series_tmdb_id": str(tmdb_id),
+                "release_date": local.get("release_date"),
+                "release_year": local.get("release_year"),
+                "poster_path": local.get("poster_path"),
+                "backdrop_path": local.get("backdrop_path"),
+                "overview": local.get("overview"),
+            }
+
+        series = self._tmdb_tv_details(tmdb_id) or {}
+        season_info = {}
+        for item in series.get("seasons") or []:
+            if _safe_int(item.get("season_number")) == season:
+                season_info = item
+                break
+        season_id = str(season_info.get("id") or f"{tmdb_id}_S{season}")
+        release_date = season_info.get("air_date")
+        return season_id, {
+            "tmdb_id": season_id,
+            "title": season_info.get("name") or f"第 {season} 季",
+            "season_number": season,
+            "parent_series_tmdb_id": str(tmdb_id),
+            "release_date": release_date,
+            "release_year": _safe_int(str(release_date or "")[:4]) or _safe_int(info.get("year")) or None,
+            "poster_path": season_info.get("poster_path") or series.get("poster_path") or self._normalize_tmdb_image_path(info.get("poster")),
+            "backdrop_path": series.get("backdrop_path") or self._normalize_tmdb_image_path(info.get("backdrop")),
+            "overview": season_info.get("overview") or series.get("overview") or info.get("description"),
+        }
+
+    def _mp_base_media_info(self, tmdb_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "tmdb_id": str(tmdb_id),
+            "title": info.get("name") or info.get("title") or info.get("keyword") or str(tmdb_id),
+            "original_title": info.get("original_title") or info.get("original_name"),
+            "release_year": _safe_int(info.get("year")) or None,
+            "poster_path": self._normalize_tmdb_image_path(info.get("poster") or info.get("poster_path")),
+            "backdrop_path": self._normalize_tmdb_image_path(info.get("backdrop") or info.get("backdrop_path")),
+            "overview": info.get("description") or info.get("overview"),
+        }
+
+    def _normalize_tmdb_image_path(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        marker = "/t/p/"
+        if marker in text:
+            tail = text.split(marker, 1)[-1]
+            parts = tail.split("/", 1)
+            if len(parts) == 2 and parts[1]:
+                return "/" + parts[1].lstrip("/")
+        return text
+
+    def _tmdb_tv_details(self, tmdb_id: str) -> Dict[str, Any]:
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id:
+            return {}
+        if tmdb_id in self._tmdb_tv_cache:
+            return self._tmdb_tv_cache[tmdb_id]
+        api_key = self.app_config.get("tmdb_api_key") or ""
+        if not api_key:
+            return {}
+        try:
+            details = tmdb.get_tv_details(int(tmdb_id), api_key, append_to_response=None, allow_english_fallback=False) or {}
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 获取剧集 TMDb 元数据失败：%s -> %s", tmdb_id, e)
+            details = {}
+        self._tmdb_tv_cache[tmdb_id] = details
+        return details
+
+    def _find_local_season_info(self, tmdb_id: str, season: int) -> Dict[str, Any]:
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT tmdb_id, title, release_date, release_year, poster_path, backdrop_path, overview
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type = 'Season'
+                          AND season_number = %s
+                        LIMIT 1
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+                    return dict(row) if row else {}
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 查询本地季元数据失败：%s S%s -> %s", tmdb_id, season, e)
+            return {}
+
+    def _upsert_etk_subscribed_media(
+        self,
+        tmdb_id: str,
+        item_type: str,
+        media_info: Dict[str, Any],
+        source: Dict[str, Any],
+        history_sync: bool = False,
+    ) -> bool:
+        if not tmdb_id or item_type not in ("Movie", "Series", "Season"):
+            return False
+        media_info = dict(media_info or {})
+        source_payload = json.dumps([source], ensure_ascii=False, default=str)
+        source_marker = json.dumps([{"type": "moviepilot"}], ensure_ascii=False)
+        if history_sync:
+            status_sql = """
+                            subscription_status = CASE
+                                WHEN media_metadata.subscription_status IN ('NONE', 'REQUESTED', 'WANTED')
+                                    THEN 'SUBSCRIBED'
+                                ELSE media_metadata.subscription_status
+                            END,
+            """
+            ignore_sql = """
+                            ignore_reason = CASE
+                                WHEN media_metadata.subscription_status IN ('NONE', 'REQUESTED', 'WANTED')
+                                    THEN NULL
+                                ELSE media_metadata.ignore_reason
+                            END
+            """
+            where_status_sql = """
+                           media_metadata.subscription_status != 'IGNORED'
+                       AND (
+                              media_metadata.subscription_status IN ('NONE', 'REQUESTED', 'WANTED')
+                           OR NOT (media_metadata.subscription_sources_json @> %(source_marker)s::jsonb)
+                           OR (media_metadata.title IS NULL AND EXCLUDED.title IS NOT NULL)
+                           OR (media_metadata.poster_path IS NULL AND EXCLUDED.poster_path IS NOT NULL)
+                           OR (media_metadata.parent_series_tmdb_id IS NULL AND EXCLUDED.parent_series_tmdb_id IS NOT NULL)
+                       )
+            """
+        else:
+            status_sql = "subscription_status = 'SUBSCRIBED',"
+            ignore_sql = "ignore_reason = NULL"
+            where_status_sql = """
+                           media_metadata.subscription_status != 'SUBSCRIBED'
+                        OR NOT (media_metadata.subscription_sources_json @> %(source_marker)s::jsonb)
+                        OR (media_metadata.title IS NULL AND EXCLUDED.title IS NOT NULL)
+                        OR (media_metadata.poster_path IS NULL AND EXCLUDED.poster_path IS NOT NULL)
+                        OR (media_metadata.parent_series_tmdb_id IS NULL AND EXCLUDED.parent_series_tmdb_id IS NOT NULL)
+            """
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO media_metadata (
+                            tmdb_id, item_type, subscription_status, subscription_sources_json,
+                            first_requested_at, last_subscribed_at,
+                            title, original_title, release_date, release_year,
+                            poster_path, backdrop_path, season_number, parent_series_tmdb_id, overview,
+                            last_synced_at
+                        )
+                        VALUES (
+                            %(tmdb_id)s, %(item_type)s, 'SUBSCRIBED', %(source)s::jsonb,
+                            NOW(), NOW(),
+                            %(title)s, %(original_title)s, %(release_date)s, %(release_year)s,
+                            %(poster_path)s, %(backdrop_path)s, %(season_number)s, %(parent_series_tmdb_id)s, %(overview)s,
+                            NOW()
+                        )
+                        ON CONFLICT (tmdb_id, item_type) DO UPDATE SET
+                            {status_sql}
+                            subscription_sources_json = CASE
+                                WHEN media_metadata.subscription_sources_json @> %(source_marker)s::jsonb
+                                    THEN media_metadata.subscription_sources_json
+                                ELSE media_metadata.subscription_sources_json || %(source)s::jsonb
+                            END,
+                            first_requested_at = COALESCE(media_metadata.first_requested_at, EXCLUDED.first_requested_at),
+                            last_subscribed_at = NOW(),
+                            title = COALESCE(media_metadata.title, EXCLUDED.title),
+                            original_title = COALESCE(media_metadata.original_title, EXCLUDED.original_title),
+                            release_date = COALESCE(media_metadata.release_date, EXCLUDED.release_date),
+                            release_year = COALESCE(media_metadata.release_year, EXCLUDED.release_year),
+                            poster_path = COALESCE(media_metadata.poster_path, EXCLUDED.poster_path),
+                            backdrop_path = COALESCE(media_metadata.backdrop_path, EXCLUDED.backdrop_path),
+                            season_number = COALESCE(media_metadata.season_number, EXCLUDED.season_number),
+                            parent_series_tmdb_id = COALESCE(media_metadata.parent_series_tmdb_id, EXCLUDED.parent_series_tmdb_id),
+                            overview = COALESCE(media_metadata.overview, EXCLUDED.overview),
+                            last_synced_at = NOW(),
+                            {ignore_sql}
+                        WHERE {where_status_sql}
+                        """,
+                        {
+                            "tmdb_id": str(tmdb_id),
+                            "item_type": item_type,
+                            "source": source_payload,
+                            "source_marker": source_marker,
+                            "title": media_info.get("title"),
+                            "original_title": media_info.get("original_title"),
+                            "release_date": media_info.get("release_date") or None,
+                            "release_year": media_info.get("release_year"),
+                            "poster_path": media_info.get("poster_path"),
+                            "backdrop_path": media_info.get("backdrop_path"),
+                            "season_number": media_info.get("season_number"),
+                            "parent_series_tmdb_id": media_info.get("parent_series_tmdb_id"),
+                            "overview": media_info.get("overview"),
+                        },
+                    )
+                    changed = cursor.rowcount > 0
+                    conn.commit()
+                    return changed
+        except Exception as e:
+            logger.warning(
+                "  ➜ [订阅助手] 同步 MP 订阅到 ETK 失败：%s(%s) -> %s",
+                media_info.get("title") or tmdb_id,
+                item_type,
+                e,
+                exc_info=True,
+            )
+            return False
 
     def _enrich_subscribe_info(self, info: Dict[str, Any], media: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         enriched = dict(info or {})

@@ -231,6 +231,7 @@ def task_subscribe_assistant_maintenance(processor):
             "巡检完成："
             f"下载处理 {stats.get('download_checked', 0)}，"
             f"无下载处理 {stats.get('no_download_checked', 0)}，"
+            f"同步历史订阅 {stats.get('mp_subscriptions_synced', 0)}，"
             f"洗版超时 {stats.get('washing_timeouts', 0)}，"
             f"历史对账 {stats.get('history_reconciled', 0)}，"
             f"快照检查 {stats.get('snapshots_checked', 0)}，"
