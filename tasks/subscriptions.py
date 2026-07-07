@@ -92,6 +92,8 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
     5. 检查是否完结/配置开启 -> 决定 best_version。
     6. 逐季提交订阅并更新本地数据库。
     """
+    watchlist_config = settings_db.get_setting('watchlist_config') or {}
+
     try:
         # 1. 获取剧集详情
         series_details = tmdb.get_tv_details(tmdb_id, tmdb_api_key)
@@ -311,6 +313,8 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
         config = config_manager.APP_CONFIG
         tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
         
+        watchlist_config = settings_db.get_setting('watchlist_config') or {}
+
         processed_count = 0
 
         for i, req in enumerate(subscribe_requests):
@@ -477,6 +481,7 @@ def task_auto_subscribe(processor):
     
     # 1. 加载策略配置 (优先从数据库读取，如果没有则使用默认值)
     strategy_config = settings_db.get_setting('subscription_strategy_config') or {}
+    watchlist_config = settings_db.get_setting('watchlist_config') or {}
     
     # 默认策略参数
     movie_protection_days = int(strategy_config.get('movie_protection_days', 180))    # 默认半年新片保护
