@@ -113,8 +113,10 @@ class SubscribeAssistantManager:
                 episodes=all_tmdb_episodes,
                 season_info=season_info,
             )
+            local_season_completed = self._season_local_completed(tmdb_id, season_num, season_info, signal)
+            decision_status = "Completed" if local_season_completed else final_status
             decision = self._decide_subscription_state(
-                final_status=final_status,
+                final_status=decision_status,
                 series_details=series_details,
                 season=season_num,
                 season_episodes=season_episodes,
@@ -122,7 +124,7 @@ class SubscribeAssistantManager:
                 real_next_episode=real_next_episode,
             )
             sub = existing_by_season.get(season_num)
-            if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending"):
+            if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending") and not local_season_completed:
                 if self._triggering_episodes_are_virtual(triggering_episode_ids) or self._season_has_virtual_import(tmdb_id, season_num):
                     logger.info(
                         "  ➜ [订阅助手] 《%s》第 %s 季 仍处于虚拟入库状态，跳过自动创建 MP 订阅，等待正式入库。",
@@ -1698,6 +1700,31 @@ class SubscribeAssistantManager:
             season_cooldown_days=self.cfg.season_cooldown_days,
             volatility_stable=True,
         )
+
+    def _season_local_completed(self, tmdb_id: str, season: int, season_info: Dict[str, Any], signal: CompletionSignal) -> bool:
+        expected_count = _safe_int((season_info or {}).get("episode_count")) or _safe_int(getattr(signal, "scope_total", 0))
+        if expected_count <= 0:
+            return False
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(DISTINCT episode_number) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type = 'Episode'
+                          AND season_number = %s
+                          AND in_library = TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+            return _safe_int(row.get("count")) >= expected_count
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 判断本地季完结失败：tmdb=%s S%s，err=%s", tmdb_id, season, e)
+            return False
 
     def _decide_subscription_state(
         self,

@@ -2849,9 +2849,9 @@ class WatchlistProcessor:
             logger.error(f"  ➜ [完结洗版] {action} S{season_number} active_washing 标记失败: {e}", exc_info=True)
             return False
 
-    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str) -> int:
-        """已完结且没有洗版事务时，收口已集齐季的 ETK 订阅状态。"""
-        if final_status != STATUS_COMPLETED:
+    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str, allow_season_closeout: bool = False) -> int:
+        """无洗版事务时，收口本地已集齐季的 ETK 订阅状态。"""
+        if final_status != STATUS_COMPLETED and not allow_season_closeout:
             return 0
         try:
             with connection.get_db_connection() as conn:
@@ -2920,12 +2920,12 @@ class WatchlistProcessor:
                             subscription_sources_json = '[]'::jsonb,
                             ignore_reason = NULL
                         WHERE (
-                              (tmdb_id = %s AND item_type = 'Series' AND NOT EXISTS (SELECT 1 FROM has_open_season))
+                              (tmdb_id = %s AND item_type = 'Series' AND %s AND NOT EXISTS (SELECT 1 FROM has_open_season))
                            OR (item_type = 'Season' AND tmdb_id IN (SELECT tmdb_id FROM completed_subscribed_seasons))
                         )
                           AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
                         """,
-                        (str(tmdb_id), str(tmdb_id)),
+                        (str(tmdb_id), str(tmdb_id), final_status == STATUS_COMPLETED),
                     )
                     changed = cursor.rowcount
                     conn.commit()
@@ -3573,6 +3573,13 @@ class WatchlistProcessor:
             )
 
         is_local_latest_season_completed = latest_season_local_state == "complete"
+        local_completed_season_numbers = []
+        for season_info in valid_tmdb_seasons:
+            s_num = _safe_int(season_info.get('season_number'))
+            expected_count = _safe_int(season_info.get('episode_count'))
+            if s_num > 0 and expected_count > 0 and len(emby_seasons.get(s_num, set())) >= expected_count:
+                local_completed_season_numbers.append(s_num)
+        has_local_completed_season = bool(local_completed_season_numbers)
         final_status = STATUS_COMPLETED if is_ended_on_tmdb else STATUS_WATCHING
         if is_ended_on_tmdb:
             logger.info(f"  ➜ [追剧判定] 《{item_name}》TMDb 状态={new_tmdb_status}，剧条目标记为“已完结”。")
@@ -3606,15 +3613,15 @@ class WatchlistProcessor:
         completed_quality_gate = {}
 
         # 完结季质量门禁：
-        # - Completed -> Completed 也允许重复校验，用于洗版分批入库后的最终收口登记；
-        # - 但只有首次从追更/暂停/待定流转到 Completed 时，才允许发起新的洗版；
+        # - Series 状态只跟 TMDb；Season 状态只看本地是否集齐；
+        # - 本地已集齐季即使 Series 仍是 Watching，也要执行季级一致性校验和订阅收口；
         # - active_washing 作为洗版事务锁，防止部分集入库时反复提交 MP 洗版。
         allow_start_completed_washing = (
-            final_status == STATUS_COMPLETED
+            (final_status == STATUS_COMPLETED or has_local_completed_season)
             and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]
             and not is_force_ended
         )
-        if final_status == STATUS_COMPLETED and not is_force_ended:
+        if (final_status == STATUS_COMPLETED or has_local_completed_season) and not is_force_ended:
             set_waiting_flag = self._handle_completed_season_quality_gate(
                 tmdb_id=tmdb_id,
                 series_name=item_name,
@@ -3627,7 +3634,7 @@ class WatchlistProcessor:
             completed_quality_gate = dict(getattr(self, '_last_completed_season_quality_gate', {}) or {})
 
         # 如果剧集恢复连载，必须清除等待标志，防止误判
-        if final_status == STATUS_WATCHING:
+        if final_status == STATUS_WATCHING and not has_local_completed_season:
             set_waiting_flag = False
 
         # 更新追剧数据库
@@ -3805,7 +3812,7 @@ class WatchlistProcessor:
             real_next_episode=real_next_episode_to_air,
             triggering_episode_ids=subscription_triggering_episode_ids or airing_episode_emby_ids or [],
         )
-        self._close_completed_subscription_status(tmdb_id, item_name, final_status)
+        self._close_completed_subscription_status(tmdb_id, item_name, final_status, allow_season_closeout=has_local_completed_season)
         subscribe_assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
         version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
         lockable_statuses = {STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING}
