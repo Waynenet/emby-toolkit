@@ -113,8 +113,10 @@ class SubscribeAssistantManager:
                 episodes=all_tmdb_episodes,
                 season_info=season_info,
             )
+            local_season_completed = self._season_local_completed(tmdb_id, season_num, season_info, signal)
+            decision_status = "Completed" if local_season_completed else final_status
             decision = self._decide_subscription_state(
-                final_status=final_status,
+                final_status=decision_status,
                 series_details=series_details,
                 season=season_num,
                 season_episodes=season_episodes,
@@ -122,7 +124,7 @@ class SubscribeAssistantManager:
                 real_next_episode=real_next_episode,
             )
             sub = existing_by_season.get(season_num)
-            if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending"):
+            if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending") and not local_season_completed:
                 if self._triggering_episodes_are_virtual(triggering_episode_ids) or self._season_has_virtual_import(tmdb_id, season_num):
                     logger.info(
                         "  ➜ [订阅助手] 《%s》第 %s 季 仍处于虚拟入库状态，跳过自动创建 MP 订阅，等待正式入库。",
@@ -1502,6 +1504,8 @@ class SubscribeAssistantManager:
 
         try:
             before_keys = self._subscription_sync_keys(tmdb_items)
+            if self._mp_subscription_sync_current(tmdb_items, source):
+                return False
             skip_statuses = {"PAUSED", "IGNORED", "PENDING_RELEASE"} if history_sync else set()
             process_subscription_items_and_update_db(
                 tmdb_items=tmdb_items,
@@ -1590,6 +1594,84 @@ class SubscribeAssistantManager:
             logger.debug("  ➜ [订阅助手] 读取同步前后状态失败：%s", e)
             return {}
 
+    def _mp_subscription_sync_current(self, tmdb_items: List[Dict[str, Any]], source: Dict[str, Any]) -> bool:
+        rows = self._subscription_sync_rows(tmdb_items, target_only=True)
+        if not rows:
+            return False
+        subscribe_id = _safe_int((source or {}).get("subscribe_id"))
+        for row in rows:
+            if str(row.get("subscription_status") or "").upper() != "SUBSCRIBED":
+                return False
+            sources = row.get("sources") or []
+            if isinstance(sources, str):
+                try:
+                    sources = json.loads(sources)
+                except Exception:
+                    sources = []
+            if not isinstance(sources, list):
+                return False
+            matched = False
+            for item in sources:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "") != "moviepilot":
+                    continue
+                if subscribe_id > 0 and _safe_int(item.get("subscribe_id")) != subscribe_id:
+                    continue
+                matched = True
+                break
+            if not matched:
+                return False
+        return True
+
+    def _subscription_sync_rows(self, tmdb_items: List[Dict[str, Any]], target_only: bool = False) -> List[Dict[str, Any]]:
+        expected = []
+        for item in tmdb_items or []:
+            tmdb_id = str((item or {}).get("tmdb_id") or "").strip()
+            media_type = str((item or {}).get("media_type") or "").strip()
+            season = _safe_int((item or {}).get("season"))
+            if media_type == "Movie" and tmdb_id:
+                expected.append((tmdb_id, "Movie"))
+            elif media_type == "Series" and tmdb_id:
+                if not target_only:
+                    expected.append((tmdb_id, "Series"))
+                if season > 0:
+                    expected.append((tmdb_id, f"SeasonByParent:{season}"))
+        if not expected:
+            return []
+        rows = []
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for tmdb_id, item_type in expected:
+                        if item_type.startswith("SeasonByParent:"):
+                            season = _safe_int(item_type.split(":", 1)[1])
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json AS sources
+                                FROM media_metadata
+                                WHERE parent_series_tmdb_id = %s
+                                  AND item_type = 'Season'
+                                  AND season_number = %s
+                                """,
+                                (tmdb_id, season),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json AS sources
+                                FROM media_metadata
+                                WHERE tmdb_id = %s
+                                  AND item_type = %s
+                                """,
+                                (tmdb_id, item_type),
+                            )
+                        rows.extend(cursor.fetchall() or [])
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 读取 MP 订阅同步状态失败：%s", e)
+            return []
+        return rows
+
     def _enrich_subscribe_info(self, info: Dict[str, Any], media: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         enriched = dict(info or {})
         tmdb_id = str(enriched.get("tmdbid") or media.get("tmdb_id") or "").strip()
@@ -1618,6 +1700,31 @@ class SubscribeAssistantManager:
             season_cooldown_days=self.cfg.season_cooldown_days,
             volatility_stable=True,
         )
+
+    def _season_local_completed(self, tmdb_id: str, season: int, season_info: Dict[str, Any], signal: CompletionSignal) -> bool:
+        expected_count = _safe_int((season_info or {}).get("episode_count")) or _safe_int(getattr(signal, "scope_total", 0))
+        if expected_count <= 0:
+            return False
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(DISTINCT episode_number) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type = 'Episode'
+                          AND season_number = %s
+                          AND in_library = TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+            return _safe_int(row.get("count")) >= expected_count
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 判断本地季完结失败：tmdb=%s S%s，err=%s", tmdb_id, season, e)
+            return False
 
     def _decide_subscription_state(
         self,

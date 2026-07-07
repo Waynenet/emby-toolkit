@@ -16,6 +16,7 @@ from database import media_db, settings_db, user_db
 from database.connection import get_db_connection
 from handler.p115_temp_dir import cleanup_old_temp_videos_for_client, find_temp_video, get_temp_dir_name
 from handler.p115_play_pool_client import P115PlayPoolClient
+from handler.p115_media_analyzer import P115MediaAnalyzerMixin
 from handler.p115_service import P115CacheManager, P115Service
 
 logger = logging.getLogger(__name__)
@@ -1074,6 +1075,18 @@ def _has_complete_source_row(row):
     )
 
 
+def _has_source_identity_row(row):
+    row = row if isinstance(row, dict) else {}
+    sha1 = str(row.get("sha1") or "").strip().upper()
+    size = _safe_int(row.get("size"), 0)
+    return bool(re.fullmatch(r"[A-F0-9]{40}", sha1 or "") and size > 0)
+
+
+def _raw_has_probe_payload(raw):
+    raw = _jsonish_to_obj(raw, {}) or {}
+    return bool(isinstance(raw, dict) and (raw.get("streams") or raw.get("format") or raw.get("_iso_probe")))
+
+
 def _jsonish_to_obj(value, default=None):
     if value in (None, ""):
         return default
@@ -1134,6 +1147,88 @@ def _extract_cached_mediainfo_source(sha1):
     return {"sha1": sha1, "size": size, "preid": preid, "raw_ffprobe_json": raw}
 
 
+def _backfill_source_raw_and_preid(source_row, pick_code, sha1, file_name):
+    source_row = source_row if isinstance(source_row, dict) else {}
+    pick_code = str(pick_code or source_row.get("pick_code") or source_row.get("pc") or "").strip()
+    sha1 = str(sha1 or source_row.get("sha1") or "").strip().upper()
+    file_name = str(file_name or source_row.get("name") or source_row.get("file_name") or sha1 or "").strip()
+    if not pick_code or not re.fullmatch(r"[A-F0-9]{40}", sha1 or ""):
+        return ""
+
+    main_client = P115Service.get_client()
+    if not main_client:
+        return ""
+
+    try:
+        probe_helper = P115MediaAnalyzerMixin()
+        probe_helper.client = main_client
+        probe_helper.language_map = settings_db.get_setting("language_mapping") or getattr(P115MediaAnalyzerMixin, "language_map", None)
+        file_node = {
+            "pc": pick_code,
+            "pick_code": pick_code,
+            "name": file_name,
+            "file_name": file_name,
+            "sha1": sha1,
+            "size": _safe_int(source_row.get("size"), 0),
+        }
+        emby_json, raw_ffprobe = probe_helper._probe_mediainfo_with_ffprobe(
+            file_node,
+            sha1=sha1,
+            silent_log=True,
+        ) or (None, None)
+        if not emby_json or not raw_ffprobe:
+            return ""
+
+        P115CacheManager.save_mediainfo_cache(
+            sha1,
+            emby_json,
+            raw_ffprobe,
+            file_info=source_row,
+            pick_code=pick_code,
+            file_name=file_name,
+        )
+        preid = P115CacheManager._norm_preid(
+            source_row.get("preid")
+            or P115CacheManager._extract_preid_from_raw_etk(raw_ffprobe)
+        )
+        if preid:
+            source_row["preid"] = preid
+            source_row["raw_ffprobe_json"] = raw_ffprobe
+            logger.info(
+                "  ➜ [小号播放] 源文件缺失 RAW，已由主号现查并回填 RAW + preid：%s -> %s...",
+                _display_title(file_name),
+                preid[:12],
+            )
+        return preid
+    except Exception as e:
+        logger.debug(
+            "  ➜ [小号播放] 主号现查补齐 RAW + preid 失败：pc=%s..., sha1=%s..., err=%s",
+            pick_code[:8],
+            sha1[:12],
+            e,
+        )
+        return ""
+
+
+def _ensure_source_preid_for_play_pool(source_row, pick_code, sha1, file_name):
+    source_row = source_row if isinstance(source_row, dict) else {}
+    preid = P115CacheManager._norm_preid(source_row.get("preid"))
+    if re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        return preid
+
+    if not _raw_has_probe_payload(source_row.get("raw_ffprobe_json")):
+        preid = _backfill_source_raw_and_preid(source_row, pick_code, sha1, file_name)
+        if re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+            return preid
+
+    return P115CacheManager._norm_preid(P115CacheManager.ensure_file_preid(
+        source_row,
+        sha1=sha1,
+        pick_code=pick_code,
+        file_name=file_name,
+    ))
+
+
 def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
     item_id = str(item_id or "").strip()
     if not item_id:
@@ -1154,14 +1249,44 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
     for asset in candidates:
         if not isinstance(asset, dict):
             continue
+        asset_pc = str((asset or {}).get("pc") or "").strip()
+        pc = source_pc or asset_pc
         sha1 = str(asset.get("sha1") or "").strip().upper()
         cached = _extract_cached_mediainfo_source(sha1)
-        if not _has_complete_source_row(cached):
+
+        file_cache = {}
+        try:
+            if pc:
+                file_cache = P115CacheManager.get_file_cache_by_pickcode(pc) or {}
+            if not file_cache and re.fullmatch(r"[A-F0-9]{40}", sha1 or ""):
+                file_cache = P115CacheManager.get_file_cache_by_sha1(sha1) or {}
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 查询 115 文件缓存补源文件身份失败: pc=%s..., sha1=%s..., err=%s",
+                pc[:8],
+                sha1[:12],
+                e,
+            )
+
+        sha1 = str(cached.get("sha1") or file_cache.get("sha1") or sha1 or "").strip().upper()
+        size = _safe_int(cached.get("size"), 0) or _safe_int(file_cache.get("size"), 0) or _safe_int(asset.get("size"), 0)
+        if not re.fullmatch(r"[A-F0-9]{40}", sha1 or "") or size <= 0:
             continue
         asset_path = str(asset.get("path") or "").replace("\\", "/")
-        cached["pick_code"] = source_pc or str(asset.get("pc") or "").strip()
-        cached["name"] = file_name or asset_path.rsplit("/", 1)[-1] or f"{sha1}.mkv"
-        return cached
+        return {
+            "fid": str(file_cache.get("id") or file_cache.get("fid") or "").strip(),
+            "sha1": sha1,
+            "size": size,
+            "preid": P115CacheManager._norm_preid(cached.get("preid")),
+            "raw_ffprobe_json": cached.get("raw_ffprobe_json") or {},
+            "pick_code": pc or str(file_cache.get("pick_code") or "").strip(),
+            "name": (
+                file_name
+                or str(file_cache.get("name") or "").strip()
+                or asset_path.rsplit("/", 1)[-1]
+                or f"{sha1}.mkv"
+            ),
+        }
     return {}
 
 
@@ -1201,8 +1326,33 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     size = _safe_int(source_row.get("size"), 0)
     preid = P115CacheManager._norm_preid(source_row.get("preid"))
     display_name = _pick_upload_file_name(file_name, source_row.get("name"), f"{sha1 or source_pick_code}.mkv")
-    if not _has_complete_source_row(source_row):
-        raise RuntimeError("小号播放需要源文件 SHA1、size 和 preid，media_metadata/p115_mediainfo_cache 未命中完整信息")
+    if not _has_source_identity_row(source_row):
+        raise RuntimeError("小号播放需要源文件 SHA1 和 size，media_metadata/p115_mediainfo_cache 未命中文件身份信息")
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        try:
+            preid = _ensure_source_preid_for_play_pool(
+                source_row,
+                sha1=sha1,
+                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
+                file_name=display_name,
+            )
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
+                str(source_pick_code or source_row.get("pick_code") or "")[:8],
+                sha1[:12],
+                e,
+            )
+            preid = ""
+        if preid:
+            source_row["preid"] = preid
+            logger.info(
+                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
+                _display_title(display_name),
+                preid[:12],
+            )
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     reusable = _find_reusable_session(
         source_pick_code=source_pick_code,
@@ -1641,7 +1791,7 @@ def speedtest_account(account_id, sample_pick_code="", user_agent=""):
         raise RuntimeError("测速样本缺少 SHA1 或 size")
     if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
         try:
-            preid = P115CacheManager.ensure_file_preid(
+            preid = _ensure_source_preid_for_play_pool(
                 source_row,
                 sha1=sha1,
                 pick_code=sample_pick_code,

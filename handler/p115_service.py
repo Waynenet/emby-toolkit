@@ -1989,7 +1989,15 @@ class P115CookieClient:
         url = "https://webapi.115.com/share/receive"
         payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': cid}
         r = self.request(url, method='POST', data=payload)
-        return r.json() if hasattr(r, 'json') else r
+        resp = r.json() if hasattr(r, 'json') else r
+        if _p115_success(resp):
+            try:
+                clean_resp = self.history_clean_receive()
+                if not _p115_success(clean_resp):
+                    logger.debug(f"  ➜ 清理 115 最近接收记录未成功: {clean_resp}")
+            except Exception as e:
+                logger.debug(f"  ➜ 清理 115 最近接收记录异常: {e}")
+        return resp
 
     def history_receive_list(self, offset=0, limit=100):
         """获取 115 最近接收记录。
@@ -2011,8 +2019,22 @@ class P115CookieClient:
         if not ids_list:
             return {'state': False, 'error_msg': '缺少历史记录 id'}
         url = "https://webapi.115.com/history/delete"
-        r = self.request(url, method='POST', data={'id': ','.join(ids_list)})
+        r = self.request(url, method='POST', data={'id': ','.join(ids_list), 'with_file': 0})
         return _p115_normalize_common_response(self._json_result(r))
+
+    def history_clean(self, history_type=0, with_file=0):
+        """清空 115 指定类型历史记录；type=7 对应“最近接收”。"""
+        url = "https://webapi.115.com/history/clean"
+        payload = {
+            'type': str(history_type),
+            'with_file': 1 if with_file else 0,
+        }
+        r = self.request(url, method='POST', data=payload)
+        return _p115_normalize_common_response(self._json_result(r))
+
+    def history_clean_receive(self):
+        """清空 115“最近接收”历史展示，不删除网盘文件。"""
+        return self.history_clean(7, with_file=0)
 
     def share_send(self, file_ids, **kwargs):
         """创建当前账号自己的 115 分享。
@@ -3228,6 +3250,18 @@ class P115Service:
                 if not self._cookie:
                     raise Exception("未配置 115 Cookie，无法删除历史记录")
                 return self._cookie.history_delete(ids)
+
+            def history_clean(self, history_type=0, with_file=0):
+                self._rate_limit()
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法清空历史记录")
+                return self._cookie.history_clean(history_type=history_type, with_file=with_file)
+
+            def history_clean_receive(self):
+                self._rate_limit()
+                if not self._cookie:
+                    raise Exception("未配置 115 Cookie，无法清空最近接收记录")
+                return self._cookie.history_clean_receive()
 
             def share_send(self, file_ids, **kwargs):
                 self._rate_limit()

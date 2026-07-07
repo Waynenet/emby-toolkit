@@ -1227,6 +1227,36 @@ def _extract_completed_share_payload(resp: Dict[str, Any], *, receive_code: str 
     }
 
 
+def _p115_status_text(resp: Any) -> str:
+    """Extract explicit status/error text without scanning titles or filenames."""
+    keys = {
+        'status', 'state', 'share_status', 'share_state', 'review_status', 'audit_status',
+        'message', 'msg', 'error', 'error_msg', 'errno_msg', 'status_message', 'status_text',
+        'review_message', 'audit_message',
+    }
+    parts = []
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key or '').strip()
+                if key_text in keys or any(token in key_text.lower() for token in ('status', 'state', 'error', 'message', 'review', 'audit')):
+                    if isinstance(item, (str, int, float, bool)):
+                        parts.append(str(item))
+                    else:
+                        walk(item, depth + 1)
+                elif isinstance(item, dict):
+                    walk(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, depth + 1)
+
+    walk(resp)
+    return '\n'.join(parts).lower()
+
+
 def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_valid: bool = True) -> Dict[str, str]:
     """把 115 分享状态响应映射为中心状态。
 
@@ -1238,9 +1268,10 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
     只有这种结果才允许覆盖 share_list 定点对账结果。这样避免把“处理中”的
     分享因为 state=True 误判为可转存。
     """
-    text = json.dumps(resp if isinstance(resp, dict) else {'value': str(resp)}, ensure_ascii=False, default=str).lower()
+    status_text = _p115_status_text(resp)
+    text = status_text if status_text else (str(resp).lower() if not isinstance(resp, (dict, list)) else '')
     message = _p115_error(resp)
-    if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
+    if any(x in status_text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
         return {'status': 'review_failed', 'review_status': 'failed', 'message': message or '115 分享审核失败/违规', 'explicit': True}
     if any(x in text for x in ('审核中', '待审核', '处理中', '正在处理', 'reviewing', 'pending_review', 'pending review', 'processing')):
         return {'status': 'pending_review', 'review_status': 'pending', 'message': message or '115 分享审核中/处理中', 'explicit': True}
@@ -1256,7 +1287,7 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
 
 
 def _logical_share_provider_forbidden_status(value: Any) -> Dict[str, Any]:
-    text = json.dumps(value if isinstance(value, (dict, list)) else {'value': str(value)}, ensure_ascii=False, default=str).lower()
+    text = _p115_status_text(value) or (str(value).lower() if not isinstance(value, (dict, list)) else '')
     if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
         return {
             'status': 'review_failed',
@@ -1331,10 +1362,10 @@ def _completed_share_known_list_map(p115, share_codes: List[str], *, max_pages: 
     # 115 分享列表只能分页；这里按本次需要对账的 share_code 数量动态多翻几页，
     # 仍然有上限，避免把用户私人分享全量扫爆。
     try:
-        dynamic_pages = max(1, math.ceil(len(wanted) / limit) + 3)
+        dynamic_pages = max(1, math.ceil(len(wanted) / limit) + 8)
     except Exception:
-        dynamic_pages = 5
-    page_limit = max(1, min(int(max_pages or 20), max(dynamic_pages, 5)))
+        dynamic_pages = 10
+    page_limit = max(1, min(int(max_pages or 20), max(dynamic_pages, 10)))
     for page in range(page_limit):
         if not wanted:
             break
@@ -1354,9 +1385,11 @@ def _completed_share_known_list_map(p115, share_codes: List[str], *, max_pages: 
                 wanted.discard(code)
         if len(items) < limit:
             break
+    missing = list(wanted)[:8]
+    missing_text = f"，未命中样例={missing}" if missing else ""
     logger.debug(
         f"  ➜ [完结季分享] 批量分享列表对账完成：wanted={len(share_codes or [])}, "
-        f"matched={len(found)}, pages<={page_limit}"
+        f"matched={len(found)}, pages<={page_limit}{missing_text}"
     )
     return found
 
@@ -1672,12 +1705,16 @@ def _completed_share_status_from_list_item(item: Dict[str, Any], *, current_stat
         if val is True or str(val).strip() in {'1', 'true', 'True'}:
             return {'status': 'valid', 'review_status': 'passed', 'message': '115 分享审核通过', 'explicit': True}
 
-    raw_state = str(item.get('share_state') or item.get('share_status') or item.get('status') or item.get('state') or '').strip().lower()
-    if raw_state in {'normal', 'valid', 'available', 'alive', 'pass', 'passed', 'success'}:
+    raw_state = ''
+    for key in ('share_state', 'share_status', 'status', 'state'):
+        if key in item and item.get(key) is not None:
+            raw_state = str(item.get(key)).strip().lower()
+            break
+    if raw_state in {'1', 'normal', 'valid', 'available', 'alive', 'pass', 'passed', 'success'}:
         return {'status': 'valid', 'review_status': 'passed', 'message': '115 分享审核通过', 'explicit': True}
-    if raw_state in {'pending', 'pending_review', 'reviewing', 'processing'}:
+    if raw_state in {'0', 'pending', 'pending_review', 'reviewing', 'processing'}:
         return {'status': 'pending_review', 'review_status': 'pending', 'message': '115 分享审核中/处理中', 'explicit': True}
-    if raw_state in {'expired', 'cancelled', 'canceled', 'deleted', 'invalid'}:
+    if raw_state in {'-1', '2', 'expired', 'cancelled', 'canceled', 'deleted', 'invalid'}:
         return {'status': 'expired', 'review_status': 'expired', 'message': '115 分享已失效', 'explicit': True}
 
     if current == 'valid':
@@ -2282,6 +2319,29 @@ def _report_share_sync_heartbeat(summary: Dict[str, Any] = None, *, status: str 
         return method(payload)
     return _direct_center_share_sync_heartbeat(payload)
 
+
+def _clean_p115_recent_receive_for_share_sync() -> Dict[str, Any]:
+    """清理 115 最近接收历史；供硬编码分享同步任务顺手兜底。"""
+    try:
+        from handler.p115_service import P115Service
+        p115 = P115Service.get_client()
+        if not p115:
+            return {'ok': False, 'skipped': True, 'message': '115 客户端未初始化'}
+        method = getattr(p115, 'history_clean_receive', None)
+        if not callable(method):
+            return {'ok': False, 'skipped': True, 'message': '115 客户端不支持清理最近接收'}
+        resp = method()
+        ok = not (isinstance(resp, dict) and resp.get('state') is False)
+        if ok:
+            logger.debug("  ➜ [共享资源] 已清理 115 最近接收历史。")
+        else:
+            logger.debug(f"  ➜ [共享资源] 清理 115 最近接收历史未成功：{resp}")
+        return {'ok': bool(ok), 'response': resp}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 清理 115 最近接收历史异常：{e}")
+        return {'ok': False, 'error': str(e)}
+
+
 def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any]:
     """轻量同步本机已创建的完结季分享状态；供高频任务调用。"""
     if not _enabled():
@@ -2297,6 +2357,22 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
             need_check=False,
         )
         rows = [r for r in (raw_rows or []) if _share_channel_is_logical(r)]
+        status_rank = {
+            'pending_review': 0,
+            'creating': 1,
+            'failed': 2,
+            'import_failed': 2,
+            'source_unavailable': 2,
+            'review_failed': 3,
+            'expired': 3,
+            'disabled': 4,
+            'valid': 9,
+        }
+        rows.sort(key=lambda r: (
+            status_rank.get(str(r.get('status') or '').strip().lower(), 5),
+            r.get('last_checked_at') or r.get('updated_at') or '',
+            r.get('id') or 0,
+        ))
         skipped_legacy = len(raw_rows or []) - len(rows)
         if limit and len(rows) > int(limit):
             rows = rows[:int(limit)]
@@ -2308,6 +2384,12 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
             return {'ok': False, 'message': '115 客户端未初始化', 'checked': 0}
         client = SharedCenterClient()
         share_codes = [str(r.get('share_code') or '').strip() for r in rows if str(r.get('share_code') or '').strip()]
+        logger.debug(
+            f"  ➜ [完结季分享] 本轮状态同步候选：rows={len(rows)}, "
+            f"pending={sum(1 for r in rows if str(r.get('status') or '').strip().lower() == 'pending_review')}, "
+            f"valid={sum(1 for r in rows if str(r.get('status') or '').strip().lower() == 'valid')}, "
+            f"share_codes={len(share_codes)}"
+        )
         # 只拿本地 ETK channel 已知的 share_code 做定点状态对账；不会把 115 私人分享导入共享池。
         share_list_map = _completed_share_known_list_map(p115, share_codes)
         items = []
@@ -2501,17 +2583,15 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
                 # 这些只更新本地 last_checked_at，不再制造 completed_season_share_status_update。
                 terminal_status = status in {'expired', 'review_failed'}
                 status_changed = bool(row_status and row_status != status)
-                should_report_center = bool(terminal_status or status_changed)
+                existing_raw = _share_channel_raw_json(row)
+                center_resp_prev = existing_raw.get('center_status_response')
+                center_unsynced = bool(
+                    existing_raw.get('center_status_pending')
+                    or (isinstance(center_resp_prev, dict) and center_resp_prev.get('ok') is False)
+                )
+                should_report_center = bool(terminal_status or status_changed or center_unsynced)
 
                 if should_report_center:
-                    center_resp = _update_center_share_channel_status(client, row, channel_id, {
-                        'status': status,
-                        'review_status': status_info.get('review_status') or '',
-                        'status_message': msg,
-                        'file_count': list_file_count or row.get('file_count') or 0,
-                        'total_size': list_total_size or row.get('total_size') or 0,
-                        'raw_json': {**raw_status_json, 'report_source': 'full_logical_share_credential_resync'},
-                    })
                     saved = shared_share_db.update_completed_season_share_channel(
                         channel_id,
                         status=status,
@@ -2519,10 +2599,33 @@ def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any
                         status_message=msg,
                         file_count=list_file_count or row.get('file_count') or 0,
                         total_size=list_total_size or row.get('total_size') or 0,
-                        raw_json={**raw_status_json, 'center_status_response': center_resp},
+                        raw_json={**raw_status_json, 'center_status_pending': True},
                         last_checked_at='NOW()',
-                        last_reported_at='NOW()',
                     )
+                    try:
+                        center_resp = _update_center_share_channel_status(client, row, channel_id, {
+                            'status': status,
+                            'review_status': status_info.get('review_status') or '',
+                            'status_message': msg,
+                            'file_count': list_file_count or row.get('file_count') or 0,
+                            'total_size': list_total_size or row.get('total_size') or 0,
+                            'raw_json': {**raw_status_json, 'report_source': 'full_logical_share_credential_resync'},
+                        })
+                    except Exception as ce:
+                        center_resp = {'ok': False, 'error': str(ce)}
+                    center_failed = isinstance(center_resp, dict) and center_resp.get('ok') is False
+                    save_fields = {
+                        'status': status,
+                        'review_status': status_info.get('review_status') or '',
+                        'status_message': msg if not center_failed else f"{msg}；中心同步失败: {center_resp.get('error') or center_resp}",
+                        'file_count': list_file_count or row.get('file_count') or 0,
+                        'total_size': list_total_size or row.get('total_size') or 0,
+                        'raw_json': {**raw_status_json, 'center_status_response': center_resp},
+                        'last_checked_at': 'NOW()',
+                    }
+                    if not center_failed:
+                        save_fields['last_reported_at'] = 'NOW()'
+                    saved = shared_share_db.update_completed_season_share_channel(channel_id, **save_fields)
                 else:
                     center_resp = {'ok': True, 'skipped': True, 'reason': 'status_unchanged'}
                     saved = shared_share_db.update_completed_season_share_channel(
@@ -8383,6 +8486,8 @@ def task_shared_share_status_sync_high_freq(processor=None, maintenance_silent: 
         share_sync = {'ok': False, 'checked': 0, 'error': str(e)}
         logger.warning(f"  ➜ [共享资源] 逻辑季分享状态同步失败：{e}")
 
+    recent_receive_cleanup = _clean_p115_recent_receive_for_share_sync()
+
     final_heartbeat = {}
     if share_sync.get('ok'):
         try:
@@ -8401,4 +8506,5 @@ def task_shared_share_status_sync_high_freq(processor=None, maintenance_silent: 
         'share_sync_heartbeat': heartbeat,
         'share_sync_final_heartbeat': final_heartbeat,
         'logical_season_share_sync': share_sync,
+        'p115_recent_receive_cleanup': recent_receive_cleanup,
     }

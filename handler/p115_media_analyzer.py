@@ -2470,13 +2470,31 @@ class P115MediaAnalyzerMixin:
             info["season_number"] = etk_season_number
         if etk_episode_number is not None:
             info["episode_number"] = etk_episode_number
-        try:
-            if isinstance(raw_json, list) and len(raw_json) > 0:
-                source_info = raw_json[0].get("MediaSourceInfo", raw_json[0])
-            else:
-                source_info = raw_json
+        def _pick_media_source(value):
+            if isinstance(value, list):
+                for item in value:
+                    picked = _pick_media_source(item)
+                    if picked:
+                        return picked
+                return {}
 
-            streams = source_info.get("MediaStreams", [])
+            if not isinstance(value, dict):
+                return {}
+
+            media_source = value.get("MediaSourceInfo")
+            if media_source is not None:
+                picked = _pick_media_source(media_source)
+                if picked:
+                    return picked
+
+            if isinstance(value.get("MediaStreams"), list):
+                return value
+
+            return {}
+
+        try:
+            source_info = _pick_media_source(raw_json)
+            streams = [s for s in (source_info.get("MediaStreams") or []) if isinstance(s, dict)]
             
             # ★ 核心修复：物理数据是唯一真理。只要存在流信息，强制接管这 6 个核心参数
             if streams:

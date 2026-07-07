@@ -568,13 +568,13 @@ class WatchlistProcessor:
                                     **mp_wash_kwargs
                                 )
                                 if sub_success:
-                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
                                     watchlist_db.update_specific_season_total_episodes(
                                         tmdb_id,
                                         new_season_num,
                                         tmdb_ep_count,
                                         locked=False
                                     )
+                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
                                     season_info['episode_count'] = tmdb_ep_count
                                     self._update_watchlist_entry(tmdb_id, series_name, {
                                         "watchlist_tmdb_status": "Returning Series"
@@ -1665,8 +1665,6 @@ class WatchlistProcessor:
 
         group_info = self._version_lock_release_group_info(filename)
         group_regex = helpers.build_exclusion_regex_from_groups([group_info.get('group')]) if group_info.get('group') else ''
-        if not group_regex and group_info.get('alias'):
-            group_regex = re.escape(group_info.get('alias'))
         if group_regex:
             add_positive('release_group', group_regex)
         return "(?i)" + "".join(lookaheads) if lookaheads else ""
@@ -2594,13 +2592,14 @@ class WatchlistProcessor:
                 derived_info = self._version_lock_release_group_info(state.get('source_name') or '')
                 derived_group = derived_info.get('group') or ''
                 derived_alias = derived_info.get('alias') or ''
-                if not derived_group:
-                    derived_group = self._version_lock_release_group_from_include(include_regex)
-                if not derived_group and release_group_alias:
-                    alias_group = helpers.normalize_release_group_name(release_group_alias)
-                    if self._is_known_release_group(alias_group):
-                        derived_group = alias_group
-                        derived_alias = release_group_alias
+                if release_group and not derived_group:
+                    release_group = ''
+                    release_group_alias = ''
+                    self._save_version_lock_wait_state(tmdb_id, season_number, {
+                        'release_group': '',
+                        'release_group_alias': '',
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                    }, series_name)
                 expected_group_regex = helpers.build_exclusion_regex_from_groups([derived_group]) if derived_group else ''
                 include_needs_rebuild = False
                 rebuilt_include = self._build_version_lock_include_regex(state.get('source_name') or '')
@@ -2651,7 +2650,7 @@ class WatchlistProcessor:
                             'updated_at': datetime.now(timezone.utc).isoformat(),
                         }, series_name)
 
-                if consistency_check_enabled and release_group:
+                if consistency_check_enabled and include_regex:
                     sync_state = self._sync_version_lock_release_group_washing(
                         tmdb_id,
                         season_number,
@@ -2762,7 +2761,7 @@ class WatchlistProcessor:
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 **wait_state,
             }, series_name)
-            if ok and release_group and consistency_check_enabled:
+            if ok and include_regex and consistency_check_enabled:
                 sync_state = self._sync_version_lock_release_group_washing(
                     tmdb_id,
                     season_number,
@@ -2850,9 +2849,9 @@ class WatchlistProcessor:
             logger.error(f"  ➜ [完结洗版] {action} S{season_number} active_washing 标记失败: {e}", exc_info=True)
             return False
 
-    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str) -> int:
-        """已完结且没有洗版事务时，收口 ETK 订阅状态。"""
-        if final_status != STATUS_COMPLETED:
+    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str, allow_season_closeout: bool = False) -> int:
+        """无洗版事务时，收口本地已集齐季的 ETK 订阅状态。"""
+        if final_status != STATUS_COMPLETED and not allow_season_closeout:
             return 0
         try:
             with connection.get_db_connection() as conn:
@@ -2879,21 +2878,54 @@ class WatchlistProcessor:
 
                     cursor.execute(
                         """
+                        WITH season_stats AS (
+                            SELECT
+                                s.tmdb_id,
+                                s.season_number,
+                                s.subscription_status,
+                                COALESCE(s.total_episodes, 0) AS total_episodes,
+                                COUNT(e.tmdb_id) FILTER (WHERE e.in_library = TRUE) AS local_count
+                            FROM media_metadata s
+                            LEFT JOIN media_metadata e
+                              ON e.parent_series_tmdb_id = s.parent_series_tmdb_id
+                             AND e.item_type = 'Episode'
+                             AND e.season_number = s.season_number
+                            WHERE s.parent_series_tmdb_id = %s
+                              AND s.item_type = 'Season'
+                              AND s.season_number > 0
+                            GROUP BY s.tmdb_id, s.season_number, s.subscription_status, s.total_episodes
+                        ),
+                        completed_subscribed_seasons AS (
+                            SELECT tmdb_id
+                            FROM season_stats
+                            WHERE total_episodes > 0
+                              AND local_count >= total_episodes
+                              AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                        ),
+                        has_open_season AS (
+                            SELECT 1
+                            FROM season_stats
+                            WHERE (
+                                   total_episodes <= 0
+                                OR local_count < total_episodes
+                                OR (
+                                      subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                                  AND NOT (total_episodes > 0 AND local_count >= total_episodes)
+                                )
+                            )
+                            LIMIT 1
+                        )
                         UPDATE media_metadata
                         SET subscription_status = 'NONE',
                             subscription_sources_json = '[]'::jsonb,
                             ignore_reason = NULL
                         WHERE (
-                              (tmdb_id = %s AND item_type = 'Series')
-                           OR (
-                                  parent_series_tmdb_id = %s
-                              AND item_type = 'Season'
-                              AND watching_status = 'Completed'
-                           )
+                              (tmdb_id = %s AND item_type = 'Series' AND %s AND NOT EXISTS (SELECT 1 FROM has_open_season))
+                           OR (item_type = 'Season' AND tmdb_id IN (SELECT tmdb_id FROM completed_subscribed_seasons))
                         )
                           AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
                         """,
-                        (str(tmdb_id), str(tmdb_id)),
+                        (str(tmdb_id), str(tmdb_id), final_status == STATUS_COMPLETED),
                     )
                     changed = cursor.rowcount
                     conn.commit()
@@ -3333,9 +3365,6 @@ class WatchlistProcessor:
         # --- 获取配置 ---
         watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
         auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
-        aggressive_threshold = int(auto_pending_cfg.get('episodes', 5)) 
-        auto_pause_days = int(watchlist_cfg.get('auto_pause', 0))
-        enable_auto_pause = auto_pause_days > 0
 
         # 调用通用辅助函数刷新元数据
         refresh_result = self._refresh_series_metadata(tmdb_id, item_name, item_id)
@@ -3502,73 +3531,17 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 执行分季锁定过滤时出错: {e}", exc_info=True)
 
         # 计算状态和缺失信息
-        new_tmdb_status = latest_series_data.get("status")
+        new_tmdb_status = str(latest_series_data.get("status") or "").strip()
         is_ended_on_tmdb = new_tmdb_status in ["Ended", "Canceled"]
         
         # 依然计算缺失信息，用于后续的“补旧番”订阅，但不影响状态判定
         real_next_episode_to_air = self._calculate_real_next_episode(all_tmdb_episodes, emby_seasons)
         missing_info = self._calculate_missing_info(latest_series_data.get('seasons', []), all_tmdb_episodes, emby_seasons)
-        has_missing_media = bool(missing_info["missing_seasons"] or missing_info["missing_episodes"])
 
-         # 1. 第一步：必须先定义 today，否则后面计算日期差会报错
         today = datetime.now(timezone.utc).date()
-
-        # 2. 第二步：获取上一集信息
         last_episode_to_air = latest_series_data.get("last_episode_to_air")
-        
-        # 3. 第三步：计算距离上一集播出的天数 (依赖 today)
-        days_since_last = 9999 # 默认给一个很大的值
-        if last_episode_to_air and (last_date_str := last_episode_to_air.get('air_date')):
-            try:
-                last_air_date_obj = datetime.strptime(last_date_str, '%Y-%m-%d').date()
-                days_since_last = (today - last_air_date_obj).days
-            except ValueError:
-                pass
-        final_status = STATUS_WATCHING 
         paused_until_date = None
 
-        # 预处理：确定是否存在一个“有效的、未来的”下一集
-        effective_next_episode = None
-        effective_next_episode_air_date = None
-        if real_next_episode_to_air and (air_date_str := real_next_episode_to_air.get('air_date')):
-            try:
-                air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
-                if air_date >= today:
-                    effective_next_episode = real_next_episode_to_air
-                    effective_next_episode_air_date = air_date 
-            except (ValueError, TypeError):
-                pass
-
-        # 预处理：检查是否为本季大结局
-        is_season_finale = False
-        last_date_str = None # 用于日志
-        if last_episode_to_air:
-            last_date_str = last_episode_to_air.get('air_date')
-            last_s_num = last_episode_to_air.get('season_number')
-            last_e_num = last_episode_to_air.get('episode_number')
-            
-            if last_s_num and last_e_num:
-                season_info = next((s for s in latest_series_data.get('seasons', []) if s.get('season_number') == last_s_num), None)
-                if season_info:
-                    total_ep_count = season_info.get('episode_count', 0)
-                    
-                    # 如果总集数很少（例如3集），可能是新剧刚开播 TMDb 还没更新后续集数，
-                    # 此时应跳过大结局判定，让其落入后续的“最近播出”或“自动待定”逻辑。
-                    if total_ep_count > aggressive_threshold and last_e_num >= total_ep_count:
-                        is_season_finale = True
-                        logger.debug(f"  ➜ [预判] S{last_s_num} 总集数({total_ep_count}) > 保护阈值({aggressive_threshold}) 且已播至最后一集，标记为本季大结局。")
-
-        # ==============================================================================
-        # ★★★ 本地完结门槛 ★★★
-        # ==============================================================================
-        # 取消“提前完结抢完结包”：不再因为 TMDb 大结局已播出 / 状态已完结就直接把本地半截剧判完结。
-        # 三段规则：
-        # 1. 本地 0 集：视为没有追这一季，可以完结/休眠；
-        # 2. 本地 1～N-1 集：视为追到一半，必须继续保持追剧，不能完结；
-        # 3. 本地 N/N 集：本地已集齐，才允许完结并触发后续完结洗版/等待完结包逻辑。
-        watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-        tg_channel_tracking = watchlist_cfg.get('tg_channel_tracking', False)
-        
         tmdb_seasons_list = latest_series_data.get('seasons', [])
         valid_tmdb_seasons = sorted(
             [s for s in tmdb_seasons_list if s.get('season_number', 0) > 0], 
@@ -3599,170 +3572,25 @@ class WatchlistProcessor:
                 f"状态={latest_season_local_state}。"
             )
 
-        is_latest_season_not_started = latest_season_local_state == "not_started"
         is_local_latest_season_completed = latest_season_local_state == "complete"
-        is_latest_season_partial = latest_season_local_state == "partial"
-
-        # ==============================================================================
-        # ★★★ 重构后的状态判定逻辑 ★★★
-        # ==============================================================================
-
-        # 规则 1: 本地最新季已集齐 -> 允许完结
-        if is_local_latest_season_completed:
-            final_status = STATUS_COMPLETED
-            paused_until_date = None
-            logger.info(f"  ➜ [追剧判定] 《{item_name}》第 {latest_s_num} 季本地已集齐 {local_latest_s_episodes}/{latest_s_total_episodes} 集，判定为“已完结”。")
-
-        # 规则 2: TMDb 状态已完结
-        # 本地 0 集：说明没追这一季，可以完结；本地半截：必须继续追，不能抢完结包。
-        elif is_ended_on_tmdb:
-            if is_latest_season_partial:
-                final_status = STATUS_WATCHING
-                paused_until_date = None
-                logger.info(f"  ➜ [本地未集齐保护] TMDb 已显示完结，但第 {latest_s_num} 季本地只有 {local_latest_s_episodes}/{latest_s_total_episodes or '未知'} 集，保持“追剧中”。")
-            else:
-                final_status = STATUS_COMPLETED
-                paused_until_date = None
-                if is_latest_season_not_started:
-                    logger.info(f"  ➜ [追剧判定] TMDb 已显示完结，且第 {latest_s_num} 季本地 0 集，视为未追本季，判定为“已完结”。")
-                else:
-                    logger.info(f"  ➜ [追剧判定] TMDb 已显示完结，且本地没有半截追更，判定为“已完结”。")
-
-        # 规则 3: 本季大结局已播出且无明确下一集
-        # 只作为“是否可以休眠”的信号；如果本地已经追了一部分但没集齐，不能完结。
-        elif is_season_finale and not effective_next_episode:
-            is_suspiciously_short = (new_tmdb_status == "Returning Series" and total_ep_count <= 3)
-            
-            if is_suspiciously_short and days_since_last <= 7:
-                final_status = STATUS_WATCHING
-                paused_until_date = None
-                logger.info(f"  ➜ [安全锁生效] 疑似第 {last_s_num} 季第 {last_e_num} 集是大结局，但该季仅 {total_ep_count} 集且刚播出 {days_since_last} 天，先按数据滞后处理，保持“追剧中”。")
-            elif is_latest_season_partial:
-                final_status = STATUS_WATCHING
-                paused_until_date = None
-                logger.info(f"  ➜ [本地未集齐保护] 本季大结局虽已播出，但第 {latest_s_num} 季本地只有 {local_latest_s_episodes}/{latest_s_total_episodes or '未知'} 集，保持“追剧中”。")
-            else:
-                final_status = STATUS_COMPLETED
-                paused_until_date = None
-                if is_latest_season_not_started:
-                    logger.info(f"  ➜ [追剧判定] 本季大结局已播出，但第 {latest_s_num} 季本地 0 集，视为未追本季，判定为“已完结”。")
-                else:
-                    logger.info(f"  ➜ [追剧判定] 第 {last_s_num} 季第 {last_e_num} 集已播出且本地没有半截追更，判定为“已完结”。")
-
-        # 规则 4: 连载中逻辑
+        local_completed_season_numbers = []
+        for season_info in valid_tmdb_seasons:
+            s_num = _safe_int(season_info.get('season_number'))
+            expected_count = _safe_int(season_info.get('episode_count'))
+            if s_num > 0 and expected_count > 0 and len(emby_seasons.get(s_num, set())) >= expected_count:
+                local_completed_season_numbers.append(s_num)
+        has_local_completed_season = bool(local_completed_season_numbers)
+        final_status = STATUS_COMPLETED if is_ended_on_tmdb else STATUS_WATCHING
+        if is_ended_on_tmdb:
+            logger.info(f"  ➜ [追剧判定] 《{item_name}》TMDb 状态={new_tmdb_status}，剧条目标记为“已完结”。")
         else:
-            # 情况 A: 下一集有明确播出日期
-            if effective_next_episode:
-                season_number = effective_next_episode.get('season_number')
-                episode_number = effective_next_episode.get('episode_number')
-                air_date = effective_next_episode_air_date
-                days_until_air = (air_date - today).days
-
-                # ==============================================================================
-                # ★★★ 核心逻辑：不见兔子不撒鹰 ★★★
-                # 只有当下一集所属的季在本地至少有一集时，才允许进入 Watching/Paused 状态。
-                # 否则一律视为 Completed (等待新季入库)。
-                # ==============================================================================
-                has_local_season = season_number in emby_seasons
-
-                if not has_local_season:
-                    final_status = STATUS_COMPLETED
-                    paused_until_date = None
-                    logger.info(f"  ➜ [追剧判定] 下一集是第 {season_number} 季第 {episode_number} 集，但本地没有这一季文件，视为未追本季，判定为“已完结”。")
-                
-                # --- 只有本地有该季文件，才根据时间判断是追剧还是暂停 ---
-                else:
-                    # 子规则 A: 播出时间 >= 设定天数 -> 设为“暂停”
-                    if enable_auto_pause and days_until_air >= auto_pause_days:
-                        final_status = STATUS_PAUSED
-                        paused_until_date = air_date
-                        logger.info(f"  ➜ [追剧判定] 第 {episode_number} 集将在 {days_until_air} 天后播出，超过自动暂停阈值 {auto_pause_days} 天，状态设为“已暂停”。")
-                    # 子规则 B: 即将播出 -> 设为“追剧中”
-                    else:
-                        final_status = STATUS_WATCHING
-                        paused_until_date = None
-                        logger.info(f"  ➜ [追剧判定] 第 {episode_number} 集将在 {days_until_air} 天内播出（{air_date}），状态设为“追剧中”。")
-
-            # 情况 B: 无下一集信息 (或信息不全)
-            else:
-                if days_since_last != 9999:
-                    # 1. 获取当前季的 TMDb 总集数
-                    current_season_total = 0
-                    last_s_num = last_episode_to_air.get('season_number')
-                    last_e_num = last_episode_to_air.get('episode_number')
-                    
-                    if last_s_num:
-                        # 从 series_details 的 seasons 列表中找到对应季的 info
-                        season_info = next((s for s in latest_series_data.get('seasons', []) if s.get('season_number') == last_s_num), None)
-                        if season_info:
-                            current_season_total = season_info.get('episode_count', 0)
-
-                    # ==============================================================================
-                    # ★★★ 核心修复：兜底逻辑也要“不见兔子不撒鹰” ★★★
-                    # 如果 TMDb 认为的“当前正在播出的季 (last_s_num)”在本地根本不存在，
-                    # 说明用户根本没开始追这一季，直接判定为完结！
-                    # ==============================================================================
-                    has_local_last_season = last_s_num in emby_seasons if last_s_num else False
-                    local_last_season_episodes = len(emby_seasons.get(last_s_num, set())) if last_s_num else 0
-
-                    if (not has_local_last_season) or local_last_season_episodes <= 0:
-                        final_status = STATUS_COMPLETED
-                        paused_until_date = None
-                        logger.info(f"  ➜ [追剧判定] 本地没有第 {last_s_num} 季文件，视为未追本季，判定为“已完结”。")
-                    
-                    # 本地已经有一部分，但还没达到该季总集数：必须继续追，不能因为无下一集排期而完结。
-                    elif current_season_total > 0 and local_last_season_episodes < current_season_total:
-                        final_status = STATUS_WATCHING
-                        paused_until_date = None
-                        logger.info(f"  ➜ [本地未集齐保护] 无待播集信息，但第 {last_s_num} 季本地只有 {local_last_season_episodes}/{current_season_total} 集，保持“追剧中”。")
-
-                    # 有本地文件但总集数未知，无法证明已经集齐，也不能完结。
-                    elif current_season_total <= 0 and local_last_season_episodes > 0:
-                        final_status = STATUS_WATCHING
-                        paused_until_date = None
-                        logger.info(f"  ➜ [本地未集齐保护] 第 {last_s_num} 季本地已有 {local_last_season_episodes} 集，但 TMDb 总集数未知，保持“追剧中”。")
-                    
-                    # 状态仍是连载中，且 TMDb 显示当前季尚未播完：继续追。
-                    elif new_tmdb_status == "Returning Series" and last_e_num and current_season_total > 0 and last_e_num < current_season_total:
-                        final_status = STATUS_WATCHING
-                        paused_until_date = None
-                        logger.info(f"  ➜ [追剧判定] 暂无后续排期，但第 {last_s_num} 季尚未播完（已播 {last_e_num}/{current_season_total} 集），按数据滞后处理，保持“追剧中”。")
-                    
-                    # 否则：本地已达到该季总集数，允许完结。
-                    else:
-                        final_status = STATUS_COMPLETED
-                        paused_until_date = None
-                        logger.info(f"  ➜ [追剧判定] 无待播集信息，且第 {last_s_num} 季本地已集齐 {local_last_season_episodes}/{current_season_total} 集，判定为“已完结”。")
-                
-                else:
-                    # 极端情况：无任何日期信息
-                    final_status = STATUS_WATCHING
-                    paused_until_date = None
-                    logger.info(f"  ➜ [判定-连载中] 缺乏播出日期数据，默认保持“追剧中”状态。")
-
-        # 自动待定 (Auto Pending) 覆盖逻辑
-        # 读取配置 (提前读取，后面要用)
-        watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-        auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
-        
-        # ★★★ 修复：将 STATUS_COMPLETED 加入检查列表 ★★★
-        # 只有这样，当逻辑误判为“已完结”时，下面的代码才有机会把它救回来
-        if final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_COMPLETED]:
-            
-            # 安全检查：如果 TMDb 明确说是 Ended/Canceled，那就不救了，是真的完结了
-            if new_tmdb_status in ["Ended", "Canceled"]:
-                 pass 
-            
-            # 本地 0 集代表没追这一季，允许完结/休眠，不再被自动待定救回追更。
-            elif final_status == STATUS_COMPLETED and is_latest_season_not_started:
-                logger.debug(f"  ➜ [自动待定跳过] 《{item_name}》S{latest_s_num} 本地 0 集，视为未追本季，保持“已完结”。")
-            
-            # 核心检查：如果 TMDb 还在连载(Returning Series)，但满足新剧条件(集数少、时间短)
-            elif self._check_auto_pending_condition(latest_series_data, auto_pending_cfg):
-                final_status = STATUS_PENDING
-                paused_until_date = None 
-                # 这里的日志会出现在“判定已完结”之后，表示修正成功
-                logger.info(f"  ➜ [自动待定] 《{item_name}》满足新剧保护条件，状态从“已完结”修正为“待定”。")
+            logger.info(f"  ➜ [追剧判定] 《{item_name}》TMDb 状态={new_tmdb_status or '未知'}，剧条目标记为“追剧中”。")
+        if latest_s_num:
+            logger.info(
+                f"  ➜ [追剧判定] 《{item_name}》第 {latest_s_num} 季本地状态："
+                f"{local_latest_s_episodes}/{latest_s_total_episodes or '未知'}，"
+                f"{'已集齐' if is_local_latest_season_completed else '未集齐'}。"
+            )
 
         # 手动强制完结
         if is_force_ended and final_status != STATUS_COMPLETED:
@@ -3785,15 +3613,15 @@ class WatchlistProcessor:
         completed_quality_gate = {}
 
         # 完结季质量门禁：
-        # - Completed -> Completed 也允许重复校验，用于洗版分批入库后的最终收口登记；
-        # - 但只有首次从追更/暂停/待定流转到 Completed 时，才允许发起新的洗版；
+        # - Series 状态只跟 TMDb；Season 状态只看本地是否集齐；
+        # - 本地已集齐季即使 Series 仍是 Watching，也要执行季级一致性校验和订阅收口；
         # - active_washing 作为洗版事务锁，防止部分集入库时反复提交 MP 洗版。
         allow_start_completed_washing = (
-            final_status == STATUS_COMPLETED
+            (final_status == STATUS_COMPLETED or has_local_completed_season)
             and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]
             and not is_force_ended
         )
-        if final_status == STATUS_COMPLETED and not is_force_ended:
+        if (final_status == STATUS_COMPLETED or has_local_completed_season) and not is_force_ended:
             set_waiting_flag = self._handle_completed_season_quality_gate(
                 tmdb_id=tmdb_id,
                 series_name=item_name,
@@ -3805,8 +3633,8 @@ class WatchlistProcessor:
             )
             completed_quality_gate = dict(getattr(self, '_last_completed_season_quality_gate', {}) or {})
 
-        # 如果剧集恢复连载（出新季了），必须清除等待标志，防止误判
-        if final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]:
+        # 如果剧集恢复连载，必须清除等待标志，防止误判
+        if final_status == STATUS_WATCHING and not has_local_completed_season:
             set_waiting_flag = False
 
         # 更新追剧数据库
@@ -3823,38 +3651,10 @@ class WatchlistProcessor:
         # ★ 将标志位合入数据库更新字典
         if set_waiting_flag is not None:
             updates_to_db['waiting_for_completed_pack'] = set_waiting_flag
-        # 如果是待定状态，强制修改总集数为“虚标”值
-        if final_status == STATUS_PENDING:
-            # 获取配置的默认集数，默认为 99
-            fake_total = int(auto_pending_cfg.get('default_total_episodes', 99))
-            
-            current_tmdb_total = latest_series_data.get('number_of_episodes', 0)
-            
-            if current_tmdb_total < fake_total:
-                # 1. 更新 Series 记录 (保持原样)
-                updates_to_db['total_episodes'] = fake_total
-                
-                # 2. ★★★ 新增：同时更新最新一季的 Season 记录 ★★★
-                # 只有更新了 Season 记录，前端分季卡片才会显示虚标集数
-                seasons = latest_series_data.get('seasons', [])
-                # 过滤掉第0季，按季号倒序找到最新季
-                valid_seasons = sorted([s for s in seasons if s.get('season_number', 0) > 0], 
-                                       key=lambda x: x['season_number'], reverse=True)
-                
-                if valid_seasons:
-                    latest_season_num = valid_seasons[0]['season_number']
-                    # 调用 DB 更新
-                    watchlist_db.update_specific_season_total_episodes(tmdb_id, latest_season_num, fake_total)
-                    for _season_obj in seasons:
-                        if _season_obj.get('season_number') == latest_season_num:
-                            _season_obj['episode_count'] = fake_total
-                            break
-                    latest_series_data['number_of_episodes'] = max(self._watchlist_safe_int(latest_series_data.get('number_of_episodes'), 0), fake_total)
-                    logger.debug(f"  ➜ 已同步更新 S{latest_season_num} 的总集数为 {fake_total}")
         self._update_watchlist_entry(tmdb_id, item_name, updates_to_db)
 
         # ======================================================================
-        # ★★★ 提前计算季的活跃状态 (供数据库同步和目录重组使用) ★★★
+        # ★★★ 提前计算季的活跃状态 (供版本锁定使用) ★★★
         # ======================================================================
         active_seasons = set()
         # 规则 A: 如果有明确的下一集待播，该集所属的季肯定是活跃的
@@ -3883,13 +3683,13 @@ class WatchlistProcessor:
                 active_seasons.add(max(s['season_number'] for s in valid_tmdb_seasons))
 
         # ======================================================================
-        # ★★★ 追剧目录自动重组 (大脑指挥官 - 优雅在播季限定版) ★★★
+        # ★★★ 追剧目录自动重组 (大脑指挥官 - 整剧状态版) ★★★
         # ======================================================================
         if self.p115_enable_organize:
             try:
                 # 判断是否发生了关键的状态流转
                 status_changed_to_watching = (old_status in [None, 'NONE'] and final_status in ['Watching', 'Paused', 'Pending'])
-                status_changed_to_completed = (old_status in ['Watching', 'Paused', 'Pending'] and final_status == 'Completed')
+                status_changed_to_completed = (old_status in [None, 'NONE', 'Watching', 'Paused', 'Pending'] and final_status == 'Completed')
                 
                 # 新季复活流转 (完结 -> 追剧/待定/暂停)
                 status_revived = (old_status == 'Completed' and final_status in ['Watching', 'Paused', 'Pending'])
@@ -3897,106 +3697,83 @@ class WatchlistProcessor:
                 if status_changed_to_watching or status_changed_to_completed or status_revived:
                     logger.info(
                         f"  ➜ [智能追剧] 检测到状态从“{translate_internal_status(old_status)}”变为"
-                        f"“{translate_internal_status(final_status)}”，准备重新评估 115 目录分类。"
+                        f"“{translate_internal_status(final_status)}”，准备按整剧状态重新评估 115 目录分类。"
                     )
-                    
-                    target_seasons_for_move = set(active_seasons)
-                    valid_local_seasons = [s for s in emby_seasons.keys() if s > 0]
-                    if valid_local_seasons:
-                        target_seasons_for_move.add(max(valid_local_seasons))
 
-                    if not target_seasons_for_move:
-                        logger.debug("  ➜ [智能追剧] 未找到有效的目标季，跳过重组。")
-                    else:
-                        from handler.p115_service import P115Service, SmartOrganizer, ManualCorrectTaskQueue
-                        from database.connection import get_db_connection
+                    from handler.p115_service import P115Service, SmartOrganizer, ManualCorrectTaskQueue
+                    from database.connection import get_db_connection
 
-                        # ★ MP 直出是“原路径映射”，不应该被追剧状态流转重新分拣。
-                        #   先查整理记录：只要目标季对应记录的分类是 MP直出，就直接从重组候选里剔除。
-                        with get_db_connection() as conn:
-                            with conn.cursor() as cursor:
-                                cursor.execute("""
-                                    SELECT id, season_number, target_cid, category_name
-                                    FROM p115_organize_records
-                                    WHERE tmdb_id = %s
-                                """, (str(tmdb_id),))
-                                all_records = cursor.fetchall()
+                    # ★ MP 直出是“原路径映射”，不应该被追剧状态流转重新分拣。
+                    #   整剧状态流转时，除 MP直出 外的同剧整理记录都重新按整剧状态归类。
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("""
+                                SELECT id, season_number, target_cid, category_name
+                                FROM p115_organize_records
+                                WHERE tmdb_id = %s
+                            """, (str(tmdb_id),))
+                            all_records = cursor.fetchall()
 
-                        candidate_rows = []
-                        mp_direct_skipped_count = 0
+                    candidate_rows = []
+                    mp_direct_skipped_count = 0
 
-                        for row in all_records:
-                            s_num = row['season_number']
-                            category_name = str(row.get('category_name') or '').strip()
+                    for row in all_records:
+                        category_name = str(row.get('category_name') or '').strip()
 
-                            # 先判断这条记录是不是本轮状态流转需要考虑的目标季
-                            is_target_season = False
-                            if s_num and s_num in target_seasons_for_move:
-                                is_target_season = True
-                            elif not s_num and len(target_seasons_for_move) == 1:
-                                # 兜底：如果实在没有季号(如花絮)，但目标季只有一个，兜底带上
-                                is_target_season = True
+                        # ★ 核心修复：MP直出一律不参与追剧自动重组
+                        if category_name == "MP直出":
+                            mp_direct_skipped_count += 1
+                            continue
 
-                            if not is_target_season:
-                                continue
+                        candidate_rows.append(row)
 
-                            # ★ 核心修复：MP直出一律不参与追剧自动重组
-                            if category_name == "MP直出":
-                                mp_direct_skipped_count += 1
-                                continue
-
-                            candidate_rows.append(row)
-
-                        if not candidate_rows:
-                            if mp_direct_skipped_count > 0:
-                                logger.info(
-                                    f"  ➜ [智能追剧] 检测到 {mp_direct_skipped_count} 条目标季记录来自 MP直出，"
-                                    f"按原路径映射策略跳过自动重组。"
-                                )
-                            else:
-                                logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+                    if not candidate_rows:
+                        if mp_direct_skipped_count > 0:
+                            logger.info(
+                                f"  ➜ [智能追剧] 检测到 {mp_direct_skipped_count} 条整剧记录来自 MP直出，"
+                                f"按原路径映射策略跳过自动重组。"
+                            )
                         else:
-                            client = P115Service.get_client()
-                            if client:
-                                # 1. 提前计算出新的目标目录 CID
-                                organizer = SmartOrganizer(client, tmdb_id, 'tv', item_name)
-                                new_target_cid = organizer.get_target_cid(ignore_memory=True)
+                            logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+                    else:
+                        client = P115Service.get_client()
+                        if client:
+                            # 1. 提前计算出新的目标目录 CID
+                            organizer = SmartOrganizer(client, tmdb_id, 'tv', item_name)
+                            new_target_cid = organizer.get_target_cid(ignore_memory=True)
 
-                                if new_target_cid:
-                                    records_to_process = []
-                                    skipped_count = 0
+                            if new_target_cid:
+                                records_to_process = []
+                                skipped_count = 0
 
-                                    for row in candidate_rows:
-                                        s_num = row['season_number']
-                                        current_cid = row['target_cid']
+                                for row in candidate_rows:
+                                    s_num = row['season_number']
+                                    current_cid = row['target_cid']
 
-                                        # ★ 核心优化：如果当前目录已经等于目标目录，静默跳过！(防原地摩擦)
-                                        if str(current_cid) == str(new_target_cid):
-                                            skipped_count += 1
-                                            continue
+                                    # ★ 核心优化：如果当前目录已经等于目标目录，静默跳过！(防原地摩擦)
+                                    if str(current_cid) == str(new_target_cid):
+                                        skipped_count += 1
+                                        continue
 
-                                        # ★ 直接使用数据库里的季号，告别正则！
-                                        if s_num and s_num in target_seasons_for_move:
-                                            records_to_process.append((row['id'], s_num))
-                                        elif not s_num and len(target_seasons_for_move) == 1:
-                                            records_to_process.append((row['id'], list(target_seasons_for_move)[0]))
+                                    # ★ 整剧随状态重组：直接使用数据库里的季号，不再限制目标季。
+                                    records_to_process.append((row['id'], s_num))
 
-                                    if records_to_process:
-                                        logger.info(f"  ➜ [智能追剧] 已锁定 {len(records_to_process)} 个需要移动的文件，加入自动重组队列。")
-                                        logger.debug(f"  ➜ [智能追剧] 自动重组详情：CID={new_target_cid}, 目标季={list(target_seasons_for_move)}")
-                                        for rid, s_num in records_to_process:
-                                            ManualCorrectTaskQueue.add(rid, tmdb_id, 'tv', new_target_cid, s_num)
+                                if records_to_process:
+                                    logger.info(f"  ➜ [智能追剧] 已锁定 {len(records_to_process)} 个需要移动的文件，加入整剧自动重组队列。")
+                                    logger.debug(f"  ➜ [智能追剧] 自动重组详情：CID={new_target_cid}, 整剧记录={len(candidate_rows)}")
+                                    for rid, s_num in records_to_process:
+                                        ManualCorrectTaskQueue.add(rid, tmdb_id, 'tv', new_target_cid, s_num)
+                                else:
+                                    if skipped_count > 0:
+                                        logger.info("  ➜ [智能追剧] 整剧文件已在正确分类，无需移动，跳过重组。")
+                                        logger.debug(f"  ➜ [智能追剧] 已命中目标目录：CID={new_target_cid}")
                                     else:
-                                        if skipped_count > 0:
-                                            logger.info("  ➜ [智能追剧] 目标季文件已在正确目录，无需移动，跳过重组。")
-                                            logger.debug(f"  ➜ [智能追剧] 已命中目标目录：CID={new_target_cid}")
-                                        else:
-                                            logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+                                        logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
             except Exception as e:
                 logger.error(f"  ➜ 触发 115 自动分类迁移失败: {e}", exc_info=True)
 
-        # 调用 DB 模块进行批量更新 (使用上面提前算好的 active_seasons)
-        watchlist_db.sync_seasons_watching_status(tmdb_id, list(active_seasons), final_status)
+        # 季条目状态只看本地是否集齐，不再继承剧条目的 TMDb 状态。
+        watchlist_db.sync_seasons_watching_status(tmdb_id, emby_seasons=emby_seasons)
 
         # 追剧判定完成后，中心端此时才能拿到最可信的 Series 元数据、季状态和季总集数：
         # - Season.watching_status 只以本地季行同步后的状态为准；
@@ -4035,7 +3812,7 @@ class WatchlistProcessor:
             real_next_episode=real_next_episode_to_air,
             triggering_episode_ids=subscription_triggering_episode_ids or airing_episode_emby_ids or [],
         )
-        self._close_completed_subscription_status(tmdb_id, item_name, final_status)
+        self._close_completed_subscription_status(tmdb_id, item_name, final_status, allow_season_closeout=has_local_completed_season)
         subscribe_assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
         version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
         lockable_statuses = {STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING}

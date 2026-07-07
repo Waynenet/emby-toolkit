@@ -7,7 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
 import pytz
-from datetime import datetime
+from datetime import datetime, timezone
 from croniter import croniter
 import re
 
@@ -23,6 +23,45 @@ logger = logging.getLogger(__name__)
 # APScheduler 默认会在每次定时任务成功后输出 "executed successfully"。
 # 共享资源维护属于高频后台任务，成功执行不需要刷实时日志；错误仍由 APScheduler 以 ERROR 输出。
 logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
+
+
+def _parse_pro_expire_time(value: str = ''):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        try:
+            return datetime.strptime(text.split('.')[0].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None
+
+
+def _keep_saved_pro_if_valid() -> bool:
+    try:
+        license_key = settings_db.get_setting('pro_license_key') or ''
+        expire_time = settings_db.get_setting('pro_expire_time') or ''
+    except Exception as e:
+        logger.warning(f"  ➜ 读取本地 Pro 授权缓存失败: {e}")
+        return False
+
+    if not license_key or not expire_time:
+        return False
+
+    parsed = _parse_pro_expire_time(expire_time)
+    if not parsed:
+        return False
+
+    now = datetime.now(parsed.tzinfo or timezone.utc)
+    if parsed.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    if parsed <= now:
+        return False
+
+    config_manager.APP_CONFIG['is_pro_active'] = True
+    config_manager.APP_CONFIG['pro_expire_time'] = expire_time
+    return True
 
 # --- 【V10 - 任务ID拆分】 ---
 # 为每个独立的定时任务定义清晰的ID
@@ -556,11 +595,19 @@ class SchedulerManager:
                         config_manager.APP_CONFIG['is_pro_active'] = True
                         config_manager.APP_CONFIG['pro_expire_time'] = resp.get("expire_time", "")
                         # logger.debug("  ➜ Pro 状态有效。")
-                    else:
+                    elif resp.get("success"):
                         config_manager.APP_CONFIG['is_pro_active'] = False
                         logger.warning(f"  ➜ Pro 状态已失效或过期！已降级为免费版。原因: {resp.get('msg')}")
+                    elif _keep_saved_pro_if_valid():
+                        logger.warning(f"  ➜ Pro 定时查岗返回异常: {resp.get('msg') or resp}。已保留本地未过期 Pro 状态。")
+                    else:
+                        config_manager.APP_CONFIG['is_pro_active'] = False
+                        logger.warning(f"  ➜ Pro 定时查岗返回异常且本地无可用授权缓存: {resp.get('msg') or resp}")
                 except Exception as e:
-                    pass
+                    if _keep_saved_pro_if_valid():
+                        logger.warning(f"  ➜ Pro 定时查岗连接失败: {e}。已保留本地未过期 Pro 状态。")
+                    else:
+                        logger.warning(f"  ➜ Pro 定时查岗连接失败: {e}。本地无可用授权缓存。")
 
         try:
             self.scheduler.add_job(

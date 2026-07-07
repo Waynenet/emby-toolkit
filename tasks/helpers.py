@@ -305,30 +305,10 @@ def _extract_exclusion_keywords_from_filename(filename: str) -> List[str]:
     """
     if not filename:
         return []
-    # 我们需要原始大小写的文件名（不含扩展名）来进行正则匹配
-    name_part = os.path.splitext(filename)[0]
-
     tail_token = extract_release_group_token_from_filename(filename)
     tail_group = normalize_release_group_name(tail_token)
     if tail_token and tail_group and tail_group != tail_token:
         return [tail_group]
-
-    for group_name, alias_list in get_release_group_mapping().items():
-        for alias in alias_list:
-            try:
-                # 核心修复：使用 re.search 来正确评估正则表达式
-                # re.IGNORECASE 可以在匹配时忽略大小写
-                if re.search(alias, name_part, re.IGNORECASE):
-                    return [group_name]
-            except re.error as e:
-                # 如果正则表达式本身有语法错误，记录日志并跳过
-                logger.warning(f"RELEASE_GROUPS 中存在无效的正则表达式: '{alias}' for group '{group_name}'. Error: {e}")
-                continue
-        
-        # 保留对组名本身的检查（例如 "MTeam"）
-        if group_name.upper() in name_part.upper():
-            return [group_name]
-
     return []
 
 def extract_release_groups_from_filename(filename: str) -> List[str]:
@@ -375,10 +355,10 @@ def describe_release_group_match(filename: str) -> Dict[str, str]:
     """返回发布组标准名和命中的尾部别名，用于锁版判断和日志展示。"""
     token = extract_release_group_token_from_filename(filename)
     groups = extract_release_groups_from_filename(filename)
-    standard = groups[0] if groups else normalize_release_group_name(token)
+    standard = groups[0] if groups else ''
     return {
         'group': standard,
-        'alias': token,
+        'alias': token if standard else '',
     }
 
 def format_release_group_label(group_name: str, alias: str = '') -> str:
@@ -1614,8 +1594,8 @@ def check_series_completion(
     统一检查剧集或指定季的播出状态。
 
     mode:
-      - "completed": 返回是否已完结。用于 MP best_version / 影巢完结包策略。
-      - "airing": 返回是否仍在连载/待播/短季保护期。用于整理规则里的“连载中”判断。
+      - "completed": TMDb 状态为 Ended/Canceled 才返回 True。
+      - "airing": TMDb 状态不是 Ended/Canceled 才返回 True。
 
     注意：
       - 获取不到数据时，两个 mode 都返回 False。
@@ -1629,143 +1609,23 @@ def check_series_completion(
             return status == "airing"
         return status == "completed"
 
-    def _parse_air_date(date_str: str):
-        if not date_str:
-            return None
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            return None
-
     if not api_key or not tmdb_id:
         return False
 
-    today = datetime.now(timezone.utc).date()
-
     try:
         show_details = get_tv_details(tmdb_id, api_key)
-
-        show_status = ""
-        if show_details:
-            show_status = show_details.get("status", "")
-
-        # TMDb 明确标记整剧结束/取消，直接视为完结。
-        if show_status in ["Ended", "Canceled"]:
-            logger.info(
-                f"  ➜ 剧集《{series_name}》TMDb状态为 '{show_status}'，"
-                f"判定第 {season_number if season_number else 'All'} 季已完结。"
-            )
-            return _match("completed")
-
-        # 查询整剧，不指定季号时，保留原有逻辑：最新一集已播出则认为可洗版。
-        if season_number is None:
-            last_episode_to_air = show_details.get("last_episode_to_air") if show_details else None
-            if last_episode_to_air:
-                last_air_date = _parse_air_date(last_episode_to_air.get("air_date"))
-                if last_air_date:
-                    if last_air_date <= today:
-                        logger.info(
-                            f"  ➜ 剧集《{series_name}》的最新一集已播出 ({last_air_date})，判定为可洗版状态。"
-                        )
-                        return _match("completed")
-
-                    logger.info(
-                        f"  ➜ 剧集《{series_name}》最新一集将于 {last_air_date} 播出，判定仍在连载/待播。"
-                    )
-                    return _match("airing")
-
-            logger.warning(f"  ➜ 剧集《{series_name}》缺少最新播出信息，状态未知。")
+        if not show_details:
+            logger.warning(f"  ➜ 剧集《{series_name}》缺少 TMDb 详情，状态未知。")
             return False
 
-        # 查询指定季。
-        season_details = get_tv_season_details(tmdb_id, season_number, api_key)
-
-        if not season_details:
-            logger.warning(
-                f"  ➜ 无法获取《{series_name}》第 {season_number} 季详情，状态未知。"
-            )
-            return False
-
-        episodes = season_details.get("episodes") or []
-        if not episodes:
-            logger.warning(
-                f"  ➜ 《{series_name}》第 {season_number} 季暂无集数信息，状态未知。"
-            )
-            return False
-
-        official_count = season_details.get("episode_count") or len(episodes)
-        try:
-            official_count = int(official_count)
-        except (ValueError, TypeError):
-            official_count = len(episodes)
-
-        valid_air_dates = []
-        last_aired_ep_num = 0
-        has_future_episode = False
-
-        for ep in episodes:
-            air_date = _parse_air_date(ep.get("air_date"))
-            if not air_date:
-                continue
-
-            valid_air_dates.append(air_date)
-
-            if air_date > today:
-                has_future_episode = True
-            else:
-                try:
-                    ep_num = int(ep.get("episode_number") or 0)
-                except (ValueError, TypeError):
-                    ep_num = 0
-                last_aired_ep_num = max(last_aired_ep_num, ep_num)
-
-        # 规则 1：有明确未来集，肯定还在连载/待播。
-        if has_future_episode:
-            logger.info(
-                f"  ➜ 《{series_name}》第 {season_number} 季存在未来待播集，判定为连载/待播。"
-            )
-            return _match("airing")
-
-        # 规则 2：官方总集数大于当前已播最大集号，说明没播完。
-        if official_count > 0 and 0 < last_aired_ep_num < official_count:
-            logger.info(
-                f"  ➜ 《{series_name}》第 {season_number} 季已播至 E{last_aired_ep_num}，"
-                f"官方共 {official_count} 集，判定为连载中。"
-            )
-            return _match("airing")
-
-        if not valid_air_dates:
-            logger.warning(
-                f"  ➜ 《{series_name}》第 {season_number} 季没有有效播出日期，状态未知。"
-            )
-            return False
-
-        last_air_date = max(valid_air_dates)
-        days_since_last_air = (today - last_air_date).days
-
-        # 规则 3：短季/新剧保护。
-        # 原 check_series_completion 对 <=5 集短季不会立刻判完结；
-        # 原 evaluate_season_airing_status 对 <=3 集新剧会保护。
-        # 这里统一成 <=5 集且最后一集播出 30 天内，仍按活跃处理，避免新剧占位误判完结。
-        if official_count <= 5 and 0 <= days_since_last_air <= 30:
-            logger.info(
-                f"  ➜ 《{series_name}》第 {season_number} 季共 {official_count} 集，"
-                f"最近一集于 {last_air_date} 播出，仍在 30 天短季保护期内，判定为活跃/连载。"
-            )
-            return _match("airing")
-
-        # 规则 4：没有未来集、没有缺集、最近一集已播出，判定完结。
-        if last_air_date <= today:
-            logger.info(
-                f"  ➜ 《{series_name}》第 {season_number} 季最后一集于 {last_air_date} 播出，"
-                f"共 {official_count} 集，判定已完结。"
-            )
-            return _match("completed")
-
+        show_status = str(show_details.get("status") or "").strip()
+        completed = show_status in ["Ended", "Canceled"]
+        target_label = f"第 {season_number} 季" if season_number else "全剧"
         logger.info(
-            f"  ➜ 《{series_name}》第 {season_number} 季最后一集将于 {last_air_date} 播出，判定未完结。"
+            f"  ➜ 剧集《{series_name}》{target_label} 按 TMDb 状态判定："
+            f"{show_status or '未知'} -> {'已完结' if completed else '连载中'}。"
         )
-        return _match("airing")
+        return _match("completed" if completed else "airing")
 
     except Exception as e:
         logger.warning(
