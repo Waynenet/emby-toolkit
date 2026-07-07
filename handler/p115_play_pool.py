@@ -1249,14 +1249,44 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
     for asset in candidates:
         if not isinstance(asset, dict):
             continue
+        asset_pc = str((asset or {}).get("pc") or "").strip()
+        pc = source_pc or asset_pc
         sha1 = str(asset.get("sha1") or "").strip().upper()
         cached = _extract_cached_mediainfo_source(sha1)
-        if not _has_source_identity_row(cached):
+
+        file_cache = {}
+        try:
+            if pc:
+                file_cache = P115CacheManager.get_file_cache_by_pickcode(pc) or {}
+            if not file_cache and re.fullmatch(r"[A-F0-9]{40}", sha1 or ""):
+                file_cache = P115CacheManager.get_file_cache_by_sha1(sha1) or {}
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 查询 115 文件缓存补源文件身份失败: pc=%s..., sha1=%s..., err=%s",
+                pc[:8],
+                sha1[:12],
+                e,
+            )
+
+        sha1 = str(cached.get("sha1") or file_cache.get("sha1") or sha1 or "").strip().upper()
+        size = _safe_int(cached.get("size"), 0) or _safe_int(file_cache.get("size"), 0) or _safe_int(asset.get("size"), 0)
+        if not re.fullmatch(r"[A-F0-9]{40}", sha1 or "") or size <= 0:
             continue
         asset_path = str(asset.get("path") or "").replace("\\", "/")
-        cached["pick_code"] = source_pc or str(asset.get("pc") or "").strip()
-        cached["name"] = file_name or asset_path.rsplit("/", 1)[-1] or f"{sha1}.mkv"
-        return cached
+        return {
+            "fid": str(file_cache.get("id") or file_cache.get("fid") or "").strip(),
+            "sha1": sha1,
+            "size": size,
+            "preid": P115CacheManager._norm_preid(cached.get("preid")),
+            "raw_ffprobe_json": cached.get("raw_ffprobe_json") or {},
+            "pick_code": pc or str(file_cache.get("pick_code") or "").strip(),
+            "name": (
+                file_name
+                or str(file_cache.get("name") or "").strip()
+                or asset_path.rsplit("/", 1)[-1]
+                or f"{sha1}.mkv"
+            ),
+        }
     return {}
 
 
