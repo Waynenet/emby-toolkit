@@ -1227,6 +1227,36 @@ def _extract_completed_share_payload(resp: Dict[str, Any], *, receive_code: str 
     }
 
 
+def _p115_status_text(resp: Any) -> str:
+    """Extract explicit status/error text without scanning titles or filenames."""
+    keys = {
+        'status', 'state', 'share_status', 'share_state', 'review_status', 'audit_status',
+        'message', 'msg', 'error', 'error_msg', 'errno_msg', 'status_message', 'status_text',
+        'review_message', 'audit_message',
+    }
+    parts = []
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key or '').strip()
+                if key_text in keys or any(token in key_text.lower() for token in ('status', 'state', 'error', 'message', 'review', 'audit')):
+                    if isinstance(item, (str, int, float, bool)):
+                        parts.append(str(item))
+                    else:
+                        walk(item, depth + 1)
+                elif isinstance(item, dict):
+                    walk(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, depth + 1)
+
+    walk(resp)
+    return '\n'.join(parts).lower()
+
+
 def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_valid: bool = True) -> Dict[str, str]:
     """把 115 分享状态响应映射为中心状态。
 
@@ -1238,9 +1268,10 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
     只有这种结果才允许覆盖 share_list 定点对账结果。这样避免把“处理中”的
     分享因为 state=True 误判为可转存。
     """
-    text = json.dumps(resp if isinstance(resp, dict) else {'value': str(resp)}, ensure_ascii=False, default=str).lower()
+    status_text = _p115_status_text(resp)
+    text = status_text if status_text else (str(resp).lower() if not isinstance(resp, (dict, list)) else '')
     message = _p115_error(resp)
-    if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
+    if any(x in status_text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
         return {'status': 'review_failed', 'review_status': 'failed', 'message': message or '115 分享审核失败/违规', 'explicit': True}
     if any(x in text for x in ('审核中', '待审核', '处理中', '正在处理', 'reviewing', 'pending_review', 'pending review', 'processing')):
         return {'status': 'pending_review', 'review_status': 'pending', 'message': message or '115 分享审核中/处理中', 'explicit': True}
@@ -1256,7 +1287,7 @@ def _completed_share_status_from_info(resp: Dict[str, Any], *, allow_implicit_va
 
 
 def _logical_share_provider_forbidden_status(value: Any) -> Dict[str, Any]:
-    text = json.dumps(value if isinstance(value, (dict, list)) else {'value': str(value)}, ensure_ascii=False, default=str).lower()
+    text = _p115_status_text(value) or (str(value).lower() if not isinstance(value, (dict, list)) else '')
     if any(x in text for x in ('审核不通过', '审核失败', '审核未通过', '未通过审核', '违规', '违法', '违反', '涉嫌', '涉政', '暴恐', '政治', '恐怖', '风险', '禁止分享', '不允许分享', '不能分享', '封禁', 'risk', 'violation', 'forbidden')):
         return {
             'status': 'review_failed',
@@ -2281,6 +2312,29 @@ def _report_share_sync_heartbeat(summary: Dict[str, Any] = None, *, status: str 
     if callable(method):
         return method(payload)
     return _direct_center_share_sync_heartbeat(payload)
+
+
+def _clean_p115_recent_receive_for_share_sync() -> Dict[str, Any]:
+    """清理 115 最近接收历史；供硬编码分享同步任务顺手兜底。"""
+    try:
+        from handler.p115_service import P115Service
+        p115 = P115Service.get_client()
+        if not p115:
+            return {'ok': False, 'skipped': True, 'message': '115 客户端未初始化'}
+        method = getattr(p115, 'history_clean_receive', None)
+        if not callable(method):
+            return {'ok': False, 'skipped': True, 'message': '115 客户端不支持清理最近接收'}
+        resp = method()
+        ok = not (isinstance(resp, dict) and resp.get('state') is False)
+        if ok:
+            logger.debug("  ➜ [共享资源] 已清理 115 最近接收历史。")
+        else:
+            logger.debug(f"  ➜ [共享资源] 清理 115 最近接收历史未成功：{resp}")
+        return {'ok': bool(ok), 'response': resp}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 清理 115 最近接收历史异常：{e}")
+        return {'ok': False, 'error': str(e)}
+
 
 def _sync_completed_season_share_channels_once(limit: int = 50) -> Dict[str, Any]:
     """轻量同步本机已创建的完结季分享状态；供高频任务调用。"""
@@ -8383,6 +8437,8 @@ def task_shared_share_status_sync_high_freq(processor=None, maintenance_silent: 
         share_sync = {'ok': False, 'checked': 0, 'error': str(e)}
         logger.warning(f"  ➜ [共享资源] 逻辑季分享状态同步失败：{e}")
 
+    recent_receive_cleanup = _clean_p115_recent_receive_for_share_sync()
+
     final_heartbeat = {}
     if share_sync.get('ok'):
         try:
@@ -8401,4 +8457,5 @@ def task_shared_share_status_sync_high_freq(processor=None, maintenance_silent: 
         'share_sync_heartbeat': heartbeat,
         'share_sync_final_heartbeat': final_heartbeat,
         'logical_season_share_sync': share_sync,
+        'p115_recent_receive_cleanup': recent_receive_cleanup,
     }
