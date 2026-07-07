@@ -1665,8 +1665,6 @@ class WatchlistProcessor:
 
         group_info = self._version_lock_release_group_info(filename)
         group_regex = helpers.build_exclusion_regex_from_groups([group_info.get('group')]) if group_info.get('group') else ''
-        if not group_regex and group_info.get('alias'):
-            group_regex = re.escape(group_info.get('alias'))
         if group_regex:
             add_positive('release_group', group_regex)
         return "(?i)" + "".join(lookaheads) if lookaheads else ""
@@ -2594,13 +2592,14 @@ class WatchlistProcessor:
                 derived_info = self._version_lock_release_group_info(state.get('source_name') or '')
                 derived_group = derived_info.get('group') or ''
                 derived_alias = derived_info.get('alias') or ''
-                if not derived_group:
-                    derived_group = self._version_lock_release_group_from_include(include_regex)
-                if not derived_group and release_group_alias:
-                    alias_group = helpers.normalize_release_group_name(release_group_alias)
-                    if self._is_known_release_group(alias_group):
-                        derived_group = alias_group
-                        derived_alias = release_group_alias
+                if release_group and not derived_group:
+                    release_group = ''
+                    release_group_alias = ''
+                    self._save_version_lock_wait_state(tmdb_id, season_number, {
+                        'release_group': '',
+                        'release_group_alias': '',
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                    }, series_name)
                 expected_group_regex = helpers.build_exclusion_regex_from_groups([derived_group]) if derived_group else ''
                 include_needs_rebuild = False
                 rebuilt_include = self._build_version_lock_include_regex(state.get('source_name') or '')
@@ -2651,7 +2650,7 @@ class WatchlistProcessor:
                             'updated_at': datetime.now(timezone.utc).isoformat(),
                         }, series_name)
 
-                if consistency_check_enabled and release_group:
+                if consistency_check_enabled and include_regex:
                     sync_state = self._sync_version_lock_release_group_washing(
                         tmdb_id,
                         season_number,
@@ -2762,7 +2761,7 @@ class WatchlistProcessor:
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 **wait_state,
             }, series_name)
-            if ok and release_group and consistency_check_enabled:
+            if ok and include_regex and consistency_check_enabled:
                 sync_state = self._sync_version_lock_release_group_washing(
                     tmdb_id,
                     season_number,

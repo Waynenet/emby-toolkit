@@ -1502,6 +1502,8 @@ class SubscribeAssistantManager:
 
         try:
             before_keys = self._subscription_sync_keys(tmdb_items)
+            if self._mp_subscription_sync_current(tmdb_items, source):
+                return False
             skip_statuses = {"PAUSED", "IGNORED", "PENDING_RELEASE"} if history_sync else set()
             process_subscription_items_and_update_db(
                 tmdb_items=tmdb_items,
@@ -1589,6 +1591,84 @@ class SubscribeAssistantManager:
         except Exception as e:
             logger.debug("  ➜ [订阅助手] 读取同步前后状态失败：%s", e)
             return {}
+
+    def _mp_subscription_sync_current(self, tmdb_items: List[Dict[str, Any]], source: Dict[str, Any]) -> bool:
+        rows = self._subscription_sync_rows(tmdb_items, target_only=True)
+        if not rows:
+            return False
+        subscribe_id = _safe_int((source or {}).get("subscribe_id"))
+        for row in rows:
+            if str(row.get("subscription_status") or "").upper() != "SUBSCRIBED":
+                return False
+            sources = row.get("sources") or []
+            if isinstance(sources, str):
+                try:
+                    sources = json.loads(sources)
+                except Exception:
+                    sources = []
+            if not isinstance(sources, list):
+                return False
+            matched = False
+            for item in sources:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "") != "moviepilot":
+                    continue
+                if subscribe_id > 0 and _safe_int(item.get("subscribe_id")) != subscribe_id:
+                    continue
+                matched = True
+                break
+            if not matched:
+                return False
+        return True
+
+    def _subscription_sync_rows(self, tmdb_items: List[Dict[str, Any]], target_only: bool = False) -> List[Dict[str, Any]]:
+        expected = []
+        for item in tmdb_items or []:
+            tmdb_id = str((item or {}).get("tmdb_id") or "").strip()
+            media_type = str((item or {}).get("media_type") or "").strip()
+            season = _safe_int((item or {}).get("season"))
+            if media_type == "Movie" and tmdb_id:
+                expected.append((tmdb_id, "Movie"))
+            elif media_type == "Series" and tmdb_id:
+                if not target_only:
+                    expected.append((tmdb_id, "Series"))
+                if season > 0:
+                    expected.append((tmdb_id, f"SeasonByParent:{season}"))
+        if not expected:
+            return []
+        rows = []
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for tmdb_id, item_type in expected:
+                        if item_type.startswith("SeasonByParent:"):
+                            season = _safe_int(item_type.split(":", 1)[1])
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json AS sources
+                                FROM media_metadata
+                                WHERE parent_series_tmdb_id = %s
+                                  AND item_type = 'Season'
+                                  AND season_number = %s
+                                """,
+                                (tmdb_id, season),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                SELECT tmdb_id, item_type, subscription_status, subscription_sources_json AS sources
+                                FROM media_metadata
+                                WHERE tmdb_id = %s
+                                  AND item_type = %s
+                                """,
+                                (tmdb_id, item_type),
+                            )
+                        rows.extend(cursor.fetchall() or [])
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 读取 MP 订阅同步状态失败：%s", e)
+            return []
+        return rows
 
     def _enrich_subscribe_info(self, info: Dict[str, Any], media: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         enriched = dict(info or {})
