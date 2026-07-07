@@ -1074,6 +1074,13 @@ def _has_complete_source_row(row):
     )
 
 
+def _has_source_identity_row(row):
+    row = row if isinstance(row, dict) else {}
+    sha1 = str(row.get("sha1") or "").strip().upper()
+    size = _safe_int(row.get("size"), 0)
+    return bool(re.fullmatch(r"[A-F0-9]{40}", sha1 or "") and size > 0)
+
+
 def _jsonish_to_obj(value, default=None):
     if value in (None, ""):
         return default
@@ -1156,7 +1163,7 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
             continue
         sha1 = str(asset.get("sha1") or "").strip().upper()
         cached = _extract_cached_mediainfo_source(sha1)
-        if not _has_complete_source_row(cached):
+        if not _has_source_identity_row(cached):
             continue
         asset_path = str(asset.get("path") or "").replace("\\", "/")
         cached["pick_code"] = source_pc or str(asset.get("pc") or "").strip()
@@ -1201,8 +1208,33 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     size = _safe_int(source_row.get("size"), 0)
     preid = P115CacheManager._norm_preid(source_row.get("preid"))
     display_name = _pick_upload_file_name(file_name, source_row.get("name"), f"{sha1 or source_pick_code}.mkv")
-    if not _has_complete_source_row(source_row):
-        raise RuntimeError("小号播放需要源文件 SHA1、size 和 preid，media_metadata/p115_mediainfo_cache 未命中完整信息")
+    if not _has_source_identity_row(source_row):
+        raise RuntimeError("小号播放需要源文件 SHA1 和 size，media_metadata/p115_mediainfo_cache 未命中文件身份信息")
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        try:
+            preid = P115CacheManager._norm_preid(P115CacheManager.ensure_file_preid(
+                source_row,
+                sha1=sha1,
+                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
+                file_name=display_name,
+            ))
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
+                str(source_pick_code or source_row.get("pick_code") or "")[:8],
+                sha1[:12],
+                e,
+            )
+            preid = ""
+        if preid:
+            source_row["preid"] = preid
+            logger.info(
+                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
+                _display_title(display_name),
+                preid[:12],
+            )
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     reusable = _find_reusable_session(
         source_pick_code=source_pick_code,
