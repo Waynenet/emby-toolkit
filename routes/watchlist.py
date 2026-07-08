@@ -319,7 +319,6 @@ def api_watchlist_settings():
                 "torrent banned"
             ],
             "best_version_type": "tv_episode",
-            "best_version_backfill_enabled": False,
             "best_version_episode_to_full": True,
             "best_version_full_consistency_check_enabled": True,
             "full_washing_timeout_hours": 72,
@@ -327,9 +326,7 @@ def api_watchlist_settings():
             "subscription_cleanup_history_scenes": ["completed"],
             "verify_enabled": True,
             "verify_interval_hours": 12,
-            "snapshot_retention_days": 180,
-            "recognition_guard_enabled": False,
-            "recognition_guard_mode": "audit"
+            "snapshot_retention_days": 180
         }
     }
 
@@ -355,6 +352,15 @@ def api_watchlist_settings():
             new_config = request.json
             if not isinstance(new_config, dict):
                 return jsonify({"error": "配置格式错误"}), 400
+            assistant = new_config.get("subscribe_assistant")
+            if isinstance(assistant, dict):
+                for stale_key in (
+                    "notify",
+                    "best_version_backfill_enabled",
+                    "recognition_guard_enabled",
+                    "recognition_guard_mode",
+                ):
+                    assistant.pop(stale_key, None)
             
             # 保存到数据库
             settings_db.save_setting(CONFIG_KEY, new_config)
