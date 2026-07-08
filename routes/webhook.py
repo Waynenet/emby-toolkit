@@ -31,6 +31,7 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.connection import get_db_connection
 from database.log_db import LogDBManager
+from services.subscribe_assistant.manager import SubscribeAssistantManager
 import logging
 logger = logging.getLogger(__name__)
 
@@ -767,8 +768,22 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
 @extensions.processor_ready_required
 def emby_webhook():
     data = request.json
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # ★★★            魔法日志 - START            ★★★
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # try:
+    #     import json
+    #     # 使用 WARNING 级别和醒目的标记，让它在日志中容易检索
+    #     logger.warning("  ➜ [魔法日志] 收到原始 Webhook 负载：Event=%s, type=%s", data.get("Event") or "-", data.get("type") or "-")
+    #     # 将整个 JSON 数据格式化后打印出来
+    #     logger.warning(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+    # except Exception as e:
+    #     logger.error(f"[魔法日志] 记录原始 Webhook 时出错: {e}")
+    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # # ★★★             魔法日志 - END             ★★★
+    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
-
+    mp_event_type = data.get("type") # MP
     # ======================================================================
     # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
     # ======================================================================
@@ -874,6 +889,17 @@ def emby_webhook():
 
         # 深度删除处理完毕，直接返回 200
         return jsonify({"status": "deep_delete_processed"}), 200
+
+    # ======================================================================
+    # ★★★ 处理 MoviePilot 订阅助手事件 ★★★
+    # ======================================================================
+    if mp_event_type in {"download.added", "subscribe.added", "subscribe.modified", "subscribe.deleted", "subscribe.complete"}:
+        try:
+            handled = SubscribeAssistantManager(config_manager.APP_CONFIG).handle_moviepilot_event(mp_event_type, data)
+            return jsonify({"status": "subscribe_assistant_processed" if handled else "subscribe_assistant_ignored"}), 200
+        except Exception as e:
+            logger.error(f"  ➜ [订阅助手] MP Webhook 事件处理失败: {mp_event_type} -> {e}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
         
     logger.debug(f"  ➜ 收到Emby Webhook: {event_type}")
 

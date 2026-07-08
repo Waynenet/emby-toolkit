@@ -395,158 +395,338 @@
     </n-modal>
     
     <!-- 追剧策略配置模态框 -->
-    <n-modal v-model:show="showConfigModal" preset="card" title="智能追剧策略" style="width: 950px; max-width: 95vw;" :bordered="false" size="huge">
-      <div class="settings-layout">
-        <!-- 左侧列 -->
-        <div class="settings-col">
-          <div class="settings-group-title">状态自动化</div>
-          <div class="settings-card">
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="TimerIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">新剧保护 (自动待定)</div>
-                  <n-switch v-model:value="watchlistConfig.auto_pending.enabled" size="small" />
+    <n-modal
+      v-model:show="showConfigModal"
+      preset="card"
+      title="订阅助手增强版"
+      style="width: 1040px; max-width: 96vw;"
+      class="custom-modal glass-modal"
+      :bordered="false"
+      size="huge"
+    >
+      <template #header-extra>
+        <n-icon size="20" :component="MPSyncIcon" />
+      </template>
+
+      <div class="assistant-settings">
+        <div class="assistant-hero">
+          <div class="setting-icon"><n-icon :component="MPSyncIcon" /></div>
+          <div class="setting-content">
+            <div class="setting-header">
+              <div>
+                <div class="setting-label">增强订阅助手接管 MoviePilot</div>
+                <div class="setting-desc">
+                  {{ mpSubscriptionEnabled ? '移植自爱神的 MP 订阅助手增强版插件，全流程接管 MP 订阅。' : '统一订阅未启用 MoviePilot，订阅助手已自动关闭。' }}
+                  <a
+                    class="assistant-wiki-link"
+                    href="https://hbq0405.github.io/emby-toolkit/zh/guide/subscribe-assistant"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >查看使用详解</a>
                 </div>
-                <div class="setting-desc">对于刚开播或集数很少的新剧，将其状态设为“待定”，防止因集数不足被误判为完结。</div>
-                <n-collapse-transition :show="watchlistConfig.auto_pending.enabled">
-                  <div class="setting-sub-panel">
-                    <div class="auto-pending-grid">
-                      <div class="auto-pending-item"><div class="sub-label">保护期(天)</div><n-input-number v-model:value="watchlistConfig.auto_pending.days" size="small" /></div>
-                      <div class="auto-pending-item"><div class="sub-label">保护集数</div><n-input-number v-model:value="watchlistConfig.auto_pending.episodes" size="small" /></div>
-                      <div class="auto-pending-item"><div class="sub-label">虚标集数</div><n-input-number v-model:value="watchlistConfig.auto_pending.default_total_episodes" size="small" /></div>
-                    </div>
-                  </div>
-                </n-collapse-transition>
               </div>
-            </div>
-            <n-divider style="margin: 0" />
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="PausedIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">自动暂停</div>
-                  <n-input-number v-model:value="watchlistConfig.auto_pause" size="small" style="width: 120px" :min="0" />
-                </div>
-                <div class="setting-desc">当下一集播出时间在指定天数以后时，自动将状态设为“暂停”。0=关闭。</div>
-              </div>
-            </div>
-            <n-divider style="margin: 0" />
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">豆瓣辅助修正集数</div>
-                  <n-switch v-model:value="watchlistConfig.douban_count_correction" size="small" />
-                </div>
-                <div class="setting-desc">当 TMDb 集数数据滞后或错误时，尝试从豆瓣获取准确的总集数并锁定。</div>
-              </div>
+              <n-switch
+                v-model:value="watchlistConfig.subscribe_assistant.enabled"
+                size="small"
+                :disabled="!mpSubscriptionEnabled"
+              >
+                <template #checked>接管中</template>
+                <template #unchecked>关闭</template>
+              </n-switch>
             </div>
           </div>
         </div>
         
-        <!-- 右侧列 -->
-        <div class="settings-col">
-          <div class="settings-group-title">订阅与洗版</div>
-          <div class="settings-card">
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="RefreshIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">完结自动洗版</div>
-                  <n-switch v-model:value="watchlistConfig.auto_resub_ended" size="small" />
-                </div>
-                <div class="setting-desc">剧集完结后，自动删除旧订阅并提交“洗版订阅”，以获取整季合集。</div>
-                <n-collapse-transition :show="watchlistConfig.auto_resub_ended">
-                  <div class="setting-sub-panel">
-                    <div class="resub-item">
-                      <span class="resub-label">洗版超时取消 (天)</span>
-                      <n-input-number 
-                        v-model:value="watchlistConfig.auto_resub_ended_timeout_days" 
-                        size="small" 
-                        style="width: 120px" 
-                        :min="1"
-                      >
+        <n-collapse-transition :show="watchlistConfig.subscribe_assistant.enabled">
+          <div class="settings-layout">
+            <div class="settings-col">
+              <div class="settings-group-title">状态判定</div>
+              <div class="settings-card">
+                <div class="assistant-section">
+                  <div class="assistant-section-title">完结守卫</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">守卫模式</div>
+                      <n-select v-model:value="watchlistConfig.subscribe_assistant.guard_mode" :options="guardModeOptions" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">季冷却期</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.season_cooldown_days" size="small" :min="0">
                         <template #suffix>天</template>
                       </n-input-number>
-                    </div>
-                    <div class="resub-item">
-                      <span class="resub-label">删除 Emby 旧文件</span>
-                      <n-switch v-model:value="watchlistConfig.auto_delete_old_files" size="small"/>
-                    </div>
-                    <div class="resub-item">
-                      <span class="resub-label">删除 MP 整理记录</span>
-                      <n-switch v-model:value="watchlistConfig.auto_delete_mp_history" size="small"/>
-                    </div>
-                    <div class="resub-item" style="border-bottom: none;">
-                      <span class="resub-label">删除下载器任务及源文件</span>
-                      <n-switch v-model:value="watchlistConfig.auto_delete_download_tasks" size="small"/>
-                    </div>
-                  </div>
-                </n-collapse-transition>
-              </div>
-            </div>
-            
-            <n-divider style="margin: 0" />
-            
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="MPSyncIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">MoviePilot 自动补订</div>
-                  <n-switch v-model:value="watchlistConfig.sync_mp_subscription" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">集数波动窗口</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.volatility_window_days" size="small" :min="1">
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">启用波动判断</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.volatility_enabled" size="small" />
+                    </n-grid-item>
+                  </n-grid>
                 </div>
-                <div class="setting-desc">当发现 MoviePilot 中缺失在追剧订阅时自动补订。</div>
+
+                <n-divider style="margin: 0" />
+
+                <div class="assistant-section">
+                  <div class="assistant-section-title">待定与暂停</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">增强待定</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.pending_enhanced_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">参考波动</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.pending_use_volatility" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">待定虚标集数</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.pending_fake_total_episodes" size="small" :min="1">
+                        <template #suffix>集</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">增强暂停</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.pause_enhanced_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">开播前暂停</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.tv_air_pause_days" size="small" :min="0">
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">播出间隔暂停</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.airing_pause_days" size="small" :min="0">
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">无下载等待</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.tv_no_download_days" size="small" :min="0">
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item span="2">
+                      <div class="sub-label">无下载动作</div>
+                      <n-select
+                        v-model:value="watchlistConfig.subscribe_assistant.no_download_actions"
+                        :options="noDownloadActionOptions"
+                        multiple
+                        clearable
+                        size="small"
+                      />
+                    </n-grid-item>
+                  </n-grid>
+                </div>
+              </div>
+
+              <div class="settings-group-title" style="margin-top: 18px;">下载监控</div>
+              <div class="settings-card">
+                <div class="assistant-section">
+                  <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">下载巡检</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.download_monitor_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">手动删种监听</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.manual_delete_listen" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">Tracker 响应监听</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.tracker_response_listen" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">超时窗口</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.download_timeout_minutes" size="small" :min="5">
+                        <template #suffix>分钟</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">进度阈值</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.download_progress_threshold" size="small" :min="0" :max="100">
+                        <template #suffix>%</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">重试次数</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.download_retry_limit" size="small" :min="1" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">删种后补搜</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.auto_search_when_delete" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">跳过近期删除</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.skip_deletion" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">删除记录保留</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.delete_record_retention_hours" size="small" :min="1">
+                        <template #suffix>小时</template>
+                      </n-input-number>
+                    </n-grid-item>
+                  </n-grid>
+                  <div class="assistant-wide-control">
+                    <div class="sub-label">排除标签</div>
+                    <n-dynamic-tags v-model:value="watchlistConfig.subscribe_assistant.delete_exclude_tags" />
+                  </div>
+                  <div class="assistant-wide-control">
+                    <div class="sub-label">Tracker 响应关键字</div>
+                    <n-dynamic-tags v-model:value="watchlistConfig.subscribe_assistant.tracker_keywords" />
+                  </div>
+                </div>
               </div>
             </div>
 
-            <n-divider style="margin: 0" />
+            <div class="settings-col">
+              <div class="settings-group-title">洗版与维护</div>
+              <div class="settings-card">
+                <div class="assistant-section">
+                  <div class="assistant-section-title">洗版编排</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">自动洗版范围</div>
+                      <n-select v-model:value="watchlistConfig.subscribe_assistant.best_version_type" :options="bestVersionTypeOptions" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">回填已存在集</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_backfill_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">分集转全集</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_episode_to_full" size="small" />
+                    </n-grid-item>
+                    <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_episode_to_full">
+                      <div class="sub-label">一致性校验</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_full_consistency_check_enabled" size="small" />
+                    </n-grid-item>
+                  </n-grid>
+                </div>
 
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="DownloadIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">订阅洗版参数</div>
+                <n-divider style="margin: 0" />
+
+                <div class="assistant-section">
+                  <div class="assistant-section-title">锁版策略</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="2" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">锁版模式</div>
+                      <n-select v-model:value="watchlistConfig.series_version_lock_mode" :options="versionLockModeOptions" size="small" />
+                    </n-grid-item>
+                    <n-grid-item v-if="watchlistConfig.series_version_lock_mode === 'best'">
+                      <div class="sub-label">降级间隔</div>
+                      <n-input-number v-model:value="watchlistConfig.series_version_lock_decay_hours" size="small" :min="0">
+                        <template #suffix>小时</template>
+                      </n-input-number>
+                    </n-grid-item>
+                  </n-grid>
                 </div>
-                <div class="setting-desc">
-                  向 MoviePilot 提交追更订阅时使用的洗版参数。注：已完结剧集洗版始终强制为全集洗版。
+
+                <n-divider style="margin: 0" />
+
+                <div class="assistant-section">
+                  <div class="assistant-section-title">订阅清理</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="2" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">清理范围</div>
+                      <n-select v-model:value="watchlistConfig.subscribe_assistant.subscription_cleanup_history_type" :options="cleanupTypeOptions" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">清理场景</div>
+                      <n-select
+                        v-model:value="watchlistConfig.subscribe_assistant.subscription_cleanup_history_scenes"
+                        :options="cleanupSceneOptions"
+                        multiple
+                        size="small"
+                        clearable
+                      />
+                    </n-grid-item>
+                  </n-grid>
                 </div>
-                <div class="setting-sub-panel">
-                  <div class="resub-item">
-                    <div style="display: flex; flex-direction: column; gap: 2px;">
-                      <span style="font-size: 13px; font-weight: 500; color: var(--n-text-color);">分集洗版</span>
-                      <span style="font-size: 12px; color: var(--n-text-color-depth-3);">适合边追更边替换更佳版本。</span>
-                    </div>
-                    <n-switch v-model:value="watchlistConfig.series_subscription_best_version" size="small">
-                      <template #checked>开启</template>
-                      <template #unchecked>关闭</template>
-                    </n-switch>
-                  </div>
-                  <div class="resub-item" style="border-bottom: none;">
-                    <div style="display: flex; flex-direction: column; gap: 2px;">
-                      <span style="font-size: 13px; font-weight: 500; color: var(--n-text-color);">全集洗版</span>
-                      <span style="font-size: 12px; color: var(--n-text-color-depth-3);">仅下载包含整季的完结包。</span>
-                    </div>
-                    <n-switch v-model:value="watchlistConfig.series_subscription_best_version_full" size="small">
-                      <template #checked>开启</template>
-                      <template #unchecked>关闭</template>
-                    </n-switch>
-                  </div>
+
+                <n-divider style="margin: 0" />
+
+                <div class="assistant-section">
+                  <div class="assistant-section-title">自动纠错</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">启用纠错</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.verify_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">纠错间隔</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.verify_interval_hours" size="small" :min="1">
+                        <template #suffix>小时</template>
+                      </n-input-number>
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">快照保留</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.snapshot_retention_days" size="small" :min="1">
+                        <template #suffix>天</template>
+                      </n-input-number>
+                    </n-grid-item>
+                  </n-grid>
+                </div>
+
+                <n-divider style="margin: 0" />
+
+                <div class="assistant-section">
+                  <div class="assistant-section-title">识别增强</div>
+                  <n-grid :x-gap="12" :y-gap="12" :cols="2" responsive="screen">
+                    <n-grid-item>
+                      <div class="sub-label">候选准入</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.recognition_guard_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item>
+                      <div class="sub-label">识别策略</div>
+                      <n-select v-model:value="watchlistConfig.subscribe_assistant.recognition_guard_mode" :options="recognitionModeOptions" size="small" />
+                    </n-grid-item>
+                  </n-grid>
                 </div>
               </div>
             </div>
           </div>
           
-          <div class="settings-group-title" style="margin-top: 4px;">跟踪与维护</div>
-          <div class="settings-card">
-            <div class="setting-item">
-              <div class="setting-icon"><n-icon :component="TimeIcon" /></div>
-              <div class="setting-content">
-                <div class="setting-header">
-                  <div class="setting-label">全量刷新回溯期</div>
-                  <n-input-number v-model:value="watchlistConfig.revival_check_days" size="small" style="width: 120px" :min="1" />
+        </n-collapse-transition>
+
+        <div class="settings-layout assistant-aux-layout">
+          <div class="settings-col">
+            <div class="settings-group-title" style="margin-top: 18px;">追剧辅助</div>
+            <div class="settings-card">
+              <div class="setting-item">
+                <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
+                <div class="setting-content">
+                  <div class="setting-header">
+                    <div>
+                      <div class="setting-label">豆瓣辅助修正集数</div>
+                      <div class="setting-desc">TMDb 集数滞后或错误时，尝试从豆瓣获取总集数并锁定。</div>
+                    </div>
+                    <n-switch v-model:value="watchlistConfig.douban_count_correction" size="small" />
+                  </div>
                 </div>
-                <div class="setting-desc">对于已完结超过此天数的剧集，仅进行轻量级检查。</div>
+              </div>
+              <n-divider style="margin: 0" />
+              <div class="setting-item">
+                <div class="setting-icon"><n-icon :component="TimeIcon" /></div>
+                <div class="setting-content">
+                  <div class="setting-header">
+                    <div>
+                      <div class="setting-label">全量刷新回溯期</div>
+                      <div class="setting-desc">已完结超过该天数的剧集仅做轻量检查。</div>
+                    </div>
+                    <n-input-number
+                      v-model:value="watchlistConfig.revival_check_days"
+                      size="small"
+                      style="width: 140px"
+                      :min="1"
+                    >
+                      <template #suffix>天</template>
+                    </n-input-number>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -565,7 +745,7 @@
 <script setup>
 import { ref, shallowRef, triggerRef, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
-import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NPopconfirm, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTabs, NTabPane, NList, NListItem, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NProgress, useThemeVars, NPopover, NInputNumber, NSwitch, NCollapseTransition, NText } from 'naive-ui';
+import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NPopconfirm, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTabs, NTabPane, NList, NListItem, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NProgress, useThemeVars, NPopover, NInputNumber, NSwitch, NCollapseTransition, NText, NGrid, NGridItem, NDynamicTags } from 'naive-ui';
 import { SyncOutline, TvOutline as TvIcon, TrashOutline as TrashIcon, EyeOutline as EyeIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, PlayCircleOutline as WatchingIcon, PauseCircleOutline as PausedIcon, CheckmarkCircleOutline as CompletedIcon, ScanCircleOutline as ScanIcon, CaretDownOutline as CaretDownIcon, FlashOffOutline as ForceEndIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, DownloadOutline as DownloadIcon, AlbumsOutline as CollectionsIcon, SettingsOutline as SettingsIcon, HourglassOutline as PendingIcon, TimerOutline as TimerIcon, RefreshCircleOutline as RefreshIcon, GitNetworkOutline as GapIcon, RepeatOutline as MPSyncIcon, CloudDownloadOutline as BackfillIcon, EarthOutline as DoubanIcon, PaperPlaneOutline as PaperPlaneIcon } from '@vicons/ionicons5';
 import { format, parseISO } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';
@@ -612,45 +792,117 @@ const activeTab = ref('seasons');
 const showConfigModal = ref(false);
 const configSaving = ref(false);
 
-const watchlistConfig = ref({
-  auto_pending: { enabled: false, days: 30, episodes: 1, default_total_episodes: 99 },
-  auto_pause: 0,
-  douban_count_correction: false,
-  auto_resub_ended: false,
-  auto_resub_ended_timeout_days: 7,
-  auto_delete_old_files: false,
-  auto_delete_mp_history: false,
-  auto_delete_download_tasks: false,
-  sync_mp_subscription: false,
-  series_subscription_best_version: false,
-  series_subscription_best_version_full: false,
-  revival_check_days: 365
+const guardModeOptions = [
+  { label: '平衡', value: 'balanced' },
+  { label: '严格', value: 'strict' },
+  { label: '宽松', value: 'loose' },
+  { label: '关闭', value: 'off' }
+];
+const bestVersionTypeOptions = [
+  { label: '关闭', value: 'no' },
+  { label: '剧集', value: 'tv' },
+  { label: '剧集分集', value: 'tv_episode' },
+  { label: '全部', value: 'all' }
+];
+const versionLockModeOptions = [
+  { label: '关闭', value: 'off' },
+  { label: '最佳版本', value: 'best' },
+  { label: '任意版本', value: 'any' }
+];
+const recognitionModeOptions = [
+  { label: '仅记录', value: 'audit' },
+  { label: '拦截高风险', value: 'block_high_risk' },
+  { label: '严格拦截', value: 'strict' }
+];
+const cleanupTypeOptions = [
+  { label: '保留历史', value: 'none' },
+  { label: '仅当前剧集', value: 'current' },
+  { label: '同 TMDb 全部季', value: 'tmdb' }
+];
+const cleanupSceneOptions = [
+  { label: '订阅完成', value: 'completed' },
+  { label: '状态恢复', value: 'resumed' },
+  { label: '手动删除', value: 'manual_delete' },
+  { label: '超时重试', value: 'timeout' }
+];
+const noDownloadActionOptions = [
+  { label: '暂停订阅', value: 'pause' },
+  { label: '转待定', value: 'pending' },
+  { label: '触发补搜', value: 'search' }
+];
+
+const defaultSubscribeAssistant = () => ({
+  enabled: true,
+  guard_mode: 'balanced',
+  season_cooldown_days: 14,
+  volatility_enabled: true,
+  volatility_window_days: 14,
+  pending_enhanced_enabled: true,
+  pending_use_volatility: false,
+  pending_fake_total_episodes: 99,
+  pause_enhanced_enabled: true,
+  tv_air_pause_days: 14,
+  airing_pause_days: 30,
+  tv_no_download_days: 0,
+  no_download_actions: [],
+  download_monitor_enabled: false,
+  manual_delete_listen: true,
+  tracker_response_listen: true,
+  download_timeout_minutes: 120,
+  download_progress_threshold: 10,
+  download_retry_limit: 3,
+  auto_search_when_delete: true,
+  skip_deletion: true,
+  delete_record_retention_hours: 24,
+  delete_exclude_tags: ['H&R'],
+  tracker_keywords: ['torrent not registered with this tracker', 'torrent banned'],
+  best_version_type: 'tv',
+  best_version_backfill_enabled: false,
+  best_version_episode_to_full: true,
+  best_version_full_consistency_check_enabled: true,
+  subscription_cleanup_history_type: 'none',
+  subscription_cleanup_history_scenes: ['completed'],
+  verify_enabled: true,
+  verify_interval_hours: 12,
+  snapshot_retention_days: 180,
+  recognition_guard_enabled: false,
+  recognition_guard_mode: 'audit'
 });
+
+const buildWatchlistConfig = (data = {}) => {
+  const assistant = { ...defaultSubscribeAssistant(), ...(data.subscribe_assistant || {}) };
+  return {
+    auto_pending: {
+      enabled: assistant.pending_enhanced_enabled,
+      days: data.auto_pending?.days ?? 7,
+      episodes: data.auto_pending?.episodes ?? 5,
+      default_total_episodes: assistant.pending_fake_total_episodes
+    },
+    auto_pause: assistant.pause_enhanced_enabled ? assistant.airing_pause_days : 0,
+    douban_count_correction: data.douban_count_correction ?? false,
+    auto_resub_ended: false,
+    auto_resub_ended_timeout_days: data.auto_resub_ended_timeout_days ?? 7,
+    auto_delete_old_files: data.auto_delete_old_files ?? false,
+    auto_delete_mp_history: data.auto_delete_mp_history ?? false,
+    auto_delete_download_tasks: data.auto_delete_download_tasks ?? false,
+    enable_backfill: data.enable_backfill ?? false,
+    sync_mp_subscription: assistant.enabled,
+    series_subscription_best_version: false,
+    series_subscription_best_version_full: false,
+    series_version_lock_mode: data.series_version_lock_mode ?? 'off',
+    series_version_lock_decay_hours: data.series_version_lock_decay_hours ?? 48,
+    revival_check_days: data.revival_check_days ?? 365,
+    subscribe_assistant: assistant
+  };
+};
+const watchlistConfig = ref(buildWatchlistConfig());
 
 const openConfigModal = async () => {
   showConfigModal.value = true;
   try {
     const { data } = await axios.get('/api/watchlist/settings');
     if (data) {
-       watchlistConfig.value = {
-         auto_pending: { 
-           enabled: data.auto_pending?.enabled ?? false,
-           days: data.auto_pending?.days ?? 30,
-           episodes: data.auto_pending?.episodes ?? 1,
-           default_total_episodes: data.auto_pending?.default_total_episodes ?? 99
-         },
-         auto_pause: data.auto_pause ?? 0,
-         douban_count_correction: data.douban_count_correction ?? false,
-         auto_resub_ended: data.auto_resub_ended ?? false,
-         auto_resub_ended_timeout_days: data.auto_resub_ended_timeout_days ?? 7,
-         auto_delete_old_files: data.auto_delete_old_files ?? false,
-         auto_delete_mp_history: data.auto_delete_mp_history ?? false,
-         auto_delete_download_tasks: data.auto_delete_download_tasks ?? false,
-         sync_mp_subscription: data.sync_mp_subscription ?? false,
-         series_subscription_best_version: data.series_subscription_best_version ?? data.sync_mp_subscription_episode_wash ?? false,
-         series_subscription_best_version_full: data.series_subscription_best_version_full ?? data.sync_mp_subscription_full_wash ?? false,
-         revival_check_days: data.revival_check_days ?? 365
-       };
+       watchlistConfig.value = buildWatchlistConfig(data);
     }
   } catch (e) {
     console.warn('获取追剧配置失败或无配置，使用默认值', e);
@@ -660,7 +912,25 @@ const openConfigModal = async () => {
 const saveConfig = async () => {
   configSaving.value = true;
   try {
-    await axios.post('/api/watchlist/settings', watchlistConfig.value);
+    const assistant = watchlistConfig.value.subscribe_assistant;
+    const payload = {
+      ...watchlistConfig.value,
+      auto_pending: {
+        enabled: assistant.pending_enhanced_enabled,
+        days: watchlistConfig.value.auto_pending?.days ?? 7,
+        episodes: watchlistConfig.value.auto_pending?.episodes ?? 5,
+        default_total_episodes: assistant.pending_fake_total_episodes
+      },
+      auto_pause: assistant.pause_enhanced_enabled ? assistant.airing_pause_days : 0,
+      auto_resub_ended: false,
+      sync_mp_subscription: assistant.enabled,
+      series_subscription_best_version: false,
+      series_subscription_best_version_full: false,
+      series_version_lock_mode: watchlistConfig.value.series_version_lock_mode,
+      series_version_lock_decay_hours: watchlistConfig.value.series_version_lock_decay_hours
+    };
+    await axios.post('/api/watchlist/settings', payload);
+    watchlistConfig.value = buildWatchlistConfig(payload);
     message.success('配置保存成功');
     showConfigModal.value = false;
   } catch (e) {
@@ -1308,10 +1578,40 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 .settings-card {
-  background: var(--n-color);
-  border: 1px solid var(--n-border-color);
+  /* background: var(--card-bg-color);
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--card-border-color); */
   border-radius: 8px;
   padding: 0 16px;
+}
+
+.assistant-settings {
+  padding: 2px 0;
+}
+.assistant-hero {
+  display: flex;
+  gap: 16px;
+  padding: 18px;
+  margin-bottom: 18px;
+  /* border: 1px solid var(--card-border-color); */
+  border-radius: 8px;
+  /* background: color-mix(in srgb, var(--card-bg-color) 84%, var(--accent-color) 16%);
+  box-shadow: 0 10px 28px -20px var(--accent-glow-color); */
+}
+.assistant-section {
+  padding: 16px;
+}
+.assistant-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  /* color: var(--n-text-color-1); */
+  margin-bottom: 12px;
+}
+.assistant-wide-control {
+  margin-top: 12px;
+}
+.assistant-wide-control :deep(.n-dynamic-tags) {
+  width: 100%;
 }
 
 .setting-item {
@@ -1359,6 +1659,16 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   font-size: 13px;
   color: var(--n-text-color-depth-3);
   line-height: 1.5;
+}
+
+.assistant-wiki-link {
+  margin-left: 8px;
+  /* color: var(--accent-color); */
+  text-decoration: none;
+  font-weight: 600;
+}
+.assistant-wiki-link:hover {
+  text-decoration: underline;
 }
 
 .setting-sub-panel {
@@ -1424,6 +1734,14 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
     width: 38px;
     height: 38px;
     border-radius: 8px;
+  }
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .assistant-hero,
+  .setting-item {
+    padding: 14px;
   }
 }
 </style>

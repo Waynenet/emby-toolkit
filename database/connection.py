@@ -278,6 +278,44 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_state' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_state (
+                        state_key TEXT PRIMARY KEY,
+                        state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_snapshots' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_snapshots (
+                        id SERIAL PRIMARY KEY,
+                        tmdb_id TEXT NOT NULL,
+                        item_type TEXT NOT NULL DEFAULT 'Series',
+                        season_number INTEGER,
+                        subscribe_id INTEGER,
+                        scope_total INTEGER DEFAULT 0,
+                        scope_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        subscribe_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        last_checked_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'subscribe_assistant_delete_records' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS subscribe_assistant_delete_records (
+                        fingerprint TEXT PRIMARY KEY,
+                        tmdb_id TEXT,
+                        season_number INTEGER,
+                        episode_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        reason TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        expires_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+
                 logger.trace("  ➜ 正在创建 'person_metadata' 表...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS person_metadata (
@@ -514,6 +552,9 @@ def init_db():
                             "tagline": "TEXT",
                             "tmdb_episode_group_id": "TEXT"
                         },
+                        'subscribe_assistant_snapshots': {
+                            "last_checked_at": "TIMESTAMP WITH TIME ZONE"
+                        },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
                             "resubscribe_source": "TEXT DEFAULT 'moviepilot'", 
@@ -611,6 +652,10 @@ def init_db():
 
                     # 11. 【跟播系统】加速“正在连载”剧集的筛选
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
+
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_media ON subscribe_assistant_snapshots (tmdb_id, item_type, season_number);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_checked ON subscribe_assistant_snapshots (last_checked_at);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_delete_records_expires ON subscribe_assistant_delete_records (expires_at);")
 
                     # 12. 【海量数据优化】加速追剧列表的聚合查询
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, parent_series_tmdb_id);")

@@ -862,7 +862,10 @@ const tableInfo = {
   'invitations': { cn: '邀请链接', isSharable: false },
   'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
   'douban_api_cache': { cn: '豆瓣数据缓存', isSharable: false }, 
-  'title_parse_whitelist': { cn: '剧名防抖白名单', isSharable: false }
+  'title_parse_whitelist': { cn: '剧名防抖白名单', isSharable: false },
+  'subscribe_assistant_delete_records': { cn: '订阅助手删除记录', isSharable: false },
+  'subscribe_assistant_snapshots': { cn: '订阅助手快照', isSharable: false },
+  'subscribe_assistant_state': { cn: '订阅助手状态', isSharable: false }
 };
 const tableDependencies = {
   'emby_users': ['user_media_data', 'emby_users_extended'],

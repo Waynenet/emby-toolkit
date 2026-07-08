@@ -4,7 +4,7 @@ import time
 import json
 import os
 import concurrent.futures
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 import threading
 from collections import defaultdict
@@ -17,6 +17,7 @@ import handler.tmdb as tmdb
 import handler.emby as emby
 import handler.moviepilot as moviepilot
 import tasks.helpers as helpers
+from services.subscribe_assistant.manager import SubscribeAssistantManager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -64,23 +65,11 @@ def _series_has_animation_genre(series_data: Dict[str, Any]) -> bool:
     return False
 
 def _watchlist_mp_wash_kwargs(watchlist_cfg: Dict[str, Any], *, force_full: bool = False) -> Dict[str, Optional[int]]:
-    version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
-    episode_wash_enabled = bool(
-        watchlist_cfg.get(
-            'series_subscription_best_version',
-            watchlist_cfg.get('sync_mp_subscription_episode_wash', False),
-        )
-    ) or version_lock_mode == 'best'
-    full_wash_enabled = bool(
-        watchlist_cfg.get(
-            'series_subscription_best_version_full',
-            watchlist_cfg.get('sync_mp_subscription_full_wash', False),
-        )
-    )
-
-    if force_full or full_wash_enabled:
+    assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
+    best_version_type = str(assistant.get('best_version_type') or 'no').strip().lower()
+    if force_full or best_version_type in ('tv', 'all'):
         return {'best_version': 1, 'best_version_full': 1}
-    if episode_wash_enabled:
+    if best_version_type == 'tv_episode':
         return {'best_version': 1, 'best_version_full': None}
     return {'best_version': None, 'best_version_full': None}
 
@@ -193,37 +182,6 @@ class WatchlistProcessor:
         
         self.progress_callback(0, "准备检查待更新剧集...")
         try:
-            # ==================================================================
-            # ★★★ 新增：在全局扫描前，检查并清理超时的僵尸洗版订阅 ★★★
-            # ==================================================================
-            if not tmdb_id: # 只有全局定时扫描时才执行，单点刷新不执行
-                watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-                if watchlist_cfg.get('auto_resub_ended', False):
-                    timeout_days = int(watchlist_cfg.get('auto_resub_ended_timeout_days', 14))
-                    if timeout_days > 0:
-                        self.progress_callback(2, "正在检查并清理超时的洗版订阅...")
-                        cleaned_subs = moviepilot.cleanup_stale_washing_subscriptions(self.config, timeout_days)
-
-                        if cleaned_subs:
-                            logger.info(f"  ➜ 本次共清理了 {len(cleaned_subs)} 个超时的僵尸洗版订阅。")
-                            # 顺手清理本地数据库的 active_washing 标记，彻底结束洗版状态
-                            try:
-                                with connection.get_db_connection() as conn:
-                                    with conn.cursor() as cursor:
-                                        for sub in cleaned_subs:
-                                            cursor.execute("""
-                                                UPDATE media_metadata 
-                                                SET active_washing = FALSE 
-                                                WHERE parent_series_tmdb_id = %s 
-                                                  AND season_number = %s 
-                                                  AND item_type = 'Episode'
-                                            """, (str(sub['tmdbid']), sub['season']))
-                                        conn.commit()
-                            except Exception as e:
-                                logger.warning(f"  ➜ 清理本地洗版标记失败: {e}")
-                        else:
-                            logger.info("  ➜ 无需清理任何超时洗版订阅。")
-            # ==================================================================
             where_clause = ""
             if not tmdb_id: 
                 today_str = datetime.now().date().isoformat()
@@ -945,113 +903,30 @@ class WatchlistProcessor:
             return False
 
     # ★★★ 辅助方法：同步状态给 MoviePilot ★★★
-    def _sync_status_to_moviepilot(self, tmdb_id: str, series_name: str, series_details: Dict[str, Any], final_status: str, old_status: str = None):
-        """
-        根据最终计算出的 watching_status，调用 MP 接口更新订阅状态及总集数。
-        逻辑优化：
-        1. 只要 MP 有订阅，就同步状态（覆盖所有季）。
-        2. 如果 MP 无订阅，仅自动补订【最新季】（防止已完结的老季诈尸）。
-        """
+    def _sync_status_to_moviepilot(
+        self,
+        tmdb_id: str,
+        series_name: str,
+        series_details: Dict[str, Any],
+        final_status: str,
+        old_status: str = None,
+        all_tmdb_episodes: Optional[List[Dict[str, Any]]] = None,
+        real_next_episode: Optional[Dict[str, Any]] = None,
+    ):
+        """由订阅助手增强版统一同步 MoviePilot 订阅状态。"""
         try:
-            watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-            auto_pause_days = int(watchlist_cfg.get('auto_pause', 0))
-            enable_auto_pause = auto_pause_days > 0
-            auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
-            enable_sync_sub = watchlist_cfg.get('sync_mp_subscription', False)
-            mp_wash_kwargs = _watchlist_mp_wash_kwargs(watchlist_cfg, force_full=(final_status == STATUS_COMPLETED))
-            
-            # 获取配置的虚标集数 (默认99)
-            fake_total_episodes = int(auto_pending_cfg.get('default_total_episodes', 99))
-
-            # 1. 确定 MP 目标状态
-            target_mp_status = 'R' 
-            if final_status == STATUS_PENDING:
-                target_mp_status = 'P'
-            elif final_status == STATUS_PAUSED:
-                target_mp_status = 'S' if enable_auto_pause else 'R'
-            elif final_status == STATUS_WATCHING:
-                target_mp_status = 'R'
-            else:
-                return 
-
-            # ★★★ 计算最新季号 ★★★
-            all_seasons = series_details.get('seasons', [])
-            valid_seasons = [s for s in all_seasons if s.get('season_number', 0) > 0]
-            latest_season_num = max((s['season_number'] for s in valid_seasons), default=0)
-
-            # 2. 遍历所有季进行同步
-            for season in all_seasons:
-                s_num = season.get('season_number')
-                if not s_num or s_num <= 0:
-                    continue
-
-                # --- A. 检查订阅是否存在 ---
-                exists = moviepilot.check_subscription_exists(tmdb_id, 'Series', self.config, season=s_num)
-                
-                # --- B. 自动补订逻辑 ---
-                if not exists:
-                    # 只有【最新季】才允许自动补订
-                    # 逻辑：S1-S3 没了就没了，不补；S4(最新) 没了必须补回来，因为要追更。
-                    if s_num == latest_season_num:
-                        if not enable_sync_sub:
-                            logger.debug("  ➜ 自动补订开关关闭，跳过自动补订。")
-                            continue
-                        logger.info(f"  ➜ [MP同步] 发现《{series_name}》 第 {s_num} 季 在 MoviePilot 中无活跃订阅，正在自动补订...")
-                        sub_success = moviepilot.subscribe_series_to_moviepilot(
-                            series_info={'title': series_name, 'tmdb_id': tmdb_id},
-                            season_number=s_num,
-                            config=self.config,
-                            **mp_wash_kwargs,
-                        )
-                        if not sub_success:
-                            logger.warning(f"  ➜ [MP同步] 补订 第 {s_num} 季 失败，跳过。")
-                            continue
-                        logger.info(f"  ➜ [MP同步] 《{series_name}》 第 {s_num} 季 补订成功。")
-                    else:
-                        # 旧季不存在，直接跳过，不打扰
-                        continue
-
-                # --- C. 计算目标总集数 ---
-                real_episode_count = season.get('episode_count', 0)
-                current_target_total = None
-                
-                if target_mp_status == 'P':
-                    current_target_total = fake_total_episodes
-                elif target_mp_status == 'R':
-                    if real_episode_count > 0:
-                        current_target_total = real_episode_count
-
-                # --- D. 执行状态同步 ---
-                sync_success = moviepilot.update_subscription_status(
-                    int(tmdb_id), 
-                    s_num, 
-                    target_mp_status, 
-                    self.config, 
-                    total_episodes=current_target_total
-                )
-
-                if sync_success:
-                    # 仅记录有意义的变更日志
-                    should_log = False
-                    log_msg = ""
-
-                    if target_mp_status != 'R':
-                        should_log = True
-                        status_desc = "待定(P)" if target_mp_status == 'P' else "暂停(S)"
-                        ep_msg = f", 集数->{current_target_total}" if current_target_total else ""
-                        log_msg = f"  ➜ [MP同步] 《{series_name}》 第 {s_num} 季 -> {status_desc}{ep_msg} (原因: {translate_internal_status(final_status)})"
-                    
-                    elif target_mp_status == 'R' and (old_status == STATUS_PENDING or (not exists and s_num == latest_season_num)):
-                        should_log = True
-                        reason = "重新补订" if not exists else "解除待定"
-                        ep_msg = f", 集数修正->{current_target_total}" if current_target_total else ""
-                        log_msg = f"  ➜ [MP同步] 《{series_name}》 第 {s_num} 季 -> 恢复订阅(R){ep_msg} (原因: {reason})"
-
-                    if should_log:
-                        logger.info(log_msg)
-
-        except Exception as e:
-            logger.warning(f"同步状态给 MoviePilot 时出错: {e}")
+            SubscribeAssistantManager(self.config).sync_series(
+                tmdb_id=tmdb_id,
+                series_name=series_name,
+                series_details=series_details,
+                final_status=final_status,
+                old_status=old_status,
+                all_tmdb_episodes=all_tmdb_episodes or [],
+                real_next_episode=real_next_episode or {},
+            )
+            return
+        except Exception as assistant_error:
+            logger.warning(f"  ➜ [订阅助手] 增强同步失败，已停止旧 MP 订阅策略回退: {assistant_error}", exc_info=True)
 
     def _check_season_consistency(self, tmdb_id: str, season_number: int, expected_episode_count: int) -> bool:
         """
@@ -1120,120 +995,12 @@ class WatchlistProcessor:
             return False # 出错默认不跳过，继续洗版以防万一
 
     def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
-        """
-        针对指定季进行完结洗版。
-        参数直接传入季号和集数，不再需要在内部计算。
-        """
-        try:
-            logger.info(f"  🎉 剧集《{series_name}》已自然完结，正在对最终季 (S{season_number}) 执行洗版流程...")
-            watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-            # 1.检查配额
-            if settings_db.get_subscription_quota() <= 0:
-                logger.warning(f"  ➜ 每日订阅配额已用尽，跳过《{series_name}》S{season_number} 的完结洗版。")
-                return
-            # 2. 直接使用传入的集数进行一致性检查
-            if self._check_season_consistency(tmdb_id, season_number, episode_count):
-                return
-            
-            # 3. 检查是否需要删除旧文件 (Emby)
-            if watchlist_cfg.get('auto_delete_old_files', False):
-                logger.info(f"  ➜ [自动清理] 检测到“删除 Emby 旧文件”已开启，正在评估删除范围...")
-                try:
-                    # 调用 DB 层获取剧集 Emby ID 和所有在库的季
-                    series_emby_id, in_library_seasons = watchlist_db.get_series_deletion_info(tmdb_id)
-                    
-                    # 过滤掉当前准备删除的季，看看还有没有剩下的季 (包括 SP/第0季)
-                    other_seasons = [s for s in in_library_seasons if s != season_number]
-
-                    if not other_seasons and series_emby_id:
-                        # 只有这一季，直接删除整部剧，防止留下空壳
-                        logger.info(f"  ➜ [自动清理] 剧集下无其他在库季，准备直接删除整部剧集 (Emby ID: {series_emby_id})...")
-                        if emby.delete_item(series_emby_id, self.emby_url, self.emby_api_key, self.emby_user_id):
-                            logger.info(f"  ➜ [自动清理] 已成功从 Emby 删除整部剧集。")
-                            time.sleep(2)
-                        else:
-                            logger.error(f"  ➜ [自动清理] 删除整部剧集失败，将继续执行洗版订阅。")
-                    else:
-                        # 还有其他季，仅删除当前季
-                        target_season_id = watchlist_db.get_season_emby_id(tmdb_id, season_number)
-                        if target_season_id:
-                            logger.info(f"  ➜ [自动清理] 剧集下还有其他季 {other_seasons}，仅删除 S{season_number} (Emby ID: {target_season_id})...")
-                            if emby.delete_item(target_season_id, self.emby_url, self.emby_api_key, self.emby_user_id):
-                                logger.info(f"  ➜ [自动清理] 已成功从 Emby 删除 S{season_number}。")
-                                time.sleep(2)
-                            else:
-                                logger.error(f"  ➜ [自动清理] 删除 S{season_number} 失败，将继续执行洗版订阅。")
-                        else:
-                            logger.warning(f"  ➜ [自动清理] 数据库中未找到 S{season_number} 的 Emby ID，跳过删除。")
-
-                except Exception as e:
-                    logger.error(f"  ➜ [自动清理] 执行删除逻辑时出错: {e}")
-            
-            # 4. 清理 MoviePilot 整理记录 / 下载器旧任务
-            #    改用 smart_cleanup_mp_media 统一入口，避免旧接口只按 hash 盲删，漏掉同数据辅种。
-            delete_mp_history = bool(watchlist_cfg.get('auto_delete_mp_history', False))
-            delete_download_tasks = bool(watchlist_cfg.get('auto_delete_download_tasks', False))
-
-            if delete_mp_history or delete_download_tasks:
-                cleanup_parts = []
-                if delete_mp_history:
-                    cleanup_parts.append("MoviePilot 整理记录")
-                if delete_download_tasks:
-                    cleanup_parts.append("下载器旧任务及源文件（含辅种）")
-
-                logger.info(f"  ➜ [自动清理] 正在清理 {'、'.join(cleanup_parts)}...")
-
-                cleanup_ok = moviepilot.smart_cleanup_mp_media(
-                    tmdb_id=str(tmdb_id),
-                    item_type='Series',
-                    season=season_number,
-                    episode=None,
-                    title=series_name,
-                    config=self.config,
-                    delete_history=delete_mp_history,
-                    delete_files=delete_download_tasks
-                )
-
-                if not cleanup_ok:
-                    logger.warning(f"  ➜ [自动清理] MoviePilot 智能清理未完全成功，将继续执行取消订阅和洗版订阅流程。")
-
-            # 5. 取消旧订阅
-            moviepilot.cancel_subscription(tmdb_id, 'Series', self.config, season=season_number)
-            
-            # 6. 发起新订阅 (洗版)
-            payload = {
-                "name": series_name,
-                "tmdbid": int(tmdb_id),
-                "type": "电视剧",
-                "season": season_number,
-                "best_version": 1, # ★ 核心：洗版模式
-                "best_version_full": 1 # 全集洗版
-            }
-            
-            if moviepilot.subscribe_with_custom_payload(payload, self.config):
-                settings_db.decrement_subscription_quota()
-                logger.info(f"  ➜ [完结洗版] 《{series_name}》 第 {season_number} 季 已提交洗版订阅。")
-                
-                # ★★★ 核心修改：将 active_washing 标记下放到该季的每一集 ★★★
-                try:
-                    with connection.get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("""
-                                UPDATE media_metadata 
-                                SET active_washing = TRUE 
-                                WHERE parent_series_tmdb_id = %s 
-                                  AND season_number = %s 
-                                  AND item_type = 'Episode'
-                            """, (tmdb_id, season_number))
-                            conn.commit()
-                    logger.info(f"  ➜ [完结洗版] 已为 第 {season_number} 季的所有分集开启 'active_washing' 洗版锁，防止向 MP 重复提交。")
-                except Exception as e:
-                    logger.error(f"  ➜ 开启洗版状态失败: {e}")
-            else:
-                logger.error(f"  ➜ [完结洗版] 《{series_name}》 第 {season_number} 季 提交失败。")
-
-        except Exception as e:
-            logger.error(f"  ➜ 执行完结自动洗版逻辑时出错: {e}", exc_info=True)
+        """旧 ETK 完结洗版入口已停用，MoviePilot 订阅由订阅助手增强版统一接管。"""
+        logger.info(
+            "  ➜ [订阅助手] 已拦截旧完结洗版入口：《%s》S%s 不再取消/重建 MoviePilot 订阅。",
+            series_name,
+            season_number,
+        )
 
     # --- 尝试从豆瓣获取总集数 ---
     def _try_fetch_douban_episode_count(self, series_name: str, season_number: int, year: str, imdb_id: Optional[str] = None, season_name: Optional[str] = None) -> Optional[int]:
@@ -1673,7 +1440,9 @@ class WatchlistProcessor:
             series_name=item_name, 
             series_details=latest_series_data, 
             final_status=final_status,
-            old_status=old_status
+            old_status=old_status,
+            all_tmdb_episodes=all_tmdb_episodes,
+            real_next_episode=real_next_episode_to_air,
         )
 
     # --- 统一的、公开的追剧处理入口 ★★★
