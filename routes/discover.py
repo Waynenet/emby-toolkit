@@ -277,6 +277,9 @@ def discover_movies():
 
             tmdb_params['page'] = current_tmdb_page
             tmdb_data = tmdb.discover_movie_tmdb(api_key, tmdb_params)
+            if not tmdb_data:
+                logger.warning("TMDb 发现电影请求失败，返回空响应 (page=%s, params=%s)", current_tmdb_page, tmdb_params)
+                return jsonify({"status": "error", "message": "从 TMDb 获取电影数据失败，请检查网络、代理或 TMDb API Key。"}), 502
             
             batch_results = tmdb_data.get('results', [])
             total_pages_from_tmdb = tmdb_data.get('total_pages', 0)
@@ -423,6 +426,9 @@ def discover_tv_shows():
 
             tmdb_params['page'] = current_tmdb_page
             tmdb_data = tmdb.discover_tv_tmdb(api_key, tmdb_params)
+            if not tmdb_data:
+                logger.warning("TMDb 发现电视剧请求失败，返回空响应 (page=%s, params=%s)", current_tmdb_page, tmdb_params)
+                return jsonify({"status": "error", "message": "从 TMDb 获取电视剧数据失败，请检查网络、代理或 TMDb API Key。"}), 502
             
             batch_results = tmdb_data.get('results', [])
             total_pages_from_tmdb = tmdb_data.get('total_pages', 0)
