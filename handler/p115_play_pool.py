@@ -1339,6 +1339,8 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
             )
 
         sha1 = str(cached.get("sha1") or file_cache.get("sha1") or sha1 or "").strip().upper()
+        if re.fullmatch(r"[A-F0-9]{40}", sha1 or "") and str(cached.get("sha1") or "").strip().upper() != sha1:
+            cached = _extract_cached_mediainfo_source(sha1)
         size = _safe_int(cached.get("size"), 0) or _safe_int(file_cache.get("size"), 0) or _safe_int(asset.get("size"), 0)
         if not re.fullmatch(r"[A-F0-9]{40}", sha1 or "") or size <= 0:
             continue
@@ -1398,31 +1400,6 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     display_name = _pick_upload_file_name(file_name, source_row.get("name"), f"{sha1 or source_pick_code}.mkv")
     if not _has_source_identity_row(source_row):
         raise RuntimeError("小号播放需要源文件 SHA1 和 size，media_metadata/p115_mediainfo_cache 未命中文件身份信息")
-    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
-        try:
-            preid = _ensure_source_preid_for_play_pool(
-                source_row,
-                sha1=sha1,
-                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
-                file_name=display_name,
-            )
-        except Exception as e:
-            logger.debug(
-                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
-                str(source_pick_code or source_row.get("pick_code") or "")[:8],
-                sha1[:12],
-                e,
-            )
-            preid = ""
-        if preid:
-            source_row["preid"] = preid
-            logger.info(
-                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
-                _display_title(display_name),
-                preid[:12],
-            )
-    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
-        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     reusable = _find_reusable_session(
         source_pick_code=source_pick_code,
@@ -1432,12 +1409,12 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         client_key=client_key,
     )
     if reusable:
-        account = next((x for x in config.get("accounts") or [] if str(x.get("id")) == str(reusable.get("account_id"))), None)
+        reusable_account = next((x for x in config.get("accounts") or [] if str(x.get("id")) == str(reusable.get("account_id"))), None)
         account_usable = bool(
-            account
-            and account.get("enabled")
-            and _has_account_auth(account)
-            and _account_allowed_for_user(account, user_id)
+            reusable_account
+            and reusable_account.get("enabled")
+            and _has_account_auth(reusable_account)
+            and _account_allowed_for_user(reusable_account, user_id)
         )
         direct_url = str(reusable.get("direct_url") or "").strip()
         direct_url_usable = bool(direct_url and _same_user_agent(reusable.get("direct_url_user_agent"), user_agent))
@@ -1445,14 +1422,14 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             logger.debug(
                 "  ➜ [小号播放] 复用已有小号播放记录：%s | account=%s | session=%s | direct_url=%s",
                 reusable.get("file_name") or display_name,
-                account.get("alias") or account.get("id") or reusable.get("account_alias") or "-",
+                reusable_account.get("alias") or reusable_account.get("id") or reusable.get("account_alias") or "-",
                 reusable.get("session_id") or "-",
                 "yes" if direct_url_usable else "no",
             )
             return {
                 "pick_code": reusable.get("temp_pick_code") or "",
-                "client": _account_client(account),
-                "account": account,
+                "client": _account_client(reusable_account),
+                "account": reusable_account,
                 "session": reusable,
                 "direct_url": direct_url if direct_url_usable else "",
             }
@@ -1500,6 +1477,32 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             _display_user_name(user_id),
         )
         return {"pick_code": record["temp_pick_code"], "client": client, "account": account, "session": record}
+
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        try:
+            preid = _ensure_source_preid_for_play_pool(
+                source_row,
+                sha1=sha1,
+                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
+                file_name=display_name,
+            )
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
+                str(source_pick_code or source_row.get("pick_code") or "")[:8],
+                sha1[:12],
+                e,
+            )
+            preid = ""
+        if preid:
+            source_row["preid"] = preid
+            logger.info(
+                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
+                _display_title(display_name),
+                preid[:12],
+            )
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     payload = {
         "cid": temp_cid,
