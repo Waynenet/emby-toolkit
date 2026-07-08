@@ -505,13 +505,13 @@ class WatchlistProcessor:
                                     **mp_wash_kwargs
                                 )
                                 if sub_success:
-                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
                                     watchlist_db.update_specific_season_total_episodes(
                                         tmdb_id,
                                         new_season_num,
                                         tmdb_ep_count,
                                         locked=False
                                     )
+                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
                                     season_info['episode_count'] = tmdb_ep_count
                                     self._update_watchlist_entry(tmdb_id, series_name, {
                                         "watchlist_tmdb_status": "Returning Series"

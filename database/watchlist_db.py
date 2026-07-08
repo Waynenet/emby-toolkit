@@ -135,15 +135,16 @@ def add_item_to_watchlist(tmdb_id: str, item_name: str) -> bool:
             """
             cursor.execute(upsert_sql, (tmdb_id, item_name))
             
-            # 2. 重置该剧集下所有子项的状态为 NONE
-            # 这样子项就会自动继承父级的 'Watching' 状态，避免旧的 'Completed' 状态干扰
+            # 2. 集不参与追剧状态管理；季状态由本地集齐情况单独同步。
             reset_children_sql = """
                 UPDATE media_metadata
                 SET watching_status = 'NONE'
-                WHERE parent_series_tmdb_id = %s;
+                WHERE parent_series_tmdb_id = %s
+                  AND item_type = 'Episode';
             """
             cursor.execute(reset_children_sql, (tmdb_id,))
             conn.commit()
+            sync_seasons_watching_status(tmdb_id)
             return True
     except Exception as e:
         logger.error(f"  ➜ 添加 '{item_name}' 到追剧列表失败: {e}", exc_info=True)
@@ -164,18 +165,12 @@ def update_watchlist_item_status(tmdb_id: str, new_status: str) -> bool:
     
     values = list(updates.values())
     
-    # ★★★ 级联更新 SQL ★★★
     sql = f"""
         UPDATE media_metadata 
         SET {', '.join(set_clauses)} 
-        WHERE 
-            (tmdb_id = %s AND item_type = 'Series')
-            OR
-            (parent_series_tmdb_id = %s)
+        WHERE tmdb_id = %s AND item_type = 'Series'
     """
     
-    # 追加 WHERE 参数
-    values.append(tmdb_id)
     values.append(tmdb_id)
     
     try:
@@ -252,19 +247,14 @@ def batch_force_end_watchlist_items(tmdb_ids: List[str]) -> int:
                     force_ended = TRUE,
                     watchlist_is_airing = FALSE
                 WHERE 
-                    -- 1. 匹配剧集本身
-                    (tmdb_id = ANY(%s) AND item_type = 'Series')
-                    OR
-                    -- 2. 匹配该剧集下的季 (排除集)
-                    (parent_series_tmdb_id = ANY(%s) AND item_type = 'Season')
+                    tmdb_id = ANY(%s) AND item_type = 'Series'
             """
-            # 注意：需要传入两次 tmdb_ids，分别对应两个 ANY(%s)
-            cursor.execute(sql, (tmdb_ids, tmdb_ids))
+            cursor.execute(sql, (tmdb_ids,))
             conn.commit()
             
             updated_count = cursor.rowcount
             if updated_count > 0:
-                logger.info(f"  ➜ 批量强制完结了 {len(tmdb_ids)} 个剧集系列，共更新 {updated_count} 条记录(含季)。")
+                logger.info(f"  ➜ 批量强制完结了 {len(tmdb_ids)} 个剧集系列，共更新 {updated_count} 条剧记录。")
             return updated_count
     except Exception as e:
         logger.error(f"  ➜ 批量强制完结追剧项目时发生错误: {e}", exc_info=True)
@@ -299,21 +289,15 @@ def batch_update_watchlist_status(item_ids: list, new_status: str) -> int:
                 UPDATE media_metadata 
                 SET {', '.join(set_clauses)} 
                 WHERE 
-                    -- 1. 匹配剧集本身
-                    (tmdb_id = ANY(%s) AND item_type = 'Series')
-                    OR
-                    -- 2. 匹配该剧集下的季 (排除集)
-                    (parent_series_tmdb_id = ANY(%s) AND item_type = 'Season')
+                    tmdb_id = ANY(%s) AND item_type = 'Series'
             """
             
-            # 追加 WHERE 子句的参数 (两次 item_ids)
-            values.append(item_ids)
             values.append(item_ids)
             
             cursor.execute(sql, tuple(values))
             conn.commit()
             
-            logger.info(f"  ➜ 成功将 {len(item_ids)} 个剧集系列的状态批量更新为 '{new_status}'，共更新 {cursor.rowcount} 条记录(含季)。")
+            logger.info(f"  ➜ 成功将 {len(item_ids)} 个剧集系列的状态批量更新为 '{new_status}'，共更新 {cursor.rowcount} 条剧记录。")
             return cursor.rowcount
             
     except Exception as e:
@@ -564,7 +548,7 @@ def batch_import_series_as_completed(library_ids: Optional[List[str]] = None) ->
     逻辑：
     1. 仅处理 watching_status 为 'NONE' (或 NULL) 的剧集。
     2. Series -> 'Completed' (默认存量剧集已看完)
-    3. Season -> 'Completed' (让前端显示为完结状态)
+    3. Season -> 按本地集齐情况同步状态
     4. Episode -> 'NONE' (集不参与状态管理)
     
     Returns:
@@ -623,16 +607,7 @@ def batch_import_series_as_completed(library_ids: Optional[List[str]] = None) ->
             """
             cursor.execute(sql_series, (ids_to_update,))
             
-            # 2. Season -> Completed
-            # 直接把季也设为完结，这样前端看起来就是整整齐齐的已完结状态
-            sql_seasons = """
-                UPDATE media_metadata
-                SET watching_status = 'Completed'
-                WHERE parent_series_tmdb_id = ANY(%s) AND item_type = 'Season'
-            """
-            cursor.execute(sql_seasons, (ids_to_update,))
-
-            # 3. Episode -> NONE
+            # 2. Episode -> NONE
             # 确保集没有错误的状态
             sql_episodes = """
                 UPDATE media_metadata
@@ -642,6 +617,8 @@ def batch_import_series_as_completed(library_ids: Optional[List[str]] = None) ->
             cursor.execute(sql_episodes, (ids_to_update,))
             
             conn.commit()
+            for tmdb_id in ids_to_update:
+                sync_seasons_watching_status(tmdb_id)
             # ★★★ 修改返回值：返回 ID 列表 ★★★
             return ids_to_update
 
@@ -925,16 +902,8 @@ def revive_completed_series_and_season(parent_tmdb_id: str, season_number: int):
                   AND item_type = 'Series'
                   AND watching_status = 'Completed'
             """, (parent_tmdb_id,))
-            cursor.execute("""
-                UPDATE media_metadata
-                SET watching_status = 'Watching',
-                    watchlist_last_checked_at = NOW()
-                WHERE parent_series_tmdb_id = %s
-                  AND item_type = 'Season'
-                  AND season_number = %s
-                  AND watching_status = 'Completed'
-            """, (parent_tmdb_id, season_number))
             conn.commit()
+            sync_seasons_watching_status(parent_tmdb_id)
     except Exception as e:
         logger.error(f"复活剧集 {parent_tmdb_id} S{season_number} 追剧状态失败: {e}", exc_info=True)
 
