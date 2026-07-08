@@ -1327,9 +1327,14 @@
                     <template #header><span class="card-title">Telegram 设置</span></template>
                     
                     <template #header-extra>
-                      <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
-                        发送测试
-                      </n-button>
+                      <n-space>
+                        <n-button size="tiny" type="primary" ghost @click="openTelegramTemplateModal">
+                          通知模板
+                        </n-button>
+                        <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
+                          发送测试
+                        </n-button>
+                      </n-space>
                     </template>
 
                     <n-form-item-grid-item label="Telegram Bot Token" path="telegram_bot_token">
@@ -2048,7 +2053,9 @@
         </n-space>
       </template>
     </n-modal>
+
     <!-- ★ 引入频道监听模态框 -->
+    <TelegramTemplateModal ref="telegramTemplateModalRef" />
     <TGMonitorModal ref="tgMonitorModalRef" />
     <PlayPoolConfigModal ref="playPoolModalRef" @updated="handlePlayPoolUpdated" />
 </template>
@@ -2056,6 +2063,7 @@
 <script setup>
 import { ref, watch, computed, onMounted, onUnmounted, nextTick, isShallow } from 'vue'; 
 import TGMonitorModal from './TGMonitorModal.vue';
+import TelegramTemplateModal from './TelegramTemplateModal.vue';
 import PlayPoolConfigModal from './PlayPoolConfigModal.vue';
 import { 
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi, 
@@ -2107,6 +2115,7 @@ const mpModalRef = ref(null);
 const washingPriorityModalRef = ref(null);
 const hdhiveModalRef = ref(null);
 const tgMonitorModalRef = ref(null);
+const telegramTemplateModalRef = ref(null);
 const playPoolModalRef = ref(null);
 const renameModalRef = ref(null);
 const episodeRegexModalRef = ref(null);
@@ -2146,6 +2155,7 @@ const modalStyle = (width) => ({
   width: isMobile.value ? 'calc(100vw - 24px)' : `${width}px`,
   maxWidth: 'calc(100vw - 24px)'
 });
+const openTelegramTemplateModal = () => telegramTemplateModalRef.value?.open();
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
 const savingPrompts = ref(false);

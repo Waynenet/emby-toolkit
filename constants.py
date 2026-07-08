@@ -90,6 +90,15 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
 DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail', 'intercept_notify']
+APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES = "telegram_notification_templates"
+DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES = {
+    "library_new": "",
+    "transfer_success": "",
+    "playback": "",
+    "recognize_fail": "",
+    "intercept_notify": "",
+    "hdhive_checkin": "",
+}
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)
