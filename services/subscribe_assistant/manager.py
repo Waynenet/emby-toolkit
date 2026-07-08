@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 STATE_SUBSCRIBES = "subscribes"
 STATE_TORRENTS = "torrents"
+STATE_SNAPSHOT_RESTORE_SUPPRESSIONS = "snapshot_restore_suppressions"
 SOURCE_PENDING_JUDGE = "pending_judge"
 SOURCE_GUARD_VETO = "guard_veto"
 SOURCE_DOWNLOAD_PENDING = "download_pending"
@@ -446,6 +447,11 @@ class SubscribeAssistantManager:
         if subscribe_id <= 0:
             return False
         info = self._enrich_subscribe_info(info, media, subscribe_id)
+        self._clear_snapshot_restore_suppression(
+            str(info.get("tmdbid") or info.get("tmdb_id") or ""),
+            _safe_int(info.get("season")),
+            subscribe_id,
+        )
         self._remember_subscription(subscribe_id, info, reason="subscribe.added")
         logger.info("  ➜ [订阅助手] 已接管 MP 新增订阅：%s。", self._format_subscribe_info(info))
         return True
@@ -496,6 +502,10 @@ class SubscribeAssistantManager:
         self._clear_torrents_for_subscription(subscribe_id, "订阅已删除")
         tmdb_id = str(info.get("tmdbid") or info.get("tmdb_id") or "").strip()
         season = _safe_int(info.get("season"))
+        if self._snapshot_restore_suppressed(tmdb_id, season, subscribe_id):
+            logger.info("  ➜ [订阅助手] MP 订阅删除属于订阅助手主动收口，跳过完成快照恢复：%s。", self._format_subscribe_info(info))
+            logger.info("  ➜ [订阅助手] 已记录 MP 订阅删除：%s。", self._format_subscribe_info(info))
+            return True
         if self.cfg.verify_enabled and tmdb_id and season > 0:
             snapshot = store.get_latest_snapshot(
                 tmdb_id=tmdb_id,
@@ -648,6 +658,13 @@ class SubscribeAssistantManager:
 
     def _repair_snapshot_subscription(self, snapshot: Dict[str, Any], tmdb_id: str, season: int, snapshot_total: int) -> bool:
         if snapshot_total <= 0:
+            return False
+        if self._snapshot_restore_suppressed(tmdb_id, season, _safe_int(snapshot.get("subscribe_id"))):
+            logger.debug(
+                "  ➜ [订阅助手] 《%s》S%s 已按配置完成后删除订阅，跳过完成快照恢复。",
+                self._series_title(tmdb_id, snapshot.get("subscribe_json")),
+                season,
+            )
             return False
 
         subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
@@ -834,6 +851,79 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _snapshot_restore_suppression_keys(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> List[str]:
+        keys = []
+        tmdb = str(tmdb_id or "").strip()
+        if tmdb and _safe_int(season) > 0:
+            keys.append(f"tmdb:{tmdb}:S{_safe_int(season)}")
+        if _safe_int(subscribe_id) > 0:
+            keys.append(f"sub:{_safe_int(subscribe_id)}")
+        return keys
+
+    def _mark_snapshot_restore_suppressed(
+        self,
+        tmdb_id: str,
+        season: int,
+        subscribe_id: int,
+        reason: str,
+    ) -> None:
+        keys = self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id)
+        if not keys:
+            return
+        now = time.time()
+        expires_at = now + max(1, _safe_int(self.cfg.snapshot_retention_days, 180)) * 86400
+
+        def updater(data):
+            for key in list(data.keys()):
+                if float((data.get(key) or {}).get("expires_at") or 0) <= now:
+                    data.pop(key, None)
+            for key in keys:
+                data[key] = {
+                    "tmdb_id": str(tmdb_id or ""),
+                    "season": _safe_int(season),
+                    "subscribe_id": _safe_int(subscribe_id),
+                    "reason": reason,
+                    "created_at": now,
+                    "expires_at": expires_at,
+                }
+            return data
+
+        store.update_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, updater)
+
+    def _clear_snapshot_restore_suppression(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> None:
+        keys = set(self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id))
+        if not keys:
+            return
+
+        def updater(data):
+            for key in keys:
+                data.pop(key, None)
+            return data
+
+        store.update_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, updater)
+
+    def _snapshot_restore_suppressed(self, tmdb_id: str, season: int, subscribe_id: int = 0) -> bool:
+        keys = set(self._snapshot_restore_suppression_keys(tmdb_id, season, subscribe_id))
+        if not keys:
+            return False
+        now = time.time()
+        state = store.read_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS)
+        changed = False
+        suppressed = False
+        if not isinstance(state, dict):
+            return False
+        for key, item in list(state.items()):
+            expires_at = float((item or {}).get("expires_at") or 0)
+            if expires_at <= now:
+                state.pop(key, None)
+                changed = True
+                continue
+            if key in keys:
+                suppressed = True
+        if changed:
+            store.write_state(STATE_SNAPSHOT_RESTORE_SUPPRESSIONS, state)
+        return suppressed
 
     def _has_recent_manual_mp_change(self, subscribe_id: int, field: str) -> bool:
         if not subscribe_id:
@@ -1242,11 +1332,18 @@ class SubscribeAssistantManager:
         if not subscribe_id:
             subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
             subscribe_id = _safe_int((subscriptions[0] or {}).get("id") if subscriptions else 0)
+        self._mark_snapshot_restore_suppressed(
+            tmdb_id,
+            season,
+            subscribe_id,
+            "分集洗版一致性通过，按配置删除 MP 订阅",
+        )
         if subscribe_id and moviepilot.delete_subscription_by_id(subscribe_id, self.app_config):
             self._remove_subscription_state(subscribe_id, subscribe or {}, reason="episode_washing_consistency_ok")
             self._clear_torrents_for_subscription(subscribe_id, "分集洗版一致性通过，删除 MP 订阅")
             logger.info("  ➜ [订阅助手] 《%s》S%s 分集洗版一致性通过，已按配置删除 MP 订阅。", series_name, season)
         else:
+            self._clear_snapshot_restore_suppression(tmdb_id, season, subscribe_id)
             logger.warning("  ➜ [订阅助手] 《%s》S%s 分集洗版一致性通过，但删除 MP 订阅失败。", series_name, season)
 
     def _season_consistency_ok(self, tmdb_id: str, season: int, expected_count: int, series_name: str) -> bool:
