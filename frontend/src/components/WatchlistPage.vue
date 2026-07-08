@@ -353,7 +353,7 @@
       v-model:show="showConfigModal"
       preset="card"
       title="追剧辅助配置"
-      style="width: 720px; max-width: 96vw;"
+      style="width: 920px; max-width: 96vw;"
       class="custom-modal glass-modal"
       :bordered="false"
       size="huge"
@@ -365,7 +365,6 @@
       <div class="assistant-settings">
         <div class="settings-layout assistant-aux-layout">
           <div class="settings-col">
-            <div class="settings-group-title">通用辅助</div>
             <div class="settings-card">
               <div class="setting-item">
                 <div class="setting-icon"><n-icon :component="DoubanIcon" /></div>
@@ -1638,6 +1637,10 @@ html.dark .progress-separator :deep(.n-progress-graph-line-rail) {
   grid-template-columns: 1fr 1fr; /* 两列等宽 */
   gap: 24px; /* 列间距 */
   align-items: start; /* 顶部对齐 */
+}
+
+.assistant-aux-layout {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* 手机端适配 */
