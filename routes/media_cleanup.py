@@ -302,20 +302,34 @@ def delete_single_version():
     import constants
     from database import media_db, maintenance_db
     from database.connection import get_db_connection
+    from handler import emby
+    from handler.p115_service import WebhookDeleteBuffer
     
     config = config_manager.APP_CONFIG
     
     try:
-        paths = media_db.get_physical_paths_and_sha1s_by_emby_id(emby_id)
+        paths = media_db.get_physical_paths_and_sha1s_by_emby_id(emby_id, exact_match=True)
         if not paths:
             return jsonify({"error": "未找到对应的物理文件路径"}), 404
 
         local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+        sync_delete = config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False)
         protected_dirs = {os.path.abspath(local_root)} if local_root else set()
+        deleted_paths = []
+        pickcodes_to_delete = []
 
         for item in paths:
             file_path = item.get('path')
-            if not file_path or not os.path.exists(file_path):
+            pc = str(item.get('pc') or '').strip()
+            if pc and pc not in pickcodes_to_delete:
+                pickcodes_to_delete.append(pc)
+
+            if not file_path:
+                continue
+            if file_path not in deleted_paths:
+                deleted_paths.append(file_path)
+            if not os.path.exists(file_path):
+                logger.debug(f"手动删除版本：本地文件不存在，仍将通知 Emby 删除: {file_path}")
                 continue
 
             try:
@@ -357,11 +371,32 @@ def delete_single_version():
             except Exception as e:
                 return jsonify({"error": f"删除物理文件失败: {e}"}), 500
 
+        if not pickcodes_to_delete:
+            pc = media_db.get_pickcode_by_emby_id(emby_id)
+            if pc:
+                pickcodes_to_delete.append(pc)
+
         maintenance_db.cleanup_deleted_media_item(
             item_id=emby_id,
             item_name='',
             item_type='Episode'
         )
+
+        if pickcodes_to_delete and sync_delete:
+            logger.info(f"  ➜ 手动删除版本：正在将 {len(pickcodes_to_delete)} 个文件加入 115 网盘联动删除队列...")
+            WebhookDeleteBuffer.add(pickcodes_to_delete)
+
+        if deleted_paths:
+            emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+            emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+            if emby_url and emby_api_key:
+                logger.info(f"  ➜ 手动删除版本：正在通知 Emby 刷新 {len(deleted_paths)} 个被删除的路径...")
+                emby.notify_emby_file_changes(
+                    file_paths=deleted_paths,
+                    base_url=emby_url,
+                    api_key=emby_api_key,
+                    update_type="Deleted"
+                )
             
         # 2. 从清理任务索引中剔除该版本，保证前端刷新完美同步
         with get_db_connection() as conn:

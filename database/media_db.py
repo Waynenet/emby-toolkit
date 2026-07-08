@@ -1642,10 +1642,11 @@ def get_all_in_library_physical_paths() -> List[Dict[str, Any]]:
         return []
 
 # --- 新增：根据 Emby ID 获取物理路径和指纹 ---
-def get_physical_paths_and_sha1s_by_emby_id(emby_id: str) -> List[Dict[str, str]]:
+def get_physical_paths_and_sha1s_by_emby_id(emby_id: str, exact_match: bool = False) -> List[Dict[str, str]]:
     """
     【定点优化】根据 Emby ID 获取关联的所有物理路径、SHA1 和 PickCode。
-    如果是剧集(Series)，会自动向下穿透获取所有分集(Episode)的资产。
+    默认保持旧行为：如果是剧集(Series)，会自动向下穿透获取所有分集(Episode)的资产。
+    exact_match=True 时只返回该 Emby ID 对齐的单个资产，用于手动删除单一版本。
     利用数据库中对齐的 JSON 数组，避免张冠李戴。
     """
     if not emby_id:
@@ -1673,13 +1674,26 @@ def get_physical_paths_and_sha1s_by_emby_id(emby_id: str) -> List[Dict[str, str]
                 rows = cursor.fetchall()
                 
                 for row in rows:
+                    emby_ids = row['emby_item_ids_json'] or []
                     sha1s = row['file_sha1_json'] or []
                     pcs = row['file_pickcode_json'] or []
                     assets = row['asset_details_json'] or []
+                    target_idx = None
+                    if isinstance(emby_ids, list):
+                        for id_idx, row_emby_id in enumerate(emby_ids):
+                            if str(row_emby_id) == str(emby_id):
+                                target_idx = id_idx
+                                break
+                    if exact_match and target_idx is None:
+                        continue
                     
                     # 遍历资产数组，按索引对齐提取
                     for idx, asset in enumerate(assets):
                         if not isinstance(asset, dict): continue
+                        if exact_match:
+                            asset_emby_id = str(asset.get('emby_item_id') or asset.get('id') or '').strip()
+                            if idx != target_idx and asset_emby_id != str(emby_id):
+                                continue
                         path = asset.get('path')
                         if not path: continue
                         
