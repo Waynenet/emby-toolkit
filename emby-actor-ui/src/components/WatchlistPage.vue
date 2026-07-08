@@ -600,6 +600,10 @@
                       <div class="sub-label">一致性校验</div>
                       <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_full_consistency_check_enabled" size="small" />
                     </n-grid-item>
+                    <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_type === 'tv_episode'">
+                      <div class="sub-label">分集转全集</div>
+                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_episode_to_full" size="small" />
+                    </n-grid-item>
                     <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_type !== 'no'">
                       <div class="sub-label">洗版超时</div>
                       <n-input-number v-model:value="watchlistConfig.subscribe_assistant.full_washing_timeout_hours" size="small" :min="0">
