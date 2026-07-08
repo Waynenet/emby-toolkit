@@ -49,33 +49,52 @@ def _apply_watchlist_mp_wash_flags(
 ) -> str:
     """
     根据追剧配置决定向 MoviePilot 提交的洗版参数。
-    - `force_full=True`: 强制全集洗版，忽略开关。
-    - 两个开关都关: 不携带 best_version
-    - 分集洗版: 携带 best_version
-    - 全集洗版: 携带 best_version + best_version_full
+
+    订阅助手新策略：
+    - no: 关闭，不携带 best_version
+    - tv_episode: 分集洗版，未完结携带 best_version，完结携带 best_version + best_version_full
+    - completed_full: 完结洗版，未完结不洗版，完结携带 best_version + best_version_full
+    - tv: 全集洗版，始终携带 best_version + best_version_full
     """
-    episode_wash_enabled = bool(
-        watchlist_config.get(
-            'series_subscription_best_version',
-            watchlist_config.get('sync_mp_subscription_episode_wash', False)
+    assistant = watchlist_config.get('subscribe_assistant')
+    best_version_type = ''
+    if isinstance(assistant, dict):
+        best_version_type = str(assistant.get('best_version_type') or '').strip()
+
+    if not best_version_type:
+        episode_wash_enabled = bool(
+            watchlist_config.get(
+                'series_subscription_best_version',
+                watchlist_config.get('sync_mp_subscription_episode_wash', False)
+            )
         )
-    )
-    full_wash_enabled = bool(
-        watchlist_config.get(
-            'series_subscription_best_version_full',
-            watchlist_config.get('sync_mp_subscription_full_wash', False)
+        full_wash_enabled = bool(
+            watchlist_config.get(
+                'series_subscription_best_version_full',
+                watchlist_config.get('sync_mp_subscription_full_wash', False)
+            )
         )
-    )
+        if full_wash_enabled:
+            best_version_type = 'tv'
+        elif episode_wash_enabled:
+            best_version_type = 'tv_episode'
+        else:
+            best_version_type = 'no'
 
     mp_payload.pop('best_version', None)
     mp_payload.pop('best_version_full', None)
 
-    if force_full or full_wash_enabled:
+    if best_version_type == 'tv':
         mp_payload['best_version'] = 1
         mp_payload['best_version_full'] = 1
         return '全集洗版'
 
-    if episode_wash_enabled:
+    if force_full and best_version_type in ('tv_episode', 'completed_full'):
+        mp_payload['best_version'] = 1
+        mp_payload['best_version_full'] = 1
+        return '完结洗版'
+
+    if best_version_type == 'tv_episode':
         mp_payload['best_version'] = 1
         return '分集洗版'
 
