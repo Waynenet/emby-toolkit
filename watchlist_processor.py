@@ -84,6 +84,12 @@ def _watchlist_mp_wash_kwargs(watchlist_cfg: Dict[str, Any], *, force_full: bool
         return {'best_version': 1, 'best_version_full': None}
     return {'best_version': None, 'best_version_full': None}
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
 class WatchlistProcessor:
     """
     【V13 - media_metadata 适配版】
@@ -1553,6 +1559,13 @@ class WatchlistProcessor:
             )
 
         is_local_latest_season_completed = latest_season_local_state == "complete"
+        local_completed_season_numbers = []
+        for season_info in valid_tmdb_seasons:
+            s_num = _safe_int(season_info.get('season_number'))
+            expected_count = _safe_int(season_info.get('episode_count'))
+            if s_num > 0 and expected_count > 0 and len(emby_seasons.get(s_num, set())) >= expected_count:
+                local_completed_season_numbers.append(s_num)
+        has_local_completed_season = bool(local_completed_season_numbers)
         final_status = STATUS_COMPLETED if is_ended_on_tmdb else STATUS_WATCHING
         if is_ended_on_tmdb:
             logger.info(f"  ➜ [追剧判定] 《{item_name}》TMDb 状态={new_tmdb_status}，剧条目标记为“已完结”。")
@@ -1582,7 +1595,7 @@ class WatchlistProcessor:
         
         # 定义一个变量，用于控制是否更新等待标志
         set_waiting_flag = None
-        if final_status == STATUS_COMPLETED and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING] and not is_force_ended:
+        if (final_status == STATUS_COMPLETED or has_local_completed_season) and old_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING] and not is_force_ended:
             watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
             if watchlist_cfg.get('auto_resub_ended', False):
                 seasons = latest_series_data.get('seasons', [])
@@ -1601,7 +1614,7 @@ class WatchlistProcessor:
                         self._handle_auto_resub_ended(tmdb_id, item_name, last_s_num, last_ep_count)
 
         # 如果剧集恢复连载，必须清除等待标志，防止误判
-        if final_status == STATUS_WATCHING:
+        if final_status == STATUS_WATCHING and not has_local_completed_season:
             set_waiting_flag = False
 
         # 更新追剧数据库
