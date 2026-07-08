@@ -142,6 +142,16 @@ RELEASE_GROUPS: Dict[str, List[str]] = {
     "影巢": ['HiveWeb'],
 }
 
+def get_release_group_mapping() -> Dict[str, List[str]]:
+    try:
+        return _coerce_release_group_mapping(settings_db.get_setting('release_group_mapping'))
+    except Exception as e:
+        logger.warning(f"release_group_mapping read failed; falling back to defaults. Error: {e}")
+        return dict(utils.DEFAULT_RELEASE_GROUP_MAPPING)
+
+def get_release_group_names() -> List[str]:
+    return list(get_release_group_mapping().keys())
+
 def normalize_full_width_chars(text: str) -> str:
     """将字符串中的全角字符（数字、字母、冒号）转换为半角。"""
     if not text:
