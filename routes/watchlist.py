@@ -318,10 +318,11 @@ def api_watchlist_settings():
                 "torrent not registered with this tracker",
                 "torrent banned"
             ],
-            "best_version_type": "tv",
+            "best_version_type": "tv_episode",
             "best_version_backfill_enabled": False,
             "best_version_episode_to_full": True,
             "best_version_full_consistency_check_enabled": True,
+            "full_washing_timeout_hours": 72,
             "subscription_cleanup_history_type": "none",
             "subscription_cleanup_history_scenes": ["completed"],
             "verify_enabled": True,

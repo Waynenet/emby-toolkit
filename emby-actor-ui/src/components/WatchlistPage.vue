@@ -589,20 +589,22 @@
                   <div class="assistant-section-title">洗版编排</div>
                   <n-grid :x-gap="12" :y-gap="12" :cols="3" responsive="screen">
                     <n-grid-item>
-                      <div class="sub-label">自动洗版范围</div>
+                      <div class="sub-label">洗版模式</div>
                       <n-select v-model:value="watchlistConfig.subscribe_assistant.best_version_type" :options="bestVersionTypeOptions" size="small" />
                     </n-grid-item>
                     <n-grid-item>
                       <div class="sub-label">回填已存在集</div>
                       <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_backfill_enabled" size="small" />
                     </n-grid-item>
-                    <n-grid-item>
-                      <div class="sub-label">分集转全集</div>
-                      <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_episode_to_full" size="small" />
-                    </n-grid-item>
-                    <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_episode_to_full">
+                    <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_type !== 'no'">
                       <div class="sub-label">一致性校验</div>
                       <n-switch v-model:value="watchlistConfig.subscribe_assistant.best_version_full_consistency_check_enabled" size="small" />
+                    </n-grid-item>
+                    <n-grid-item v-if="watchlistConfig.subscribe_assistant.best_version_type !== 'no'">
+                      <div class="sub-label">洗版超时</div>
+                      <n-input-number v-model:value="watchlistConfig.subscribe_assistant.full_washing_timeout_hours" size="small" :min="0">
+                        <template #suffix>小时</template>
+                      </n-input-number>
                     </n-grid-item>
                   </n-grid>
                 </div>
@@ -800,9 +802,9 @@ const guardModeOptions = [
 ];
 const bestVersionTypeOptions = [
   { label: '关闭', value: 'no' },
-  { label: '剧集', value: 'tv' },
-  { label: '剧集分集', value: 'tv_episode' },
-  { label: '全部', value: 'all' }
+  { label: '分集洗版', value: 'tv_episode' },
+  { label: '完结洗版', value: 'completed_full' },
+  { label: '全集洗版', value: 'tv' }
 ];
 const versionLockModeOptions = [
   { label: '关闭', value: 'off' },
@@ -856,10 +858,11 @@ const defaultSubscribeAssistant = () => ({
   delete_record_retention_hours: 24,
   delete_exclude_tags: ['H&R'],
   tracker_keywords: ['torrent not registered with this tracker', 'torrent banned'],
-  best_version_type: 'tv',
+  best_version_type: 'tv_episode',
   best_version_backfill_enabled: false,
   best_version_episode_to_full: true,
   best_version_full_consistency_check_enabled: true,
+  full_washing_timeout_hours: 72,
   subscription_cleanup_history_type: 'none',
   subscription_cleanup_history_scenes: ['completed'],
   verify_enabled: true,

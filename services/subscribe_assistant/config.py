@@ -31,10 +31,11 @@ class AssistantConfig:
     delete_record_retention_hours: int = 24
     delete_exclude_tags: List[str] = None
     tracker_keywords: List[str] = None
-    best_version_type: str = "tv"
+    best_version_type: str = "tv_episode"
     best_version_backfill_enabled: bool = False
     best_version_episode_to_full: bool = True
     best_version_full_consistency_check_enabled: bool = True
+    full_washing_timeout_hours: int = 72
     subscription_cleanup_history_type: str = "none"
     subscription_cleanup_history_scenes: List[str] = None
     verify_enabled: bool = True
@@ -138,6 +139,10 @@ def from_watchlist_config(raw: Dict[str, Any] = None) -> AssistantConfig:
     cfg.best_version_full_consistency_check_enabled = _as_bool(
         assistant.get("best_version_full_consistency_check_enabled"),
         cfg.best_version_full_consistency_check_enabled,
+    )
+    cfg.full_washing_timeout_hours = _as_int(
+        assistant.get("full_washing_timeout_hours"),
+        cfg.full_washing_timeout_hours,
     )
     cfg.subscription_cleanup_history_type = str(
         assistant.get("subscription_cleanup_history_type") or cfg.subscription_cleanup_history_type

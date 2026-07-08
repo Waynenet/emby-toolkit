@@ -125,6 +125,15 @@ class SubscribeAssistantManager:
                 continue
 
             subscribe_id = _safe_int(sub.get("id"))
+            if _safe_int(sub.get("best_version_full")) == 1:
+                self._mark_full_washing_started(
+                    subscribe_id,
+                    tmdb_id,
+                    season_num,
+                    sub,
+                    reason="existing_full_washing_subscription",
+                )
+                self._set_season_active_washing(tmdb_id, season_num, True, "检测到现有全集洗版订阅。")
             if self._has_recent_manual_mp_change(subscribe_id, "state"):
                 logger.info(
                     "  ➜ [订阅助手] 《%s》S%s 检测到 MP 近期人工改状态，本轮暂不覆盖。",
@@ -185,17 +194,72 @@ class SubscribeAssistantManager:
         stats = {
             "released_pending": 0,
             "download_checked": 0,
+            "washing_timeouts": 0,
             "snapshots_checked": 0,
             "snapshots_cleaned": 0,
             "delete_records_cleaned": 0,
         }
         stats["delete_records_cleaned"] = store.cleanup_delete_records()
         stats["snapshots_cleaned"] = store.cleanup_snapshots(self.cfg.snapshot_retention_days)
+        stats["washing_timeouts"] = self.run_full_washing_timeout_check()
         if self.cfg.download_monitor_enabled:
             stats["download_checked"] = self.run_download_check()
         if self.cfg.verify_enabled:
             stats["snapshots_checked"] = self.run_snapshot_verify(limit=limit)
         return stats
+
+    def run_full_washing_timeout_check(self) -> int:
+        timeout_hours = _safe_int(self.cfg.full_washing_timeout_hours)
+        if timeout_hours <= 0:
+            return 0
+        data = store.read_state(STATE_SUBSCRIBES)
+        if not isinstance(data, dict) or not data:
+            return 0
+
+        now = time.time()
+        changed = 0
+        timeout_seconds = timeout_hours * 3600
+        for key, task in list(data.items()):
+            if not isinstance(task, dict):
+                continue
+            started_at = float(task.get("full_washing_started_at") or 0)
+            if started_at <= 0 or now - started_at < timeout_seconds:
+                continue
+            tmdb_id = str(task.get("tmdb_id") or "").strip()
+            season = _safe_int(task.get("season"))
+            if not tmdb_id or season <= 0:
+                self._clear_full_washing_state(_safe_int(task.get("subscribe_id")))
+                continue
+
+            info = task.get("subscribe_info") if isinstance(task.get("subscribe_info"), dict) else {}
+            title = self._series_title(tmdb_id, info)
+            total = _safe_int(info.get("total_episode") or info.get("total") or info.get("total_episodes"))
+            if total > 0 and self._season_consistency_ok(tmdb_id, season, total, title):
+                self._set_season_active_washing(tmdb_id, season, False, "洗版超时检查时一致性已通过，收口。")
+                self._clear_full_washing_state(_safe_int(task.get("subscribe_id")))
+                logger.info("  ➜ [订阅助手] 《%s》S%s 洗版超时检查：一致性已通过，清理待洗版状态。", title, season)
+                changed += 1
+                continue
+
+            sub = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
+            subscribe_id = _safe_int(task.get("subscribe_id") or ((sub[0] or {}).get("id") if sub else 0))
+            if subscribe_id and moviepilot.delete_subscription_by_id(subscribe_id, self.app_config):
+                logger.warning(
+                    "  ➜ [订阅助手] 《%s》S%s 全集洗版已超时 %s 小时，一致性仍未通过，已删除 MP 洗版订阅。",
+                    title,
+                    season,
+                    timeout_hours,
+                )
+            else:
+                logger.warning(
+                    "  ➜ [订阅助手] 《%s》S%s 全集洗版已超时 %s 小时，但删除 MP 洗版订阅失败。",
+                    title,
+                    season,
+                    timeout_hours,
+                )
+            self._clear_full_washing_state(subscribe_id)
+            changed += 1
+        return changed
 
     def run_download_check(self) -> int:
         torrents = store.read_state(STATE_TORRENTS)
@@ -456,6 +520,8 @@ class SubscribeAssistantManager:
         if subscribe_id <= 0 or not tmdb_id:
             return False
         total = _safe_int(info.get("total_episode") or media.get("number_of_episodes"))
+        if self._full_washing_completion_blocked(tmdb_id, season, subscribe_id, info, total):
+            return True
         self._remember_subscription(subscribe_id, info, reason="subscribe.complete")
         store.upsert_snapshot(
             tmdb_id=tmdb_id,
@@ -475,6 +541,42 @@ class SubscribeAssistantManager:
         self._clear_torrents_for_subscription(subscribe_id, "订阅已完成")
         logger.info("  ➜ [订阅助手] 已根据 MP 完成事件写入快照：%s，总集数=%s。", self._format_subscribe_info(info), total or "-")
         self._trigger_subscription_cleanup_on_complete(tmdb_id, season, info)
+        return True
+
+    def _full_washing_completion_blocked(
+        self,
+        tmdb_id: str,
+        season: int,
+        subscribe_id: int,
+        info: Dict[str, Any],
+        total: int,
+    ) -> bool:
+        if not self.cfg.best_version_full_consistency_check_enabled:
+            return False
+        if season <= 0 or _safe_int((info or {}).get("best_version_full")) != 1:
+            return False
+        title = self._series_title(tmdb_id, info)
+        if total <= 0:
+            logger.warning("  ➜ [订阅助手] 《%s》S%s 全集洗版完成事件缺少总集数，按一致性不通过处理。", title, season)
+        elif self._season_consistency_ok(tmdb_id, season, total, title):
+            self._set_season_active_washing(tmdb_id, season, False, "全集洗版完成且一致性通过，收口。")
+            self._clear_full_washing_state(subscribe_id)
+            return False
+
+        self._set_season_active_washing(tmdb_id, season, True, "全集洗版完成但一致性不通过，继续保持洗版。")
+        if self._keep_full_washing_subscription_active(tmdb_id, season, subscribe_id, info, total):
+            logger.warning(
+                "  ➜ [订阅助手] 《%s》S%s 全集洗版完成但一致性未通过，已阻止收口并恢复 MP 洗版订阅。",
+                title,
+                season,
+            )
+        else:
+            logger.warning(
+                "  ➜ [订阅助手] 《%s》S%s 全集洗版完成但一致性未通过，恢复 MP 洗版订阅失败。",
+                title,
+                season,
+            )
+        self._mark_full_washing_started(subscribe_id, tmdb_id, season, info, reason="consistency_failed_complete")
         return True
 
     def _trigger_subscription_cleanup_on_complete(self, tmdb_id: str, season: int, info: Dict[str, Any]) -> None:
@@ -623,6 +725,86 @@ class SubscribeAssistantManager:
             return data
 
         store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _mark_full_washing_started(
+        self,
+        subscribe_id: int,
+        tmdb_id: str,
+        season: int,
+        info: Dict[str, Any],
+        reason: str = "",
+    ) -> None:
+        if not subscribe_id:
+            return
+
+        def updater(data):
+            task = data.get(str(subscribe_id), {})
+            task["subscribe_id"] = subscribe_id
+            task["subscribe_info"] = info or task.get("subscribe_info") or {}
+            task["tmdb_id"] = str(tmdb_id or task.get("tmdb_id") or "")
+            task["season"] = _safe_int(season or task.get("season")) or None
+            task["full_washing"] = True
+            task["full_washing_started_at"] = float(task.get("full_washing_started_at") or time.time())
+            task["last_event"] = reason or task.get("last_event") or "full_washing"
+            task["updated_at"] = time.time()
+            data[str(subscribe_id)] = task
+            return data
+
+        store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _clear_full_washing_state(self, subscribe_id: int) -> None:
+        if not subscribe_id:
+            return
+
+        def updater(data):
+            task = data.get(str(subscribe_id), {})
+            if isinstance(task, dict):
+                task.pop("full_washing", None)
+                task.pop("full_washing_started_at", None)
+                task["updated_at"] = time.time()
+                data[str(subscribe_id)] = task
+            return data
+
+        store.update_state(STATE_SUBSCRIBES, updater)
+
+    def _keep_full_washing_subscription_active(
+        self,
+        tmdb_id: str,
+        season: int,
+        subscribe_id: int,
+        info: Dict[str, Any],
+        total: int,
+    ) -> bool:
+        sub = None
+        subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
+        if subscriptions:
+            sub = subscriptions[0]
+
+        if not sub:
+            title = self._series_title(tmdb_id, info)
+            created = self._create_subscription(
+                str(tmdb_id),
+                title,
+                season,
+                {"mp_state": "R", "sources": {}, "reason": "全集洗版一致性不通过，恢复订阅", "completed_full_washing": True},
+            )
+            return bool(created)
+
+        payload = dict(sub)
+        payload["tmdbid"] = int(tmdb_id)
+        payload["season"] = int(season)
+        payload["type"] = payload.get("type") or "电视剧"
+        payload["state"] = "R"
+        payload["best_version"] = 1
+        payload["best_version_full"] = 1
+        if total > 0:
+            payload["total_episode"] = int(total)
+        ok = moviepilot.update_subscription(payload, self.app_config)
+        if ok:
+            sid = _safe_int(payload.get("id") or subscribe_id)
+            if sid:
+                moviepilot.search_subscription(sid, self.app_config)
+        return ok
 
     def _remove_subscription_state(self, subscribe_id: int, info: Dict[str, Any], reason: str = "") -> None:
         def updater(data):
@@ -854,7 +1036,17 @@ class SubscribeAssistantManager:
             logger.warning("  ➜ [订阅助手] 《%s》S%s 自动补订失败。", series_name, season)
             return None
         subscriptions = moviepilot.find_subscriptions(tmdb_id, season, self.app_config)
-        return subscriptions[0] if subscriptions else {"tmdbid": tmdb_id, "season": season}
+        sub = subscriptions[0] if subscriptions else {"tmdbid": tmdb_id, "season": season}
+        if _safe_int(payload_kwargs.get("best_version_full")) == 1:
+            self._mark_full_washing_started(
+                _safe_int(sub.get("id")),
+                tmdb_id,
+                season,
+                sub,
+                reason="create_full_washing_subscription",
+            )
+            self._set_season_active_washing(tmdb_id, season, True, "全集洗版订阅已创建。")
+        return sub
 
     def _subscription_wash_kwargs(self, decision: Dict[str, Any]) -> Dict[str, Optional[int]]:
         if decision.get("completed_full_washing"):
@@ -875,9 +1067,8 @@ class SubscribeAssistantManager:
         season_info: Dict[str, Any],
         signal: CompletionSignal,
     ) -> None:
-        if not self.cfg.best_version_episode_to_full:
-            return
-        if self.cfg.best_version_type != "tv_episode":
+        wash_mode = str(self.cfg.best_version_type or "no").strip().lower()
+        if wash_mode not in ("tv_episode", "completed_full"):
             return
 
         expected_count = _safe_int(season_info.get("episode_count")) or _safe_int(signal.scope_total)
@@ -885,7 +1076,7 @@ class SubscribeAssistantManager:
             logger.info("  ➜ [订阅助手] 《%s》S%s 总集数未知，跳过全集洗版门禁。", series_name, season)
             return
 
-        if self.cfg.best_version_full_consistency_check_enabled:
+        if wash_mode == "tv_episode" and self.cfg.best_version_full_consistency_check_enabled:
             if self._season_consistency_ok(tmdb_id, season, expected_count, series_name):
                 self._set_season_active_washing(tmdb_id, season, False, "一致性通过，不提交全集洗版。")
                 logger.info(
@@ -895,8 +1086,17 @@ class SubscribeAssistantManager:
                 )
                 return
             self._set_season_active_washing(tmdb_id, season, True, "一致性不通过，提交全集洗版并等待收口。")
+        elif wash_mode == "completed_full":
+            self._set_season_active_washing(tmdb_id, season, True, "完结洗版模式，提交全集洗版并等待收口。")
 
         if _safe_int((subscribe or {}).get("best_version_full")) == 1:
+            self._mark_full_washing_started(
+                _safe_int((subscribe or {}).get("id")),
+                tmdb_id,
+                season,
+                subscribe,
+                reason="full_washing_already_active",
+            )
             logger.debug("  ➜ [订阅助手] 《%s》S%s 已是全集洗版订阅，跳过重复更新。", series_name, season)
             return
 
@@ -912,9 +1112,19 @@ class SubscribeAssistantManager:
         payload["best_version_full"] = 1
 
         if moviepilot.update_subscription(payload, self.app_config):
-            logger.info("  ➜ [订阅助手] 《%s》S%s 已提交分集转全集洗版订阅。", series_name, season)
+            self._mark_full_washing_started(
+                _safe_int(payload.get("id")),
+                tmdb_id,
+                season,
+                payload,
+                reason="submit_full_washing",
+            )
+            if wash_mode == "completed_full":
+                logger.info("  ➜ [订阅助手] 《%s》S%s 已提交完结全集洗版订阅。", series_name, season)
+            else:
+                logger.info("  ➜ [订阅助手] 《%s》S%s 已提交分集转全集洗版订阅。", series_name, season)
         else:
-            logger.warning("  ➜ [订阅助手] 《%s》S%s 分集转全集洗版订阅更新失败。", series_name, season)
+            logger.warning("  ➜ [订阅助手] 《%s》S%s 全集洗版订阅更新失败。", series_name, season)
 
     def _season_consistency_ok(self, tmdb_id: str, season: int, expected_count: int, series_name: str) -> bool:
         try:
