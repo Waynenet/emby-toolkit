@@ -500,7 +500,8 @@ def _normalize_telegram_notification_templates(value):
     source = value if isinstance(value, dict) else {}
     normalized = dict(constants.DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES)
     for key in normalized.keys():
-        normalized[key] = str(source.get(key) or '')
+        if key in source:
+            normalized[key] = str(source.get(key) or '')
     return normalized
 
 

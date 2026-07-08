@@ -493,10 +493,36 @@ def _render_notification_template(template_key: str, context: dict, default_text
         return safe_context.get(key, '')
 
     try:
-        return re.sub(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', replace_var, template)
+        rendered = re.sub(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', replace_var, template)
+        return _escape_template_markdown_parentheses(rendered)
     except Exception as e:
         logger.warning(f"  ➜ 渲染 Telegram 通知模板失败，已使用默认模板: {e}")
         return default_text
+
+
+def _escape_template_markdown_parentheses(text: str) -> str:
+    """模板正文允许用户写普通括号，这里兜底转义 MarkdownV2 保留字符。"""
+    result = []
+    escaped = False
+    in_code = False
+    for char in str(text or ''):
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == '\\':
+            result.append(char)
+            escaped = True
+            continue
+        if char == '`':
+            in_code = not in_code
+            result.append(char)
+            continue
+        if not in_code and char in '()':
+            result.append('\\' + char)
+            continue
+        result.append(char)
+    return ''.join(result)
 
 # --- 通用的 Telegram 文本消息发送函数 ---
 def send_telegram_message(chat_id: str, text: str, disable_notification: bool = False, reply_markup: dict = None):
@@ -942,7 +968,7 @@ def send_playback_notification(data: dict):
             f"{action_str}\n\n"
             f"👤 *用户*: `{escape_markdown(user_name)}`\n"
             f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
-            f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
+            f"📱 *设备*: `{escape_markdown(device_name)}（{escape_markdown(client_name)}）`\n"
             f"🕒 *时间*: `{escape_markdown(current_time)}`"
             f"{overview_text}" 
         )
