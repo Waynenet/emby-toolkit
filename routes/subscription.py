@@ -10,6 +10,7 @@ from handler.tg_userbot import TGUserBotManager, tg_task_queue
 from handler.tg_media_candidate import build_channel_task_payload
 from handler.shared_center_client import SharedCenterClient, shared_center_enabled
 from handler.shared_subscription_service import consume_center_source_payload
+from services.subscribe_assistant.config import default_assistant_config_dict
 import threading
 
 subscription_bp = Blueprint('subscription_bp', __name__, url_prefix='/api/subscription')
@@ -53,21 +54,44 @@ def get_subscription_status():
 def get_mp_config():
     """获取 MoviePilot 配置"""
     cfg = settings_db.get_setting('mp_config') or {}
+    watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
+    assistant_cfg = cfg.get('subscribe_assistant')
+    if not isinstance(assistant_cfg, dict):
+        assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg, dict) else {}
     # 提供默认值
     default_cfg = {
         'moviepilot_url': '', 'moviepilot_username': '', 'moviepilot_password': '',
         'moviepilot_recognition': False,
-        'link_delete_transfer_history': False,
-        'link_delete_download_files': False,
         'resubscribe_daily_cap': 10, 'resubscribe_delay_seconds': 2.0,
-        'movie_protection_days': 180,
         'movie_search_window_days': 1,
         'movie_pause_days': 7,
         'delay_subscription_days': 0,
-        'timeout_revive_days': 0,
-        'download_timeout_hours': 0
+        'series_version_lock_mode': 'off',
+        'series_version_lock_decay_hours': 48,
+        'subscribe_assistant': default_assistant_config_dict(),
     }
+    if isinstance(watchlist_cfg, dict):
+        default_cfg['series_version_lock_mode'] = watchlist_cfg.get(
+            'series_version_lock_mode',
+            default_cfg['series_version_lock_mode'],
+        )
+        default_cfg['series_version_lock_decay_hours'] = watchlist_cfg.get(
+            'series_version_lock_decay_hours',
+            default_cfg['series_version_lock_decay_hours'],
+        )
     default_cfg.update(cfg)
+    for removed_key in (
+        'link_delete_transfer_history',
+        'link_delete_download_files',
+        'timeout_revive_days',
+        'download_timeout_hours',
+        'movie_protection_days',
+    ):
+        default_cfg.pop(removed_key, None)
+    default_cfg['subscribe_assistant'] = {
+        **default_assistant_config_dict(),
+        **(assistant_cfg if isinstance(assistant_cfg, dict) else {}),
+    }
     return jsonify({"success": True, "data": default_cfg})
 
 @subscription_bp.route('/mp/config', methods=['POST'])
@@ -75,6 +99,28 @@ def get_mp_config():
 def save_mp_config():
     """保存 MoviePilot 配置"""
     new_cfg = request.json
+    if not isinstance(new_cfg, dict):
+        return jsonify({"success": False, "message": "配置格式错误"}), 400
+    for removed_key in (
+        'link_delete_transfer_history',
+        'link_delete_download_files',
+        'timeout_revive_days',
+        'download_timeout_hours',
+        'movie_protection_days',
+    ):
+        new_cfg.pop(removed_key, None)
+    assistant = new_cfg.get('subscribe_assistant')
+    if isinstance(assistant, dict):
+        for stale_key in (
+            "notify",
+            "best_version_backfill_enabled",
+            "recognition_guard_enabled",
+            "recognition_guard_mode",
+        ):
+            assistant.pop(stale_key, None)
+        new_cfg['subscribe_assistant'] = {**default_assistant_config_dict(), **assistant}
+    else:
+        new_cfg['subscribe_assistant'] = default_assistant_config_dict()
     settings_db.save_setting('mp_config', new_cfg)
     
     return jsonify({"success": True, "message": "MoviePilot 配置已保存生效"})

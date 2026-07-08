@@ -68,7 +68,10 @@ def _series_has_animation_genre(series_data: Dict[str, Any]) -> bool:
     return False
 
 def _watchlist_mp_wash_kwargs(watchlist_cfg: Dict[str, Any], *, force_full: bool = False) -> Dict[str, Optional[int]]:
-    assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
+    mp_config = settings_db.get_setting('mp_config') or {}
+    assistant = mp_config.get('subscribe_assistant')
+    if not isinstance(assistant, dict):
+        assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
     best_version_type = str(assistant.get('best_version_type') or 'no').strip().lower()
     if force_full or best_version_type in ('tv', 'all'):
         return {'best_version': 1, 'best_version_full': 1}
@@ -2369,11 +2372,18 @@ class WatchlistProcessor:
             return {}
 
     def _get_version_lock_threshold(self, watchlist_cfg: Dict[str, Any]) -> int:
-        decay_hours = _safe_int(watchlist_cfg.get('series_version_lock_decay_hours'), 48)
+        mp_config = settings_db.get_setting('mp_config') or {}
+        decay_hours = _safe_int(
+            mp_config.get('series_version_lock_decay_hours', watchlist_cfg.get('series_version_lock_decay_hours')),
+            48,
+        )
         return max(decay_hours, 0)
 
     def _version_lock_consistency_check_enabled(self, watchlist_cfg: Dict[str, Any]) -> bool:
-        assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg, dict) else {}
+        mp_config = settings_db.get_setting('mp_config') or {}
+        assistant = mp_config.get('subscribe_assistant')
+        if not isinstance(assistant, dict):
+            assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg, dict) else {}
         if not isinstance(assistant, dict):
             return True
         value = assistant.get('best_version_full_consistency_check_enabled', True)
@@ -3813,8 +3823,8 @@ class WatchlistProcessor:
             triggering_episode_ids=subscription_triggering_episode_ids or airing_episode_emby_ids or [],
         )
         self._close_completed_subscription_status(tmdb_id, item_name, final_status, allow_season_closeout=has_local_completed_season)
-        subscribe_assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
-        version_lock_mode = str(watchlist_cfg.get('series_version_lock_mode') or 'off').strip().lower()
+        mp_config = settings_db.get_setting('mp_config') or {}
+        version_lock_mode = str(mp_config.get('series_version_lock_mode', watchlist_cfg.get('series_version_lock_mode')) or 'off').strip().lower()
         lockable_statuses = {STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING}
         if final_status not in lockable_statuses and version_lock_mode in ('best', 'any') and airing_episode_emby_ids:
             logger.info(f"  ➜ [版本锁定] 《{item_name}》当前状态为“{translate_internal_status(final_status)}”，已完结/非追剧中，跳过锁版。")
