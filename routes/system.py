@@ -495,6 +495,39 @@ def api_test_telegram_connection():
         logger.error(f"Telegram 测试发生错误: {e}")
         return jsonify({"success": False, "message": f"发生未知错误: {str(e)}"}), 500
 
+
+def _normalize_telegram_notification_templates(value):
+    source = value if isinstance(value, dict) else {}
+    normalized = dict(constants.DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES)
+    for key in normalized.keys():
+        if key in source:
+            normalized[key] = str(source.get(key) or '')
+    return normalized
+
+
+@system_bp.route('/telegram/templates', methods=['GET'])
+@admin_required
+def api_get_telegram_notification_templates():
+    try:
+        data = settings_db.get_setting(constants.APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES) or {}
+        return jsonify(_normalize_telegram_notification_templates(data))
+    except Exception as e:
+        logger.error(f"读取 Telegram 通知模板失败: {e}", exc_info=True)
+        return jsonify({"error": "读取 Telegram 通知模板失败"}), 500
+
+
+@system_bp.route('/telegram/templates', methods=['POST'])
+@admin_required
+def api_save_telegram_notification_templates():
+    try:
+        payload = request.json or {}
+        templates = _normalize_telegram_notification_templates(payload.get('templates') if isinstance(payload, dict) else payload)
+        settings_db.save_setting(constants.APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES, templates)
+        return jsonify({"success": True, "message": "Telegram 通知模板已保存", "templates": templates})
+    except Exception as e:
+        logger.error(f"保存 Telegram 通知模板失败: {e}", exc_info=True)
+        return jsonify({"error": "保存 Telegram 通知模板失败"}), 500
+
 # --- API 端点：保存配置 ---
 @system_bp.route('/config', methods=['POST'])
 def api_save_config():

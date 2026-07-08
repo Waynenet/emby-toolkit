@@ -1087,6 +1087,24 @@ def _raw_has_probe_payload(raw):
     return bool(isinstance(raw, dict) and (raw.get("streams") or raw.get("format") or raw.get("_iso_probe")))
 
 
+def _raw_needs_etk_context_backfill(raw):
+    raw = _jsonish_to_obj(raw, {}) or {}
+    if not isinstance(raw, dict):
+        return False
+
+    ctx = raw.get("_etk") if isinstance(raw.get("_etk"), dict) else {}
+    if not P115CacheManager._raw_ffprobe_has_useful_etk(raw):
+        return True
+    if not ctx.get("original_language") or not ctx.get("sha1") or not P115CacheManager._norm_preid(ctx.get("preid")):
+        return True
+    if not ctx.get("quality_source"):
+        return True
+    if str(ctx.get("type") or "").strip().lower() in ("tv", "series", "season", "episode"):
+        if ctx.get("season_number") in (None, "") or ctx.get("episode_number") in (None, ""):
+            return True
+    return False
+
+
 def _jsonish_to_obj(value, default=None):
     if value in (None, ""):
         return default
@@ -1119,6 +1137,13 @@ def _extract_cached_mediainfo_source(sha1):
         return {}
 
     raw = _jsonish_to_obj(row.get("raw_ffprobe_json"), {}) or {}
+    if _raw_has_probe_payload(raw) and _raw_needs_etk_context_backfill(raw):
+        try:
+            patched_raw = P115CacheManager.get_raw_ffprobe_cache(sha1)
+            if isinstance(patched_raw, dict):
+                raw = patched_raw
+        except Exception as e:
+            logger.debug(f"  ➜ [小号播放] 补齐现有 RAW _etk 上下文失败: sha1={sha1[:12]}..., err={e}")
     mediainfo = _jsonish_to_obj(row.get("mediainfo_json"), {}) or {}
     etk = raw.get("_etk") if isinstance(raw, dict) and isinstance(raw.get("_etk"), dict) else {}
     fmt = raw.get("format") if isinstance(raw, dict) and isinstance(raw.get("format"), dict) else {}
@@ -1147,6 +1172,48 @@ def _extract_cached_mediainfo_source(sha1):
     return {"sha1": sha1, "size": size, "preid": preid, "raw_ffprobe_json": raw}
 
 
+def _play_pool_etk_context_from_source_row(source_row):
+    source_row = source_row if isinstance(source_row, dict) else {}
+    sha1 = str(source_row.get("sha1") or "").strip().upper()
+    if re.fullmatch(r"[A-F0-9]{40}", sha1 or ""):
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    context = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1) or {}
+                    if context:
+                        return context
+        except Exception as e:
+            logger.debug(f"  ➜ [小号播放] 按 SHA1 反查 _etk 上下文失败: sha1={sha1[:12]}..., err={e}")
+
+    def _ctx_int(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(float(value))
+        except Exception:
+            return None
+
+    item_type = str(source_row.get("item_type") or "").strip()
+    media_type = str(source_row.get("media_type") or source_row.get("type") or item_type or "").strip()
+    if media_type.lower() in {"movie", "movies", "film"}:
+        media_type = "movie"
+    elif media_type.lower() in {"tv", "series", "season", "episode"}:
+        media_type = "tv"
+
+    tmdb_id = source_row.get("tmdb_id")
+    if str(item_type).strip().lower() == "episode":
+        tmdb_id = source_row.get("parent_series_tmdb_id") or tmdb_id
+
+    context = {
+        "tmdb_id": str(tmdb_id).strip() if tmdb_id not in (None, "") else None,
+        "media_type": media_type,
+        "original_language": str(source_row.get("original_language")).strip() if source_row.get("original_language") not in (None, "") else None,
+        "season_number": _ctx_int(source_row.get("season_number")),
+        "episode_number": _ctx_int(source_row.get("episode_number")),
+    }
+    return {k: v for k, v in context.items() if v not in (None, "", [], {})}
+
+
 def _backfill_source_raw_and_preid(source_row, pick_code, sha1, file_name):
     source_row = source_row if isinstance(source_row, dict) else {}
     pick_code = str(pick_code or source_row.get("pick_code") or source_row.get("pc") or "").strip()
@@ -1163,6 +1230,7 @@ def _backfill_source_raw_and_preid(source_row, pick_code, sha1, file_name):
         probe_helper = P115MediaAnalyzerMixin()
         probe_helper.client = main_client
         probe_helper.language_map = settings_db.get_setting("language_mapping") or getattr(P115MediaAnalyzerMixin, "language_map", None)
+        metadata_context = _play_pool_etk_context_from_source_row(source_row)
         file_node = {
             "pc": pick_code,
             "pick_code": pick_code,
@@ -1171,10 +1239,12 @@ def _backfill_source_raw_and_preid(source_row, pick_code, sha1, file_name):
             "sha1": sha1,
             "size": _safe_int(source_row.get("size"), 0),
         }
+        file_node.update(metadata_context)
         emby_json, raw_ffprobe = probe_helper._probe_mediainfo_with_ffprobe(
             file_node,
             sha1=sha1,
             silent_log=True,
+            metadata_context=metadata_context,
         ) or (None, None)
         if not emby_json or not raw_ffprobe:
             return ""
@@ -1269,6 +1339,8 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
             )
 
         sha1 = str(cached.get("sha1") or file_cache.get("sha1") or sha1 or "").strip().upper()
+        if re.fullmatch(r"[A-F0-9]{40}", sha1 or "") and str(cached.get("sha1") or "").strip().upper() != sha1:
+            cached = _extract_cached_mediainfo_source(sha1)
         size = _safe_int(cached.get("size"), 0) or _safe_int(file_cache.get("size"), 0) or _safe_int(asset.get("size"), 0)
         if not re.fullmatch(r"[A-F0-9]{40}", sha1 or "") or size <= 0:
             continue
@@ -1328,31 +1400,6 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
     display_name = _pick_upload_file_name(file_name, source_row.get("name"), f"{sha1 or source_pick_code}.mkv")
     if not _has_source_identity_row(source_row):
         raise RuntimeError("小号播放需要源文件 SHA1 和 size，media_metadata/p115_mediainfo_cache 未命中文件身份信息")
-    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
-        try:
-            preid = _ensure_source_preid_for_play_pool(
-                source_row,
-                sha1=sha1,
-                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
-                file_name=display_name,
-            )
-        except Exception as e:
-            logger.debug(
-                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
-                str(source_pick_code or source_row.get("pick_code") or "")[:8],
-                sha1[:12],
-                e,
-            )
-            preid = ""
-        if preid:
-            source_row["preid"] = preid
-            logger.info(
-                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
-                _display_title(display_name),
-                preid[:12],
-            )
-    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
-        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     reusable = _find_reusable_session(
         source_pick_code=source_pick_code,
@@ -1362,12 +1409,12 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
         client_key=client_key,
     )
     if reusable:
-        account = next((x for x in config.get("accounts") or [] if str(x.get("id")) == str(reusable.get("account_id"))), None)
+        reusable_account = next((x for x in config.get("accounts") or [] if str(x.get("id")) == str(reusable.get("account_id"))), None)
         account_usable = bool(
-            account
-            and account.get("enabled")
-            and _has_account_auth(account)
-            and _account_allowed_for_user(account, user_id)
+            reusable_account
+            and reusable_account.get("enabled")
+            and _has_account_auth(reusable_account)
+            and _account_allowed_for_user(reusable_account, user_id)
         )
         direct_url = str(reusable.get("direct_url") or "").strip()
         direct_url_usable = bool(direct_url and _same_user_agent(reusable.get("direct_url_user_agent"), user_agent))
@@ -1375,14 +1422,14 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             logger.debug(
                 "  ➜ [小号播放] 复用已有小号播放记录：%s | account=%s | session=%s | direct_url=%s",
                 reusable.get("file_name") or display_name,
-                account.get("alias") or account.get("id") or reusable.get("account_alias") or "-",
+                reusable_account.get("alias") or reusable_account.get("id") or reusable.get("account_alias") or "-",
                 reusable.get("session_id") or "-",
                 "yes" if direct_url_usable else "no",
             )
             return {
                 "pick_code": reusable.get("temp_pick_code") or "",
-                "client": _account_client(account),
-                "account": account,
+                "client": _account_client(reusable_account),
+                "account": reusable_account,
                 "session": reusable,
                 "direct_url": direct_url if direct_url_usable else "",
             }
@@ -1430,6 +1477,32 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             _display_user_name(user_id),
         )
         return {"pick_code": record["temp_pick_code"], "client": client, "account": account, "session": record}
+
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        try:
+            preid = _ensure_source_preid_for_play_pool(
+                source_row,
+                sha1=sha1,
+                pick_code=str(source_pick_code or source_row.get("pick_code") or "").strip(),
+                file_name=display_name,
+            )
+        except Exception as e:
+            logger.debug(
+                "  ➜ [小号播放] 源文件缺失 preid，主号现查补齐失败：pc=%s..., sha1=%s..., err=%s",
+                str(source_pick_code or source_row.get("pick_code") or "")[:8],
+                sha1[:12],
+                e,
+            )
+            preid = ""
+        if preid:
+            source_row["preid"] = preid
+            logger.info(
+                "  ➜ [小号播放] 源文件缺失 preid，已由主号现查并回填：%s -> %s...",
+                _display_title(display_name),
+                preid[:12],
+            )
+    if not re.fullmatch(r"[A-F0-9]{40}", preid or ""):
+        raise RuntimeError("小号播放需要源文件 preid，主号现查未补齐")
 
     payload = {
         "cid": temp_cid,

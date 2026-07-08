@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "10.7.71"  # 更新版本号
+APP_VERSION = "10.7.76"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -90,6 +90,15 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
 DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail', 'intercept_notify']
+APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES = "telegram_notification_templates"
+DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES = {
+    "library_new": "{{ media_icon }} {{ title }} {{ notification_title }}\n\n{{ episode_info }}\n{{ media_params }}\n⏰ *时间*: `{{ time }}`\n📝 *剧情*: {{ overview }}\n{{ review_warning }}",
+    "transfer_success": "{{ action_title }}\n{{ title }}\n\n{{ episode_info }}\n🕒 *时间*: `{{ time }}`\n🎭 *类别*: {{ type }}\n{{ rating }}\n{{ overview }}",
+    "playback": "{{ action }}\n\n👤 *用户*: `{{ user }}`\n🎬 *媒体*: {{ title }}\n📱 *设备*: `{{ device }}（{{ client }}）`\n🕒 *时间*: `{{ time }}`\n{{ overview }}",
+    "recognize_fail": "⚠️ *识别失败通知*\n\n📁 *文件名*: `{{ file_name }}`\n❓ *原因*: {{ reason }}\n🕒 *时间*: `{{ time }}`\n\n💡 _文件已被移入「未识别」目录，请前往 WebUI 手动纠错。_",
+    "intercept_notify": "⛔ *洗版拦截通知*\n\n📁 *拦截文件*: {{ file_names }}\n🚫 *原因*: {{ reason }}\n🕒 *时间*: `{{ time }}`\n\n💡 _文件未达到优先级标准，已被标记「质检不合格」。_",
+    "hdhive_checkin": "【{{ status_icon }} *{{ status_title }}*】\n📢 *执行结果*\n\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\n🕒 *时间*: `{{ time }}`\n👤 *用户*: `{{ user }}`\n📍 *模式*: {{ mode }}\n✨ *状态*: {{ status }}\n\n📊 *签到详情*\n💬 *消息*: {{ message }}\n🎁 *奖励*: {{ reward }} 积分",
+}
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)

@@ -8,7 +8,7 @@ import re
 from datetime import datetime
 from config_manager import APP_CONFIG, get_proxies_for_requests
 from handler.emby import get_emby_item_details
-from database import user_db, request_db, media_db
+from database import user_db, request_db, media_db, settings_db
 from database.connection import get_db_connection
 import constants
 from handler.tg_media_candidate import build_channel_task_payload
@@ -469,6 +469,61 @@ def _build_notice_asset_params_text(emby_item_ids: list) -> str:
 
     return ('\n'.join(lines) + '\n') if lines else ''
 
+
+def _get_notification_template(template_key: str) -> str:
+    try:
+        templates = settings_db.get_setting(constants.APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES) or {}
+    except Exception as e:
+        logger.warning(f"  ➜ 读取 Telegram 通知模板失败，已使用默认模板: {e}")
+        return ''
+    if not isinstance(templates, dict):
+        return ''
+    return str(templates.get(template_key) or '').strip()
+
+
+def _render_notification_template(template_key: str, context: dict, default_text: str) -> str:
+    template = _get_notification_template(template_key)
+    if not template:
+        return default_text
+
+    safe_context = {str(k): '' if v is None else str(v) for k, v in (context or {}).items()}
+
+    def replace_var(match):
+        key = match.group(1).strip()
+        return safe_context.get(key, '')
+
+    try:
+        rendered = re.sub(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', replace_var, template)
+        return _escape_template_markdown_parentheses(rendered)
+    except Exception as e:
+        logger.warning(f"  ➜ 渲染 Telegram 通知模板失败，已使用默认模板: {e}")
+        return default_text
+
+
+def _escape_template_markdown_parentheses(text: str) -> str:
+    """模板正文允许用户写普通括号，这里兜底转义 MarkdownV2 保留字符。"""
+    result = []
+    escaped = False
+    in_code = False
+    for char in str(text or ''):
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == '\\':
+            result.append(char)
+            escaped = True
+            continue
+        if char == '`':
+            in_code = not in_code
+            result.append(char)
+            continue
+        if not in_code and char in '()':
+            result.append('\\' + char)
+            continue
+        result.append(char)
+    return ''.join(result)
+
 # --- 通用的 Telegram 文本消息发送函数 ---
 def send_telegram_message(chat_id: str, text: str, disable_notification: bool = False, reply_markup: dict = None):
     """通用的 Telegram 文本消息发送函数，支持内联键盘。"""
@@ -657,7 +712,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             episode_info_text = _build_episode_notice_text(raw_episodes, label="🎞️ *集数*")
 
         # ★★★ 修改：将 review_warning 追加到 caption 尾部 ★★★
-        caption = (
+        default_caption = (
             f"{media_icon} *{escaped_title}* {notification_title}\n\n"
             f"{episode_info_text}"
             f"{media_param_text}"
@@ -665,6 +720,19 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             f"📝 *剧情*: {escaped_overview}"
             f"{review_warning}"
         )
+        caption = _render_notification_template('library_new', {
+            'media_icon': media_icon,
+            'title': f"*{escaped_title}*",
+            'plain_title': escape_markdown(title),
+            'notification_title': notification_title,
+            'episode_info': episode_info_text.rstrip(),
+            'media_params': media_param_text.rstrip(),
+            'time': current_time,
+            'overview': escaped_overview,
+            'review_warning': review_warning.strip(),
+            'type': escape_markdown(item_type or ''),
+            'tmdb_id': escape_markdown(tmdb_id or ''),
+        }, default_caption)
         
         # --- 5. 查询订阅者 ---
         subscribers = request_db.get_subscribers_by_tmdb_id(tmdb_id, item_type) if tmdb_id else []
@@ -805,7 +873,7 @@ def send_transfer_success_notification(task: dict):
         # ★ 区分是 115 转存还是离线下载
         action_title = "📥 *离线任务已提交*" if task.get('is_offline') else "📥 *转存成功*"
         
-        caption = (
+        default_caption = (
             f"{action_title}\n"
             f"*{escaped_title}*\n\n"
             f"{season_info}"
@@ -814,6 +882,17 @@ def send_transfer_success_notification(task: dict):
             f"{rating}"
             f"{overview_text}" 
         )
+        caption = _render_notification_template('transfer_success', {
+            'action_title': action_title,
+            'title': f"*{escaped_title}*",
+            'plain_title': escaped_title,
+            'episode_info': season_info.rstrip(),
+            'time': current_time,
+            'type': type_str,
+            'rating': rating.rstrip(),
+            'overview': overview_text.rstrip(),
+            'tmdb_id': escape_markdown(tmdb_id or ''),
+        }, default_caption)
 
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
@@ -885,14 +964,24 @@ def send_playback_notification(data: dict):
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # ★ 修改：将剧情变量追加到卡片末尾
-        caption = (
+        default_caption = (
             f"{action_str}\n\n"
             f"👤 *用户*: `{escape_markdown(user_name)}`\n"
             f"🎬 *媒体*: *{escape_markdown(display_item_name)}*\n"
-            f"📱 *设备*: `{escape_markdown(device_name)} ({escape_markdown(client_name)})`\n"
+            f"📱 *设备*: `{escape_markdown(device_name)}（{escape_markdown(client_name)}）`\n"
             f"🕒 *时间*: `{escape_markdown(current_time)}`"
             f"{overview_text}" 
         )
+        caption = _render_notification_template('playback', {
+            'action': action_str,
+            'user': escape_markdown(user_name),
+            'title': f"*{escape_markdown(display_item_name)}*",
+            'plain_title': escape_markdown(display_item_name),
+            'device': escape_markdown(device_name),
+            'client': escape_markdown(client_name),
+            'time': escape_markdown(current_time),
+            'overview': overview_text.strip(),
+        }, default_caption)
         
         # --- 收集发送目标 (频道 + 所有管理员) ---
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
@@ -933,13 +1022,18 @@ def send_unrecognized_notification(file_name: str, reason: str = "未匹配到�
         escaped_file_name = escape_markdown(file_name)
         escaped_reason = escape_markdown(reason)
 
-        caption = (
+        default_caption = (
             f"⚠️ *识别失败通知*\n\n"
             f"📁 *文件名*: `{escaped_file_name}`\n"
             f"❓ *原因*: {escaped_reason}\n"
             f"🕒 *时间*: `{current_time}`\n\n"
             f"💡 _文件已被移入「未识别」目录，请前往 WebUI 手动纠错。_"
         )
+        caption = _render_notification_template('recognize_fail', {
+            'file_name': escaped_file_name,
+            'reason': escaped_reason,
+            'time': current_time,
+        }, default_caption)
 
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
@@ -984,13 +1078,19 @@ def send_intercept_notification(file_names, reason: str):
                 name_str += f"\n_{escape_markdown(f'...等共 {count} 个文件')}_"
             name_str = f"共 {count} 个文件:\n{name_str}"
 
-        caption = (
+        default_caption = (
             f"⛔ *洗版拦截通知*\n\n"
             f"📁 *拦截文件*: {name_str}\n"
             f"🚫 *原因*: {escaped_reason}\n"
             f"🕒 *时间*: `{current_time}`\n\n"
             f"💡 _文件未达到优先级标准，已被标记「质检不合格」。_"
         )
+        caption = _render_notification_template('intercept_notify', {
+            'file_names': name_str,
+            'reason': escaped_reason,
+            'time': current_time,
+            'count': str(count),
+        }, default_caption)
 
         global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
@@ -2790,7 +2890,7 @@ def send_hdhive_checkin_notification(checkin_res: dict, is_gambler: bool, user_i
     separator = "\\-" * 24
 
     # 构造精简版 MarkdownV2 文本 
-    text = (
+    default_text = (
         f"【{status_icon} *{escape_markdown(status_title)}*】\n"
         f"📢 *执行结果*\n"
         f"{separator}\n"
@@ -2802,6 +2902,16 @@ def send_hdhive_checkin_notification(checkin_res: dict, is_gambler: bool, user_i
         f"💬 *消息*: {escape_markdown(message_text)}\n"
         f"🎁 *奖励*: {escape_markdown(reward)} 积分"
     )
+    text = _render_notification_template('hdhive_checkin', {
+        'status_icon': status_icon,
+        'status_title': escape_markdown(status_title),
+        'time': escape_markdown(current_time),
+        'user': escape_markdown(username),
+        'mode': escape_markdown(mode_text),
+        'status': escape_markdown(status_text),
+        'message': escape_markdown(message_text),
+        'reward': escape_markdown(reward),
+    }, default_text)
 
     # 发送给频道和所有管理员
     global_channel_id = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_CHANNEL_ID)
