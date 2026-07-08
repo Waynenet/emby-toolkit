@@ -2381,6 +2381,9 @@ class P115Service:
                             resp = normalizer(resp)
                         last_resp = resp
                         if _p115_success(resp):
+                            if isinstance(resp, dict):
+                                resp.setdefault('_etk_api_label', label)
+                                resp.setdefault('_etk_api_label_lower', label.lower())
                             if len(attempted) > 1:
                                 logger.info(f"  ➜ [115] {method_name} 已自动切换到 {label} 接口成功。")
                             return resp
