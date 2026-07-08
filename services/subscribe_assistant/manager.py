@@ -742,6 +742,7 @@ class SubscribeAssistantManager:
         season: int,
         info: Dict[str, Any],
         reason: str = "",
+        reset_started_at: bool = False,
     ) -> None:
         if not subscribe_id:
             return
@@ -753,7 +754,11 @@ class SubscribeAssistantManager:
             task["tmdb_id"] = str(tmdb_id or task.get("tmdb_id") or "")
             task["season"] = _safe_int(season or task.get("season")) or None
             task["full_washing"] = True
-            task["full_washing_started_at"] = float(task.get("full_washing_started_at") or time.time())
+            if reset_started_at:
+                task["full_washing_started_at"] = time.time()
+                task.pop("washing_timeout_started_at", None)
+            else:
+                task["full_washing_started_at"] = float(task.get("full_washing_started_at") or time.time())
             task["last_event"] = reason or task.get("last_event") or "full_washing"
             task["updated_at"] = time.time()
             data[str(subscribe_id)] = task
@@ -1160,6 +1165,7 @@ class SubscribeAssistantManager:
                 season,
                 payload,
                 reason="submit_full_washing",
+                reset_started_at=True,
             )
             if wash_mode == "completed_full":
                 logger.info("  ➜ [订阅助手] 《%s》S%s 已提交完结全集洗版订阅。", series_name, season)
