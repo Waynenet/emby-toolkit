@@ -162,26 +162,65 @@ def _extract_exclusion_keywords_from_filename(filename: str) -> List[str]:
     """
     if not filename:
         return []
-    # 我们需要原始大小写的文件名（不含扩展名）来进行正则匹配
-    name_part = os.path.splitext(filename)[0]
+    tail_token = extract_release_group_token_from_filename(filename)
+    tail_group = normalize_release_group_name(tail_token)
+    if tail_token and tail_group and tail_group != tail_token:
+        return [tail_group]
+    return []
 
-    for group_name, alias_list in RELEASE_GROUPS.items():
+def extract_release_groups_from_filename(filename: str) -> List[str]:
+    """Return standardized release group names matched by RELEASE_GROUPS."""
+    return _extract_exclusion_keywords_from_filename(filename)
+
+def extract_release_group_token_from_filename(filename: str) -> str:
+    """从常见命名尾部提取原始发布组别名，例如 HDSWEB、ADWeb。"""
+    text = str(filename or '').strip()
+    if not text:
+        return ''
+    name_part = os.path.splitext(text)[0].strip(' ._-')
+    if '@' in name_part:
+        token = name_part.rsplit('@', 1)[-1]
+    else:
+        token = re.split(r'\s*[·-]\s*', name_part)[-1]
+    token = str(token or '').strip(' ._-')
+    if re.search(r'[A-Za-z]', token):
+        return token
+    return ''
+
+def normalize_release_group_name(value: str) -> str:
+    """将发布组别名归一为 RELEASE_GROUPS 的标准组名；未命中时返回清洗后的原值。"""
+    text = str(value or '').strip(' ._-')
+    if not text:
+        return ''
+    text = re.sub(r'\.(?:mkv|mp4|ts|avi|mov|wmv|strm|nfo|json)$', '', text, flags=re.IGNORECASE).strip(' ._-')
+    if not text:
+        return ''
+
+    for group_name, alias_list in get_release_group_mapping().items():
+        if text.lower() == str(group_name).lower():
+            return group_name
         for alias in alias_list:
             try:
-                # 核心修复：使用 re.search 来正确评估正则表达式
-                # re.IGNORECASE 可以在匹配时忽略大小写
-                if re.search(alias, name_part, re.IGNORECASE):
-                    return [group_name]
+                if re.fullmatch(alias, text, re.IGNORECASE):
+                    return group_name
             except re.error as e:
-                # 如果正则表达式本身有语法错误，记录日志并跳过
                 logger.warning(f"RELEASE_GROUPS 中存在无效的正则表达式: '{alias}' for group '{group_name}'. Error: {e}")
                 continue
-        
-        # 保留对组名本身的检查（例如 "MTeam"）
-        if group_name.upper() in name_part.upper():
-            return [group_name]
+    return text
 
-    return []
+def describe_release_group_match(filename: str) -> Dict[str, str]:
+    """返回发布组标准名和命中的尾部别名，用于锁版判断和日志展示。"""
+    token = extract_release_group_token_from_filename(filename)
+    groups = extract_release_groups_from_filename(filename)
+    standard = groups[0] if groups else ''
+    return {
+        'group': standard,
+        'alias': token if standard else '',
+    }
+
+def format_release_group_label(group_name: str, alias: str = '') -> str:
+    group = str(group_name or '').strip(' ._-')
+    return group or str(alias or '').strip(' ._-')
 
 def get_keywords_by_group_name(group_name: str) -> List[str]:
     """
