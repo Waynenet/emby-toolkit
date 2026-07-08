@@ -806,7 +806,7 @@ def _format_shared_pool_cloud_title(item: dict) -> str:
         season > 0
         and (
             display_kind in {"pack", "season", "series"}
-            or source_kind in {"season_hub", "completed_season"}
+            or source_kind in {"season_hub", "logical_season"}
             or item.get("progress_text")
         )
     )
@@ -1127,7 +1127,7 @@ def trigger_cloud_download():
     media_type = _normalize_hdhive_media_type(raw_media_type)
     title = data.get('title') or resource.get('title') or resource.get('name') or '未知影视'
 
-    if source_type in {'shared_pool', 'shared', 'shared_center', 'center', '共享池'} or resource.get('source_kind') in {'movie', 'episode', 'completed_season', 'season_hub'}:
+    if source_type in {'shared_pool', 'shared', 'shared_center', 'center', '共享池'} or resource.get('source_kind') in {'movie', 'episode', 'logical_episode', 'logical_season', 'season_hub'}:
         if not shared_center_enabled():
             return jsonify({"success": False, "message": "共享池未启用或未配置中心地址"}), 401
 

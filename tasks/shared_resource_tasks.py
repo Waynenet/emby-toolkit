@@ -3048,7 +3048,12 @@ def _event_transfer_lease_identity(event: Dict[str, Any]) -> Dict[str, str]:
     source_id = normalized.get('source_id') or ''
     sha1 = _norm_sha1(payload.get('sha1'))
     event_type = str((event or {}).get('event_type') or payload.get('event_type') or '').strip()
-    if source_kind not in {'movie', 'episode', 'logical_episode', 'logical_season'} or not source_id:
+    # logical_season is only a package shell. Its actionable holders are the
+    # expanded logical_episode assets, so requesting a lease for the shell can
+    # be rejected as no_available_holder even when the season has usable files.
+    if source_kind == 'logical_season':
+        return {}
+    if source_kind not in {'movie', 'episode', 'logical_episode'} or not source_id:
         return {}
     if event_type in {COMPLETED_SEASON_SHARE_CREATE_EVENT_TYPE, LOGICAL_SEASON_SHARE_CREATE_EVENT_TYPE, PRO_QUOTA_AUTH_EVENT_TYPE}:
         return {}
