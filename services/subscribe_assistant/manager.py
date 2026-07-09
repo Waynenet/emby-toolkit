@@ -43,10 +43,19 @@ MANUAL_CHANGE_GRACE_SECONDS = 3600
 
 
 def get_config() -> AssistantConfig:
-    cfg = from_watchlist_config(settings_db.get_setting("watchlist_config") or {})
+    watchlist_config = settings_db.get_setting("watchlist_config") or {}
+    mp_config = settings_db.get_setting("mp_config") or {}
+    assistant = mp_config.get("subscribe_assistant")
+    if not isinstance(assistant, dict):
+        assistant = watchlist_config.get("subscribe_assistant")
+    cfg_source = {
+        "auto_pending": watchlist_config.get("auto_pending") if isinstance(watchlist_config, dict) else {},
+        "auto_pause": watchlist_config.get("auto_pause") if isinstance(watchlist_config, dict) else 0,
+        "subscribe_assistant": assistant if isinstance(assistant, dict) else {},
+    }
+    cfg = from_watchlist_config(cfg_source)
     strategy = settings_db.get_setting("subscription_strategy_config") or {}
     sources = strategy.get("subscription_sources")
-    mp_config = settings_db.get_setting("mp_config") or {}
     if not mp_config.get("moviepilot_url") or (isinstance(sources, list) and "mp" not in sources):
         cfg.enabled = False
     return cfg

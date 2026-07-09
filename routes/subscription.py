@@ -10,6 +10,7 @@ from handler.tg_userbot import TGUserBotManager, tg_task_queue
 from handler.tg_media_candidate import build_channel_task_payload
 from handler.shared_center_client import SharedCenterClient, shared_center_enabled
 from handler.shared_subscription_service import consume_center_source_payload
+from services.subscribe_assistant.config import default_assistant_config_dict
 import threading
 
 subscription_bp = Blueprint('subscription_bp', __name__, url_prefix='/api/subscription')
@@ -53,21 +54,44 @@ def get_subscription_status():
 def get_mp_config():
     """获取 MoviePilot 配置"""
     cfg = settings_db.get_setting('mp_config') or {}
+    watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
+    assistant_cfg = cfg.get('subscribe_assistant')
+    if not isinstance(assistant_cfg, dict):
+        assistant_cfg = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg, dict) else {}
     # 提供默认值
     default_cfg = {
         'moviepilot_url': '', 'moviepilot_username': '', 'moviepilot_password': '',
         'moviepilot_recognition': False,
-        'link_delete_transfer_history': False,
-        'link_delete_download_files': False,
         'resubscribe_daily_cap': 10, 'resubscribe_delay_seconds': 2.0,
-        'movie_protection_days': 180,
         'movie_search_window_days': 1,
         'movie_pause_days': 7,
         'delay_subscription_days': 0,
-        'timeout_revive_days': 0,
-        'download_timeout_hours': 0
+        'series_version_lock_mode': 'off',
+        'series_version_lock_decay_hours': 48,
+        'subscribe_assistant': default_assistant_config_dict(),
     }
+    if isinstance(watchlist_cfg, dict):
+        default_cfg['series_version_lock_mode'] = watchlist_cfg.get(
+            'series_version_lock_mode',
+            default_cfg['series_version_lock_mode'],
+        )
+        default_cfg['series_version_lock_decay_hours'] = watchlist_cfg.get(
+            'series_version_lock_decay_hours',
+            default_cfg['series_version_lock_decay_hours'],
+        )
     default_cfg.update(cfg)
+    for removed_key in (
+        'link_delete_transfer_history',
+        'link_delete_download_files',
+        'timeout_revive_days',
+        'download_timeout_hours',
+        'movie_protection_days',
+    ):
+        default_cfg.pop(removed_key, None)
+    default_cfg['subscribe_assistant'] = {
+        **default_assistant_config_dict(),
+        **(assistant_cfg if isinstance(assistant_cfg, dict) else {}),
+    }
     return jsonify({"success": True, "data": default_cfg})
 
 @subscription_bp.route('/mp/config', methods=['POST'])
@@ -75,6 +99,28 @@ def get_mp_config():
 def save_mp_config():
     """保存 MoviePilot 配置"""
     new_cfg = request.json
+    if not isinstance(new_cfg, dict):
+        return jsonify({"success": False, "message": "配置格式错误"}), 400
+    for removed_key in (
+        'link_delete_transfer_history',
+        'link_delete_download_files',
+        'timeout_revive_days',
+        'download_timeout_hours',
+        'movie_protection_days',
+    ):
+        new_cfg.pop(removed_key, None)
+    assistant = new_cfg.get('subscribe_assistant')
+    if isinstance(assistant, dict):
+        for stale_key in (
+            "notify",
+            "best_version_backfill_enabled",
+            "recognition_guard_enabled",
+            "recognition_guard_mode",
+        ):
+            assistant.pop(stale_key, None)
+        new_cfg['subscribe_assistant'] = {**default_assistant_config_dict(), **assistant}
+    else:
+        new_cfg['subscribe_assistant'] = default_assistant_config_dict()
     settings_db.save_setting('mp_config', new_cfg)
     
     return jsonify({"success": True, "message": "MoviePilot 配置已保存生效"})
@@ -118,6 +164,7 @@ def _has_hdhive_scope(relay_status, scope_name):
         return scope_name in scope_text.split()
 
     return False
+
 
 def _get_hdhive_config():
     cfg = settings_db.get_setting("hdhive_config") or {}
@@ -292,6 +339,67 @@ def clear_hdhive_authorization():
     })
 
 
+@subscription_bp.route('/hdhive/subscriptions', methods=['GET', 'POST'])
+@admin_required
+def handle_hdhive_subscriptions():
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    if request.method == "GET":
+        res = client.list_subscriptions(
+            target_type=request.args.get("target_type") or None,
+            status=request.args.get("status") or "active",
+            q=request.args.get("q") or None,
+            page=_safe_int(request.args.get("page"), default=1, min_value=1),
+            page_size=_safe_int(request.args.get("page_size"), default=100, min_value=1, max_value=200),
+        )
+        return jsonify(res), 200 if res.get("success") else 500
+
+    data = request.json or {}
+    target_type = str(data.get("target_type") or "").strip()
+    target_key = str(data.get("target_key") or "").strip()
+    target_id = data.get("target_id")
+    media_filters = data.get("media_filters")
+
+    if target_type not in {"publisher", "media_resource"}:
+        return jsonify({"success": False, "message": "订阅类型仅支持发布者或资源"}), 400
+    if not target_key or target_id in (None, ""):
+        return jsonify({"success": False, "message": "缺少订阅目标信息"}), 400
+    if media_filters is not None and not isinstance(media_filters, dict):
+        return jsonify({"success": False, "message": "media_filters 必须是对象"}), 400
+
+    res = client.create_subscription(target_type, target_id, target_key, media_filters=media_filters)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
+@subscription_bp.route('/hdhive/subscriptions/check', methods=['GET'])
+@admin_required
+def check_hdhive_subscription():
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    target_type = str(request.args.get("target_type") or "").strip()
+    target_key = str(request.args.get("target_key") or "").strip()
+    if target_type not in {"publisher", "media_resource"} or not target_key:
+        return jsonify({"success": False, "message": "缺少订阅目标信息"}), 400
+
+    res = client.check_subscription(target_type, target_key)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
+@subscription_bp.route('/hdhive/subscriptions/<int:subscription_id>', methods=['DELETE'])
+@admin_required
+def delete_hdhive_subscription(subscription_id):
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    res = client.delete_subscription(subscription_id)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
 
 def _normalize_hdhive_media_type(media_type, item_type=None):
     """影巢 OpenAPI 只接受 movie / tv。
@@ -334,6 +442,21 @@ def _normalize_hdhive_resource(resource):
     item["source_type"] = "hdhive"
     item["source_name"] = "影巢"
     item["_cloud_source"] = "hdhive"
+    user = item.get("user") or {}
+    if isinstance(user, dict):
+        publisher_name = (
+            user.get("nickname")
+            or user.get("name")
+            or user.get("username")
+            or user.get("display_name")
+        )
+        publisher_id = user.get("id") or user.get("user_id")
+        if publisher_name and not item.get("publisher_name"):
+            item["publisher_name"] = publisher_name
+        if publisher_id is not None and not item.get("publisher_id"):
+            item["publisher_id"] = publisher_id
+        if publisher_id is not None and not item.get("publisher_target_key"):
+            item["publisher_target_key"] = f"publisher:{publisher_id}"
     if item.get("slug"):
         item["unique_id"] = f"hdhive:{item.get('slug')}"
     return item
@@ -806,7 +929,7 @@ def _format_shared_pool_cloud_title(item: dict) -> str:
         season > 0
         and (
             display_kind in {"pack", "season", "series"}
-            or source_kind in {"season_hub", "completed_season"}
+            or source_kind in {"season_hub", "logical_season"}
             or item.get("progress_text")
         )
     )
@@ -1127,7 +1250,7 @@ def trigger_cloud_download():
     media_type = _normalize_hdhive_media_type(raw_media_type)
     title = data.get('title') or resource.get('title') or resource.get('name') or '未知影视'
 
-    if source_type in {'shared_pool', 'shared', 'shared_center', 'center', '共享池'} or resource.get('source_kind') in {'movie', 'episode', 'completed_season', 'season_hub'}:
+    if source_type in {'shared_pool', 'shared', 'shared_center', 'center', '共享池'} or resource.get('source_kind') in {'movie', 'episode', 'logical_episode', 'logical_season', 'season_hub'}:
         if not shared_center_enabled():
             return jsonify({"success": False, "message": "共享池未启用或未配置中心地址"}), 401
 
@@ -1171,7 +1294,7 @@ def trigger_cloud_download():
 
         threading.Thread(
             target=task_download_from_hdhive,
-            args=(None, slug, tmdb_id, media_type, title)
+            args=(None, slug, tmdb_id, media_type, title, resource)
         ).start()
         return jsonify({"success": True, "message": "已向 115 发送影巢资源转存指令，后台正在处理！"})
 
@@ -1250,7 +1373,7 @@ def trigger_hdhive_download():
     # task_download_from_hdhive 的第一个参数保留兼容旧函数签名，新版 HDHiveClient 会忽略该参数。
     threading.Thread(
         target=task_download_from_hdhive,
-        args=(None, slug, tmdb_id, media_type, title)
+        args=(None, slug, tmdb_id, media_type, title, data)
     ).start()
     return jsonify({"success": True, "message": "已向 115 发送转存指令，后台正在处理！"})
 

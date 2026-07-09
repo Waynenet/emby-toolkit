@@ -103,24 +103,6 @@ def _extract_share_code_from_text(text):
     return match.group(1).lower() if match else ""
 
 
-def _extract_hdhive_unlock_points(text):
-    text = str(text or "")
-    if "hdhive.com/resource/" not in text.lower():
-        return 0
-
-    patterns = (
-        r"(?:\u6263\u9664|\u9700|\u9700\u8981|\u6d88\u8017)\s*\u79ef\u5206\s*[:\uff1a]?\s*(\d+)",
-        r"(\d+)\s*\u79ef\u5206",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            try:
-                return int(match.group(1) or 0)
-            except Exception:
-                return 0
-    return 0
-
 def _extract_message_lookup_key(source_chat_id="", source_username="", message_id=None):
     message_id = str(message_id or "").strip()
     if not message_id:
@@ -557,7 +539,8 @@ def build_tg_media_candidate(
             urls = [inline_link] + urls
 
     for url in urls:
-        if "115.com/s/" in url or "115cdn.com/s/" in url or "hdhive.com/resource/" in url:
+        lower_url = url.lower()
+        if "115.com/s/" in lower_url or "115cdn.com/s/" in lower_url or "hdhive.com/resource/" in lower_url:
             target_link = url
             pwd_in_url = apply_channel_regex(url, custom_regex.get("password", []), DEFAULT_TG_REGEX.get("password_url", []), chat_username, chat_id)
             if pwd_in_url:
@@ -663,7 +646,7 @@ def build_tg_media_candidate(
         "resolution": resolution or "未知",
         "share_size": share_size,
         "pan_type": "115" if target_link else "离线",
-        "unlock_points": _extract_hdhive_unlock_points(text),
+        "unlock_points": 0,
         "source_channel": chat_title or chat_username or chat_id,
         "source_username": chat_username,
         "source_chat_id": str(chat_id or ""),
@@ -693,7 +676,7 @@ def build_tg_media_candidate(
     }
 
 
-def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matched=False, is_subscribe=True, title_override=None, tmdb_id_override=None, media_type_override=None, year_override=None):
+def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matched=False, is_subscribe=True, is_hdhive_push=False, title_override=None, tmdb_id_override=None, media_type_override=None, year_override=None):
     candidate = candidate or {}
     media_type = media_type_override or candidate.get("media_type") or candidate.get("item_type") or "movie"
     title = title_override or candidate.get("identify_title") or candidate.get("clean_title") or candidate.get("title") or candidate.get("name")
@@ -714,6 +697,7 @@ def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matc
         "is_brainless": bool(is_brainless),
         "is_keyword_matched": bool(is_keyword_matched),
         "is_subscribe": bool(is_subscribe),
+        "is_hdhive_push": bool(is_hdhive_push),
         "candidate": copy.deepcopy(candidate),
     }
     return payload

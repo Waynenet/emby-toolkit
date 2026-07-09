@@ -1339,7 +1339,7 @@ def task_full_sync_strm_and_subs(processor=None):
 
             return rel_dir
 
-        # 内存路径推导函数 (★ 终极修复版：DB缓存 + API动态溯源)
+        # 内存路径推导函数：优先使用本次扫描/DB 缓存，远端查询只做缺失兜底。
         def resolve_local_dir(pid, target_cid):
             pid = str(pid)
             # 1. 如果文件直接在分类根目录下
@@ -1354,25 +1354,12 @@ def task_full_sync_strm_and_subs(processor=None):
             if pid in dynamic_path_cache:
                 return dynamic_path_cache[pid]
 
-            # 4. 优先向 115 请求真实路径，避免旧 p115_filesystem_cache 把 STRM 继续生成到脏路径
-            try:
-                dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-                path_nodes = dir_info.get('path', [])
-                if path_nodes:
-                    base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
-                    resolved_path = remember_ancestor_dirs(path_nodes, target_cid, base_cat_path)
-                    if resolved_path:
-                        dynamic_path_cache[pid] = resolved_path # 存入内存池，同目录文件不再请求
-                        logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
-                        return resolved_path
-            except Exception as e:
-                logger.debug(f"  ➜ 动态查询目录路径失败 (pid: {pid}): {e}")
-
-            # 5. 远端路径不可用时，才使用数据库缓存兜底
+            # 4. 优先使用数据库缓存，避免每个视频都额外请求 115 推导父目录路径。
             if pid in dir_cache and dir_cache[pid].get('local_path'):
+                dynamic_path_cache[pid] = dir_cache[pid]['local_path']
                 return dir_cache[pid]['local_path']
-                
-            # 6. 最后尝试在数据库缓存中向上追溯
+
+            # 5. 尝试在数据库缓存中向上追溯
             parts = []
             curr = pid
             while curr and curr in dir_cache:
@@ -1385,6 +1372,20 @@ def task_full_sync_strm_and_subs(processor=None):
                     resolved_path = os.path.join(*parts)
                     dynamic_path_cache[pid] = resolved_path # 存入内存池
                     return resolved_path
+
+            # 6. 缓存缺失时才向 115 请求真实路径兜底。
+            try:
+                dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                path_nodes = dir_info.get('path', [])
+                if path_nodes:
+                    base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
+                    resolved_path = remember_ancestor_dirs(path_nodes, target_cid, base_cat_path)
+                    if resolved_path:
+                        dynamic_path_cache[pid] = resolved_path # 存入内存池，同目录文件不再请求
+                        logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
+                        return resolved_path
+            except Exception as e:
+                logger.debug(f"  ➜ 动态查询目录路径失败 (pid: {pid}): {e}")
 
             return None
 
@@ -1638,60 +1639,6 @@ def task_full_sync_strm_and_subs(processor=None):
 
                     valid_local_files.add(os.path.abspath(sub_path))
 
-        def run_cookie_fast_sync(target_cid, category_name, progress):
-            raw_p115_client = getattr(client, 'raw_client', None)
-            if raw_p115_client is None and hasattr(client, 'native_client'):
-                raw_p115_client = client.native_client()
-            if not raw_p115_client:
-                return None
-
-            try:
-                from p115client.tool.iterdir import iter_files_with_path_skim
-            except Exception as e:
-                logger.debug(f"  ➜ Cookie 极速遍历组件不可用，改用 OpenAPI 拉取：{e}")
-                return None
-
-            try:
-                update_progress(progress, f"  ➜ 正在使用 Cookie 极速遍历分类 [{category_name}] ...")
-                iterator = iter_files_with_path_skim(
-                    raw_p115_client,
-                    int(target_cid),
-                    with_ancestors=True,
-                    max_workers=2,
-                )
-
-                count = 0
-                for info in iterator:
-                    if processor and getattr(processor, 'is_stop_requested', lambda: False)():
-                        return 0
-                    fid = info.get('fid') or info.get('file_id') or info.get('id')
-                    is_dir = info.get('is_dir') or info.get('ico') == 'folder' or str(info.get('fc', '')) == '0'
-                    if not fid or is_dir:
-                        continue
-
-                    rel_dir = remember_ancestor_dirs(
-                        info.get('ancestors') or info.get('paths') or info.get('path'),
-                        target_cid,
-                        category_name,
-                        fid,
-                    )
-                    if rel_dir:
-                        info['_etk_rel_dir'] = rel_dir
-
-                    process_full_sync_items((info,), target_cid, category_name)
-                    count += 1
-                    if count % 500 == 0:
-                        update_progress(progress, f"  ➜ [{category_name}] Cookie 极速遍历中，已处理 {count} 个文件...")
-
-                return count
-            except Exception as e:
-                text = str(e)
-                if '405' in text or '403' in text or 'Method Not Allowed' in text:
-                    logger.warning("  ➜ Cookie 极速遍历被 115 拒绝，自动改用 OpenAPI 慢速拉取。")
-                else:
-                    logger.warning(f"  ➜ Cookie 极速遍历失败，自动改用 OpenAPI 慢速拉取：{e}")
-                return None
-
         # =================================================================
         # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
         # =================================================================
@@ -1711,17 +1658,7 @@ def task_full_sync_strm_and_subs(processor=None):
             category_name = cid_to_rel_path.get(target_cid, "未知分类")
             base_prog = 10 + int((idx / total_targets) * 80)
             target_invalid = False
-            fast_count = run_cookie_fast_sync(target_cid, category_name, base_prog)
-            if processor and getattr(processor, 'is_stop_requested', lambda: False)():
-                return
-            if fast_count:
-                update_progress(base_prog, f"  ➜ [{category_name}] Cookie 极速遍历完成：{fast_count} 个文件")
-                successful_target_cids.add(target_cid)
-                continue
-            if fast_count == 0:
-                logger.warning(f"  ➜ [{category_name}] Cookie 极速遍历没有返回文件，改用 OpenAPI 复查。")
-
-            update_progress(base_prog, f"  ➜ 正在使用 OpenAPI 拉取分类 [{category_name}] 下的所有文件...")
+            update_progress(base_prog, f"  ➜ 正在拉取分类 [{category_name}] 下的所有文件...")
             
             for f_type in fetch_types:
                 type_name = "视频" if f_type == 4 else "文档/字幕"
@@ -1735,13 +1672,14 @@ def task_full_sync_strm_and_subs(processor=None):
                     try:
                         # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
                         res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
+                        api_label = res.get('_etk_api_label') or '115'
                         if not res.get('state') and res.get('code'):
                             logger.error(f"  ➜ API 返回异常状态 (可能触发流控): {res}")
                             sync_has_errors = True
                             break
                         if not _p115_response_path_contains_cid(res, target_cid):
                             logger.warning(
-                                f"  ➜ [{category_name}] OpenAPI 返回路径不包含目标 cid={target_cid}，"
+                                f"  ➜ [{category_name}] {api_label} 返回路径不包含目标 cid={target_cid}，"
                                 "可能远端目录已删除或本地缓存过期，已跳过该分类的兜底同步。"
                             )
                             sync_has_errors = True
@@ -1750,7 +1688,7 @@ def task_full_sync_strm_and_subs(processor=None):
                         data = res.get('data', [])
                         if not data: break
                         
-                        logger.info(f"  ➜ [{category_name}] - [{type_name}] 获取第 {page} 页 ({len(data)} 个文件)...")
+                        logger.info(f"  ➜ [{category_name}] - [{type_name}] 使用 {api_label} 获取第 {page} 页 ({len(data)} 个文件)...")
                         process_full_sync_items(data, target_cid, category_name)
 
                         if len(data) < limit: break

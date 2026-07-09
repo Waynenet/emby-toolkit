@@ -111,6 +111,10 @@
                     来源：{{ res.source_channel }}
                   </n-tag>
 
+                  <n-tag size="small" type="info" :bordered="false" v-if="formatPublisher(res)">
+                    发布者：{{ formatPublisher(res) }}
+                  </n-tag>
+
                   <n-tag size="small" type="info" :bordered="false" v-if="res._season_match_label">
                     {{ res._season_match_label }}
                   </n-tag>
@@ -133,6 +137,7 @@
                   >
                     {{ tag.label }}
                   </n-tag>
+
                 </n-space>
 
                 <div v-if="isSharedPoolGroup(res)" class="cloud-version-list">
@@ -217,15 +222,18 @@
                   <span v-else>需 {{ res.unlock_points }} 积分</span>
                 </div>
 
-                <n-button
-                  type="primary"
-                  :color="isSharedPool(res) ? sharedPoolActionText(res).color : (isChannel(res) ? '#2080f0' : '#f0a020')"
-                  size="small"
-                  @click="download(res)"
-                  :loading="downloadingKey === getResourceKey(res)"
-                >
-                  {{ isSharedPool(res) ? sharedPoolActionText(res).button : (isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存') }}
-                </n-button>
+                <n-space vertical size="small" align="end">
+                  <n-button
+                    type="primary"
+                    :color="isSharedPool(res) ? sharedPoolActionText(res).color : (isChannel(res) ? '#2080f0' : '#f0a020')"
+                    size="small"
+                    @click="download(res)"
+                    :loading="downloadingKey === getResourceKey(res)"
+                  >
+                    {{ isSharedPool(res) ? sharedPoolActionText(res).button : (isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存') }}
+                  </n-button>
+
+                </n-space>
               </div>
             </div>
           </n-card>
@@ -271,6 +279,7 @@ const loading = ref(false);
 const resources = ref([]);
 const stats = ref(null);
 const downloadingKey = ref(null);
+const subscribingKey = ref(null);
 const sourceFilter = ref('all');
 const searchTitle = ref('');
 
@@ -574,6 +583,28 @@ const formatSource = (resource) => {
   return normalize(values);
 };
 
+const formatPublisher = (resource) => {
+  const direct = firstCloudValue(resource, ['publisher_name', 'publisher', 'author_name', 'author']);
+  if (direct) return String(direct).trim();
+
+  const user = resource?.user;
+  if (user && typeof user === 'object') {
+    return String(user.nickname || user.name || user.username || user.display_name || '').trim();
+  }
+
+  return '';
+};
+
+const getPublisherTargetId = (resource) => {
+  const direct = resource?.publisher_id || resource?.publisher_user_id || resource?.author_id;
+  if (direct !== undefined && direct !== null && String(direct).trim() !== '') return direct;
+  const user = resource?.user;
+  if (user && typeof user === 'object') {
+    return user.id || user.user_id || user.uid || '';
+  }
+  return '';
+};
+
 const formatCodec = (resource) => {
   const text = String(firstCloudValue(resource, ['video_codec', 'codec', 'codec_display']) || '').trim();
   if (!text || ['未知', 'unknown'].includes(text.toLowerCase())) return '';
@@ -821,6 +852,7 @@ const download = async (resource) => {
     downloadingKey.value = null;
   }
 };
+
 </script>
 
 <style scoped>

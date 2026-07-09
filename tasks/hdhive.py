@@ -12,7 +12,7 @@ import config_manager
 
 logger = logging.getLogger(__name__)
 
-def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=None, title=None):
+def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=None, title=None, hdhive_resource=None):
     """
     核心任务：从影巢解锁 -> 转存 115 -> 搜索真实ID -> 精准整理
     """
@@ -37,7 +37,7 @@ def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=
     if not unlock_data:
         logger.error("  ➜ 影巢资源解锁失败，可能积分不足或资源已失效。")
         return False
-        
+
     share_url = unlock_data.get("url") or ""
     full_url = unlock_data.get("full_url") or ""
     

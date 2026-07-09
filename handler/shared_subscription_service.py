@@ -2186,31 +2186,6 @@ def _logical_season_group_id_from_payload(payload: Dict[str, Any], fallback: Any
     return ''
 
 
-def _legacy_completed_source_should_use_logical(payload: Dict[str, Any], source_id: str = '') -> str:
-    payload = payload if isinstance(payload, dict) else {}
-    group_id = _logical_season_group_id_from_payload(payload, source_id)
-    if not group_id:
-        return ''
-    if _looks_like_logical_season_group_id(group_id):
-        return group_id
-    logical_group = payload.get('logical_group') if isinstance(payload.get('logical_group'), dict) else {}
-    channel = _completed_share_channel_from_payload(payload) if '_completed_share_channel_from_payload' in globals() else {}
-    channel = channel if isinstance(channel, dict) else {}
-    raw_channel = channel.get('raw_json') if isinstance(channel.get('raw_json'), dict) else {}
-    has_logical_marker = bool(
-        payload.get('logical_pool_complete')
-        or payload.get('pool_complete')
-        or payload.get('logical_shadow_only')
-        or payload.get('logical_import_available')
-        or payload.get('logical_group_id')
-        or payload.get('group_id')
-        or logical_group
-        or isinstance(payload.get('best_asset_map'), dict)
-        or str(channel.get('share_kind') or raw_channel.get('share_kind') or '').strip() == 'logical_season'
-    )
-    return group_id if has_logical_marker else ''
-
-
 def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[str, str, List[Dict[str, Any]]]:
     payload = _event_payload(event)
     source_kind = _normalize_source_kind(event.get('source_kind') or payload.get('source_kind') or '')
@@ -2230,26 +2205,8 @@ def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[s
                 payload.get('kind') or payload.get('item_type') or payload.get('display_type') or ''
             )
 
-    logical_group_id = ''
-    if source_kind == 'completed_season':
-        logical_group_id = _legacy_completed_source_should_use_logical(payload, source_id)
-        if logical_group_id:
-            old_source_id = source_id
-            source_kind = 'logical_season'
-            source_id = logical_group_id
-            payload['source_kind'] = 'logical_season'
-            payload['source_id'] = source_id
-            payload['source_ref_id'] = source_id
-            try:
-                event['source_kind'] = 'logical_season'
-                event['source_ref_id'] = source_id
-                event['payload_json'] = payload
-            except Exception:
-                pass
-            logger.info(
-                f"  ➜ [共享资源] 已将旧 completed_season 转存事件改道为逻辑季包："
-                f"{old_source_id or '-'} -> {source_id}"
-            )
+    if source_kind in ('completed_season', 'deprecated_completed_season'):
+        raise RuntimeError('旧 completed_season 已停用，请删除旧共享源并重新登记逻辑季包。')
 
     # 逻辑季包展开出来的单集资产：前端直接提交 logical_episode + asset_id + rapid 参数，
     # 中心端 lease/sign/report 均按 shared_episode_assets.asset_id 结算；本机只负责执行单文件秒传。
@@ -2321,47 +2278,6 @@ def _event_sources(event: Dict[str, Any], client: SharedCenterClient) -> Tuple[s
                 rapid_meta['pick_code'] = f.get('pick_code')
             f['rapid_meta_json'] = rapid_meta
             files.append(f)
-        return source_kind, source_id, files
-
-    # display-list 里的 Pack 如果是公共连载季壳，通常只有 hub_id，没有 completed source_id。
-    # 这种壳不能走 completed_season_manifest，否则会拿不到 7-8 这类 children 分集。
-    if source_kind == 'completed_season' and payload.get('hub_id') and not payload.get('source_id'):
-        source_kind = 'season_hub'
-        source_id = str(payload.get('hub_id') or source_id or '').strip()
-
-    # 兼容中心返回的 completed season 包：列表接口只给源摘要，真正文件清单要再取 manifest。
-    # 如果 manifest 为空，不能再显示“秒传完成 0/0”，这属于 manifest 缺失/旧数据，需要重新登记该季。
-    if source_kind == 'completed_season':
-        # 新中心已停用旧 completed-season manifest。能识别为逻辑季的旧事件必须在上面改道；
-        # 到这里仍是 completed_season，直接给业务错误，避免抛 RuntimeError 打 500。
-        method = getattr(client, 'completed_season_manifest', None)
-        if not callable(method):
-            raise RuntimeError('旧 completed-season manifest 已停用，当前资源缺少 logical_season group_id，请刷新中心资源库后重试。')
-        try:
-            manifest = method(source_id)
-        except RuntimeError as e:
-            raise RuntimeError('旧 completed-season manifest 已停用，当前资源没有可识别的 logical_season group_id，请刷新中心资源库后重试。') from e
-        manifest_item = (manifest.get('item') if isinstance(manifest, dict) and isinstance(manifest.get('item'), dict) else {}) or {}
-        source_payload = {**manifest_item, **payload}
-        files = (manifest.get('files') or manifest.get('items') or []) if isinstance(manifest, dict) else []
-        if not files and isinstance(manifest, dict):
-            data = manifest.get('data') if isinstance(manifest.get('data'), dict) else {}
-            files = data.get('files') or data.get('items') or []
-        if not files and isinstance(payload.get('files'), list):
-            files = payload.get('files') or []
-        files = [dict(f or {}) for f in files if isinstance(f, dict)]
-        for f in files:
-            f.setdefault('tmdb_id', source_payload.get('tmdb_id'))
-            f.setdefault('item_type', 'Episode')
-            f.setdefault('season_number', source_payload.get('season_number'))
-            f.setdefault('title', source_payload.get('title'))
-            f.setdefault('release_year', source_payload.get('release_year'))
-            f.setdefault('is_clean_version', bool(source_payload.get('is_clean_version')))
-            f.setdefault('clean_version_confidence', source_payload.get('clean_version_confidence'))
-            f.setdefault('clean_version_meta_json', source_payload.get('clean_version_meta_json') or {})
-            f.setdefault('source_kind', 'completed_season')
-            f.setdefault('source_id', source_id)
-            f.setdefault('source_ref_id', source_id)
         return source_kind, source_id, files
 
     # 公共连载季包：中心 display-list 返回 season_hub 壳，真正可秒传文件在 pack_items/children 中。
@@ -3408,6 +3324,8 @@ def _wait_rapid_transfer_lease_for_fallback(
         return {'ok': True, 'skipped': True, 'reason': 'lease_already_present', 'lease_id': existing}
     source_kind = _normalize_source_kind(source_kind)
     source_id = str(source_id or '').strip()
+    if source_kind == 'logical_season':
+        return {'ok': True, 'skipped': True, 'reason': 'logical_season_shell_lease_skipped'}
     if source_kind not in ('movie', 'episode', 'logical_season') or not source_id:
         return {'ok': True, 'skipped': True, 'reason': 'unsupported_source'}
 
@@ -3979,7 +3897,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 'abort_transfer': bool(result.get('abort_transfer')),
             }
             if result.get('no_retry') or result.get('abort_transfer'):
-                if not partial_missing_episode_transfer:
+                if not partial_missing_episode_transfer and source_kind != 'logical_season':
                     abort_event.set()
                 logger.warning(
                     f"  ➜ [共享资源] 中心已终止本次秒传：{file_label}，"
@@ -4006,7 +3924,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                     success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
                 else:
                     errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
-                    if (item.get('error') or {}).get('abort_transfer'):
+                    if source_kind != 'logical_season' and (item.get('error') or {}).get('abort_transfer'):
                         abort_event.set()
                         for other in future_map:
                             if other is not future:
@@ -4022,7 +3940,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             else:
                 errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
                 if (item.get('error') or {}).get('abort_transfer'):
-                    if not partial_missing_episode_transfer:
+                    if not partial_missing_episode_transfer and source_kind != 'logical_season':
                         abort_event.set()
                         break
 
@@ -4031,9 +3949,8 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     skipped_report_sources = []
     cleanup_result = {}
 
-    # 季包必须全量成功。任何一集由中心判定不可签名/不可秒传，整季放弃入库，删除临时目录，
-    # 不上报 success，不触发整理，避免 8/9 半季污染媒体库。消费端贡献点也不会被扣除。
-    if is_package_transfer and ok_count != len(files):
+    # 公共季包仍按整包事务处理；逻辑季按分集尽力秒传，成功几集保留几集，不回滚。
+    if is_package_transfer and source_kind != 'logical_season' and ok_count != len(files):
         message = f'季包秒传不完整，已放弃整季入库：成功 {ok_count}/{len(files)}，失败 {len(errors)} 个文件'
         cleanup_result = _cleanup_rapid_temp_dir(rapid_target, reason=message)
         fail_report = _report_transfer_failed_safely(
@@ -4072,17 +3989,14 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     # 只有 webhook 入库后触发自动共享登记，才代表本机真正具备可签名能力。
     if ok_count:
         report_groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        if is_package_transfer and source_kind == 'logical_season' and ok_count == len(files):
-            report_groups[(source_kind, source_id)] = {'count': len(files), 'file': (files[0] if files else {})}
-        else:
-            for report_kind, report_id, report_file in success_sources:
-                report_kind = _normalize_source_kind(report_kind)
-                if report_kind not in ('movie', 'episode', 'logical_episode', 'logical_season') or not report_id:
-                    skipped_report_sources.append({'source_kind': report_kind, 'source_id': report_id, 'file': (report_file or {}).get('file_name') or (report_file or {}).get('sha1')})
-                    continue
-                key = (report_kind, report_id)
-                group = report_groups.setdefault(key, {'count': 0, 'file': report_file})
-                group['count'] += 1
+        for report_kind, report_id, report_file in success_sources:
+            report_kind = _normalize_source_kind(report_kind)
+            if report_kind not in ('movie', 'episode', 'logical_episode', 'logical_season') or not report_id:
+                skipped_report_sources.append({'source_kind': report_kind, 'source_id': report_id, 'file': (report_file or {}).get('file_name') or (report_file or {}).get('sha1')})
+                continue
+            key = (report_kind, report_id)
+            group = report_groups.setdefault(key, {'count': 0, 'file': report_file})
+            group['count'] += 1
         if not report_groups:
             logger.warning(
                 f"  ➜ [共享资源] 秒传已成功但没有可上报的中心源，热度不会增加："
@@ -4800,7 +4714,7 @@ def _consume_sources(
             payload['_consume_context'] = consume_context
         if missing_episode_numbers:
             # 统一订阅已经知道缺集时，必须把缺集号透传到消费层；
-            # season_hub / completed_season 会在 RAW/洗版预检前按集号裁剪。
+            # season_hub / logical_season 会在 RAW/洗版预检前按集号裁剪。
             payload['_requested_missing_episode_numbers'] = missing_episode_numbers
         event_source_kind = payload.get('source_kind') or payload.get('kind')
         if not event_source_kind and (payload.get('hub_id') or payload.get('is_season_hub')):
@@ -4808,9 +4722,6 @@ def _consume_sources(
         if not event_source_kind:
             event_source_kind = payload.get('item_type') or payload.get('display_type')
         event_source_kind = _normalize_source_kind(event_source_kind)
-        if event_source_kind == 'completed_season' and payload.get('hub_id') and not payload.get('source_id'):
-            event_source_kind = 'season_hub'
-
         event = {
             'event_id': '',
             'source_kind': event_source_kind,
@@ -4826,7 +4737,7 @@ def _consume_sources(
         success_count = int(result.get('success_count') or 0)
         if result.get('ok') and not result.get('skipped') and not result.get('blocked') and success_count > 0:
             ok += success_count
-            # 电影 / 单集命中一个即可；完结季一次事件会包含多文件。
+            # 电影 / 单集命中一个即可；逻辑季一次事件会包含多文件。
             if payload.get('source_kind') in ('movie', 'episode'):
                 break
         elif result.get('skipped'):

@@ -140,13 +140,14 @@ class HDHiveClient:
         except Exception:
             return int(default)
 
-    def _request(self, method, path, json_body=None, timeout=30):
+    def _request(self, method, path, json_body=None, timeout=30, params=None):
         url = self.relay_base_url + path
         return requests.request(
             method=method,
             url=url,
             headers=self._instance_headers(),
             json=json_body,
+            params=params,
             proxies=self.proxies,
             timeout=timeout,
         )
@@ -360,3 +361,72 @@ class HDHiveClient:
         except Exception as e:
             self._handle_error(e, "签到")
             return {"success": False, "message": "网络或鉴权异常，请查看日志"}
+
+    def list_subscriptions(self, target_type=None, status="active", q=None, page=1, page_size=100):
+        try:
+            params = {}
+            if target_type:
+                params["target_type"] = target_type
+            if status:
+                params["status"] = status
+            if q:
+                params["q"] = q
+            if page:
+                params["page"] = int(page)
+            if page_size:
+                params["page_size"] = int(page_size)
+
+            res = self._request("GET", "/api/hdhive/subscriptions", timeout=30, params=params)
+            data = self._safe_json(res)
+            if res.status_code == 200 and data.get("success"):
+                return data
+            self._log_response_error(res, "获取订阅列表")
+            return data
+        except Exception as e:
+            self._handle_error(e, "获取订阅列表")
+            return {"success": False, "message": "获取订阅列表失败"}
+
+    def create_subscription(self, target_type, target_id, target_key, media_filters=None):
+        try:
+            payload = {
+                "target_type": target_type,
+                "target_id": int(target_id),
+                "target_key": target_key,
+            }
+            if isinstance(media_filters, dict) and media_filters:
+                payload["media_filters"] = media_filters
+
+            res = self._request("POST", "/api/hdhive/subscriptions", payload, timeout=30)
+            data = self._safe_json(res)
+            if res.status_code in {200, 201} and data.get("success"):
+                return data
+            self._log_response_error(res, "创建订阅")
+            return data
+        except Exception as e:
+            self._handle_error(e, "创建订阅")
+            return {"success": False, "message": "创建订阅失败"}
+
+    def check_subscription(self, target_type, target_key):
+        try:
+            params = {"target_type": target_type, "target_key": target_key}
+            res = self._request("GET", "/api/hdhive/subscriptions/check", timeout=30, params=params)
+            data = self._safe_json(res)
+            if res.status_code == 200 and data.get("success"):
+                return data
+            self._log_response_error(res, "检查订阅")
+            return data
+        except Exception as e:
+            self._handle_error(e, "检查订阅")
+            return {"success": False, "message": "检查订阅失败"}
+
+    def delete_subscription(self, subscription_id):
+        try:
+            res = self._request("DELETE", f"/api/hdhive/subscriptions/{int(subscription_id)}", timeout=30)
+            data = self._safe_json(res)
+            if res.status_code == 200 and data.get("success"):
+                return data
+            self._log_response_error(res, "取消订阅")
+            return data
+        except Exception as e:
+            self._handle_error(e, "取消订阅")
+            return {"success": False, "message": "取消订阅失败"}

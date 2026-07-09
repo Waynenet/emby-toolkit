@@ -66,8 +66,8 @@
           <n-form label-placement="left" label-width="90">
             <n-divider title-placement="left" style="margin-top: 0;">过滤规则</n-divider>
             
-            <n-form-item label="白名单频道" path="channels">
-              <n-select v-model:value="config.channels" multiple filterable tag placeholder="输入频道 Username 或 ID 并回车 (如 hdtv115)" :options="[]" />
+            <n-form-item label="白名单来源" path="channels">
+              <n-select v-model:value="config.channels" multiple filterable tag placeholder="输入频道 Username、频道 ID 或私聊 TGID 并回车" :options="[]" />
             </n-form-item>
 
             <n-form-item label="监控类型" path="monitor_types">
@@ -84,10 +84,15 @@
                 <n-space>
                   <n-checkbox value="subscribe" label="订阅转存" />
                   <n-checkbox value="keyword" label="关键词转存" />
+                  <n-checkbox value="hdhive_push" label="影巢推送转存" />
                   <n-checkbox value="brainless" label="无脑转存" />
                 </n-space>
               </n-checkbox-group>
             </n-form-item>
+
+            <n-alert v-if="config.transfer_modes && config.transfer_modes.includes('hdhive_push')" type="info" style="margin-bottom: 16px;" :show-icon="true">
+              影巢推送转存只处理白名单来源里的影巢资源链接。请登录接收影巢推送的 Telegram 账号，并把影巢私聊/机器人/频道的 username 或 TGID 加入白名单来源。
+            </n-alert>
 
             <n-alert v-if="config.transfer_modes && config.transfer_modes.includes('brainless')" type="warning" style="margin-bottom: 24px;" :show-icon="true">
               <b>警告：</b>开启“无脑转存”后，将无视您的订阅列表、追剧状态和本地去重逻辑，全盘接收频道发布的所有 115 资源！这可能会快速消耗您的 115 空间配额和影巢积分，请谨慎使用。

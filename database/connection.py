@@ -875,49 +875,6 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_media ON subscribe_assistant_snapshots (tmdb_id, item_type, season_number);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_checked ON subscribe_assistant_snapshots (last_checked_at);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_delete_records_expires ON subscribe_assistant_delete_records (expires_at);")
-
-                    # p115_filesystem_cache 是网盘实时镜像，联动删除会同步清理，不再承载 preid 永久缓存。
-                    # preid 的长期来源是 p115_mediainfo_cache.raw_ffprobe_json._etk.preid。
-                    cursor.execute("""
-                        DO $$
-                        BEGIN
-                            IF EXISTS (
-                                SELECT 1
-                                FROM information_schema.columns
-                                WHERE table_name = 'p115_filesystem_cache'
-                                  AND column_name = 'preid'
-                            ) THEN
-                                UPDATE p115_mediainfo_cache mc
-                                SET raw_ffprobe_json = jsonb_set(
-                                    COALESCE(mc.raw_ffprobe_json, '{}'::jsonb),
-                                    '{_etk}',
-                                    COALESCE(mc.raw_ffprobe_json->'_etk', '{}'::jsonb)
-                                        || jsonb_build_object(
-                                            'sha1', UPPER(mc.sha1),
-                                            'preid', UPPER(fc.preid)
-                                        ),
-                                    true
-                                )
-                                FROM (
-                                    SELECT DISTINCT ON (UPPER(sha1))
-                                        UPPER(sha1) AS sha1,
-                                        UPPER(preid) AS preid
-                                    FROM p115_filesystem_cache
-                                    WHERE sha1 IS NOT NULL
-                                      AND sha1 <> ''
-                                      AND preid IS NOT NULL
-                                      AND preid <> ''
-                                      AND UPPER(preid) ~ '^[A-F0-9]{40}$'
-                                    ORDER BY UPPER(sha1), updated_at DESC NULLS LAST
-                                ) fc
-                                WHERE UPPER(mc.sha1) = fc.sha1
-                                  AND COALESCE(mc.raw_ffprobe_json->'_etk'->>'preid', '') = '';
-                            END IF;
-                        END $$;
-                    """)
-                    cursor.execute("DROP INDEX IF EXISTS idx_p115_preid;")
-                    cursor.execute("ALTER TABLE p115_filesystem_cache DROP COLUMN IF EXISTS preid;")
-
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_credit_ledger_created ON shared_credit_ledger_local (created_at DESC);")
 
                     # 13. 【海量数据优化】加速追剧列表的聚合查询

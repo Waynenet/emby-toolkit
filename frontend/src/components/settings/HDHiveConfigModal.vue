@@ -175,6 +175,7 @@
 
     </n-spin>
   </n-modal>
+
 </template>
 
 <script setup>
@@ -242,6 +243,7 @@ const scopeLabelMap = {
   unlock: '解锁资源',
   vip: 'VIP 信息',
   write: '签到/写入',
+  subscription: '订阅发布者/资源',
 };
 
 const normalizeScopes = (value) => {
@@ -257,7 +259,7 @@ const scopeDisplayText = computed(() => {
     relayStatus.value?.scopes || relayStatus.value?.scope || ''
   );
 
-  const order = ['meta', 'query', 'unlock', 'vip', 'write'];
+  const order = ['meta', 'query', 'unlock', 'vip', 'write', 'subscription'];
   const sorted = [
     ...order.filter(s => scopes.includes(s)),
     ...scopes.filter(s => !order.includes(s)),
@@ -434,5 +436,43 @@ defineExpose({ open });
 </script>
 
 <style scoped>
-/* 移除了旧的自定义样式，全部采用 naive-ui 的 n-card 和 n-alert 组件来实现更统一的视觉效果 */
+.subscription-hint {
+  color: var(--text-color-3);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.subscription-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--divider-color);
+}
+
+.subscription-row:last-child {
+  border-bottom: none;
+}
+
+.subscription-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.subscription-title {
+  font-weight: 700;
+  line-height: 1.4;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.subscription-key {
+  color: var(--text-color-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  margin-top: 6px;
+  word-break: break-all;
+}
 </style>

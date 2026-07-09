@@ -373,65 +373,9 @@ def api_watchlist_settings():
     
     # 默认配置结构
     default_config = {
-        "auto_pending": {
-            "enabled": False, 
-            "days": 7, 
-            "episodes": 5,
-            "default_total_episodes": 99 
-        },
-        "auto_pause": 0,
         "douban_count_correction": False,
-        "auto_resub_ended": False,
-        "auto_resub_ended_timeout_days": 7,
-        "auto_delete_old_files": False,
-        "auto_delete_mp_history": False,     
-        "auto_delete_download_tasks": False,
-        "enable_backfill": False,
-        "sync_mp_subscription": False,
-        "series_subscription_best_version": False,
-        "series_subscription_best_version_full": False,
-        "series_version_lock_mode": "off",
-        "series_version_lock_decay_hours": 48,
         "revival_check_days": 365,
         "tg_channel_tracking": False,
-        "subscribe_assistant": {
-            "enabled": True,
-            "guard_mode": "balanced",
-            "season_cooldown_days": 14,
-            "volatility_enabled": True,
-            "volatility_window_days": 14,
-            "pending_enhanced_enabled": True,
-            "pending_use_volatility": False,
-            "pending_fake_total_episodes": 99,
-            "pause_enhanced_enabled": True,
-            "tv_air_pause_days": 14,
-            "airing_pause_days": 30,
-            "tv_no_download_days": 0,
-            "no_download_actions": [],
-            "download_monitor_enabled": False,
-            "manual_delete_listen": True,
-            "tracker_response_listen": True,
-            "download_timeout_minutes": 120,
-            "download_progress_threshold": 10,
-            "download_retry_limit": 3,
-            "auto_search_when_delete": True,
-            "skip_deletion": True,
-            "delete_record_retention_hours": 24,
-            "delete_exclude_tags": ["H&R"],
-            "tracker_keywords": [
-                "torrent not registered with this tracker",
-                "torrent banned"
-            ],
-            "best_version_type": "tv_episode",
-            "best_version_episode_to_full": True,
-            "best_version_full_consistency_check_enabled": True,
-            "full_washing_timeout_hours": 72,
-            "subscription_cleanup_history_type": "none",
-            "subscription_cleanup_history_scenes": ["completed"],
-            "verify_enabled": True,
-            "verify_interval_hours": 12,
-            "snapshot_retention_days": 180,
-        }
     }
 
     if request.method == 'GET':
@@ -439,13 +383,11 @@ def api_watchlist_settings():
             # 直接从数据库读取
             saved_config = settings_db.get_setting(CONFIG_KEY) or {}
             # 合并默认值，确保字段完整
-            final_config = {**default_config, **saved_config}
-            # 特殊处理嵌套字典 (auto_pending)
-            if "auto_pending" in saved_config and isinstance(saved_config["auto_pending"], dict):
-                final_config["auto_pending"] = {**default_config["auto_pending"], **saved_config["auto_pending"]}
-            if "subscribe_assistant" in saved_config and isinstance(saved_config["subscribe_assistant"], dict):
-                final_config["subscribe_assistant"] = {**default_config["subscribe_assistant"], **saved_config["subscribe_assistant"]}
-            
+            saved_config = saved_config if isinstance(saved_config, dict) else {}
+            final_config = {
+                **default_config,
+                **{k: v for k, v in saved_config.items() if k in default_config},
+            }
             return jsonify(final_config), 200
         except Exception as e:
             logger.error(f"获取追剧配置失败: {e}", exc_info=True)
@@ -456,15 +398,8 @@ def api_watchlist_settings():
             new_config = request.json
             if not isinstance(new_config, dict):
                 return jsonify({"error": "配置格式错误"}), 400
-            assistant = new_config.get("subscribe_assistant")
-            if isinstance(assistant, dict):
-                for stale_key in (
-                    "notify",
-                    "best_version_backfill_enabled",
-                    "recognition_guard_enabled",
-                    "recognition_guard_mode",
-                ):
-                    assistant.pop(stale_key, None)
+            allowed_keys = set(default_config.keys())
+            new_config = {k: new_config.get(k, v) for k, v in default_config.items() if k in allowed_keys}
             
             # 保存到数据库
             settings_db.save_setting(CONFIG_KEY, new_config)

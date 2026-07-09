@@ -27,13 +27,12 @@ media_proxy_bp = Blueprint('media_proxy', __name__)
 logger = logging.getLogger(__name__)
 
 
-def _disable_watchlist_subscribe_assistant() -> None:
-    config = settings_db.get_setting('watchlist_config') or {}
+def _disable_mp_subscribe_assistant() -> None:
+    config = settings_db.get_setting('mp_config') or {}
     assistant = config.get('subscribe_assistant')
     if isinstance(assistant, dict) and assistant.get('enabled'):
         assistant['enabled'] = False
-        config['sync_mp_subscription'] = False
-        settings_db.save_setting('watchlist_config', config)
+        settings_db.save_setting('mp_config', config)
 
 
 def _available_subscription_sources() -> set:
@@ -716,7 +715,7 @@ def api_save_subscription_strategy():
                 if source in available_sources
             ]
             if 'mp' not in data['subscription_sources']:
-                _disable_watchlist_subscribe_assistant()
+                _disable_mp_subscribe_assistant()
             
         settings_db.save_setting('subscription_strategy_config', data)
         return jsonify({"message": "策略配置已保存"})
