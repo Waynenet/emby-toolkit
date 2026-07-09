@@ -2557,6 +2557,30 @@ class WatchlistProcessor:
                     release_group = ''
                 release_group_alias = str(state.get('release_group_alias') or '').strip()
                 include_regex = str(state.get('include') or '').strip()
+                try:
+                    mp_sub = moviepilot.get_subscription_by_tmdbid(tmdb_id, season_number, self.config) or {}
+                    mp_include = str(mp_sub.get('include') or '').strip()
+                    if mp_sub.get('id') and mp_include != include_regex:
+                        if moviepilot.lock_series_subscription_version(
+                            tmdb_id,
+                            season_number,
+                            series_name,
+                            include_regex,
+                            self.config,
+                            best_version=True,
+                        ):
+                            logger.info(
+                                "  ➜ [版本锁定] 《%s》第 %s 季 已回填 MP 包含正则。",
+                                series_name or tmdb_id,
+                                season_number,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "  ➜ [版本锁定] 检查 MP 包含正则失败：《%s》第 %s 季: %s",
+                        series_name or tmdb_id,
+                        season_number,
+                        e,
+                    )
                 if mode == 'best':
                     replacement_row = self._get_version_lock_candidate(
                         tmdb_id,

@@ -66,6 +66,20 @@ def _p115_normalize_rule_path(path):
     return text
 
 
+def _p115_strip_media_root_prefix(path, media_root_name=None):
+    """剥离误缓存到分类路径里的 115 媒体库根目录名。"""
+    clean_path = _p115_normalize_rule_path(path)
+    clean_root = _p115_normalize_rule_path(media_root_name)
+    if clean_root:
+        root_cf = clean_root.casefold()
+        path_cf = clean_path.casefold()
+        if path_cf == root_cf:
+            return ''
+        if path_cf.startswith(root_cf + '/'):
+            return clean_path[len(clean_root):].strip('/')
+    return clean_path
+
+
 def _p115_load_sorting_rule_targets():
     """读取 115 分类规则，输出可用于路径前缀匹配的分类目录。
 
@@ -96,6 +110,14 @@ def _p115_load_sorting_rule_targets():
             or rule.get('dir_name')
             or rule.get('name')
         )
+        try:
+            cfg = get_config() or {}
+            category_path = _p115_strip_media_root_prefix(
+                category_path,
+                cfg.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME),
+            )
+        except Exception:
+            pass
         if not category_path:
             continue
         key = (cid, category_path.casefold())
@@ -6744,7 +6766,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         if not category_rule:
             return "未识别"
         if category_rule.get('category_path'):
-            return category_rule['category_path']
+            return _p115_strip_media_root_prefix(
+                category_rule['category_path'],
+                get_config().get(constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME),
+            ) or category_rule.get('dir_name', '未识别')
 
         media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
         try:

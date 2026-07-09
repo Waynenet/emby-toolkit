@@ -45,6 +45,27 @@ _qrcode_data = {
 }
 p115_bp = Blueprint('115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
+
+
+def _normalize_p115_category_path(path):
+    text = str(path or '').strip().replace('\\', '/')
+    text = re.sub(r'/+', '/', text).strip('/')
+    return text
+
+
+def _strip_p115_media_root_prefix(path, media_root_name):
+    clean_path = _normalize_p115_category_path(path)
+    clean_root = _normalize_p115_category_path(media_root_name)
+    if clean_root:
+        root_cf = clean_root.casefold()
+        path_cf = clean_path.casefold()
+        if path_cf == root_cf:
+            return ''
+        if path_cf.startswith(root_cf + '/'):
+            return clean_path[len(clean_root):].strip('/')
+    return clean_path
+
+
 def _resolve_play_request_user_id():
     for key in ('UserId', 'userId', 'user_id'):
         value = request.args.get(key)
@@ -1760,6 +1781,7 @@ def handle_sorting_rules():
             config = get_config()
             # 获取用户配置的媒体库根目录 CID
             media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
+            media_root_name = config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME)
             
             for rule in rules:
                 rule_id = str(rule.get('id', ''))
@@ -1771,7 +1793,10 @@ def handle_sorting_rules():
                     old_rule = old_rules_dict[rule_id]
                     # 如果 cid 没变，且旧的 category_path 存在，则直接复用，跳过网络请求
                     if str(old_rule.get('cid')) == str(cid) and old_rule.get('category_path'):
-                        rule['category_path'] = old_rule.get('category_path')
+                        rule['category_path'] = _strip_p115_media_root_prefix(
+                            old_rule.get('category_path'),
+                            media_root_name,
+                        )
                         need_recalc = False
                 
                 if need_recalc and cid and str(cid) != '0':
@@ -1827,6 +1852,11 @@ def handle_sorting_rules():
                     # 兜底：没有 cid 或者 cid 为 0
                     if not rule.get('category_path'):
                         rule['category_path'] = rule.get('dir_name', '')
+                if rule.get('category_path'):
+                    rule['category_path'] = _strip_p115_media_root_prefix(
+                        rule.get('category_path'),
+                        media_root_name,
+                    )
         
         settings_db.save_setting('p115_sorting_rules', rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
