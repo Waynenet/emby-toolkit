@@ -18,6 +18,7 @@ from utils import (
     DEFAULT_STUDIO_MAPPING, 
     DEFAULT_COUNTRY_MAPPING, 
     DEFAULT_LANGUAGE_MAPPING,
+    DEFAULT_RELEASE_GROUP_MAPPING,
     DEFAULT_RATING_MAPPING, 
     DEFAULT_RATING_PRIORITY,
     GENRE_TRANSLATION_PATCH 
@@ -45,6 +46,52 @@ def ensure_list_format(data, default_list):
     if isinstance(data, list):
         return data
     return default_list
+
+def ensure_release_group_mapping_list(data):
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (TypeError, json.JSONDecodeError):
+            data = None
+
+    def normalize_aliases(value):
+        if isinstance(value, dict):
+            value = value.get('aliases') or value.get('en') or value.get('ids') or []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [str(alias).strip() for alias in value if str(alias or '').strip()]
+
+    if isinstance(data, dict):
+        items = []
+        for label, aliases in data.items():
+            name = str(label or '').strip()
+            if name:
+                items.append({"label": name, "aliases": normalize_aliases(aliases)})
+        if items:
+            return items
+
+    if isinstance(data, list):
+        items = []
+        for item in data:
+            if isinstance(item, str):
+                name = item.strip()
+                if name:
+                    items.append({"label": name, "aliases": []})
+                continue
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('label') or item.get('name') or '').strip()
+            if name:
+                items.append({"label": name, "aliases": normalize_aliases(item)})
+        if items:
+            return items
+
+    return [
+        {"label": label, "aliases": list(aliases or [])}
+        for label, aliases in DEFAULT_RELEASE_GROUP_MAPPING.items()
+    ]
 
 # ★★★ 获取 Emby 用户列表 ★★★
 @custom_collections_bp.route('/config/emby_users', methods=['GET'])
@@ -714,6 +761,28 @@ def api_save_keyword_mapping():
 @admin_required
 def api_get_keyword_defaults():
     return jsonify(DEFAULT_KEYWORD_MAPPING)
+
+# --- 获取发布组映射表 ---
+@custom_collections_bp.route('/config/release_group_mapping', methods=['GET'])
+def api_get_release_group_mapping():
+    data = settings_db.get_setting('release_group_mapping')
+    return jsonify(ensure_release_group_mapping_list(data))
+
+# --- 保存发布组映射表 ---
+@custom_collections_bp.route('/config/release_group_mapping', methods=['POST'])
+@admin_required
+def api_save_release_group_mapping():
+    data = request.json
+    if not isinstance(data, list):
+        return jsonify({"error": "数据格式错误，必须是列表"}), 400
+    settings_db.save_setting('release_group_mapping', data)
+    return jsonify({"message": "保存成功"})
+
+# --- 恢复默认发布组映射表 ---
+@custom_collections_bp.route('/config/release_group_mapping/defaults', methods=['GET'])
+@admin_required
+def api_get_release_group_defaults():
+    return jsonify(ensure_release_group_mapping_list(None))
 
 # --- 筛选器用的关键词列表 ---
 @custom_collections_bp.route('/config/keywords', methods=['GET'])

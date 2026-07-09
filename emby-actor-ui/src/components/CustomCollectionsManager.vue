@@ -17,10 +17,6 @@
               </template>
               快速同步媒体元数据
             </n-tooltip>
-            <n-button @click="showMappingModal = true" secondary type="info">
-              <template #icon><n-icon :component="SparklesIcon" /></template>
-              映射管理
-            </n-button>
             <n-button type="default" @click="handleGenerateAllCovers" :loading="isGeneratingCovers">
               <template #icon><n-icon :component="CoverIcon" /></template>
               生成所有封面
@@ -671,9 +667,6 @@
         </n-tabs>
       </div>
     </n-modal>
-    <n-modal v-model:show="showMappingModal" preset="card" title="映射规则管理" style="width: 900px; max-width: 95%;" :bordered="false">
-      <MappingManager @close="showMappingModal = false" />
-    </n-modal>
     <TmdbDiscoveryHelper v-model:show="showDiscoverHelper" :initial-url="currentEditingUrl" @confirm="handleDiscoverConfirm" />
   </div>
 </template>
@@ -686,7 +679,6 @@ import { useConfig } from '../composables/useConfig.js';
 import Sortable from 'sortablejs';
 import { formatDistanceToNow } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import MappingManager from './modals/MappingManager.vue';
 import TmdbDiscoveryHelper from './modals/TmdbDiscoveryHelper.vue';
 import { 
   NPageHeader, NButton, NIcon, NText, NTag, NSpace,
@@ -739,7 +731,6 @@ let sortableInstance = null;
 
 const unidentifiedMediaInModal = computed(() => filterMediaByStatus('unidentified'));
 const { configModel } = useConfig();
-const showMappingModal = ref(false);
 const studioMappingOptions = ref([]);
 const showDiscoverHelper = ref(false);
 const editingUrlIndex = ref(0); 
@@ -1460,12 +1451,6 @@ watch([selectedBuiltInLists, customUrlList], () => {
   });
   currentCollection.value.definition.item_type = Array.from(newItemTypes);
 }, { deep: true });
-
-watch(showMappingModal, (newVal) => {
-  if (!newVal) {
-    fetchKeywordOptions(); fetchStudioMappingOptions(); fetchCountryOptions(); fetchLanguageOptions(); fetchUnifiedRatingOptions();
-  }
-});
 
 onMounted(() => {
   fetchCollections(); fetchCountryOptions(); fetchLanguageOptions(); fetchTagOptions(); fetchKeywordOptions(); fetchStudioMappingOptions(); fetchUnifiedRatingOptions(); fetchEmbyLibraries(); fetchEmbyUsers();

@@ -23,8 +23,16 @@
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">基础设置</span></template>
                     <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                      <n-form-item-grid-item span="1 s:2" label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
+                      <n-form-item-grid-item label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
                         <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5" style="width: 100%;" />
+                      </n-form-item-grid-item>
+
+                      <n-form-item-grid-item label="映射管理">
+                        <n-button @click="mappingManagerModalVisible = true" secondary type="info">
+                          <template #icon><n-icon :component="SparklesIcon" /></template>
+                          管理映射
+                        </n-button>
+                        <template #feedback><n-text depth="3" style="font-size:0.8em;">统一管理关键词、工作室、国家地区、原语言、发布组与分级映射。</n-text></template>
                       </n-form-item-grid-item>
                       
                       <n-form-item-grid-item span="1 s:2" label="需手动处理的最低评分阈值" path="min_score_for_review">
@@ -638,6 +646,17 @@
       </n-spin>
     </n-modal>
     
+    <!-- 映射管理模态框 -->
+    <n-modal
+      v-model:show="mappingManagerModalVisible"
+      preset="card"
+      title="映射规则管理"
+      :style="modalStyle(900)"
+      :bordered="false"
+      class="custom-modal glass-modal"
+    >
+      <MappingManager @close="mappingManagerModalVisible = false" />
+    </n-modal>
   </div>
   
   <!-- 导出选项模态框 -->
@@ -782,10 +801,14 @@ import {
   ColorWandOutline as ColorWandIcon,
   SearchOutline as SearchIcon,
   ArrowUpOutline as ArrowUpIcon,
-  RefreshOutline as RefreshIcon
+  RefreshOutline as RefreshIcon,
+  SparklesOutline as SparklesIcon
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
+import MappingManager from '../modals/MappingManager.vue';
 import axios from 'axios';
+
+const mappingManagerModalVisible = ref(false);
 
 // ★ 新增：管理员个人私人通知设置状态与方法
 const personalChatId = ref('');
