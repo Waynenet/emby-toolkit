@@ -28,32 +28,6 @@ logger = logging.getLogger(__name__)
 # 线程安全的队列，用于把 asyncio 线程的数据传递给 gevent 协程
 tg_task_queue = queue.Queue()
 
-
-def _hdhive_link_allowed_by_config(task, slug):
-    candidate = dict(task.get('candidate') or {})
-    candidate.setdefault('slug', slug)
-    candidate.setdefault('resource_slug', slug)
-    candidate.setdefault('id', slug)
-    candidate.setdefault('title', task.get('title'))
-    candidate.setdefault('name', task.get('title'))
-    candidate.setdefault('media_type', task.get('item_type'))
-    candidate.setdefault('item_type', task.get('item_type'))
-    candidate.setdefault('season_number', task.get('season_number'))
-
-    try:
-        from tasks.hdhive import filter_hdhive_resources
-
-        return bool(filter_hdhive_resources(
-            [candidate],
-            target_season=task.get('season_number'),
-            media_type='tv' if str(task.get('item_type') or '').lower() == 'tv' else 'movie',
-            require_complete=bool(task.get('is_completed_pack')),
-        ))
-    except Exception as e:
-        logger.error(f"  ➜ [频道监听] 影巢配置过滤失败，已跳过解锁以避免误扣积分: {e}")
-        return False
-
-
 class TGUserBotManager:
     _instance = None
     _lock = threading.Lock()
@@ -1176,10 +1150,6 @@ def _process_tg_queue():
                             # 频道监听这里不能再读取 hdhive_config.api_key，必须复用 ETK 统一的 OAuth Relay 授权。
                             from handler.hdhive_client import HDHiveClient
                             hd_client = HDHiveClient()
-
-                            if not _hdhive_link_allowed_by_config(task, slug):
-                                logger.info(f"  ➜ [频道监听] 影巢资源被当前配置拦截，已跳过解锁避免扣积分: {target_link}")
-                                continue
 
                             if not hd_client.ping():
                                 logger.error("  ➜ [频道监听] 解析影巢链接失败：尚未完成影巢授权，请先在影巢配置页完成授权。")

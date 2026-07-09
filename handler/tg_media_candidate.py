@@ -103,24 +103,6 @@ def _extract_share_code_from_text(text):
     return match.group(1).lower() if match else ""
 
 
-def _extract_hdhive_unlock_points(text):
-    text = str(text or "")
-    if "hdhive.com/resource/" not in text.lower():
-        return 0
-
-    patterns = (
-        r"(?:\u6263\u9664|\u9700|\u9700\u8981|\u6d88\u8017)\s*\u79ef\u5206\s*[:\uff1a]?\s*(\d+)",
-        r"(\d+)\s*\u79ef\u5206",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            try:
-                return int(match.group(1) or 0)
-            except Exception:
-                return 0
-    return 0
-
 def _extract_message_lookup_key(source_chat_id="", source_username="", message_id=None):
     message_id = str(message_id or "").strip()
     if not message_id:
@@ -663,7 +645,7 @@ def build_tg_media_candidate(
         "resolution": resolution or "未知",
         "share_size": share_size,
         "pan_type": "115" if target_link else "离线",
-        "unlock_points": _extract_hdhive_unlock_points(text),
+        "unlock_points": 0,
         "source_channel": chat_title or chat_username or chat_id,
         "source_username": chat_username,
         "source_chat_id": str(chat_id or ""),
