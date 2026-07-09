@@ -651,7 +651,7 @@
       v-model:show="mappingManagerModalVisible"
       preset="card"
       title="映射规则管理"
-      :style="modalStyle(900)"
+      style="width: 900px; max-width: 95%;"
       :bordered="false"
       class="custom-modal glass-modal"
     >
