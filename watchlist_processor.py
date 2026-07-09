@@ -994,6 +994,64 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 检查 第 {season_number} 季 一致性时出错: {e}")
             return False # 出错默认不跳过，继续洗版以防万一
 
+    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str) -> int:
+        """已完结且没有洗版事务时，收口 ETK 订阅状态。"""
+        if final_status != STATUS_COMPLETED:
+            return 0
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND item_type IN ('Season', 'Episode')
+                          AND active_washing = TRUE
+                        """,
+                        (str(tmdb_id),),
+                    )
+                    row = cursor.fetchone() or {}
+                    active_count = _safe_int(row.get('count'))
+                    if active_count > 0:
+                        logger.info(
+                            "  ➜ [订阅收口] 《%s》仍有 %s 条全集/分集洗版事务，保留订阅状态。",
+                            series_name or tmdb_id,
+                            active_count,
+                        )
+                        return 0
+
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata
+                        SET subscription_status = 'NONE',
+                            subscription_sources_json = '[]'::jsonb,
+                            ignore_reason = NULL
+                        WHERE (
+                              (tmdb_id = %s AND item_type = 'Series')
+                           OR (
+                                  parent_series_tmdb_id = %s
+                              AND item_type = 'Season'
+                              AND watching_status = 'Completed'
+                           )
+                        )
+                          AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                        """,
+                        (str(tmdb_id), str(tmdb_id)),
+                    )
+                    changed = cursor.rowcount
+                    conn.commit()
+            if changed > 0:
+                logger.info(
+                    "  ➜ [订阅收口] 《%s》已完结且无洗版事务，已清理 %s 条 ETK 订阅状态。",
+                    series_name or tmdb_id,
+                    changed,
+                )
+            return changed
+        except Exception as e:
+            logger.warning("  ➜ [订阅收口] 《%s》完结订阅状态收口失败：%s", series_name or tmdb_id, e, exc_info=True)
+            return 0
+
     def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
         """旧 ETK 完结洗版入口已停用，MoviePilot 订阅由订阅助手增强版统一接管。"""
         logger.info(
@@ -1444,6 +1502,7 @@ class WatchlistProcessor:
             all_tmdb_episodes=all_tmdb_episodes,
             real_next_episode=real_next_episode_to_air,
         )
+        self._close_completed_subscription_status(tmdb_id, item_name, final_status)
 
     # --- 统一的、公开的追剧处理入口 ★★★
     def process_watching_list(self, item_id: Optional[str] = None):

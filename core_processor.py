@@ -1538,6 +1538,10 @@ class MediaProcessor:
                     update_clauses.append(
                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
                     )
+                elif col in ('subscription_status', 'ignore_reason'):
+                    update_clauses.append(
+                        f"{col} = CASE WHEN EXCLUDED.item_type = 'Movie' THEN EXCLUDED.{col} ELSE media_metadata.{col} END"
+                    )
                 else:
                     update_clauses.append(f"{col} = EXCLUDED.{col}")
 
