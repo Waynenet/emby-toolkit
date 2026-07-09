@@ -133,6 +133,10 @@
                   >
                     {{ tag.label }}
                   </n-tag>
+
+                  <n-tag size="small" type="success" :bordered="false" v-if="res.hdhive_is_locked">
+                    已锁定追更链接
+                  </n-tag>
                 </n-space>
 
                 <div v-if="isSharedPoolGroup(res)" class="cloud-version-list">
@@ -212,20 +216,34 @@
                 <div class="cloud-action-hint">
                   <span v-if="isSharedPool(res)">{{ sharedPoolActionText(res).hint }}</span>
                   <span v-else-if="isChannel(res)">可转存</span>
+                  <span v-else-if="res.hdhive_is_locked">追更锁定</span>
                   <span v-else-if="res.already_owned">已解锁</span>
                   <span v-else-if="res.unlock_points === 0 || res.unlock_points === null">免费</span>
                   <span v-else>需 {{ res.unlock_points }} 积分</span>
                 </div>
 
-                <n-button
-                  type="primary"
-                  :color="isSharedPool(res) ? sharedPoolActionText(res).color : (isChannel(res) ? '#2080f0' : '#f0a020')"
-                  size="small"
-                  @click="download(res)"
-                  :loading="downloadingKey === getResourceKey(res)"
-                >
-                  {{ isSharedPool(res) ? sharedPoolActionText(res).button : (isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存') }}
-                </n-button>
+                <n-space vertical size="small" align="end">
+                  <n-button
+                    type="primary"
+                    :color="isSharedPool(res) ? sharedPoolActionText(res).color : (isChannel(res) ? '#2080f0' : '#f0a020')"
+                    size="small"
+                    @click="download(res)"
+                    :loading="downloadingKey === getResourceKey(res)"
+                  >
+                    {{ isSharedPool(res) ? sharedPoolActionText(res).button : (isOffline(res.pan_type) || res.magnet_url ? '离线下载' : '一键转存') }}
+                  </n-button>
+
+                  <n-button
+                    v-if="isHDHive(res) && getMediaType() === 'tv'"
+                    size="tiny"
+                    secondary
+                    :type="res.hdhive_is_locked ? 'error' : 'warning'"
+                    :loading="lockingKey === getResourceKey(res)"
+                    @click="res.hdhive_is_locked ? clearLockedLink(res) : lockResource(res)"
+                  >
+                    {{ res.hdhive_is_locked ? '解除锁定' : '锁定此链接' }}
+                  </n-button>
+                </n-space>
               </div>
             </div>
           </n-card>
@@ -271,6 +289,7 @@ const loading = ref(false);
 const resources = ref([]);
 const stats = ref(null);
 const downloadingKey = ref(null);
+const lockingKey = ref(null);
 const sourceFilter = ref('all');
 const searchTitle = ref('');
 
@@ -804,6 +823,7 @@ const download = async (resource) => {
       media_type: getMediaType(),
       title: mediaTitle.value,
       year: mediaYear.value,
+      use_locked_link: isHDHive(resource),
       mode: isSharedPool(resource) ? (hasSharedPoolShareTransfer(resource) ? 'share' : 'rapid') : undefined
     };
 
@@ -819,6 +839,57 @@ const download = async (resource) => {
     message.error(e.response?.data?.message || '触发下载失败');
   } finally {
     downloadingKey.value = null;
+  }
+};
+
+const lockResource = async (resource) => {
+  const key = getResourceKey(resource);
+  lockingKey.value = key;
+
+  try {
+    const res = await axios.post('/api/subscription/hdhive/locked_link', {
+      tmdb_id: getTmdbId(),
+      media_type: getMediaType(),
+      title: mediaTitle.value,
+      slug: resource.slug,
+      resource
+    });
+
+    if (res.data.success) {
+      message.success(res.data.message || '已锁定影巢链接');
+      await fetchResources();
+    } else {
+      message.error(res.data.message || '锁定失败');
+    }
+  } catch (e) {
+    message.error(e.response?.data?.message || '锁定失败');
+  } finally {
+    lockingKey.value = null;
+  }
+};
+
+const clearLockedLink = async (resource) => {
+  const key = getResourceKey(resource);
+  lockingKey.value = key;
+
+  try {
+    const res = await axios.delete('/api/subscription/hdhive/locked_link', {
+      data: {
+        tmdb_id: getTmdbId(),
+        media_type: getMediaType()
+      }
+    });
+
+    if (res.data.success) {
+      message.success(res.data.message || '已解除影巢链接锁定');
+      await fetchResources();
+    } else {
+      message.error(res.data.message || '解除锁定失败');
+    }
+  } catch (e) {
+    message.error(e.response?.data?.message || '解除锁定失败');
+  } finally {
+    lockingKey.value = null;
   }
 };
 </script>

@@ -2,6 +2,7 @@
 import re
 import time
 import logging
+from datetime import datetime
 from handler.hdhive_client import HDHiveClient
 from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer, get_config
 from handler.telegram import send_hdhive_checkin_notification
@@ -12,7 +13,45 @@ import config_manager
 
 logger = logging.getLogger(__name__)
 
-def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=None, title=None):
+def _hdhive_auto_lock_series_link(tmdb_id, media_type, slug, resource=None, title=None):
+    if str(media_type or '').strip().lower() != 'tv':
+        return
+    key = str(tmdb_id or '').strip()
+    slug = str(slug or '').strip()
+    if not key or not slug:
+        return
+
+    try:
+        cfg = settings_db.get_setting("hdhive_config") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if str(cfg.get("auto_lock_series_links", True)).strip().lower() in {"0", "false", "no", "off", "否", "关闭"}:
+            return
+        locked_links = cfg.get("locked_series_links") or {}
+        if not isinstance(locked_links, dict):
+            locked_links = {}
+        if locked_links.get(key, {}).get("slug"):
+            return
+
+        resource = resource if isinstance(resource, dict) else {}
+        locked_links[key] = {
+            "tmdb_id": key,
+            "slug": slug,
+            "title": resource.get("title") or resource.get("name") or title or "",
+            "pan_type": resource.get("pan_type") or "",
+            "share_size": resource.get("share_size") or "",
+            "unlock_points": resource.get("unlock_points"),
+            "remark": resource.get("remark") or "",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        cfg["locked_series_links"] = locked_links
+        settings_db.save_setting("hdhive_config", cfg)
+        logger.info("  ➜ [影巢锁定] 首次解锁后已自动锁定剧集 TMDB %s 的影巢链接: %s", key, slug)
+    except Exception as e:
+        logger.warning("  ➜ [影巢锁定] 自动保存锁定链接失败: %s", e)
+
+
+def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=None, title=None, hdhive_resource=None):
     """
     核心任务：从影巢解锁 -> 转存 115 -> 搜索真实ID -> 精准整理
     """
@@ -37,6 +76,8 @@ def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=
     if not unlock_data:
         logger.error("  ➜ 影巢资源解锁失败，可能积分不足或资源已失效。")
         return False
+
+    _hdhive_auto_lock_series_link(tmdb_id, media_type, slug, hdhive_resource, title)
         
     share_url = unlock_data.get("url") or ""
     full_url = unlock_data.get("full_url") or ""
