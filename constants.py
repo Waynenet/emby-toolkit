@@ -56,7 +56,12 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
     'scan-cleanup-issues',        # 扫描重复媒体
 ]
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
-DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success'] # ★ 默认开启入库和转存
+DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new']                    # 默认开启入库
+APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES = "telegram_notification_templates"
+DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES = {
+    "library_new": "{{ media_icon }} {{ title }} {{ notification_title }}\n\n{{ episode_info }}\n{{ media_params }}\n⏰ *时间*: `{{ time }}`\n📝 *剧情*: {{ overview }}\n{{ review_warning }}",
+    "playback": "{{ action }}\n\n👤 *用户*: `{{ user }}`\n🎬 *媒体*: {{ title }}\n📱 *设备*: `{{ device }}（{{ client }}）`\n🕒 *时间*: `{{ time }}`\n{{ overview }}",
+}
 
 # ==============================================================================
 # ✨ 反向代理配置 (Reverse Proxy)

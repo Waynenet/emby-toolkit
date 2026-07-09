@@ -460,7 +460,14 @@
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header><span class="card-title">Telegram 设置</span></template>
                     <template #header-extra>
-                      <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">测试</n-button>
+                      <n-space>
+                        <n-button size="tiny" type="primary" ghost @click="openTelegramTemplateModal">
+                          通知模板
+                        </n-button>
+                        <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
+                          发送测试
+                        </n-button>
+                      </n-space>
                     </template>
                     <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
                       <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
@@ -772,6 +779,8 @@
       </n-space>
     </template>
   </n-modal>
+
+  <TelegramTemplateModal ref="telegramTemplateModalRef" />
 </template>
 
 <script setup>
@@ -806,9 +815,11 @@ import {
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import MappingManager from '../modals/MappingManager.vue';
+import TelegramTemplateModal from './TelegramTemplateModal.vue';
 import axios from 'axios';
 
 const mappingManagerModalVisible = ref(false);
+const telegramTemplateModalRef = ref(null);
 
 // ★ 新增：管理员个人私人通知设置状态与方法
 const personalChatId = ref('');
@@ -853,6 +864,7 @@ const openBotChat = async () => {
   }
 };
 
+const openTelegramTemplateModal = () => telegramTemplateModalRef.value?.open();
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
 const savingPrompts = ref(false);
