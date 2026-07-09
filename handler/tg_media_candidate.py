@@ -539,7 +539,8 @@ def build_tg_media_candidate(
             urls = [inline_link] + urls
 
     for url in urls:
-        if "115.com/s/" in url or "115cdn.com/s/" in url or "hdhive.com/resource/" in url:
+        lower_url = url.lower()
+        if "115.com/s/" in lower_url or "115cdn.com/s/" in lower_url or "hdhive.com/resource/" in lower_url:
             target_link = url
             pwd_in_url = apply_channel_regex(url, custom_regex.get("password", []), DEFAULT_TG_REGEX.get("password_url", []), chat_username, chat_id)
             if pwd_in_url:
@@ -675,7 +676,7 @@ def build_tg_media_candidate(
     }
 
 
-def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matched=False, is_subscribe=True, title_override=None, tmdb_id_override=None, media_type_override=None, year_override=None):
+def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matched=False, is_subscribe=True, is_hdhive_push=False, title_override=None, tmdb_id_override=None, media_type_override=None, year_override=None):
     candidate = candidate or {}
     media_type = media_type_override or candidate.get("media_type") or candidate.get("item_type") or "movie"
     title = title_override or candidate.get("identify_title") or candidate.get("clean_title") or candidate.get("title") or candidate.get("name")
@@ -696,6 +697,7 @@ def build_channel_task_payload(candidate, *, is_brainless=False, is_keyword_matc
         "is_brainless": bool(is_brainless),
         "is_keyword_matched": bool(is_keyword_matched),
         "is_subscribe": bool(is_subscribe),
+        "is_hdhive_push": bool(is_hdhive_push),
         "candidate": copy.deepcopy(candidate),
     }
     return payload

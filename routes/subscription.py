@@ -1,7 +1,6 @@
 # routes/subscription.py
 import logging
 import re
-from datetime import datetime
 from flask import Blueprint, jsonify, request
 from extensions import admin_required
 from database import settings_db
@@ -148,9 +147,7 @@ HDHIVE_DEFAULT_CONFIG = {
         "resolution": "All",
         "zh_sub_only": True,
         "exclude_iso": False
-    },
-    "auto_lock_series_links": True,
-    "locked_series_links": {}
+    }
 }
 
 def _has_hdhive_scope(relay_status, scope_name):
@@ -169,20 +166,6 @@ def _has_hdhive_scope(relay_status, scope_name):
     return False
 
 
-def _hdhive_bool(value, default=False):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "是", "启用", "开启"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "否", "停用", "关闭"}:
-        return False
-    return default
-
 def _get_hdhive_config():
     cfg = settings_db.get_setting("hdhive_config") or {}
     if not isinstance(cfg, dict):
@@ -190,10 +173,6 @@ def _get_hdhive_config():
 
     unlock_cfg = cfg.get("unlock_limit") or {}
     filter_cfg = cfg.get("filter") or {}
-
-    locked_links = cfg.get("locked_series_links") or {}
-    if not isinstance(locked_links, dict):
-        locked_links = {}
 
     return {
         "relay_base_url": cfg.get("relay_base_url") or "",
@@ -211,9 +190,7 @@ def _get_hdhive_config():
             "resolution": filter_cfg.get("resolution") or "All",
             "zh_sub_only": bool(filter_cfg.get("zh_sub_only", True)),
             "exclude_iso": bool(filter_cfg.get("exclude_iso", False))
-        },
-        "auto_lock_series_links": _hdhive_bool(cfg.get("auto_lock_series_links"), True),
-        "locked_series_links": locked_links
+        }
     }
 
 
@@ -236,96 +213,8 @@ def _build_hdhive_config_from_request(data):
             "resolution": data.get("hdhive_resolution") or "All",
             "zh_sub_only": bool(data.get("hdhive_zh_sub_only", True)),
             "exclude_iso": bool(data.get("hdhive_exclude_iso", False))
-        },
-        "auto_lock_series_links": _hdhive_bool(
-            data.get("hdhive_auto_lock_enabled"),
-            old_cfg.get("auto_lock_series_links", True),
-        ),
-        "locked_series_links": old_cfg.get("locked_series_links") or {}
+        }
     }
-
-
-def _hdhive_series_lock_key(tmdb_id, media_type):
-    if _normalize_hdhive_media_type(media_type) != "tv":
-        return ""
-    key = str(tmdb_id or "").strip()
-    return key
-
-
-def _get_hdhive_locked_link(tmdb_id, media_type):
-    key = _hdhive_series_lock_key(tmdb_id, media_type)
-    if not key:
-        return None
-    cfg = _get_hdhive_config()
-    item = (cfg.get("locked_series_links") or {}).get(key)
-    return item if isinstance(item, dict) and item.get("slug") else None
-
-
-def _save_hdhive_locked_link(tmdb_id, media_type, resource, title=""):
-    key = _hdhive_series_lock_key(tmdb_id, media_type)
-    slug = str((resource or {}).get("slug") or "").strip()
-    if not key or not slug:
-        return None
-
-    cfg = _get_hdhive_config()
-    locked_links = cfg.get("locked_series_links") or {}
-    item = {
-        "tmdb_id": key,
-        "slug": slug,
-        "title": (resource or {}).get("title") or (resource or {}).get("name") or title or "",
-        "pan_type": (resource or {}).get("pan_type") or "",
-        "share_size": (resource or {}).get("share_size") or "",
-        "unlock_points": (resource or {}).get("unlock_points"),
-        "remark": (resource or {}).get("remark") or "",
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    locked_links[key] = item
-    cfg["locked_series_links"] = locked_links
-    settings_db.save_setting("hdhive_config", cfg)
-    logger.info("  ➜ [影巢锁定] 已锁定剧集 TMDB %s 的影巢链接: %s", key, slug)
-    return item
-
-
-def _clear_hdhive_locked_link(tmdb_id, media_type):
-    key = _hdhive_series_lock_key(tmdb_id, media_type)
-    if not key:
-        return False
-    cfg = _get_hdhive_config()
-    locked_links = cfg.get("locked_series_links") or {}
-    existed = key in locked_links
-    locked_links.pop(key, None)
-    cfg["locked_series_links"] = locked_links
-    settings_db.save_setting("hdhive_config", cfg)
-    if existed:
-        logger.info("  ➜ [影巢锁定] 已清除剧集 TMDB %s 的影巢锁定链接", key)
-    return existed
-
-
-def _mark_hdhive_lock_state(resources, locked_link):
-    if not locked_link:
-        return resources
-    locked_slug = str(locked_link.get("slug") or "")
-    for item in resources or []:
-        if not isinstance(item, dict):
-            continue
-        item["hdhive_locked_slug"] = locked_slug
-        item["hdhive_locked_title"] = locked_link.get("title") or ""
-        item["hdhive_is_locked"] = bool(item.get("slug") and str(item.get("slug")) == locked_slug)
-    return resources
-
-
-def _hdhive_locked_links_list():
-    cfg = _get_hdhive_config()
-    locked_links = cfg.get("locked_series_links") or {}
-    items = []
-    for key, item in locked_links.items():
-        if not isinstance(item, dict) or not item.get("slug"):
-            continue
-        row = dict(item)
-        row["tmdb_id"] = row.get("tmdb_id") or str(key)
-        items.append(row)
-    items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-    return items
 
 
 @subscription_bp.route('/hdhive/config', methods=['GET', 'POST'])
@@ -372,9 +261,6 @@ def handle_hdhive_config():
             "hdhive_resolution": filter_cfg.get("resolution", "All"),
             "hdhive_zh_sub_only": filter_cfg.get("zh_sub_only", True),
             "hdhive_exclude_iso": filter_cfg.get("exclude_iso", False),
-            "hdhive_auto_lock_enabled": cfg.get("auto_lock_series_links", True),
-            "locked_series_links": cfg.get("locked_series_links") or {},
-            "locked_series_link_count": len(cfg.get("locked_series_links") or {}),
 
             "user_info": user_info,
             "usage_today": usage_today,
@@ -412,9 +298,6 @@ def handle_hdhive_config():
         "relay_status": relay_status,
         "authorized": bool(relay_status and relay_status.get("has_access_token")),
         "hdhive_checkin_mode": cfg.get("checkin_mode", "normal"),
-        "hdhive_auto_lock_enabled": cfg.get("auto_lock_series_links", True),
-        "locked_series_links": cfg.get("locked_series_links") or {},
-        "locked_series_link_count": len(cfg.get("locked_series_links") or {}),
         "user_info": user_info,
         "usage_today": usage_today,
         "vip_info": vip_info
@@ -456,62 +339,65 @@ def clear_hdhive_authorization():
     })
 
 
-@subscription_bp.route('/hdhive/lock_config', methods=['GET', 'POST'])
+@subscription_bp.route('/hdhive/subscriptions', methods=['GET', 'POST'])
 @admin_required
-def handle_hdhive_lock_config():
-    """读取/保存影巢剧集链接锁定配置。"""
-    cfg = _get_hdhive_config()
+def handle_hdhive_subscriptions():
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
 
-    if request.method == "POST":
-        data = request.json or {}
-        cfg["auto_lock_series_links"] = _hdhive_bool(
-            data.get("auto_lock_enabled"),
-            cfg.get("auto_lock_series_links", True),
+    if request.method == "GET":
+        res = client.list_subscriptions(
+            target_type=request.args.get("target_type") or None,
+            status=request.args.get("status") or "active",
+            q=request.args.get("q") or None,
+            page=_safe_int(request.args.get("page"), default=1, min_value=1),
+            page_size=_safe_int(request.args.get("page_size"), default=100, min_value=1, max_value=200),
         )
-        settings_db.save_setting("hdhive_config", cfg)
+        return jsonify(res), 200 if res.get("success") else 500
 
-    return jsonify({
-        "success": True,
-        "message": "影巢锁定配置已保存" if request.method == "POST" else "",
-        "auto_lock_enabled": cfg.get("auto_lock_series_links", True),
-        "locked_links": _hdhive_locked_links_list(),
-        "locked_count": len(cfg.get("locked_series_links") or {}),
-    })
-
-
-@subscription_bp.route('/hdhive/locked_link', methods=['POST', 'DELETE'])
-@admin_required
-def handle_hdhive_locked_link():
-    """锁定/清除某个剧集的影巢资源链接。"""
     data = request.json or {}
-    resource = data.get("resource") or {}
-    tmdb_id = data.get("tmdb_id") or resource.get("tmdb_id")
-    raw_media_type = data.get("media_type") or resource.get("media_type") or resource.get("item_type")
-    media_type = _normalize_hdhive_media_type(raw_media_type)
+    target_type = str(data.get("target_type") or "").strip()
+    target_key = str(data.get("target_key") or "").strip()
+    target_id = data.get("target_id")
+    media_filters = data.get("media_filters")
 
-    if media_type != "tv":
-        return jsonify({"success": False, "message": "影巢链接锁定仅支持剧集"}), 400
+    if target_type not in {"publisher", "media_resource"}:
+        return jsonify({"success": False, "message": "订阅类型仅支持发布者或资源"}), 400
+    if not target_key or target_id in (None, ""):
+        return jsonify({"success": False, "message": "缺少订阅目标信息"}), 400
+    if media_filters is not None and not isinstance(media_filters, dict):
+        return jsonify({"success": False, "message": "media_filters 必须是对象"}), 400
 
-    if not tmdb_id:
-        return jsonify({"success": False, "message": "缺少剧集 TMDB ID"}), 400
+    res = client.create_subscription(target_type, target_id, target_key, media_filters=media_filters)
+    return jsonify(res), 200 if res.get("success") else 400
 
-    if request.method == "DELETE" or data.get("clear") is True:
-        _clear_hdhive_locked_link(tmdb_id, media_type)
-        return jsonify({"success": True, "message": "已解除该剧的影巢链接锁定", "locked_link": None})
 
-    slug = data.get("slug") or resource.get("slug")
-    if not slug:
-        return jsonify({"success": False, "message": "缺少影巢资源 slug"}), 400
+@subscription_bp.route('/hdhive/subscriptions/check', methods=['GET'])
+@admin_required
+def check_hdhive_subscription():
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
 
-    item = dict(resource)
-    item["slug"] = slug
-    locked = _save_hdhive_locked_link(
-        tmdb_id,
-        media_type,
-        item,
-        title=data.get("title") or resource.get("title") or resource.get("name") or "",
-    )
-    return jsonify({"success": True, "message": "已锁定该剧的影巢链接", "locked_link": locked})
+    target_type = str(request.args.get("target_type") or "").strip()
+    target_key = str(request.args.get("target_key") or "").strip()
+    if target_type not in {"publisher", "media_resource"} or not target_key:
+        return jsonify({"success": False, "message": "缺少订阅目标信息"}), 400
+
+    res = client.check_subscription(target_type, target_key)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
+@subscription_bp.route('/hdhive/subscriptions/<int:subscription_id>', methods=['DELETE'])
+@admin_required
+def delete_hdhive_subscription(subscription_id):
+    client = HDHiveClient()
+    if not client.ping():
+        return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
+
+    res = client.delete_subscription(subscription_id)
+    return jsonify(res), 200 if res.get("success") else 400
 
 
 
@@ -556,6 +442,21 @@ def _normalize_hdhive_resource(resource):
     item["source_type"] = "hdhive"
     item["source_name"] = "影巢"
     item["_cloud_source"] = "hdhive"
+    user = item.get("user") or {}
+    if isinstance(user, dict):
+        publisher_name = (
+            user.get("nickname")
+            or user.get("name")
+            or user.get("username")
+            or user.get("display_name")
+        )
+        publisher_id = user.get("id") or user.get("user_id")
+        if publisher_name and not item.get("publisher_name"):
+            item["publisher_name"] = publisher_name
+        if publisher_id is not None and not item.get("publisher_id"):
+            item["publisher_id"] = publisher_id
+        if publisher_id is not None and not item.get("publisher_target_key"):
+            item["publisher_target_key"] = f"publisher:{publisher_id}"
     if item.get("slug"):
         item["unique_id"] = f"hdhive:{item.get('slug')}"
     return item
@@ -1247,7 +1148,6 @@ def get_cloud_resources():
         warnings.append(f"共享池搜索失败：{e}")
 
     # 1. 影巢资源。云搜索属于手动搜索场景，剧集默认不按季过滤，避免用户误以为搜不到资源。
-    locked_hdhive_link = _get_hdhive_locked_link(tmdb_id, media_type) if tmdb_id else None
     if tmdb_id:
         try:
             client = HDHiveClient()
@@ -1265,21 +1165,9 @@ def get_cloud_resources():
                         media_type=media_type
                     )
                 hdhive_filtered = len(shown_hdhive or [])
-                _mark_hdhive_lock_state(shown_hdhive, locked_hdhive_link)
-
-                if locked_hdhive_link:
-                    locked_slug = str(locked_hdhive_link.get("slug") or "")
-                    if locked_slug and not any(str(item.get("slug") or "") == locked_slug for item in shown_hdhive or []):
-                        locked_item = dict(locked_hdhive_link)
-                        locked_item.setdefault("remark", "当前锁定链接")
-                        locked_item["hdhive_is_locked"] = True
-                        locked_item["hdhive_locked_slug"] = locked_slug
-                        locked_item["hdhive_locked_title"] = locked_item.get("title") or ""
-                        shown_hdhive = [locked_item, *(shown_hdhive or [])]
 
                 for item in (shown_hdhive or [])[:hdhive_limit]:
                     normalized = _normalize_hdhive_resource(item)
-                    _mark_hdhive_lock_state([normalized], locked_hdhive_link)
                     key = _cloud_resource_key(normalized)
                     if key and key in seen:
                         continue
@@ -1343,8 +1231,7 @@ def get_cloud_resources():
             "channel_total": channel_total,
             "shown": min(len(resources), collect_limit),
             "limit": collect_limit,
-            "warnings": warnings,
-            "locked_hdhive_link": locked_hdhive_link
+            "warnings": warnings
         }
     })
 
@@ -1405,20 +1292,9 @@ def trigger_cloud_download():
         if not client.ping():
             return jsonify({"success": False, "message": "请先完成影巢授权"}), 401
 
-        use_locked_link = data.get("use_locked_link", True)
-        use_locked_link = str(use_locked_link).strip().lower() not in {"0", "false", "no", "off", "否"}
-        locked_link = _get_hdhive_locked_link(tmdb_id, media_type) if use_locked_link else None
-        if locked_link and locked_link.get("slug"):
-            slug = locked_link.get("slug")
-            logger.info(
-                "  ➜ [影巢锁定] 剧集 TMDB %s 已锁定影巢链接，本次转存复用 slug=%s",
-                tmdb_id,
-                slug,
-            )
-
         threading.Thread(
             target=task_download_from_hdhive,
-            args=(None, slug, tmdb_id, media_type, title, locked_link or resource)
+            args=(None, slug, tmdb_id, media_type, title, resource)
         ).start()
         return jsonify({"success": True, "message": "已向 115 发送影巢资源转存指令，后台正在处理！"})
 

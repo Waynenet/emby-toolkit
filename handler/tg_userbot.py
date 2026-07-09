@@ -6,6 +6,7 @@ import threading
 import queue
 import logging
 import time
+import urllib.parse
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
 
@@ -240,6 +241,8 @@ class TGUserBotManager:
         
         raw_channels = cfg.get('channels') or []
         monitor_channels = [c.replace('@', '').strip().lower() for c in raw_channels if c and c.strip()]
+        transfer_modes = cfg.get('transfer_modes', ['subscribe'])
+        is_hdhive_push_enabled = 'hdhive_push' in transfer_modes
         
         if not monitor_channels:
             return
@@ -247,20 +250,41 @@ class TGUserBotManager:
         chat = await event.get_chat()
         chat_username = getattr(chat, 'username', '') or ''
         chat_id = str(getattr(chat, 'id', ''))
+        sender_username = ''
+        sender_id = ''
+        try:
+            sender = await event.get_sender()
+            sender_username = getattr(sender, 'username', '') or ''
+            sender_id = str(getattr(sender, 'id', ''))
+        except Exception:
+            sender = None
 
         # 白名单匹配逻辑
         matched = False
         for c in monitor_channels:
-            c_clean = c.replace('-100', '') if c.startswith('-100') else c
-            chat_id_clean = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
-            if chat_username.lower() == c_clean or chat_id == c or chat_id_clean == c_clean:
+            if (
+                self._channel_rule_matches(c, chat_username, chat_id)
+                or self._channel_rule_matches(c, sender_username, sender_id)
+            ):
                 matched = True
                 break
 
+        text = event.raw_text or ''
         if not matched:
+            if is_hdhive_push_enabled and (
+                'hdhive' in f"{chat_username} {sender_username}".lower()
+                or '影巢' in text
+            ):
+                logger.debug(
+                    "  ➜ [频道监听] 收到疑似影巢机器人消息，但未命中白名单来源：chat=@%s(%s), sender=@%s(%s), whitelist=%s",
+                    chat_username or '-',
+                    chat_id or '-',
+                    sender_username or '-',
+                    sender_id or '-',
+                    raw_channels,
+                )
             return
 
-        text = event.raw_text
         if not text:
             return
 
@@ -280,7 +304,6 @@ class TGUserBotManager:
         # =================================================================
         # ★ 关键词转存匹配逻辑
         # =================================================================
-        transfer_modes = cfg.get('transfer_modes', ['subscribe'])
         is_brainless = 'brainless' in transfer_modes
         is_subscribe = 'subscribe' in transfer_modes
         is_keyword_enabled = 'keyword' in transfer_modes
@@ -354,6 +377,19 @@ class TGUserBotManager:
 
         custom_regex = cfg.get('custom_regex', {})
         all_urls = self._extract_message_urls(event.message)
+        if is_hdhive_push_enabled and (
+            'hdhive' in f"{chat_username} {sender_username} {' '.join(all_urls)}".lower()
+            or '影巢' in text
+        ):
+            logger.debug(
+                "  ➜ [频道监听] 收到影巢推送候选：chat=@%s(%s), sender=@%s(%s), urls=%s, text=%s",
+                chat_username or '-',
+                chat_id or '-',
+                sender_username or '-',
+                sender_id or '-',
+                all_urls[:5],
+                self._normalize_text(text)[:160],
+            )
         candidate = build_tg_media_candidate(
             text,
             urls=all_urls,
@@ -366,9 +402,19 @@ class TGUserBotManager:
             custom_regex=custom_regex,
         )
         if not candidate:
+            if is_hdhive_push_enabled and (
+                'hdhive' in ' '.join(all_urls).lower()
+                or '影巢' in text
+            ):
+                logger.debug("  ➜ [频道监听] 影巢推送候选未生成可转存资源，可能只是订阅确认或按钮不是资源链接。")
             return
 
         target_link = candidate.get('target_link')
+        is_hdhive_push = bool(
+            is_hdhive_push_enabled
+            and target_link
+            and 'hdhive.com/resource/' in str(target_link).lower()
+        )
         receive_code = candidate.get('receive_code', '')
         tmdb_id = candidate.get('tmdb_id')
         title = candidate.get('title')
@@ -382,7 +428,7 @@ class TGUserBotManager:
         allowed_types = cfg.get('monitor_types', ['movie', 'tv'])
         
         # ★ 如果既不是无脑转存，也没命中关键词，且类型不符，则丢弃
-        if item_type not in allowed_types and not is_brainless and not is_keyword_matched:
+        if item_type not in allowed_types and not is_brainless and not is_keyword_matched and not is_hdhive_push:
             return
 
         magnet_url = candidate.get('magnet_url')
@@ -390,7 +436,7 @@ class TGUserBotManager:
         # =================================================================
         # ★ 核心分流逻辑 (统一合并到复杂校验流水线)
         # =================================================================
-        if (target_link or magnet_url) and (tmdb_id or title or is_brainless or is_keyword_matched):
+        if (target_link or magnet_url) and (tmdb_id or title or is_brainless or is_keyword_matched or is_hdhive_push):
             logger.debug(f"  ➜ [频道监听] 监听到频道资源 -> 标题: {title or '未知'}, TMDB: {tmdb_id or '缺失'} (S{season_number}E{episode_number}), 判定类型: {'剧集' if item_type=='tv' else '电影'}, 准备推入处理队列...")
             
             tg_task_queue.put(
@@ -399,6 +445,7 @@ class TGUserBotManager:
                     is_brainless=is_brainless,
                     is_keyword_matched=is_keyword_matched,
                     is_subscribe=is_subscribe,
+                    is_hdhive_push=is_hdhive_push,
                 )
             )
 
@@ -483,10 +530,24 @@ class TGUserBotManager:
                     if url:
                         urls.append(url)
 
+        expanded_urls = []
+        for url in urls:
+            expanded_urls.append(url)
+            try:
+                parsed = urllib.parse.urlparse(url)
+                query = urllib.parse.parse_qs(parsed.query)
+                for key in ('url', 'u', 'target', 'redirect', 'redirect_url', 'to', 'link'):
+                    for value in query.get(key, []) or []:
+                        decoded = urllib.parse.unquote(value).strip()
+                        if decoded.startswith('http'):
+                            expanded_urls.append(decoded)
+            except Exception:
+                continue
+
         # 去重保序
         seen = set()
         deduped = []
-        for url in urls:
+        for url in expanded_urls:
             if not url or url in seen:
                 continue
             seen.add(url)
@@ -1016,6 +1077,7 @@ def _process_tg_queue():
                 is_brainless = task.get('is_brainless', False) 
                 is_keyword_matched = task.get('is_keyword_matched', False)
                 is_subscribe = task.get('is_subscribe', True)
+                is_hdhive_push = task.get('is_hdhive_push', False)
 
                 item_type = task.get('item_type', 'movie')
                 candidate_hints = candidate_to_recognition_hints(candidate) if candidate else {}
@@ -1047,15 +1109,15 @@ def _process_tg_queue():
                         task['tmdb_id'] = tmdb_id 
                         logger.debug(f"  ➜ [频道监听] 反查成功！精准匹配到 TMDB ID: {tmdb_id}")
                     else:
-                        if is_brainless or is_keyword_matched:
-                            logger.warning(f"  ➜ [频道监听] 反查失败，但当前为【无脑/关键词转存】模式，强制放行！")
+                        if is_brainless or is_keyword_matched or is_hdhive_push:
+                            logger.warning(f"  ➜ [频道监听] 反查失败，但当前为【无脑/关键词/影巢推送】模式，强制放行！")
                         else:
                             logger.warning(f"  ➜ [频道监听] 反查失败，TMDb 未找到该{'剧集' if item_type=='tv' else '电影'}，任务终止。")
                             continue
 
-                if not tmdb_id and not (is_brainless or is_keyword_matched): continue 
+                if not tmdb_id and not (is_brainless or is_keyword_matched or is_hdhive_push): continue 
 
-                should_process = is_brainless or is_keyword_matched
+                should_process = is_brainless or is_keyword_matched or is_hdhive_push
                 # 如果没命中无脑/关键词，且开启了订阅转存，才去查库
                 if not should_process and is_subscribe:
                     try:

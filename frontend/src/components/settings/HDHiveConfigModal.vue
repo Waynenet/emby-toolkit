@@ -168,10 +168,6 @@
           <n-button secondary type="primary" @click="doCheckin(false)" :loading="checkingIn">每日签到</n-button>
           <n-button secondary type="error" @click="doCheckin(true)" :loading="checkingIn">赌狗签到</n-button>
         </template>
-        <n-button secondary type="warning" @click="openLockConfig" :loading="lockConfigLoading">
-          锁定配置
-          <template v-if="lockedLinkCount > 0">({{ lockedLinkCount }})</template>
-        </n-button>
         <n-button type="primary" color="#f0a020" @click="saveConfig" :loading="saving" style="margin-left: 12px;">
           保存配置
         </n-button>
@@ -180,81 +176,6 @@
     </n-spin>
   </n-modal>
 
-  <n-modal
-    v-model:show="lockConfigVisible"
-    preset="card"
-    title="影巢锁定配置"
-    style="width: 760px; max-width: 96%;"
-    class="custom-modal glass-modal"
-  >
-    <n-spin :show="lockConfigLoading">
-      <n-space vertical size="medium">
-        <n-alert type="info" :bordered="false">
-          自动锁定开启后，剧集首次成功解锁影巢资源会保存该链接；后续追更优先复用已锁定链接。
-        </n-alert>
-
-        <n-card size="small" title="自动锁定" :bordered="true">
-          <n-space align="center" justify="space-between">
-            <div>
-              <n-text strong>自动锁定首次解锁的剧集链接</n-text>
-              <div class="lock-config-hint">
-                关闭后不会再自动新增锁定，但已锁定链接仍会继续用于追更，直到手动移除。
-              </div>
-            </div>
-            <n-switch
-              v-model:value="autoLockEnabled"
-              :loading="savingLockConfig"
-              @update:value="saveLockConfig"
-            />
-          </n-space>
-        </n-card>
-
-        <n-card size="small" :title="`已锁定链接 (${lockedLinks.length})`" :bordered="true">
-          <n-empty v-if="lockedLinks.length === 0" description="暂无已锁定影巢链接" />
-          <n-space v-else vertical size="small">
-            <div
-              v-for="item in lockedLinks"
-              :key="item.tmdb_id"
-              class="locked-link-row"
-            >
-              <div class="locked-link-main">
-                <div class="locked-link-title">
-                  {{ item.title || `TMDB ${item.tmdb_id}` }}
-                </div>
-                <n-space size="small" wrap>
-                  <n-tag size="small" type="info" :bordered="false">TMDB {{ item.tmdb_id }}</n-tag>
-                  <n-tag size="small" type="warning" :bordered="false">{{ item.pan_type || '影巢' }}</n-tag>
-                  <n-tag size="small" type="default" :bordered="true" v-if="item.share_size">{{ item.share_size }}</n-tag>
-                  <n-tag size="small" type="default" :bordered="true" v-if="item.unlock_points !== null && item.unlock_points !== undefined">
-                    {{ item.unlock_points }} 积分
-                  </n-tag>
-                </n-space>
-                <div class="locked-link-slug">{{ item.slug }}</div>
-                <div class="lock-config-hint" v-if="item.updated_at">更新于 {{ item.updated_at }}</div>
-              </div>
-              <n-popconfirm
-                positive-text="移除"
-                negative-text="取消"
-                @positive-click="removeLockedLink(item)"
-              >
-                <template #trigger>
-                  <n-button
-                    size="small"
-                    type="error"
-                    secondary
-                    :loading="removingLockKey === item.tmdb_id"
-                  >
-                    移除锁定
-                  </n-button>
-                </template>
-                移除后，该剧后续不会再复用这个影巢链接，是否继续？
-              </n-popconfirm>
-            </div>
-          </n-space>
-        </n-card>
-      </n-space>
-    </n-spin>
-  </n-modal>
 </template>
 
 <script setup>
@@ -269,10 +190,6 @@ const saving = ref(false);
 const checkingIn = ref(false);
 const authorizing = ref(false);
 const clearingAuth = ref(false);
-const lockConfigVisible = ref(false);
-const lockConfigLoading = ref(false);
-const savingLockConfig = ref(false);
-const removingLockKey = ref(null);
 
 const relayStatus = ref(null);
 const authorizeUrl = ref('');
@@ -291,9 +208,6 @@ const unlockLimitWindow = ref(60);
 const userInfo = ref(null);
 const usageToday = ref(null);
 const vipInfo = ref(null); 
-const autoLockEnabled = ref(true);
-const lockedLinks = ref([]);
-const lockedLinkCount = ref(0);
 
 let authPollTimer = null;
 
@@ -329,6 +243,7 @@ const scopeLabelMap = {
   unlock: '解锁资源',
   vip: 'VIP 信息',
   write: '签到/写入',
+  subscription: '订阅发布者/资源',
 };
 
 const normalizeScopes = (value) => {
@@ -344,7 +259,7 @@ const scopeDisplayText = computed(() => {
     relayStatus.value?.scopes || relayStatus.value?.scope || ''
   );
 
-  const order = ['meta', 'query', 'unlock', 'vip', 'write'];
+  const order = ['meta', 'query', 'unlock', 'vip', 'write', 'subscription'];
   const sorted = [
     ...order.filter(s => scopes.includes(s)),
     ...scopes.filter(s => !order.includes(s)),
@@ -404,8 +319,6 @@ const open = async (showLoading = true) => {
       hdhiveResolution.value = res.data.hdhive_resolution || 'All';
       hdhiveZhSubOnly.value = res.data.hdhive_zh_sub_only ?? true;
       hdhiveExcludeIso.value = res.data.hdhive_exclude_iso ?? false;
-      autoLockEnabled.value = res.data.hdhive_auto_lock_enabled ?? true;
-      lockedLinkCount.value = res.data.locked_series_link_count || 0;
     } else {
       message.error(res.data.message || '获取影巢配置失败');
     }
@@ -478,7 +391,6 @@ const saveConfig = async () => {
       hdhive_resolution: hdhiveResolution.value,
       hdhive_zh_sub_only: hdhiveZhSubOnly.value,
       hdhive_exclude_iso: hdhiveExcludeIso.value,
-      hdhive_auto_lock_enabled: autoLockEnabled.value,
     });
 
     if (res.data.success) {
@@ -486,8 +398,6 @@ const saveConfig = async () => {
       relayStatus.value = res.data.relay_status || relayStatus.value;
       authorizeUrl.value = res.data.authorize_url || authorizeUrl.value;
       hdhiveCheckinMode.value = res.data.hdhive_checkin_mode || hdhiveCheckinMode.value;
-      autoLockEnabled.value = res.data.hdhive_auto_lock_enabled ?? autoLockEnabled.value;
-      lockedLinkCount.value = res.data.locked_series_link_count ?? lockedLinkCount.value;
       userInfo.value = res.data.user_info || userInfo.value;
       usageToday.value = res.data.usage_today || usageToday.value;
       vipInfo.value = res.data.vip_info || vipInfo.value; 
@@ -498,74 +408,6 @@ const saveConfig = async () => {
     message.error('保存失败');
   } finally {
     saving.value = false;
-  }
-};
-
-const loadLockConfig = async () => {
-  lockConfigLoading.value = true;
-  try {
-    const res = await axios.get('/api/subscription/hdhive/lock_config');
-    if (res.data.success) {
-      autoLockEnabled.value = res.data.auto_lock_enabled ?? true;
-      lockedLinks.value = res.data.locked_links || [];
-      lockedLinkCount.value = res.data.locked_count || 0;
-    } else {
-      message.error(res.data.message || '获取锁定配置失败');
-    }
-  } catch (e) {
-    message.error('获取锁定配置失败');
-  } finally {
-    lockConfigLoading.value = false;
-  }
-};
-
-const openLockConfig = async () => {
-  lockConfigVisible.value = true;
-  await loadLockConfig();
-};
-
-const saveLockConfig = async (value) => {
-  savingLockConfig.value = true;
-  try {
-    const res = await axios.post('/api/subscription/hdhive/lock_config', {
-      auto_lock_enabled: value
-    });
-    if (res.data.success) {
-      autoLockEnabled.value = res.data.auto_lock_enabled ?? value;
-      lockedLinks.value = res.data.locked_links || lockedLinks.value;
-      lockedLinkCount.value = res.data.locked_count ?? lockedLinkCount.value;
-      message.success(res.data.message || '影巢锁定配置已保存');
-    } else {
-      message.error(res.data.message || '保存锁定配置失败');
-      autoLockEnabled.value = !value;
-    }
-  } catch (e) {
-    message.error('保存锁定配置失败');
-    autoLockEnabled.value = !value;
-  } finally {
-    savingLockConfig.value = false;
-  }
-};
-
-const removeLockedLink = async (item) => {
-  removingLockKey.value = item.tmdb_id;
-  try {
-    const res = await axios.delete('/api/subscription/hdhive/locked_link', {
-      data: {
-        tmdb_id: item.tmdb_id,
-        media_type: 'tv'
-      }
-    });
-    if (res.data.success) {
-      message.success(res.data.message || '已移除锁定链接');
-      await loadLockConfig();
-    } else {
-      message.error(res.data.message || '移除锁定失败');
-    }
-  } catch (e) {
-    message.error(e.response?.data?.message || '移除锁定失败');
-  } finally {
-    removingLockKey.value = null;
   }
 };
 
@@ -594,14 +436,14 @@ defineExpose({ open });
 </script>
 
 <style scoped>
-.lock-config-hint {
+.subscription-hint {
   color: var(--text-color-3);
   font-size: 12px;
   line-height: 1.5;
   margin-top: 4px;
 }
 
-.locked-link-row {
+.subscription-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -610,23 +452,23 @@ defineExpose({ open });
   border-bottom: 1px solid var(--divider-color);
 }
 
-.locked-link-row:last-child {
+.subscription-row:last-child {
   border-bottom: none;
 }
 
-.locked-link-main {
+.subscription-main {
   min-width: 0;
   flex: 1;
 }
 
-.locked-link-title {
+.subscription-title {
   font-weight: 700;
   line-height: 1.4;
   margin-bottom: 6px;
   word-break: break-all;
 }
 
-.locked-link-slug {
+.subscription-key {
   color: var(--text-color-3);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
