@@ -102,7 +102,14 @@ def _apply_watchlist_mp_wash_flags(
 
 # ★★★ 内部辅助函数：处理整部剧集的精细化订阅 ★★★
 # ==============================================================================
-def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Dict, tmdb_api_key: str, source: Dict = None) -> bool:
+def _subscribe_full_series_with_logic(
+    tmdb_id: int,
+    series_name: str,
+    config: Dict,
+    tmdb_api_key: str,
+    source: Dict = None,
+    consume_quota: bool = False,
+) -> bool:
     """
     处理整部剧集的订阅：
     1. 查询 TMDb 获取所有季。
@@ -135,7 +142,7 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             mp_payload = {"name": final_series_name, "tmdbid": tmdb_id, "type": "电视剧"}
             wash_mode = _apply_watchlist_mp_wash_flags(mp_payload, watchlist_config)
             logger.info(f"  ➜ 《{final_series_name}》整剧兜底订阅使用 {wash_mode}。")
-            return moviepilot.subscribe_with_custom_payload(mp_payload, config)
+            return moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=consume_quota)
 
         # 3. 确定最后一季的季号
         last_season_num = valid_seasons[-1]['season_number']
@@ -266,7 +273,7 @@ def _subscribe_full_series_with_logic(tmdb_id: int, series_name: str, config: Di
             # ==============================================================
             # 逻辑 E: 提交订阅 & 后置状态修正
             # ==============================================================
-            mp_submit_success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+            mp_submit_success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=consume_quota)
 
             if mp_submit_success:
                 any_success = True
@@ -417,7 +424,7 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                     else:
                         logger.info(f"  ➜ [手动订阅] 第{season_number}季 尚未完结，使用 {wash_mode}。")
                     
-                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                    success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=True)
 
                 # 3. 处理整剧订阅 (Series)
                 elif item_type == 'Series':
@@ -427,7 +434,8 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                         series_name=item_title_for_log,
                         config=config,
                         tmdb_api_key=tmdb_api_key,
-                        source=source
+                        source=source,
+                        consume_quota=True,
                     )
                     if success:
                         # 整剧订阅成功只代表订阅任务已提交，不代表整剧已完成。
@@ -451,14 +459,13 @@ def task_manual_subscribe_batch(processor, subscribe_requests: List[Dict]):
                 # 电影手动订阅，通常意味着用户现在就想看，且电影一般没有“连载”概念
                 # 可以默认开启 best_version=1 以获取更好质量，或者保持默认 0
                 # 这里保持默认 0 比较稳妥，除非用户明确是洗版操作，但为了简化，这里不设 best_version
-                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=True)
 
             # ==================================================================
             # 结果处理
             # ==================================================================
             if success:
                 logger.info(f"  ➜ 《{item_title_for_log}》订阅成功！")
-                settings_db.decrement_subscription_quota()
                 
                 # 更新数据库状态 (Series 类型在 _subscribe_full_series_with_logic 里处理了)
                 if item_type != 'Series':
@@ -920,9 +927,9 @@ def task_auto_subscribe(processor):
             if item_type == 'Movie':
                 logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
                 mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
-                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=True)
             elif item_type == 'Series':
-                success = _subscribe_full_series_with_logic(int(tmdb_id), title, config, tmdb_api_key)
+                success = _subscribe_full_series_with_logic(int(tmdb_id), title, config, tmdb_api_key, consume_quota=True)
             elif item_type == 'Season' and parent_tmdb_id and season_number is not None:
                 mp_payload = {"name": title, "tmdbid": int(parent_tmdb_id), "type": "电视剧", "season": int(season_number)}
                 
@@ -949,7 +956,7 @@ def task_auto_subscribe(processor):
                 else:
                     logger.info(f"  ➜ 《{title}》S{season_number} 处于待定模式，向 MoviePilot 提交补缺订阅。")
                 
-                success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
+                success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=True)
                 if success and is_pending:
                     moviepilot.update_subscription_status(int(parent_tmdb_id), int(season_number), 'P', config, total_episodes=fake_eps)
 
@@ -963,9 +970,6 @@ def task_auto_subscribe(processor):
                         tmdb_ids=item['tmdb_id'], 
                         item_type=item_type,
                     )
-
-                # 扣除配额
-                settings_db.decrement_subscription_quota()
 
                 # 准备通知 (智能拼接通知标题)
                 item_display_name = ""

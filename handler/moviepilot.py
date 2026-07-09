@@ -40,7 +40,7 @@ def _get_access_token(config: Dict[str, Any]) -> Optional[str]:
         logger.error(f"  ➜ 获取 MoviePilot Token 失败: {e}")
         return None
 
-def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any]) -> bool:
+def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, consume_quota: bool = False) -> bool:
     """
     【核心订阅函数】直接接收一个完整的订阅 payload 并提交。
     所有其他订阅函数最终都应调用此函数。
@@ -52,6 +52,10 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any]) -> bool
             logger.error("  ➜ MoviePilot订阅失败：认证失败，未能获取到 Token。")
             return False
 
+        if consume_quota and settings_db.get_subscription_quota() <= 0:
+            logger.warning("  ➜ MoviePilot订阅失败：每日 MP 订阅额度已用尽。")
+            return False
+
         subscribe_url = f"{moviepilot_url}/api/v1/subscribe/"
         subscribe_headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -61,6 +65,8 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any]) -> bool
         
         if sub_response.status_code in [200, 201, 204]:
             logger.info(f"  ➜ MoviePilot 已接受订阅任务。")
+            if consume_quota:
+                settings_db.decrement_subscription_quota()
             return True
         else:
             # 尝试解析错误信息
@@ -232,7 +238,14 @@ def delete_subscription_by_id(subscribe_id: int, config: Dict[str, Any] = None) 
 # 业务封装函数 (保持原有逻辑，底层复用 subscribe_with_custom_payload)
 # ======================================================================
 
-def subscribe_series_to_moviepilot(series_info: dict, season_number: Optional[int], config: Dict[str, Any], best_version: Optional[int] = None) -> bool:
+def subscribe_series_to_moviepilot(
+    series_info: dict,
+    season_number: Optional[int],
+    config: Dict[str, Any] = None,
+    best_version: Optional[int] = None,
+    best_version_full: Optional[int] = None,
+    consume_quota: bool = False,
+) -> bool:
     """订阅单季或整部剧集"""
     title = series_info.get('title') or series_info.get('item_name')
     if not title:
@@ -257,7 +270,7 @@ def subscribe_series_to_moviepilot(series_info: dict, season_number: Optional[in
         log_msg += f" 第 {season_number} 季"
     logger.info(log_msg)
     
-    return subscribe_with_custom_payload(payload, config)
+    return subscribe_with_custom_payload(payload, config, consume_quota=consume_quota)
 
 def update_subscription_status(tmdb_id: int, season: Optional[int], status: str, config: Dict[str, Any], total_episodes: Optional[int] = None) -> bool:
     """

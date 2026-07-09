@@ -121,7 +121,20 @@ class SubscribeAssistantManager:
             )
             sub = existing_by_season.get(season_num)
             if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending"):
-                sub = self._create_subscription(tmdb_id, series_name, season_num, decision)
+                if self._should_create_full_washing_for_partial_completed_season(
+                    tmdb_id,
+                    season_num,
+                    season_info,
+                    signal,
+                ):
+                    decision = dict(decision)
+                    decision["completed_full_washing"] = True
+                    logger.info(
+                        "  ➜ [订阅助手] 《%s》第 %s 季 已确认完结但本地未集齐，自动补订改为全集洗版。",
+                        series_name,
+                        season_num,
+                    )
+                sub = self._create_subscription(tmdb_id, series_name, season_num, decision, consume_quota=True)
                 if sub:
                     existing_by_season[season_num] = sub
             if not sub:
@@ -1625,12 +1638,57 @@ class SubscribeAssistantManager:
                 seasons.append(season)
         return seasons
 
-    def _create_subscription(self, tmdb_id: str, series_name: str, season: int, decision: Dict[str, Any]) -> Optional[dict]:
+    def _should_create_full_washing_for_partial_completed_season(
+        self,
+        tmdb_id: str,
+        season: int,
+        season_info: Dict[str, Any],
+        signal: CompletionSignal,
+    ) -> bool:
+        if not signal or not signal.completed:
+            return False
+        expected_count = _safe_int((season_info or {}).get("episode_count")) or _safe_int(signal.scope_total)
+        if expected_count <= 0:
+            return False
+        local_count = self._local_in_library_episode_count(tmdb_id, season)
+        return 0 < local_count < expected_count
+
+    def _local_in_library_episode_count(self, tmdb_id: str, season: int) -> int:
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(DISTINCT episode_number) AS count
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                          AND in_library = TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+            return _safe_int(row.get("count"))
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 查询本地在库集数失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
+            return 0
+
+    def _create_subscription(
+        self,
+        tmdb_id: str,
+        series_name: str,
+        season: int,
+        decision: Dict[str, Any],
+        consume_quota: bool = False,
+    ) -> Optional[dict]:
         payload_kwargs = self._subscription_wash_kwargs(decision)
         if not moviepilot.subscribe_series_to_moviepilot(
             {"title": series_name, "tmdb_id": tmdb_id},
             season,
             self.app_config,
+            consume_quota=consume_quota,
             **payload_kwargs,
         ):
             logger.warning("  ➜ [订阅助手] 《%s》S%s 自动补订失败。", series_name, season)
