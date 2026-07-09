@@ -994,9 +994,9 @@ class WatchlistProcessor:
             logger.error(f"  ➜ 检查 第 {season_number} 季 一致性时出错: {e}")
             return False # 出错默认不跳过，继续洗版以防万一
 
-    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str) -> int:
-        """已完结且没有洗版事务时，收口 ETK 订阅状态。"""
-        if final_status != STATUS_COMPLETED:
+    def _close_completed_subscription_status(self, tmdb_id: str, series_name: str, final_status: str, allow_season_closeout: bool = False) -> int:
+        """无洗版事务时，收口本地已集齐季的 ETK 订阅状态。"""
+        if final_status != STATUS_COMPLETED and not allow_season_closeout:
             return 0
         try:
             with connection.get_db_connection() as conn:
@@ -1023,21 +1023,54 @@ class WatchlistProcessor:
 
                     cursor.execute(
                         """
+                        WITH season_stats AS (
+                            SELECT
+                                s.tmdb_id,
+                                s.season_number,
+                                s.subscription_status,
+                                COALESCE(s.total_episodes, 0) AS total_episodes,
+                                COUNT(e.tmdb_id) FILTER (WHERE e.in_library = TRUE) AS local_count
+                            FROM media_metadata s
+                            LEFT JOIN media_metadata e
+                              ON e.parent_series_tmdb_id = s.parent_series_tmdb_id
+                             AND e.item_type = 'Episode'
+                             AND e.season_number = s.season_number
+                            WHERE s.parent_series_tmdb_id = %s
+                              AND s.item_type = 'Season'
+                              AND s.season_number > 0
+                            GROUP BY s.tmdb_id, s.season_number, s.subscription_status, s.total_episodes
+                        ),
+                        completed_subscribed_seasons AS (
+                            SELECT tmdb_id
+                            FROM season_stats
+                            WHERE total_episodes > 0
+                              AND local_count >= total_episodes
+                              AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                        ),
+                        has_open_season AS (
+                            SELECT 1
+                            FROM season_stats
+                            WHERE (
+                                   total_episodes <= 0
+                                OR local_count < total_episodes
+                                OR (
+                                      subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
+                                  AND NOT (total_episodes > 0 AND local_count >= total_episodes)
+                                )
+                            )
+                            LIMIT 1
+                        )
                         UPDATE media_metadata
                         SET subscription_status = 'NONE',
                             subscription_sources_json = '[]'::jsonb,
                             ignore_reason = NULL
                         WHERE (
-                              (tmdb_id = %s AND item_type = 'Series')
-                           OR (
-                                  parent_series_tmdb_id = %s
-                              AND item_type = 'Season'
-                              AND watching_status = 'Completed'
-                           )
+                              (tmdb_id = %s AND item_type = 'Series' AND %s AND NOT EXISTS (SELECT 1 FROM has_open_season))
+                           OR (item_type = 'Season' AND tmdb_id IN (SELECT tmdb_id FROM completed_subscribed_seasons))
                         )
                           AND subscription_status IN ('REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE')
                         """,
-                        (str(tmdb_id), str(tmdb_id)),
+                        (str(tmdb_id), str(tmdb_id), final_status == STATUS_COMPLETED),
                     )
                     changed = cursor.rowcount
                     conn.commit()
