@@ -455,7 +455,7 @@ const open = async () => {
   showModal.value = true;
   loading.value = true;
   try {
-    const res = await axios.get('/api/system/mp/config');
+    const res = await axios.get('/api/mp/config');
     if (res.data.success) {
       formModel.value = normalizeFormModel(res.data.data || {});
     }
@@ -470,7 +470,7 @@ const saveConfig = async () => {
   saving.value = true;
   try {
     const payload = normalizeFormModel(formModel.value);
-    const res = await axios.post('/api/system/mp/config', payload);
+    const res = await axios.post('/api/mp/config', payload);
     if (res.data.success) {
       formModel.value = normalizeFormModel(payload);
       message.success(res.data.message);
