@@ -620,7 +620,6 @@ def task_scan_and_organize_115(processor=None):
     config = get_config()
     cid_val = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID)
     save_val = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_NAME, '待整理')
-    enable_organize = config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
     use_ai = config.get(constants.CONFIG_OPTION_AI_RECOGNITION, False)
     ai_translator = processor.ai_translator if processor and hasattr(processor, 'ai_translator') else None
 
@@ -632,10 +631,7 @@ def task_scan_and_organize_115(processor=None):
     if not cid_val or str(cid_val) == '0':
         logger.error("  ➜ 未配置待整理目录，跳过。")
         return
-    if not enable_organize:
-        logger.warning("  ➜ 未开启智能整理开关，仅扫描不处理。")
-        return
-        
+
     try:
         save_cid = int(cid_val)
         save_name = str(save_val)

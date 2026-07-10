@@ -158,7 +158,6 @@
 | `p115_media_root_name` | 媒体库根目录名称 |
 | `p115_request_interval` | API 请求间隔（秒） |
 | `p115_max_workers` | 最大并发线程数 |
-| `p115_enable_organize` | 启用智能整理 |
 | `p115_extensions` | 允许的文件扩展名列表 |
 | `p115_download_subs` | 下载字幕文件 |
 | `p115_local_cleanup` | 启用本地清理 |

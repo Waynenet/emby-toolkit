@@ -781,14 +781,8 @@
                       </template>
                     </n-form-item>
 
-                    <n-form-item label="智能整理" path="p115_enable_organize">
-                        <n-switch v-model:value="configModel.p115_enable_organize">
-                            <template #checked>整理并生成STRM</template>
-                            <template #unchecked>仅转存</template>
-                        </n-switch>
-                    </n-form-item>
                     <n-form-item label="MP分类" path="p115_mp_classify">
-                        <n-switch v-model:value="configModel.p115_mp_classify" :disabled="organizeDependentDisabled">
+                        <n-switch v-model:value="configModel.p115_mp_classify">
                             <template #checked>由MP分类和重命名</template>
                             <template #unchecked>仅上传待整理</template>
                         </n-switch>
@@ -798,7 +792,6 @@
                             v-model:value="configModel.p115_min_video_size" 
                             :min="0" 
                             :step="10" 
-                            :disabled="organizeDependentDisabled"
                             style="width: 150px;"
                         >
                             <template #suffix>MB</template>
@@ -810,7 +803,6 @@
                   <n-form-item label="媒体信息辅助识别" path="p115_mediainfo_assisted_recognition">
                       <n-switch
                           v-model:value="configModel.p115_mediainfo_assisted_recognition"
-                          :disabled="organizeDependentDisabled"
                       >
                           <template #checked>启用辅助识别</template>
                           <template #unchecked>不参与识别</template>
@@ -825,7 +817,6 @@
                       <n-button
                           @click="openDefaultStreamConfig"
                           type="primary"
-                          :disabled="organizeDependentDisabled"
                           ghost
                       >
                           <template #icon><n-icon :component="OptionsIcon" /></template>
@@ -838,7 +829,7 @@
                       </template>
                   </n-form-item>
                     <n-form-item label="同步下载字幕" path="p115_download_subs">
-                        <n-switch v-model:value="configModel.p115_download_subs" :disabled="organizeDependentDisabled">
+                        <n-switch v-model:value="configModel.p115_download_subs">
                             <template #checked>下载到本地</template>
                             <template #unchecked>跳过字幕</template>
                         </n-switch>
@@ -847,7 +838,7 @@
                         </template>
                     </n-form-item>
                     <n-form-item label="全量同步时清理本地" path="p115_local_cleanup">
-                        <n-switch v-model:value="configModel.p115_local_cleanup" :disabled="organizeDependentDisabled">
+                        <n-switch v-model:value="configModel.p115_local_cleanup">
                             <template #checked>清理失效文件</template>
                             <template #unchecked>保留本地文件</template>
                         </n-switch>
@@ -856,7 +847,7 @@
                         </template>
                     </n-form-item>
                     <n-form-item label="联动删除网盘文件" path="p115_enable_sync_delete">
-                        <n-switch v-model:value="configModel.p115_enable_sync_delete" :disabled="organizeDependentDisabled">
+                        <n-switch v-model:value="configModel.p115_enable_sync_delete">
                             <template #checked>删除网盘源文件</template>
                             <template #unchecked>仅移除本地缓存</template>
                         </n-switch>
@@ -2319,7 +2310,6 @@ const handleImportSelectionChange = (currentSelection) => {
 const formRef = ref(null);
 const formRules = { trigger: ['input', 'blur'] };
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
-const organizeDependentDisabled = computed(() => !configModel.value?.p115_enable_organize);
 const message = useMessage();
 const dialog = useDialog();
 

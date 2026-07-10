@@ -114,7 +114,6 @@ class WatchlistProcessor:
         self.emby_url = self.config.get("emby_server_url")
         self.emby_api_key = self.config.get("emby_api_key")
         self.emby_user_id = self.config.get("emby_user_id")
-        self.p115_enable_organize = self.config.get("p115_enable_organize", False)
         self.ai_translator = ai_translator
         self.douban_api = douban_api
         self._stop_event = threading.Event()
@@ -3719,92 +3718,91 @@ class WatchlistProcessor:
         # ======================================================================
         # ★★★ 追剧目录自动重组 (大脑指挥官 - 整剧状态版) ★★★
         # ======================================================================
-        if self.p115_enable_organize:
-            try:
-                # 判断是否发生了关键的状态流转
-                status_changed_to_watching = (old_status in [None, 'NONE'] and final_status in ['Watching', 'Paused', 'Pending'])
-                status_changed_to_completed = (old_status in [None, 'NONE', 'Watching', 'Paused', 'Pending'] and final_status == 'Completed')
-                
-                # 新季复活流转 (完结 -> 追剧/待定/暂停)
-                status_revived = (old_status == 'Completed' and final_status in ['Watching', 'Paused', 'Pending'])
+        try:
+            # 判断是否发生了关键的状态流转
+            status_changed_to_watching = (old_status in [None, 'NONE'] and final_status in ['Watching', 'Paused', 'Pending'])
+            status_changed_to_completed = (old_status in [None, 'NONE', 'Watching', 'Paused', 'Pending'] and final_status == 'Completed')
 
-                if status_changed_to_watching or status_changed_to_completed or status_revived:
-                    logger.info(
-                        f"  ➜ [智能追剧] 检测到状态从“{translate_internal_status(old_status)}”变为"
-                        f"“{translate_internal_status(final_status)}”，准备按整剧状态重新评估 115 目录分类。"
-                    )
+            # 新季复活流转 (完结 -> 追剧/待定/暂停)
+            status_revived = (old_status == 'Completed' and final_status in ['Watching', 'Paused', 'Pending'])
 
-                    from handler.p115_service import P115Service, SmartOrganizer, ManualCorrectTaskQueue
-                    from database.connection import get_db_connection
+            if status_changed_to_watching or status_changed_to_completed or status_revived:
+                logger.info(
+                    f"  ➜ [智能追剧] 检测到状态从“{translate_internal_status(old_status)}”变为"
+                    f"“{translate_internal_status(final_status)}”，准备按整剧状态重新评估 115 目录分类。"
+                )
 
-                    # ★ MP 直出是“原路径映射”，不应该被追剧状态流转重新分拣。
-                    #   整剧状态流转时，除 MP直出 外的同剧整理记录都重新按整剧状态归类。
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("""
-                                SELECT id, season_number, target_cid, category_name
-                                FROM p115_organize_records
-                                WHERE tmdb_id = %s
-                            """, (str(tmdb_id),))
-                            all_records = cursor.fetchall()
+                from handler.p115_service import P115Service, SmartOrganizer, ManualCorrectTaskQueue
+                from database.connection import get_db_connection
 
-                    candidate_rows = []
-                    mp_direct_skipped_count = 0
+                # ★ MP 直出是“原路径映射”，不应该被追剧状态流转重新分拣。
+                #   整剧状态流转时，除 MP直出 外的同剧整理记录都重新按整剧状态归类。
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            SELECT id, season_number, target_cid, category_name
+                            FROM p115_organize_records
+                            WHERE tmdb_id = %s
+                        """, (str(tmdb_id),))
+                        all_records = cursor.fetchall()
 
-                    for row in all_records:
-                        category_name = str(row.get('category_name') or '').strip()
+                candidate_rows = []
+                mp_direct_skipped_count = 0
 
-                        # ★ 核心修复：MP直出一律不参与追剧自动重组
-                        if category_name == "MP直出":
-                            mp_direct_skipped_count += 1
-                            continue
+                for row in all_records:
+                    category_name = str(row.get('category_name') or '').strip()
 
-                        candidate_rows.append(row)
+                    # ★ 核心修复：MP直出一律不参与追剧自动重组
+                    if category_name == "MP直出":
+                        mp_direct_skipped_count += 1
+                        continue
 
-                    if not candidate_rows:
-                        if mp_direct_skipped_count > 0:
-                            logger.info(
-                                f"  ➜ [智能追剧] 检测到 {mp_direct_skipped_count} 条整剧记录来自 MP直出，"
-                                f"按原路径映射策略跳过自动重组。"
-                            )
-                        else:
-                            logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+                    candidate_rows.append(row)
+
+                if not candidate_rows:
+                    if mp_direct_skipped_count > 0:
+                        logger.info(
+                            f"  ➜ [智能追剧] 检测到 {mp_direct_skipped_count} 条整剧记录来自 MP直出，"
+                            f"按原路径映射策略跳过自动重组。"
+                        )
                     else:
-                        client = P115Service.get_client()
-                        if client:
-                            # 1. 提前计算出新的目标目录 CID
-                            organizer = SmartOrganizer(client, tmdb_id, 'tv', item_name)
-                            new_target_cid = organizer.get_target_cid(ignore_memory=True)
+                        logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+                else:
+                    client = P115Service.get_client()
+                    if client:
+                        # 1. 提前计算出新的目标目录 CID
+                        organizer = SmartOrganizer(client, tmdb_id, 'tv', item_name)
+                        new_target_cid = organizer.get_target_cid(ignore_memory=True)
 
-                            if new_target_cid:
-                                records_to_process = []
-                                skipped_count = 0
+                        if new_target_cid:
+                            records_to_process = []
+                            skipped_count = 0
 
-                                for row in candidate_rows:
-                                    s_num = row['season_number']
-                                    current_cid = row['target_cid']
+                            for row in candidate_rows:
+                                s_num = row['season_number']
+                                current_cid = row['target_cid']
 
-                                    # ★ 核心优化：如果当前目录已经等于目标目录，静默跳过！(防原地摩擦)
-                                    if str(current_cid) == str(new_target_cid):
-                                        skipped_count += 1
-                                        continue
+                                # ★ 核心优化：如果当前目录已经等于目标目录，静默跳过！(防原地摩擦)
+                                if str(current_cid) == str(new_target_cid):
+                                    skipped_count += 1
+                                    continue
 
-                                    # ★ 整剧随状态重组：直接使用数据库里的季号，不再限制目标季。
-                                    records_to_process.append((row['id'], s_num))
+                                # ★ 整剧随状态重组：直接使用数据库里的季号，不再限制目标季。
+                                records_to_process.append((row['id'], s_num))
 
-                                if records_to_process:
-                                    logger.info(f"  ➜ [智能追剧] 已锁定 {len(records_to_process)} 个需要移动的文件，加入整剧自动重组队列。")
-                                    logger.debug(f"  ➜ [智能追剧] 自动重组详情：CID={new_target_cid}, 整剧记录={len(candidate_rows)}")
-                                    for rid, s_num in records_to_process:
-                                        ManualCorrectTaskQueue.add(rid, tmdb_id, 'tv', new_target_cid, s_num)
+                            if records_to_process:
+                                logger.info(f"  ➜ [智能追剧] 已锁定 {len(records_to_process)} 个需要移动的文件，加入整剧自动重组队列。")
+                                logger.debug(f"  ➜ [智能追剧] 自动重组详情：CID={new_target_cid}, 整剧记录={len(candidate_rows)}")
+                                for rid, s_num in records_to_process:
+                                    ManualCorrectTaskQueue.add(rid, tmdb_id, 'tv', new_target_cid, s_num)
+                            else:
+                                if skipped_count > 0:
+                                    logger.info("  ➜ [智能追剧] 整剧文件已在正确分类，无需移动，跳过重组。")
+                                    logger.debug(f"  ➜ [智能追剧] 已命中目标目录：CID={new_target_cid}")
                                 else:
-                                    if skipped_count > 0:
-                                        logger.info("  ➜ [智能追剧] 整剧文件已在正确分类，无需移动，跳过重组。")
-                                        logger.debug(f"  ➜ [智能追剧] 已命中目标目录：CID={new_target_cid}")
-                                    else:
-                                        logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
-            except Exception as e:
-                logger.error(f"  ➜ 触发 115 自动分类迁移失败: {e}", exc_info=True)
+                                    logger.debug("  ➜ [智能追剧] 未找到需要移动的文件。")
+        except Exception as e:
+            logger.error(f"  ➜ 触发 115 自动分类迁移失败: {e}", exc_info=True)
 
         # 季条目状态只看本地是否集齐，不再继承剧条目的 TMDb 状态。
         watchlist_db.sync_seasons_watching_status(tmdb_id, emby_seasons=emby_seasons)
