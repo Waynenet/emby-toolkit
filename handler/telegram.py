@@ -150,6 +150,18 @@ def escape_markdown(text: str) -> str:
     return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
 
+def _format_ticks_to_time(ticks: int) -> str:
+    """辅助函数：将 Emby 的 Ticks (1 tick = 100 ns) 转换为 HH:MM:SS 或 MM:SS 格式"""
+    if not ticks or ticks <= 0:
+        return "00:00"
+    seconds = int(ticks / 10000000)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
 def _markdown_code_text(text) -> str:
     """MarkdownV2 code span 内只需要处理反斜杠和反引号。"""
     return str(text or '').replace('\\', '\\\\').replace('`', '\\`')
@@ -172,6 +184,7 @@ def _format_size_for_notice(size_bytes) -> str:
     if units[idx] == 'MB':
         return f"{size:.0f}MB"
     return f"{int(size)}{units[idx]}"
+
 
 def _notice_asset_list(value) -> list:
     if value is None:
@@ -274,6 +287,7 @@ def _load_series_inventory_episode_refs(parent_series_tmdb_id: str, limit: int =
 
     return refs
 
+
 def _translate_to_chinese(text: str) -> str:
     """利用 Google Translate 免费接口将英文地理位置翻译为中文"""
     if not text:
@@ -292,6 +306,7 @@ def _translate_to_chinese(text: str) -> str:
     except Exception as e:
         logger.debug(f"  ➜ 地理位置翻译失败 '{text}': {e}")
     return text
+
 
 def _get_ip_location(clean_ip: str) -> str:
     """请求 IP.SB 接口获取 IP 的物理地理位置并翻译为中文"""
@@ -347,55 +362,6 @@ def _get_ip_location(clean_ip: str) -> str:
         logger.debug(f"  ➜ IP.SB 归属地查询失败 ({clean_ip}): {e}")
         
     return ""
-
-def _format_ticks_to_time(ticks: int) -> str:
-    """辅助函数：将 Emby 的 Ticks (1 tick = 100 ns) 转换为 HH:MM:SS 或 MM:SS 格式"""
-    if not ticks or ticks <= 0:
-        return "00:00"
-    seconds = int(ticks / 10000000)
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h:02d}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
-
-def _markdown_code_text(text) -> str:
-    """MarkdownV2 code span 内只需要处理反斜杠和反引号。"""
-    return str(text or '').replace('\\', '\\\\').replace('`', '\\`')
-
-
-def _format_size_for_notice(size_bytes) -> str:
-    try:
-        size = float(size_bytes or 0)
-    except Exception:
-        return ''
-    if size <= 0:
-        return ''
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    idx = 0
-    while size >= 1024 and idx < len(units) - 1:
-        size /= 1024.0
-        idx += 1
-    if units[idx] in {'GB', 'TB'}:
-        return f"{size:.1f}{units[idx]}" if size < 100 else f"{size:.0f}{units[idx]}"
-    if units[idx] == 'MB':
-        return f"{size:.0f}MB"
-    return f"{int(size)}{units[idx]}"
-
-
-def _notice_asset_list(value) -> list:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except Exception:
-            return []
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
 
 
 def _load_notice_asset_details_by_emby_id(emby_item_id: str) -> list:
