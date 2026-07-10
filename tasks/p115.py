@@ -2887,13 +2887,30 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
     best = sorted(versions, key=_best_sort_key)[0] if versions else {}
     best_level = best.get('level') if best else None
-    
+    slot_levels = {}
+    for version in versions:
+        slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
+        slot_id = str(slot.get('id') or '__single__')
+        current = slot_levels.get(slot_id)
+        if current and _best_sort_key(current) <= _best_sort_key(version):
+            continue
+        slot_levels[slot_id] = {
+            'id': slot_id,
+            'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
+            'suffix': slot.get('suffix') or '',
+            'level': version.get('level'),
+            'reason': version.get('reason'),
+            'sha1': version.get('sha1'),
+        }
+
     new_mm_snapshot = {
         'versions': versions,
+        'slot_levels': slot_levels,
         'reason': best.get('reason') if best else '无有效版本',
         'sha1': best.get('sha1') if best else None,
         'target_cid': best.get('target_cid') if best else None,
         'media_type': media_type,
+        'version_slot': best.get('version_slot') if best else {},
         'evaluated_at': evaluated_at
     }
 
@@ -2904,6 +2921,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             last_updated_at = NOW()
         WHERE tmdb_id = %s AND item_type = %s
     """, (
+        # washing_level 保留为旧逻辑使用的全版本最佳汇总值；逐槽等级以 slot_levels 为准。
         best_level,
         json.dumps(new_mm_snapshot, ensure_ascii=False),
         row.get('tmdb_id'),
