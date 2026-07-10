@@ -64,6 +64,84 @@
         </n-form>
       </div>
 
+      <div v-if="config.conflict_mode === 'replace'" class="version-slot-panel">
+        <div class="version-slot-header">
+          <div>
+            <div class="version-slot-title">多版本槽位</div>
+            <div class="version-slot-hint">候选按顺序命中第一个槽位，每个槽位独立保留一个最佳版本。</div>
+          </div>
+          <n-space align="center">
+            <n-button v-if="config.version_slots_enabled" size="tiny" secondary @click="addDefaultVersionSlots">杜比/HDR/SDR 预设</n-button>
+            <n-button v-if="config.version_slots_enabled" size="tiny" type="primary" ghost @click="addVersionSlot">
+              <template #icon><n-icon :component="AddIcon" /></template>
+              添加槽位
+            </n-button>
+            <n-switch v-model:value="config.version_slots_enabled" />
+          </n-space>
+        </div>
+
+        <div v-if="config.version_slots_enabled" class="version-slot-list">
+          <n-alert type="info" :show-icon="false" style="margin-bottom: 10px;">
+            非兜底槽位至少设置一个匹配条件；未命中且没有兜底槽位的资源会被判定为不合格。
+          </n-alert>
+          <draggable v-model="config.version_slots" item-key="id" handle=".slot-drag-handle">
+            <template #item="{ element: slot, index }">
+              <n-card size="small" class="version-slot-card">
+                <template #header>
+                  <div class="slot-card-header">
+                    <n-icon class="slot-drag-handle" :component="MenuIcon" />
+                    <span>{{ index + 1 }}. {{ slot.name || '未命名槽位' }}</span>
+                  </div>
+                </template>
+                <template #header-extra>
+                  <n-space align="center" :size="8">
+                    <span class="slot-fallback-label">兜底</span>
+                    <n-switch
+                      size="small"
+                      :value="slot.fallback"
+                      @update:value="value => setFallbackSlot(slot.id, value)"
+                    />
+                    <n-button size="tiny" text type="error" @click="deleteVersionSlot(index)">
+                      <template #icon><n-icon :component="TrashIcon" /></template>
+                    </n-button>
+                  </n-space>
+                </template>
+
+                <n-grid :cols="2" :x-gap="12" :y-gap="10">
+                  <n-gi>
+                    <n-input v-model:value="slot.name" placeholder="槽位名称，例如 最佳杜比" />
+                  </n-gi>
+                  <n-gi>
+                    <n-input v-model:value="slot.suffix" placeholder="文件名后缀，例如 DoVi" />
+                  </n-gi>
+                  <template v-if="!slot.fallback">
+                    <n-gi>
+                      <n-select v-model:value="slot.match.effect" multiple :options="effectOptions" placeholder="动态范围/特效" />
+                    </n-gi>
+                    <n-gi>
+                      <n-select v-model:value="slot.match.source" multiple :options="sourceOptions" placeholder="来源" />
+                    </n-gi>
+                    <n-gi>
+                      <n-select v-model:value="slot.match.resolution" multiple :options="resOptions" placeholder="分辨率" />
+                    </n-gi>
+                    <n-gi>
+                      <n-select v-model:value="slot.match.codec" multiple :options="codecOptions" placeholder="编码" />
+                    </n-gi>
+                    <n-gi>
+                      <n-select v-model:value="slot.match.audio" multiple :options="audioOptions" placeholder="音轨语言" />
+                    </n-gi>
+                    <n-gi>
+                      <n-select v-model:value="slot.match.subtitle" multiple :options="subOptions" placeholder="字幕语言" />
+                    </n-gi>
+                  </template>
+                </n-grid>
+              </n-card>
+            </template>
+          </draggable>
+          <n-empty v-if="config.version_slots.length === 0" description="暂无槽位，请添加或使用预设" />
+        </div>
+      </div>
+
       <n-layout v-if="config.conflict_mode === 'replace'" has-sider style="height: 650px; border: 1px solid var(--n-divider-color); border-radius: 8px;">
         
         <!-- 左侧：规则组列表 -->
@@ -289,7 +367,7 @@
     <template #action>
       <n-space justify="space-between" style="width: 100%;">
         <n-button v-if="config.conflict_mode === 'replace'" secondary type="warning" :loading="recalcLoading" @click="confirmRecalculate">
-          一键重算媒体库优先级
+          重算受影响媒体优先级
         </n-button>
         <span v-else></span>
         <n-space>
@@ -327,13 +405,23 @@ const categoryOptions = ref([]);
 const releaseGroupOptions = ref([]);
 const config = ref({
   conflict_mode: 'replace',
-  skip_scope: 'directory'
+  skip_scope: 'directory',
+  version_slots_enabled: false,
+  version_slots: []
 });
 
 // 当前正在编辑的优先级卡片 UID
 const editingUid = ref(null);
 
 const activeGroup = computed(() => groups.value.find(g => g.id === activeGroupId.value));
+
+const hasSlotMatchCondition = (match = {}) => {
+  return ['resolution', 'source', 'codec', 'effect', 'audio', 'subtitle', 'release_group'].some(key => {
+    return Array.isArray(match[key]) && match[key].length > 0;
+  }) || Boolean(match.subtitle_effect || match.clean_version)
+    || (match.min_size_gb !== null && match.min_size_gb !== undefined && match.min_size_gb !== '')
+    || (match.max_size_gb !== null && match.max_size_gb !== undefined && match.max_size_gb !== '');
+};
 
 // 选项字典
 const resOptions = [{label:'4K/2160p', value:'4k'}, {label:'1080p', value:'1080p'}, {label:'720p', value:'720p'}];
@@ -347,7 +435,7 @@ const sourceOptions = [
   { label: 'WEB-DL', value: 'WEB-DL' },
   { label: 'HDTV', value: 'HDTV' }
 ];
-const effectOptions = [{label:'DoVi P8', value:'dovi_p8'}, {label:'DoVi P7', value:'dovi_p7'}, {label:'DoVi P5', value:'dovi_p5'}, {label:'HDR10+', value:'hdr10+'}, {label:'HDR', value:'hdr'}, {label:'SDR', value:'sdr'}];
+const effectOptions = [{label:'DoVi P8', value:'dovi_p8'}, {label:'DoVi P7', value:'dovi_p7'}, {label:'DoVi P5', value:'dovi_p5'}, {label:'其他 DoVi', value:'dovi_other'}, {label:'HDR10+', value:'hdr10+'}, {label:'HDR', value:'hdr'}, {label:'SDR', value:'sdr'}];
 const audioOptions = [{label:'国语', value:'chi'}, {label:'粤语', value:'yue'}, {label:'英语', value:'eng'}, {label:'日语', value:'jpn'}, {label:'韩语', value:'kor'}];
 const subOptions = [{label:'简体', value:'chi'}, {label:'繁体', value:'yue'}, {label:'英文', value:'eng'}, {label:'日文', value:'jpn'}, {label:'韩文', value:'kor'}];
 
@@ -426,7 +514,11 @@ const open = async () => {
     const resConfig = await axios.get('/api/p115/washing_priority_config');
     config.value = {
       conflict_mode: resConfig.data?.data?.conflict_mode || 'replace',
-      skip_scope: resConfig.data?.data?.skip_scope || 'directory'
+      skip_scope: resConfig.data?.data?.skip_scope || 'directory',
+      version_slots_enabled: Boolean(resConfig.data?.data?.version_slots_enabled),
+      version_slots: Array.isArray(resConfig.data?.data?.version_slots)
+        ? resConfig.data.data.version_slots.map(normalizeVersionSlot)
+        : []
     };
 
     // 3. 获取洗版优先级组
@@ -455,6 +547,17 @@ const open = async () => {
 const saveGroups = async () => {
   try {
     loading.value = true;
+    if (config.value.conflict_mode === 'replace' && config.value.version_slots_enabled) {
+      if (!config.value.version_slots.length) {
+        message.error('请至少添加一个多版本槽位');
+        return;
+      }
+      const hasMatcher = config.value.version_slots.some(slot => !slot.fallback && hasSlotMatchCondition(slot.match || {}));
+      if (!hasMatcher) {
+        message.error('请至少配置一个带匹配条件的非兜底槽位');
+        return;
+      }
+    }
     const payload = JSON.parse(JSON.stringify(groups.value));
     
     // 过滤空规则并移除内部 _uid
@@ -479,15 +582,20 @@ const saveGroups = async () => {
     });
 
     await axios.post('/api/p115/washing_priority_config', config.value);
-    await axios.post('/api/p115/washing_priority_groups', payload);
+    const groupsRes = await axios.post('/api/p115/washing_priority_groups', payload);
     message.success('保存成功');
     if (config.value.conflict_mode !== 'replace') {
       showModal.value = false;
       return;
     }
+    const pendingScope = groupsRes.data?.data?.pending_scope || {};
+    if (Object.keys(pendingScope).length === 0) {
+      showModal.value = false;
+      return;
+    }
     dialog.warning({
-      title: '建议重算媒体库优先级',
-      content: '洗版优先级规则已经保存。若规则有调整，旧媒体项记录的优先级可能已经过期，建议立即重算。',
+      title: '建议重算受影响媒体优先级',
+      content: '洗版优先级规则已经保存。系统只会重算本次及此前规则变更实际影响的媒体类型和分类目录。',
       positiveText: '立即重算',
       negativeText: '稍后',
       onPositiveClick: async () => {
@@ -530,8 +638,8 @@ const triggerRecalculate = async () => {
 
 const confirmRecalculate = () => {
   dialog.warning({
-    title: '重算媒体库洗版优先级',
-    content: '将扫描当前已入库的电影和分集，按当前已保存的洗版优先级规则重新计算 washing_level，并写回 115 文件缓存与媒体元数据。大库会在后台执行。确认开始？',
+    title: '重算受影响媒体洗版优先级',
+    content: '仅重新计算已保存规则变更影响的电影或分集，并写回 115 文件缓存与媒体元数据；未受影响的媒体项不会重复计算。确认开始？',
     positiveText: '开始重算',
     negativeText: '取消',
     onPositiveClick: triggerRecalculate
@@ -541,6 +649,70 @@ const confirmRecalculate = () => {
 const switchGroup = (id) => {
   activeGroupId.value = id;
   editingUid.value = null; // 切换组时收起所有编辑面板
+};
+
+const createVersionSlot = (overrides = {}) => ({
+  id: overrides.id || `slot_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+  name: overrides.name || '新版本槽位',
+  suffix: overrides.suffix || 'Version',
+  fallback: Boolean(overrides.fallback),
+  match: {
+    resolution: [...(overrides.match?.resolution || [])],
+    source: [...(overrides.match?.source || [])],
+    codec: [...(overrides.match?.codec || [])],
+    effect: [...(overrides.match?.effect || [])],
+    audio: [...(overrides.match?.audio || [])],
+    subtitle: [...(overrides.match?.subtitle || [])],
+    release_group: [...(overrides.match?.release_group || [])],
+    subtitle_effect: Boolean(overrides.match?.subtitle_effect),
+    clean_version: Boolean(overrides.match?.clean_version),
+    exempt_original_lang: Boolean(overrides.match?.exempt_original_lang),
+    min_size_gb: overrides.match?.min_size_gb ?? null,
+    max_size_gb: overrides.match?.max_size_gb ?? null
+  }
+});
+
+const normalizeVersionSlot = (slot) => createVersionSlot(slot || {});
+
+const addVersionSlot = () => {
+  config.value.version_slots.push(createVersionSlot());
+};
+
+const addDefaultVersionSlots = () => {
+  const existingIds = new Set(config.value.version_slots.map(slot => slot.id));
+  const presets = [
+    createVersionSlot({
+      id: 'dolby',
+      name: '最佳杜比',
+      suffix: 'DoVi',
+      match: { effect: ['dovi_p5', 'dovi_p7', 'dovi_p8', 'dovi_other'] }
+    }),
+    createVersionSlot({
+      id: 'hdr',
+      name: '最佳HDR',
+      suffix: 'HDR',
+      match: { effect: ['hdr10+', 'hdr'] }
+    }),
+    createVersionSlot({
+      id: 'sdr',
+      name: '最佳SDR',
+      suffix: 'SDR',
+      fallback: true
+    })
+  ];
+  presets.forEach(slot => {
+    if (!existingIds.has(slot.id)) config.value.version_slots.push(slot);
+  });
+};
+
+const setFallbackSlot = (slotId, enabled) => {
+  config.value.version_slots.forEach(slot => {
+    slot.fallback = enabled ? slot.id === slotId : (slot.id === slotId ? false : slot.fallback);
+  });
+};
+
+const deleteVersionSlot = (index) => {
+  config.value.version_slots.splice(index, 1);
 };
 
 const addGroup = () => {
@@ -611,6 +783,59 @@ defineExpose({ open });
   background: rgba(0, 0, 0, 0.02);
   border: 1px solid var(--n-divider-color);
   border-radius: 8px;
+}
+
+.version-slot-panel {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--n-divider-color);
+  border-radius: 8px;
+  background: var(--n-color-modal);
+}
+
+.version-slot-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.version-slot-title {
+  font-weight: 700;
+}
+
+.version-slot-hint {
+  margin-top: 2px;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+}
+
+.version-slot-list {
+  max-height: 330px;
+  margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+
+.version-slot-card {
+  margin-bottom: 10px;
+}
+
+.slot-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.slot-drag-handle {
+  color: var(--n-text-color-3);
+  cursor: grab;
+}
+
+.slot-fallback-label {
+  color: var(--n-text-color-3);
+  font-size: 12px;
 }
 
 .mode-options {

@@ -1384,6 +1384,50 @@ def _p115_deploy_sorting_rules(category_dirs):
     return rules
 
 
+def _replace_washing_priority_groups(groups):
+    from database.connection import get_db_connection
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM washing_priority_groups ORDER BY sort_order ASC")
+            old_groups = cursor.fetchall() or []
+            affected_scope = settings_db.build_washing_priority_recalculate_scope(old_groups, groups)
+
+            cursor.execute(
+                "SELECT value_json FROM app_settings WHERE setting_key = %s FOR UPDATE",
+                (settings_db.WASHING_PRIORITY_RECALCULATE_SETTING_KEY,),
+            )
+            state_row = cursor.fetchone()
+            current_state = state_row.get('value_json') if state_row else {}
+            pending_state = settings_db.merge_washing_priority_recalculate_state(
+                current_state,
+                affected_scope,
+            )
+
+            cursor.execute("TRUNCATE TABLE washing_priority_groups")
+            for index, group in enumerate(groups):
+                cursor.execute("""
+                    INSERT INTO washing_priority_groups (name, media_type, target_cids, priorities, sort_order)
+                    VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+                """, (
+                    group['name'],
+                    group['media_type'],
+                    json.dumps(group.get('target_cids', [])),
+                    json.dumps(group.get('priorities', [])),
+                    index,
+                ))
+
+            if affected_scope:
+                settings_db._save_setting_with_cursor(
+                    cursor,
+                    settings_db.WASHING_PRIORITY_RECALCULATE_SETTING_KEY,
+                    pending_state,
+                )
+        conn.commit()
+
+    return affected_scope, pending_state.get('media_types', {})
+
+
 def _p115_deploy_washing_groups(category_dirs):
     def base_priorities():
         return [
@@ -1406,16 +1450,7 @@ def _p115_deploy_washing_groups(category_dirs):
             'priorities': base_priorities(),
         })
 
-    from database.connection import get_db_connection
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("TRUNCATE TABLE washing_priority_groups")
-            for i, group in enumerate(groups):
-                cursor.execute("""
-                    INSERT INTO washing_priority_groups (name, media_type, target_cids, priorities, sort_order)
-                    VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
-                """, (group['name'], group['media_type'], json.dumps(group['target_cids']), json.dumps(group['priorities']), i))
-            conn.commit()
+    _replace_washing_priority_groups(groups)
     return groups
 
 
@@ -1650,17 +1685,18 @@ def handle_washing_priority_groups():
             
     if request.method == 'POST':
         groups = request.json
+        if not isinstance(groups, list):
+            return jsonify({"success": False, "message": "规则组数据格式错误"}), 400
         try:
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("TRUNCATE TABLE washing_priority_groups")
-                    for i, g in enumerate(groups):
-                        cursor.execute("""
-                            INSERT INTO washing_priority_groups (name, media_type, target_cids, priorities, sort_order)
-                            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
-                        """, (g['name'], g['media_type'], json.dumps(g.get('target_cids', [])), json.dumps(g.get('priorities', [])), i))
-                    conn.commit()
-            return jsonify({"success": True, "message": "洗版优先级规则已保存"})
+            affected_scope, pending_scope = _replace_washing_priority_groups(groups)
+            return jsonify({
+                "success": True,
+                "message": "洗版优先级规则已保存",
+                "data": {
+                    "affected_scope": affected_scope,
+                    "pending_scope": pending_scope,
+                },
+            })
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
@@ -1706,11 +1742,12 @@ def handle_washing_priority_config():
 @p115_bp.route('/washing_priority_recalculate', methods=['POST'])
 @admin_required
 def trigger_washing_priority_recalculate():
-    """触发任务层：重算媒体库所有资源的洗版优先级快照。"""
+    """触发任务层：只重算受规则变更影响的媒体项。"""
     payload = request.json or {}
     item_type = payload.get('item_type') or 'all'
     limit = payload.get('limit')
     background = payload.get('background', True)
+    force_full = payload.get('full') is True
 
     try:
         from tasks.p115 import (
@@ -1718,15 +1755,35 @@ def trigger_washing_priority_recalculate():
             submit_washing_priority_recalculate_task,
         )
 
+        affected_scope = None
+        scope_revision = None
+        if not force_full:
+            pending_state = settings_db.get_washing_priority_recalculate_state()
+            affected_scope = pending_state.get('media_types') or {}
+            scope_revision = pending_state.get('revision')
+            if not affected_scope:
+                return jsonify({
+                    "success": True,
+                    "message": "当前没有受规则变更影响的媒体项",
+                    "data": {"scanned_items": 0, "updated_items": 0},
+                })
+
         if background is False or str(background).strip().lower() in ('0', 'false', 'no'):
             result = task_recalculate_library_washing_priorities(
                 item_type=item_type,
                 limit=limit,
+                affected_scope=affected_scope,
+                scope_revision=scope_revision,
             )
             return jsonify({"success": True, "message": "洗版优先级重算完成", "data": result})
 
-        submit_washing_priority_recalculate_task(item_type=item_type, limit=limit)
-        return jsonify({"success": True, "message": "洗版优先级重算任务已在后台启动"})
+        submit_washing_priority_recalculate_task(
+            item_type=item_type,
+            limit=limit,
+            affected_scope=affected_scope,
+            scope_revision=scope_revision,
+        )
+        return jsonify({"success": True, "message": "受影响媒体项的优先级重算任务已在后台启动"})
     except Exception as e:
         logger.error(f"  ➜ [洗版优先级重算] 启动失败: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500

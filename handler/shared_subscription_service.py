@@ -2648,6 +2648,20 @@ def _replace_mode_short_circuit_best_inventory(
     """
     payload = payload if isinstance(payload, dict) else {}
     files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
+    washing_config = settings_db.get_washing_priority_config()
+    if (
+        washing_config.get('conflict_mode') == 'replace'
+        and washing_config.get('version_slots_enabled')
+        and washing_config.get('version_slots')
+    ):
+        return files, {
+            'checked': False,
+            'short_circuit': False,
+            'reason': 'version_slots_require_candidate_preflight',
+            'message': '多版本槽位已启用，跳过单版本库存最佳值短路。',
+            'best_count': 0,
+            'kept_count': len(files),
+        }
     normalized_source_kind = _normalize_source_kind(source_kind)
     context = _preflight_context(source_kind, source_id, payload, files)
     source_label = f"{source_kind or '-'}:{source_id or '-'}"

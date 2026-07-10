@@ -417,6 +417,7 @@ def _washing_snapshot_for_remaining_versions(cursor, sha1s: List[Any], pcs: List
             'reason': snapshot.get('reason') or '',
             'target_cid': snapshot.get('target_cid') or '',
             'media_type': snapshot.get('media_type') or '',
+            'version_slot': snapshot.get('version_slot') or {},
             'identity': snapshot.get('identity') or {},
             'evaluated_at': snapshot.get('evaluated_at'),
         })
@@ -433,14 +434,33 @@ def _washing_snapshot_for_remaining_versions(cursor, sha1s: List[Any], pcs: List
         return (1, abs(int(level or 0)))
 
     best = sorted(versions, key=_sort_key)[0]
+    slot_levels = {}
+    for version in versions:
+        slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
+        slot_id = str(slot.get('id') or '__single__')
+        current = slot_levels.get(slot_id)
+        if current and _sort_key(current) <= _sort_key(version):
+            continue
+        slot_levels[slot_id] = {
+            'id': slot_id,
+            'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
+            'suffix': slot.get('suffix') or '',
+            'level': version.get('level'),
+            'reason': version.get('reason'),
+            'sha1': version.get('sha1'),
+        }
+
     return {
+        # level 是兼容旧逻辑的全版本最佳汇总值；逐槽等级存放在 snapshot.slot_levels。
         'level': best.get('level'),
         'snapshot': {
             'versions': versions,
+            'slot_levels': slot_levels,
             'reason': best.get('reason'),
             'sha1': best.get('sha1'),
             'target_cid': best.get('target_cid'),
             'media_type': best.get('media_type'),
+            'version_slot': best.get('version_slot') or {},
             'evaluated_at': best.get('evaluated_at'),
         },
     }

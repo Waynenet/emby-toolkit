@@ -4,7 +4,6 @@ import os
 import re
 import json
 import time
-import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1122,10 +1121,11 @@ def task_sync_115_directory_tree(processor=None):
 
     update_progress(100, f"=== 同步结束！共更新 {total_cached} 个目录，清理 {total_cleaned} 个失效缓存 ===")
 
-def task_full_sync_strm_and_subs(processor=None):
+def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
     """
     【V4 终极上帝视角版】全量生成 STRM 与 同步字幕
     利用 115 分类目录级全局拉取 (type=4/1) + 动态 API 溯源 + 本地 DB 目录树缓存，实现秒级增量同步！
+    home_video_only=True 时，仅同步媒体类型为 home_video 的分类规则。
     """
     config = get_config()
     download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
@@ -1135,7 +1135,10 @@ def task_full_sync_strm_and_subs(processor=None):
     min_size_mb = int(config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10))
     MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
     
-    start_msg = "=== ➜ 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== ➜ 开始极速全量同步 STRM (跳过字幕) ==="
+    if home_video_only:
+        start_msg = "=== ➜ 开始同步家庭视频 STRM 与字幕 ===" if download_subs else "=== ➜ 开始同步家庭视频 STRM (跳过字幕) ==="
+    else:
+        start_msg = "=== ➜ 开始极速全量同步 STRM 与 字幕 ===" if download_subs else "=== ➜ 开始极速全量同步 STRM (跳过字幕) ==="
     if enable_cleanup: start_msg += " [已开启本地清理]"
     logger.info(start_msg)
     
@@ -1162,6 +1165,7 @@ def task_full_sync_strm_and_subs(processor=None):
         
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
         known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+        home_video_metadata_exts = {'nfo', 'jpg', 'jpeg', 'png', 'webp'}
         
         allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
         if not allowed_exts:
@@ -1188,14 +1192,23 @@ def task_full_sync_strm_and_subs(processor=None):
         # =================================================================
         update_progress(5, "  ➜ 正在加载本地目录树缓存到内存...")
         
-        cid_to_rel_path = {}  
+        cid_to_rel_path = {}
+        cid_to_media_type = {}
         target_cids = set()   
         
         for r in rules:
+            if home_video_only and r.get('media_type') != 'home_video':
+                continue
             if r.get('enabled', True) and r.get('cid') and str(r['cid']) != '0':
                 cid = str(r['cid'])
                 target_cids.add(cid)
                 cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
+                cid_to_media_type[cid] = r.get('media_type') or 'all'
+
+        if not target_cids:
+            message = "未配置启用的家庭视频分类，跳过同步。" if home_video_only else "未配置启用且有效的分类规则，跳过同步。"
+            update_progress(100, message)
+            return
 
         # 加载 DB 中的目录树 (新增提取 local_path)
         dir_cache = {} 
@@ -1436,12 +1449,13 @@ def task_full_sync_strm_and_subs(processor=None):
             return moved_count
 
         def process_full_sync_items(items, target_cid, category_name):
-            nonlocal files_generated, subs_downloaded, root_anomaly_skipped
+            nonlocal files_generated, subs_downloaded, metadata_downloaded, root_anomaly_skipped
+            is_home_video_target = cid_to_media_type.get(str(target_cid)) == 'home_video'
             for item in items:
                 # 兼容 OpenAPI、Cookie 和 p115client 标准化字段
                 name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
                 ext = name.split('.')[-1].lower() if '.' in name else ''
-                if ext not in allowed_exts:
+                if ext not in allowed_exts and not (is_home_video_target and ext in home_video_metadata_exts):
                     continue
 
                 pc = first_present(item.get('pc'), item.get('pick_code'), item.get('pickcode'))
@@ -1639,6 +1653,32 @@ def task_full_sync_strm_and_subs(processor=None):
 
                     valid_local_files.add(os.path.abspath(sub_path))
 
+                # 家庭视频目录额外同步 NFO 与图片元数据
+                elif is_home_video_target and ext in home_video_metadata_exts:
+                    metadata_path = os.path.join(current_local_path, name)
+                    remote_size = _parse_115_size(item.get('fs') or item.get('size'))
+                    local_size = os.path.getsize(metadata_path) if os.path.exists(metadata_path) else -1
+                    should_download = not os.path.exists(metadata_path) or (remote_size > 0 and local_size != remote_size)
+
+                    if should_download:
+                        try:
+                            import requests
+                            url_obj = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
+                            if url_obj:
+                                headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                                resp = requests.get(str(url_obj), stream=True, timeout=30, headers=headers)
+                                resp.raise_for_status()
+                                with open(metadata_path, 'wb') as f:
+                                    for chunk in resp.iter_content(8192):
+                                        f.write(chunk)
+                                metadata_downloaded += 1
+                                logger.info(f"  ⬇️ [家庭视频] 下载元数据: {name}")
+                        except Exception as e:
+                            logger.error(f"  ➜ 下载家庭视频元数据失败 [{name}]: {e}")
+
+                    if os.path.exists(metadata_path):
+                        valid_local_files.add(os.path.abspath(metadata_path))
+
         # =================================================================
         # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
         # =================================================================
@@ -1646,11 +1686,9 @@ def task_full_sync_strm_and_subs(processor=None):
         valid_local_files = set()
         files_generated = 0
         subs_downloaded = 0
+        metadata_downloaded = 0
         root_anomaly_skipped = 0
         changed_strm_files = set()
-        
-        fetch_types = [4] # 4=视频
-        if download_subs: fetch_types.append(1) # 1=文档(含字幕)
 
         total_targets = len(target_cids)
         
@@ -1659,9 +1697,18 @@ def task_full_sync_strm_and_subs(processor=None):
             base_prog = 10 + int((idx / total_targets) * 80)
             target_invalid = False
             update_progress(base_prog, f"  ➜ 正在拉取分类 [{category_name}] 下的所有文件...")
-            
+
+            fetch_types = [4] # 4=视频
+            if download_subs:
+                fetch_types.append(1) # 1=文档(含字幕)
+            if cid_to_media_type.get(target_cid) == 'home_video':
+                for metadata_type in (1, 2, 99): # 文档、图片、其它
+                    if metadata_type not in fetch_types:
+                        fetch_types.append(metadata_type)
+
+            type_names = {1: "文档/字幕", 2: "图片", 4: "视频", 99: "其它文件"}
             for f_type in fetch_types:
-                type_name = "视频" if f_type == 4 else "文档/字幕"
+                type_name = type_names.get(f_type, str(f_type))
                 offset = 0
                 limit = 1000
                 page = 1
@@ -1704,7 +1751,10 @@ def task_full_sync_strm_and_subs(processor=None):
             if not target_invalid:
                 successful_target_cids.add(target_cid)
 
-        logger.info(f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
+        logger.info(
+            f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, "
+            f"下载字幕: {subs_downloaded} 个, 下载家庭视频元数据: {metadata_downloaded} 个。"
+        )
         moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
         if root_anomaly_skipped:
             sample_names = "、".join(path_anomaly_names[:3])
@@ -1954,7 +2004,8 @@ def task_full_sync_strm_and_subs(processor=None):
             except Exception as e:
                 logger.warning(f"  ➜ 通知 Emby 扫描全量生成 STRM 变更失败: {e}")
 
-        update_progress(100, "=== 全量生成STRM任务结束 ===")
+        end_message = "=== 家庭视频STRM同步任务结束 ===" if home_video_only else "=== 全量生成STRM任务结束 ==="
+        update_progress(100, end_message)
 
     except Exception as e:
         logger.error(f"  ➜ 全量同步任务异常: {e}", exc_info=True)
@@ -1965,6 +2016,20 @@ def task_full_sync_strm_and_subs(processor=None):
             resume_queue_processing()
         except:
             pass
+
+
+def task_sync_home_video_strm(processor=None):
+    """按全量同步逻辑，仅对家庭视频分类执行 STRM 同步与对账。"""
+    return task_full_sync_strm_and_subs(processor, home_video_only=True)
+
+
+class LifeEventMonitorDaemon:
+    """旧启动入口兼容壳；生活事件监控已停用。"""
+
+    @classmethod
+    def start_or_update(cls):
+        return None
+
 
 def task_sync_music_library(processor=None):
     """
@@ -2203,511 +2268,6 @@ def task_sync_music_library(processor=None):
         
     logger.info(end_msg)
     update_progress(100, f"同步完成！生成 {files_generated} 首，下载 {aux_downloaded} 个附属文件。")
-
-# ======================================================================
-# ★★★ 115 生活事件增量监控 (秒级同步 STRM) ★★★
-# ======================================================================
-def task_monitor_115_life_events(processor=None):
-    """
-    读取 115 生活事件，对比本地缓存，增量生成/删除 STRM。
-    支持目录递归扫描，完美处理“移动整个文件夹”的场景。
-    全面接入 P115CacheManager，逻辑更严密。
-    """
-    config = get_config()
-    if not config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
-        return
-
-    client = P115Service.get_client()
-    if not client:
-        return
-
-    try:
-        import task_manager
-    except ImportError:
-        task_manager = None
-
-    def update_progress(prog, msg):
-        if task_manager: task_manager.update_status_from_thread(prog, msg)
-        logger.info(msg)
-
-    update_progress(5, "=== ➜ 开始检查 115 增量生活事件 ===")
-
-    local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
-    etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
-    download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
-    rename_config = settings_db.get_setting('p115_rename_config') or {}
-    
-    known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
-    known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
-    allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
-    if not allowed_exts: allowed_exts = known_video_exts | known_sub_exts
-
-    if not local_root or not etk_url or not etk_url.startswith('http'):
-        logger.warning("  ➜ [事件] 未配置 http(s) 开头的 ETK 访问地址，跳过 STRM 增量生成。")
-        return
-
-    raw_rules = settings_db.get_setting('p115_sorting_rules')
-    if not raw_rules: return
-    rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
-    
-    target_cids = set()
-    cid_to_rel_path = {}
-    for r in rules:
-        if r.get('enabled', True) and r.get('cid') and str(r['cid']) != '0':
-            cid = str(r['cid'])
-            target_cids.add(cid)
-            cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
-
-    events_to_delete = [] 
-    added_count = 0
-    deleted_count = 0
-
-    # 动态 API 路径缓存池 (防止重复请求 115 接口)
-    dynamic_path_cache = {}
-
-    # 辅助函数：推导本地路径 (★ 终极修复版：加入 API 溯源与防误删保护)
-    def resolve_local_dir(pid):
-        pid = str(pid)
-        if pid in cid_to_rel_path: return cid_to_rel_path[pid]
-        if pid in dynamic_path_cache: return dynamic_path_cache[pid]
-        
-        try:
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    parts = []
-                    curr = pid
-                    while curr:
-                        cursor.execute("SELECT parent_id, name FROM p115_filesystem_cache WHERE id = %s", (curr,))
-                        row = cursor.fetchone()
-                        if not row: break
-                        parts.append(row['name'])
-                        curr = str(row['parent_id'])
-                        if curr in cid_to_rel_path:
-                            parts.append(cid_to_rel_path[curr])
-                            parts.reverse()
-                            resolved_path = os.path.join(*parts)
-                            dynamic_path_cache[pid] = resolved_path
-                            return resolved_path
-        except: pass
-        
-        # ★ 终极兜底：缓存穿透时，主动向 115 请求该目录的真实路径
-        try:
-            dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-            if not dir_info.get('state'):
-                # 如果 API 明确返回失败（比如目录不存在），那说明真不在了
-                if dir_info.get('code') in [20004, 70004]: 
-                    return None
-                # 其他 API 错误（如流控），抛出异常触发保护
-                raise Exception(f"API Error: {dir_info}")
-                
-            path_nodes = dir_info.get('path', [])
-            if path_nodes:
-                start_idx = -1
-                target_cid_found = None
-                for i, p_node in enumerate(path_nodes):
-                    node_cid = str(p_node.get('cid') or p_node.get('file_id'))
-                    if node_cid in target_cids:
-                        start_idx = i + 1
-                        target_cid_found = node_cid
-                        break
-                if start_idx != -1 and target_cid_found:
-                    sub_folders = [str(p.get('name') or p.get('file_name')).strip() for p in path_nodes[start_idx:]]
-                    base_cat_path = cid_to_rel_path.get(target_cid_found, '未识别')
-                    resolved_path = os.path.join(base_cat_path, *sub_folders) if sub_folders else base_cat_path
-                    dynamic_path_cache[pid] = resolved_path # 存入内存池
-                    logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
-                    return resolved_path
-                else:
-                    # 确实不在监控目录内
-                    return None
-        except Exception as e:
-            logger.warning(f"  ➜ 动态查询目录路径失败 (pid: {pid})，为防止误删，跳过该事件: {e}")
-            return "API_ERROR_PROTECT"
-
-    # 辅助函数：通知 Emby
-    def _notify_emby(path):
-        emby_url = config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
-        emby_api_key = config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
-        if emby_url and emby_api_key:
-            try:
-                from handler import emby
-                emby.notify_emby_file_changes([path], emby_url, emby_api_key, update_type="Deleted")
-            except: pass
-
-    # ★ 核心处理逻辑 (全面接入 P115CacheManager)
-    def process_node(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size):
-        nonlocal added_count, deleted_count
-        
-        # 1. 获取旧状态
-        old_local_path = P115CacheManager.get_local_path(file_id)
-        
-        # 2. 获取新状态
-        new_rel_dir = None
-        if b_type != 22: 
-            new_rel_dir = resolve_local_dir(parent_id)
-            # ★ 触发保护机制，直接跳过，不删也不加
-            if new_rel_dir == "API_ERROR_PROTECT":
-                return 
-
-        # ==========================================
-        # 分支 1：删除或移出监控目录
-        # ==========================================
-        if old_local_path and not new_rel_dir:
-            full_local_path = os.path.join(local_root, old_local_path)
-            db_ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-            
-            if db_ext in known_video_exts:
-                strm_full = os.path.splitext(full_local_path)[0] + ".strm"
-                if os.path.exists(strm_full):
-                    os.remove(strm_full)
-                    deleted_count += 1
-                    logger.info(f"  ➜ [事件] 删除失效 STRM: {os.path.basename(strm_full)}")
-                    _notify_emby(strm_full)
-                    
-                # ★ 同步删除 Mediainfo
-                mi_full = os.path.splitext(full_local_path)[0] + "-mediainfo.json"
-                if os.path.exists(mi_full):
-                    os.remove(mi_full)
-                    logger.info(f"  ➜ [事件] 删除失效媒体信息: {os.path.basename(mi_full)}")
-                    
-            elif db_ext in known_sub_exts:
-                if os.path.exists(full_local_path):
-                    os.remove(full_local_path)
-                    logger.info(f"  ➜ [事件] 删除失效字幕: {file_name}")
-            else:
-                if os.path.exists(full_local_path) and os.path.isdir(full_local_path):
-                    import shutil
-                    shutil.rmtree(full_local_path)
-                    deleted_count += 1
-                    logger.info(f"  ➜ [事件] 删除失效目录: {file_name}")
-                    _notify_emby(os.path.dirname(full_local_path))
-            
-            # 清理数据库
-            if is_folder: 
-                # 1. 递归找出本地缓存中所有子孙节点的 FID 和 PC 码
-                descendant_fids = []
-                descendant_pcs = []
-                cids_to_check = [str(file_id)]
-                
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            # 广度优先遍历，扒出所有子孙
-                            while cids_to_check:
-                                current_cid = cids_to_check.pop(0)
-                                cursor.execute("SELECT id, pick_code FROM p115_filesystem_cache WHERE parent_id = %s", (current_cid,))
-                                for row in cursor.fetchall():
-                                    fid = str(row['id'])
-                                    pc = row['pick_code']
-                                    descendant_fids.append(fid)
-                                    if pc: descendant_pcs.append(pc)
-                                    cids_to_check.append(fid) # 把子节点也加进去继续往下查
-                                    
-                            # 2. 批量删除整理记录 (斩草除根)
-                            if descendant_pcs:
-                                cursor.execute("DELETE FROM p115_organize_records WHERE pick_code = ANY(%s)", (descendant_pcs,))
-                            if descendant_fids:
-                                cursor.execute("DELETE FROM p115_organize_records WHERE file_id = ANY(%s)", (descendant_fids,))
-                                
-                            # 3. 批量删除缓存表中的所有子孙节点
-                            if descendant_fids:
-                                cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = ANY(%s)", (descendant_fids,))
-                            
-                            # 4. 最后删除目录本身的缓存
-                            cursor.execute("DELETE FROM p115_filesystem_cache WHERE id = %s", (str(file_id),))
-                            
-                        conn.commit()
-                        if descendant_fids:
-                            logger.info(f"  ➜ [事件] 级联清理完成: 移除了 {len(descendant_fids)} 个子文件的缓存与整理记录。")
-                except Exception as e:
-                    logger.error(f"  ➜ [事件] 级联清理目录缓存与记录失败: {e}")
-            else: 
-                # 单文件删除逻辑
-                P115CacheManager.delete_files([file_id])
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cursor:
-                            if pick_code:
-                                cursor.execute("DELETE FROM p115_organize_records WHERE pick_code = %s", (pick_code,))
-                            else:
-                                cursor.execute("DELETE FROM p115_organize_records WHERE file_id = %s", (str(file_id),))
-                            conn.commit()
-                except Exception as e:
-                    logger.error(f"  ➜ [事件] 清理 115 历史整理记录失败: {e}")
-
-        # ==========================================
-        # 分支 2：新增、移入、改名、同目录移动
-        # ==========================================
-        elif new_rel_dir:
-            file_local_path = os.path.join(new_rel_dir, file_name).replace('\\', '/')
-            
-            # ★ 核心逻辑 1：如果路径完全没变，说明是 MP/TG 实时处理过的，直接跳过！
-            if old_local_path == file_local_path:
-                return
-                
-            # ★ 核心逻辑 2：如果以前存在，且路径变了 (移动/改名)，需要先删掉旧的本地文件！
-            if old_local_path and old_local_path != file_local_path:
-                old_full_path = os.path.join(local_root, old_local_path)
-                old_ext = old_local_path.split('.')[-1].lower() if '.' in old_local_path else ''
-                
-                if old_ext in known_video_exts:
-                    old_strm = os.path.splitext(old_full_path)[0] + ".strm"
-                    if os.path.exists(old_strm): 
-                        os.remove(old_strm)
-                        _notify_emby(old_strm)
-                        
-                    # ★ 同步删除旧的 Mediainfo
-                    old_mi = os.path.splitext(old_full_path)[0] + "-mediainfo.json"
-                    if os.path.exists(old_mi):
-                        os.remove(old_mi)
-                        
-                elif old_ext in known_sub_exts:
-                    if os.path.exists(old_full_path): os.remove(old_full_path)
-                elif is_folder:
-                    if os.path.exists(old_full_path) and os.path.isdir(old_full_path):
-                        import shutil
-                        shutil.rmtree(old_full_path)
-                        _notify_emby(os.path.dirname(old_full_path))
-
-            # 开始生成新文件/目录
-            ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-            current_local_path = os.path.join(local_root, new_rel_dir)
-            
-            if not is_folder and ext in allowed_exts:
-                if ext in known_video_exts:
-                    min_size_mb = int(config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10))
-                    MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
-                    # 确保 file_size 是整数
-                    safe_file_size = int(file_size) if str(file_size).isdigit() else 0
-                    if 0 < safe_file_size < MIN_VIDEO_SIZE:
-                        size_mb = safe_file_size / (1024 * 1024)
-                        logger.debug(f"  ➜ [事件] 视频体积过小 ({size_mb:.2f} MB)，判定为花絮/样本/广告，忽略生成 STRM: {file_name}")
-                        return # 直接跳过，不生成 STRM，也不记录缓存
-                os.makedirs(current_local_path, exist_ok=True)
-                
-                if ext in known_video_exts and pick_code:
-                    strm_name = os.path.splitext(file_name)[0] + ".strm"
-                    strm_path = os.path.join(current_local_path, strm_name)
-                    
-                    content = f"{etk_url}/api/p115/play/{pick_code}"
-                    if rename_config.get('strm_url_fmt') == 'with_name':
-                        content = f"{content}/{file_name}"
-                            
-                    with open(strm_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    
-                    P115CacheManager.save_file_cache(
-                        fid=file_id, parent_id=parent_id, name=file_name, 
-                        sha1=file_sha1, pick_code=pick_code, 
-                        local_path=file_local_path, size=file_size
-                    )
-                    
-                    added_count += 1
-                    action_str = "移动/改名" if old_local_path else "新增"
-                    logger.info(f"  ➜ [事件] {action_str} STRM: {file_name}")
-                    
-                    # ==================================================
-                    # ★ 生成 Mediainfo (等同 MP 直出逻辑)
-                    # ==================================================
-                    if FORCE_GENERATE_MEDIAINFO:
-                        try:
-                            mediainfo_filename = os.path.splitext(file_name)[0] + "-mediainfo.json"
-                            mediainfo_filepath = os.path.join(current_local_path, mediainfo_filename)
-                            if not os.path.exists(mediainfo_filepath):
-                                mediainfo_text = None
-                                if file_sha1:
-                                    mediainfo_text = P115CacheManager.get_mediainfo_cache_text(file_sha1)
-
-                                if not mediainfo_text:
-                                    prober = _StandaloneProber(client)
-                                    probe_item = {
-                                        'fid': file_id, 'file_id': file_id,
-                                        'pc': pick_code, 'pick_code': pick_code,
-                                        'sha1': file_sha1,
-                                        'fn': file_name, 'file_name': file_name,
-                                        'fs': file_size, 'size': file_size
-                                    }
-                                    probe_result = prober._probe_mediainfo_with_ffprobe(probe_item, sha1=file_sha1, silent_log=False)
-                                    raw_ffprobe_json = None
-                                    if isinstance(probe_result, tuple) and len(probe_result) >= 2:
-                                        mediainfo_obj, raw_ffprobe_json = probe_result[0], probe_result[1]
-                                    else:
-                                        mediainfo_obj = probe_result
-                                    if mediainfo_obj:
-                                        probe_sha1 = file_sha1 or probe_item.get('sha1') or probe_item.get('sha')
-                                        if probe_sha1:
-                                            probe_sha1 = str(probe_sha1).upper()
-                                            P115CacheManager.save_mediainfo_cache(
-                                                probe_sha1,
-                                                mediainfo_obj,
-                                                raw_ffprobe_json=raw_ffprobe_json,
-                                                file_info=probe_item,
-                                                fid=file_id,
-                                                pick_code=pick_code,
-                                                file_name=file_name,
-                                            )
-                                            file_sha1 = probe_sha1
-                                        mediainfo_text = json.dumps(mediainfo_obj, ensure_ascii=False, indent=2)
-
-                                if mediainfo_text:
-                                    with open(mediainfo_filepath, "w", encoding="utf-8") as f:
-                                        f.write(mediainfo_text)
-                                    logger.info(f"  ➜ [事件] 媒体信息已生成 -> {mediainfo_filename}")
-                        except Exception as e:
-                            logger.error(f"  ➜ [事件] 生成媒体信息失败: {e}")
-                    
-                    try:
-                        from monitor_service import enqueue_file_actively
-                        enqueue_file_actively(strm_path)
-                    except: pass
-
-                elif ext in known_sub_exts and download_subs and pick_code:
-                    sub_path = os.path.join(current_local_path, file_name)
-                    if not os.path.exists(sub_path):
-                        try:
-                            url_obj = client.resolve_download_url(pick_code, user_agent="Mozilla/5.0")
-                            if url_obj:
-                                import requests
-                                headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
-                                resp = requests.get(str(url_obj), stream=True, timeout=15, headers=headers)
-                                resp.raise_for_status()
-                                with open(sub_path, 'wb') as f:
-                                    for chunk in resp.iter_content(8192): f.write(chunk)
-                                logger.info(f"  ⬇️ [事件] 下载字幕: {file_name}")
-                        except: pass
-                            
-            else:
-                # 是目录，或者是不在白名单的文件，当做目录/空壳记录
-                os.makedirs(os.path.join(current_local_path, file_name), exist_ok=True)
-                P115CacheManager.save_cid(file_id, parent_id, file_name)
-                P115CacheManager.update_local_path(file_id, file_local_path)
-
-    # ★ 递归扫描目录内容的函数
-    def process_recursive(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size):
-        # 1. 先处理当前节点
-        process_node(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size)
-        
-        # 2. 如果是目录，且不是删除事件，则拉取里面的所有文件！
-        if is_folder and b_type != 22:
-            try:
-                offset = 0
-                while True:
-                    res = client.fs_files({'cid': file_id, 'limit': 1000, 'offset': offset})
-                    items = res.get('data', [])
-                    if not items: break
-                    
-                    for item in items:
-                        c_fid = str(item.get('fid') or item.get('file_id'))
-                        c_fname = item.get('fn') or item.get('n') or item.get('file_name')
-                        c_pid = file_id
-                        c_pc = item.get('pc') or item.get('pick_code')
-                        c_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                        c_is_folder = (c_fc == '0')
-                        c_sha1 = item.get('sha1') or item.get('sha')
-                        c_size = _parse_115_size(item.get('fs') or item.get('size'))
-                        
-                        # 递归调用
-                        process_recursive(c_fid, c_fname, c_pid, c_pc, c_is_folder, b_type, c_sha1, c_size)
-                        
-                    if len(items) < 1000: break
-                    offset += 1000
-            except Exception as e:
-                logger.error(f"  ➜ 递归拉取目录 {file_name} 失败: {e}")
-
-    try:
-        res = client.life_behavior_detail({"limit": 100, "offset": 0})
-        
-        if res.get('state'):
-            records = res.get('data', {}).get('list', [])
-
-            for record in records:
-                relation_id = record.get('id')
-                
-                try:
-                    b_type = int(record.get('type', 0))
-                except: continue
-                
-                if b_type not in [2, 6, 14, 22]: continue
-                
-                file_id = str(record.get('file_id') or '')
-                file_name = record.get('file_name') or ''
-                parent_id = str(record.get('parent_id') or '')
-                pick_code = record.get('pick_code') or ''
-                file_sha1 = record.get('sha1') or ''
-                file_size = record.get('file_size') or 0
-                
-                fc = str(record.get('file_category', '1'))
-                is_folder = (fc == '0')
-                
-                if not file_id: continue
-
-                # ★ 调用递归处理函数
-                process_recursive(file_id, file_name, parent_id, pick_code, is_folder, b_type, file_sha1, file_size)
-                        
-                # 映射为 Life API 需要的字符串
-                TYPE_MAP = {2: "upload_file", 6: "move_file", 14: "receive_files", 22: "delete_file"}
-                b_type_str = TYPE_MAP.get(b_type, str(b_type))
-                
-                events_to_delete.append({"relation_id": relation_id, "behavior_type": b_type_str})
-
-    except Exception as e:
-        logger.error(f"  ➜ 获取生活事件异常: {e}", exc_info=True)
-
-    # 4. 批量清空已处理的事件
-    if events_to_delete:
-        try:
-            chunk_size = 50
-            for i in range(0, len(events_to_delete), chunk_size):
-                chunk = events_to_delete[i:i+chunk_size]
-                del_res = client.life_batch_delete(chunk)
-                if not del_res.get('state'):
-                    logger.warning(f"  ➜ 清空生活事件失败: {del_res}")
-            logger.debug(f"  ➜ 成功清空 {len(events_to_delete)} 条已处理的生活事件。")
-        except Exception as e:
-            logger.error(f"  ➜ 清空生活事件异常: {e}")
-
-    update_progress(100, f"=== 增量检查完成！新增/移动: {added_count}, 删除: {deleted_count} ===")
-
-# ======================================================================
-# ★★★ 后台守护线程：定时触发生活事件监控 ★★★
-# ======================================================================
-class LifeEventMonitorDaemon:
-    _timer = None
-    _lock = threading.Lock()
-
-    @classmethod
-    def start_or_update(cls):
-        with cls._lock:
-            if cls._timer:
-                cls._timer.cancel()
-                cls._timer = None
-                
-            config = get_config()
-            if config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
-                interval_mins = config.get(constants.CONFIG_OPTION_115_LIFE_MONITOR_INTERVAL, 5)
-                interval_secs = max(5, interval_mins) * 60 # 最少 5 分钟
-                
-                logger.info(f"  ⏱️ [守护进程] 115 生活事件监控已启动，间隔: {interval_mins} 分钟。")
-                cls._schedule_next(interval_secs)
-
-    @classmethod
-    def _schedule_next(cls, interval_secs):
-        cls._timer = threading.Timer(interval_secs, cls._run_task, args=(interval_secs,))
-        cls._timer.daemon = True
-        cls._timer.start()
-
-    @classmethod
-    def _run_task(cls, interval_secs):
-        # ★ 增加心跳日志，证明守护线程活着
-        logger.info("  💓 [守护进程] 定时触发 115 生活事件监控...")
-        try:
-            task_monitor_115_life_events()
-        except Exception as e:
-            logger.error(f"生活事件监控守护线程异常: {e}")
-        finally:
-            with cls._lock:
-                if get_config().get(constants.CONFIG_OPTION_115_LIFE_MONITOR_ENABLED, False):
-                    cls._schedule_next(interval_secs)
 
 # ======================================================================
 # ★★★ 洗版优先级一键重算任务 ★★★
@@ -3196,6 +2756,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
         level = None
         reason = '未计算'
+        version_slot = None
 
         raw_row = _lookup_mediainfo_by_sha1(cursor, sha1) if sha1 else None
         if not raw_row or raw_row.get('mediainfo_json') in (None, '', [], {}):
@@ -3217,7 +2778,34 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                             f"{old_target_cid or '-'} -> {target_cid} ({inferred_category_path or '-'}) | {file_name}"
                         )
 
-                if not _has_normal_washing_priorities(priorities):
+                slot_config = settings_db.get_washing_priority_config()
+                slot_needs_clean = any(
+                    bool((slot.get('match') or {}).get('clean_version'))
+                    for slot in (slot_config.get('version_slots') or [])
+                    if isinstance(slot, dict)
+                )
+                priority_input = _build_priority_input(
+                    raw_row.get('mediainfo_json'),
+                    file_name=file_name,
+                    file_size=file_size,
+                    original_lang=original_lang,
+                    media_type=media_type,
+                    tmdb_id=row.get('parent_series_tmdb_id') or row.get('tmdb_id') or '',
+                    season_num=row.get('season_number'),
+                    episode_num=row.get('episode_number'),
+                    need_clean_version_check=(
+                        WashingService._priorities_need_clean_version(priorities)
+                        or slot_needs_clean
+                    ),
+                )
+                norm = WashingService._normalize_info(priority_input)
+                version_slot = WashingService._resolve_version_slot_from_norm(norm)
+
+                if version_slot is None:
+                    level = 0
+                    reason = '未命中任何多版本槽位'
+                    stats['evaluated_versions'] += 1
+                elif not _has_normal_washing_priorities(priorities):
                     level = None
                     if inferred_target_cid and target_cid != inferred_target_cid:
                         reason = f'原目标分类CID({target_cid or "-"})只命中全局/排除规则，local_path 推导分类CID({inferred_target_cid})后仍未命中普通优先级规则'
@@ -3227,18 +2815,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                         reason = '缺少整理目标分类CID，且 local_path 未命中分类规则'
                     stats['no_priority_rules'] += 1
                 else:
-                    priority_input = _build_priority_input(
-                        raw_row.get('mediainfo_json'),
-                        file_name=file_name,
-                        file_size=file_size,
-                        original_lang=original_lang,
-                        media_type=media_type,
-                        tmdb_id=row.get('parent_series_tmdb_id') or row.get('tmdb_id') or '',
-                        season_num=row.get('season_number'),
-                        episode_num=row.get('episode_number'),
-                        need_clean_version_check=WashingService._priorities_need_clean_version(priorities),
-                    )
-                    norm = WashingService._normalize_info(priority_input)
                     level, reason = WashingService.get_level(norm, priorities)
                     if inferred_target_cid and target_cid == inferred_target_cid and inferred_category_path:
                         reason = f"{reason}（分类路径: {inferred_category_path}）"
@@ -3275,6 +2851,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             'pick_code': pc,
             'media_type': media_type,
             'target_cid': target_cid,
+            'version_slot': version_slot,
             'evaluated_at': evaluated_at,
         }
         versions.append(version)
@@ -3284,6 +2861,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                 'reason': reason,
                 'target_cid': target_cid or None,
                 'media_type': media_type,
+                'version_slot': version_slot,
                 'identity': identity,
                 'evaluated_at': evaluated_at
             }
@@ -3309,13 +2887,30 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
     best = sorted(versions, key=_best_sort_key)[0] if versions else {}
     best_level = best.get('level') if best else None
-    
+    slot_levels = {}
+    for version in versions:
+        slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
+        slot_id = str(slot.get('id') or '__single__')
+        current = slot_levels.get(slot_id)
+        if current and _best_sort_key(current) <= _best_sort_key(version):
+            continue
+        slot_levels[slot_id] = {
+            'id': slot_id,
+            'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
+            'suffix': slot.get('suffix') or '',
+            'level': version.get('level'),
+            'reason': version.get('reason'),
+            'sha1': version.get('sha1'),
+        }
+
     new_mm_snapshot = {
         'versions': versions,
+        'slot_levels': slot_levels,
         'reason': best.get('reason') if best else '无有效版本',
         'sha1': best.get('sha1') if best else None,
         'target_cid': best.get('target_cid') if best else None,
         'media_type': media_type,
+        'version_slot': best.get('version_slot') if best else {},
         'evaluated_at': evaluated_at
     }
 
@@ -3326,6 +2921,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             last_updated_at = NOW()
         WHERE tmdb_id = %s AND item_type = %s
     """, (
+        # washing_level 保留为旧逻辑使用的全版本最佳汇总值；逐槽等级以 slot_levels 为准。
         best_level,
         json.dumps(new_mm_snapshot, ensure_ascii=False),
         row.get('tmdb_id'),
@@ -3335,8 +2931,72 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
     return stats
 
 
-def task_recalculate_library_washing_priorities(processor=None, item_type='all', limit=None):
-    """重算当前媒体库所有电影/分集的洗版优先级快照。"""
+def _build_washing_priority_scope_filter(affected_scope, allowed_types):
+    scope = settings_db.normalize_washing_priority_recalculate_scope(affected_scope)
+    clauses = []
+    params = []
+    processed_scope = {}
+    item_type_map = {'Movie': 'Movie', 'Series': 'Episode'}
+
+    for media_type, item_type in item_type_map.items():
+        if item_type not in allowed_types:
+            continue
+        entry = scope.get(media_type)
+        if not entry:
+            continue
+        processed_scope[media_type] = entry
+        if entry.get('all'):
+            clauses.append("mm.item_type = %s")
+            params.append(item_type)
+            continue
+
+        target_cids = entry.get('target_cids') or []
+        if not target_cids:
+            continue
+        clauses.append("""
+            (
+                mm.item_type = %s
+                AND (
+                    COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->>'target_cid' = ANY(%s)
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->'versions') = 'array'
+                                THEN COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->'versions'
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS version
+                        WHERE version->>'target_cid' = ANY(%s)
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements_text(
+                            CASE
+                                WHEN jsonb_typeof(mm.file_pickcode_json) = 'array'
+                                THEN mm.file_pickcode_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS pc(value)
+                        JOIN p115_organize_records por ON por.pick_code = pc.value
+                        WHERE por.target_cid = ANY(%s)
+                    )
+                )
+            )
+        """)
+        params.extend([item_type, target_cids, target_cids, target_cids])
+
+    return (' OR '.join(clauses) if clauses else 'FALSE'), params, processed_scope
+
+
+def task_recalculate_library_washing_priorities(
+    processor=None,
+    item_type='all',
+    limit=None,
+    affected_scope=None,
+    scope_revision=None,
+):
+    """重算当前媒体库中受规则变更影响的电影/分集洗版优先级快照。"""
     from database.connection import get_db_connection
 
     try:
@@ -3397,6 +3057,8 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
         'no_priority_rules': 0,
         'backfilled_target_cid': 0,
         'errors': 0,
+        'affected_scope': settings_db.normalize_washing_priority_recalculate_scope(affected_scope),
+        'scope_acknowledged': False,
         'started_at': datetime.utcnow().isoformat() + 'Z',
         'finished_at': None,
     }
@@ -3404,6 +3066,15 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             params = [allowed_types]
+            scope_sql = ''
+            processed_scope = {}
+            if affected_scope is not None:
+                scope_filter, scope_params, processed_scope = _build_washing_priority_scope_filter(
+                    affected_scope,
+                    allowed_types,
+                )
+                scope_sql = f'AND ({scope_filter})'
+                params.extend(scope_params)
             limit_sql = ''
             if limit:
                 try:
@@ -3433,12 +3104,13 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
                 ) parent ON TRUE
                 WHERE mm.in_library = TRUE
                   AND mm.item_type = ANY(%s)
+                  {scope_sql}
                 ORDER BY mm.item_type ASC, COALESCE(mm.title, '') ASC, mm.tmdb_id ASC
                 {limit_sql}
             """, tuple(params))
             rows = cursor.fetchall() or []
             total_rows = len(rows)
-            update_progress(1, f"  ➜ [洗版优先级重算] 开始执行，待处理 {total_rows} 个媒体项")
+            update_progress(1, f"  ➜ [洗版优先级重算] 开始执行，待处理 {total_rows} 个受影响媒体项")
 
             for row in rows:
                 stats['scanned_items'] += 1
@@ -3477,6 +3149,20 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
 
             conn.commit()
 
+    if (
+        scope_revision is not None
+        and not limit
+        and stats['errors'] == 0
+        and processed_scope
+    ):
+        try:
+            stats['scope_acknowledged'] = settings_db.acknowledge_washing_priority_recalculate_scope(
+                scope_revision,
+                processed_scope,
+            )
+        except Exception as e:
+            logger.warning(f"  ➜ [洗版优先级重算] 清理已处理影响范围失败: {e}", exc_info=True)
+
     stats['finished_at'] = datetime.utcnow().isoformat() + 'Z'
     update_progress(
         100,
@@ -3486,8 +3172,13 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
     )
     return stats
 
-def submit_washing_priority_recalculate_task(item_type='all', limit=None):
-    """提交后台任务：重算媒体库所有资源的洗版优先级快照。"""
+def submit_washing_priority_recalculate_task(
+    item_type='all',
+    limit=None,
+    affected_scope=None,
+    scope_revision=None,
+):
+    """提交后台任务：重算受规则变更影响的媒体项洗版优先级快照。"""
     try:
         import task_manager
     except Exception as e:
@@ -3501,10 +3192,12 @@ def submit_washing_priority_recalculate_task(item_type='all', limit=None):
             processor=processor,
             item_type=item_type,
             limit=limit,
+            affected_scope=affected_scope,
+            scope_revision=scope_revision,
         )
 
     task_manager.submit_task(
         _task,
-        task_name="重算媒体库洗版优先级",
+        task_name="重算受影响媒体洗版优先级",
         processor_type='media'
     )

@@ -827,33 +827,18 @@ def _extract_clone_from_rapid_response(resp, client, temp_cid, file_name, sha1, 
         if item.get("fid") and item.get("pick_code"):
             return item
 
-    resp = client.fs_files({
-        "cid": temp_cid,
-        "search_value": file_name,
-        "show_dir": 0,
-        "limit": 100,
-        "offset": 0,
-        "record_open_time": 0,
-        "count_folders": 0,
-    })
-    expected_size = _safe_int(size, 0)
-    expected_sha1 = str(sha1 or "").upper()
-    for item in resp.get("data") or []:
-        item_name = str(item.get("name") or item.get("file_name") or item.get("fn") or "").strip()
-        item_size = _safe_int(item.get("size") or item.get("fs"), 0)
-        item_sha1 = str(item.get("sha1") or item.get("sha") or "").upper()
-        if file_name and item_name and item_name != file_name:
-            stem = re.escape(file_name.rsplit(".", 1)[0]) if "." in file_name else re.escape(file_name)
-            if not re.match(stem + r"(?:\(\d+\))?(?:\.[^.]+)?$", item_name):
-                continue
-        if expected_size and item_size and item_size != expected_size:
-            continue
-        if expected_sha1 and item_sha1 and item_sha1 != expected_sha1:
-            continue
-        fid = str(item.get("fid") or item.get("file_id") or item.get("id") or "").strip()
-        pc = str(item.get("pick_code") or item.get("pickcode") or item.get("pc") or "").strip()
-        if fid and pc:
-            return {"fid": fid, "pick_code": pc, "name": item_name or file_name}
+    for attempt in range(3):
+        clone = find_temp_video(
+            client,
+            temp_cid,
+            sha1=sha1,
+            size=size,
+            file_name=file_name,
+        )
+        if clone:
+            return clone
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1))
     return {}
 
 

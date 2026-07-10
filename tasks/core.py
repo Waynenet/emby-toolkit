@@ -25,7 +25,7 @@ from .discover import task_update_daily_theme
 from .resubscribe import task_update_resubscribe_cache, task_resubscribe_library
 from .vector_tasks import task_generate_embeddings
 from .system_update import task_check_and_update_container
-from .p115 import task_scan_and_organize_115, task_sync_115_directory_tree, task_full_sync_strm_and_subs, task_monitor_115_life_events, task_recalculate_library_washing_priorities, task_manual_correct_organize_records, task_play_pool_daily_speedtest
+from .p115 import task_scan_and_organize_115, task_sync_115_directory_tree, task_full_sync_strm_and_subs, task_sync_home_video_strm, task_recalculate_library_washing_priorities, task_manual_correct_organize_records, task_play_pool_daily_speedtest
 from .hdhive import task_hdhive_auto_checkin
 from .shared_resource_tasks import task_shared_resource_maintenance, share_all_library, task_shared_share_status_sync_high_freq
 
@@ -51,7 +51,7 @@ TASK_HELP_TEXTS = {
     'scan-monitor-folders': '扫描配置的监控目录，发现新增媒体文件后进入识别、整理或入库流程，适合查漏补缺。',
     'scan-organize-115': '扫描 115 网盘待整理目录，并按规则识别、整理、生成记录，适合新增资源后手动触发。',
     'full-sync-strm': '全量重建 STRM 与字幕文件，保持网盘和本地一致，适合媒体库重建或迁移时使用。',
-    'monitor-115-life-events': '增量处理 115 网盘文件变化，功能较弱，不熟悉不建议使用。',
+    'monitor-115-life-events': '按全量同步逻辑扫描家庭视频分类，同步 STRM、字幕、NFO 和图片元数据。',
     'backup-mediainfo': '备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。',
     'repair-p115-fingerprints': '扫描在库电影和分集，补齐共享资源必需的 115 PC 与 SHA1 以及缓存；优先从本地缓存恢复，必要时查询 115。',
     'restore_mediainfo': '从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。',
@@ -301,7 +301,8 @@ def get_task_registry(context: str = 'all'):
         'scan-monitor-folders': (task_scan_monitor_folders, "扫描监控目录", 'media', True),
         'scan-organize-115': (task_scan_and_organize_115, "网盘文件整理", 'media', True),
         'full-sync-strm': (task_full_sync_strm_and_subs, "全量生成STRM", 'media', True),
-        'monitor-115-life-events': (task_monitor_115_life_events, "增量生成STRM", 'media', True),
+        # 保留旧任务 key，兼容用户现有任务链配置。
+        'monitor-115-life-events': (task_sync_home_video_strm, "同步家庭视频", 'media', True),
         'backup-mediainfo': (task_backup_mediainfo, "备份媒体信息", 'media', True),
         'repair-p115-fingerprints': (task_repair_p115_fingerprints, "补齐缓存指纹", 'media', True),
         'restore_mediainfo': (task_restore_mediainfo, "还原媒体信息", 'media', True),
