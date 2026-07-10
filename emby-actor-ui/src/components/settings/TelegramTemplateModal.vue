@@ -76,11 +76,8 @@ const loading = ref(false);
 const saving = ref(false);
 
 const defaultTemplates = {
-  // 入库通知：变量剥离了标题，需要在模板里手动写 ⏰ 和 📝
-  library_new: '{{ media_icon }} {{ title }} {{ notification_title }}\n\n{{ episode_info }}\n{{ media_params }}\n⏰ *时间*: `{{ time }}`\n📝 *剧情*: {{ overview }}\n\n{{ review_warning }}',
-  
-  // 播放通知：progress 和 overview 变量在 Python 里已经自带了 ⏳进度 和 📝剧情，所以模板里直接换行引用即可
-  playback: '{{ action }}\n\n👤 *用户*: `{{ user }}`\n🎬 *媒体*: {{ title }}\n{{ progress }}\n📱 *设备*: `{{ device }}（{{ client }}）`\n🌐 *地址*: {{ ip }}\n🕒 *时间*: `{{ time }}`\n\n{{ overview }}'
+  library_new: '{{ media_icon }} {{ title }} {{ notification_title }}\n\n{{ episode_info }}\n{{ media_params }}\n⏰ *时间*: `{{ time }}`\n📝 *剧情*: {{ overview }}\n{{ review_warning }}',
+  playback: '{{ action }}\n\n👤 *用户*: `{{ user }}`\n🎬 *媒体*: {{ title }}\n{{ progress }}\n📱 *设备*: `{{ device }}（{{ client }}）`\n🌐 *地址*: {{ ip }}\n🕒 *时间*: `{{ time }}`\n{{ overview }}'
 };
 
 const model = ref({ ...defaultTemplates });
