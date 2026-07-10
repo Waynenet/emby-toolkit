@@ -41,6 +41,18 @@ def _get_access_token(config: Dict[str, Any] = None) -> Optional[str]:
         logger.error(f"  ➜ 获取 MoviePilot Token 失败: {e}")
         return None
 
+def _get_mp_base_and_headers(config: Dict[str, Any] = None) -> Tuple[str, Optional[dict], str]:
+    mp_config = settings_db.get_setting('mp_config') or {}
+    moviepilot_url = str(mp_config.get('moviepilot_url') or '').rstrip('/')
+    if not moviepilot_url:
+        return "", None, "MoviePilot URL 未配置"
+
+    access_token = _get_access_token(config)
+    if not access_token:
+        return moviepilot_url, None, "MoviePilot 认证失败，请检查用户名和密码"
+
+    return moviepilot_url, {"Authorization": f"Bearer {access_token}"}, ""
+
 def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, consume_quota: bool = False) -> bool:
     """
     【核心订阅函数】直接接收一个完整的订阅 payload 并提交。
