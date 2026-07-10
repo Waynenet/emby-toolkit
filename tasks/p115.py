@@ -1165,6 +1165,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
         known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+        home_video_metadata_exts = {'nfo', 'jpg', 'jpeg', 'png', 'webp'}
         
         allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
         if not allowed_exts:
@@ -1191,7 +1192,8 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         # =================================================================
         update_progress(5, "  ➜ 正在加载本地目录树缓存到内存...")
         
-        cid_to_rel_path = {}  
+        cid_to_rel_path = {}
+        cid_to_media_type = {}
         target_cids = set()   
         
         for r in rules:
@@ -1201,6 +1203,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 cid = str(r['cid'])
                 target_cids.add(cid)
                 cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
+                cid_to_media_type[cid] = r.get('media_type') or 'all'
 
         if not target_cids:
             message = "未配置启用的家庭视频分类，跳过同步。" if home_video_only else "未配置启用且有效的分类规则，跳过同步。"
@@ -1446,12 +1449,13 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             return moved_count
 
         def process_full_sync_items(items, target_cid, category_name):
-            nonlocal files_generated, subs_downloaded, root_anomaly_skipped
+            nonlocal files_generated, subs_downloaded, metadata_downloaded, root_anomaly_skipped
+            is_home_video_target = cid_to_media_type.get(str(target_cid)) == 'home_video'
             for item in items:
                 # 兼容 OpenAPI、Cookie 和 p115client 标准化字段
                 name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
                 ext = name.split('.')[-1].lower() if '.' in name else ''
-                if ext not in allowed_exts:
+                if ext not in allowed_exts and not (is_home_video_target and ext in home_video_metadata_exts):
                     continue
 
                 pc = first_present(item.get('pc'), item.get('pick_code'), item.get('pickcode'))
@@ -1649,6 +1653,32 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
 
                     valid_local_files.add(os.path.abspath(sub_path))
 
+                # 家庭视频目录额外同步 NFO 与图片元数据
+                elif is_home_video_target and ext in home_video_metadata_exts:
+                    metadata_path = os.path.join(current_local_path, name)
+                    remote_size = _parse_115_size(item.get('fs') or item.get('size'))
+                    local_size = os.path.getsize(metadata_path) if os.path.exists(metadata_path) else -1
+                    should_download = not os.path.exists(metadata_path) or (remote_size > 0 and local_size != remote_size)
+
+                    if should_download:
+                        try:
+                            import requests
+                            url_obj = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
+                            if url_obj:
+                                headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
+                                resp = requests.get(str(url_obj), stream=True, timeout=30, headers=headers)
+                                resp.raise_for_status()
+                                with open(metadata_path, 'wb') as f:
+                                    for chunk in resp.iter_content(8192):
+                                        f.write(chunk)
+                                metadata_downloaded += 1
+                                logger.info(f"  ⬇️ [家庭视频] 下载元数据: {name}")
+                        except Exception as e:
+                            logger.error(f"  ➜ 下载家庭视频元数据失败 [{name}]: {e}")
+
+                    if os.path.exists(metadata_path):
+                        valid_local_files.add(os.path.abspath(metadata_path))
+
         # =================================================================
         # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
         # =================================================================
@@ -1656,11 +1686,9 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         valid_local_files = set()
         files_generated = 0
         subs_downloaded = 0
+        metadata_downloaded = 0
         root_anomaly_skipped = 0
         changed_strm_files = set()
-        
-        fetch_types = [4] # 4=视频
-        if download_subs: fetch_types.append(1) # 1=文档(含字幕)
 
         total_targets = len(target_cids)
         
@@ -1669,9 +1697,18 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             base_prog = 10 + int((idx / total_targets) * 80)
             target_invalid = False
             update_progress(base_prog, f"  ➜ 正在拉取分类 [{category_name}] 下的所有文件...")
-            
+
+            fetch_types = [4] # 4=视频
+            if download_subs:
+                fetch_types.append(1) # 1=文档(含字幕)
+            if cid_to_media_type.get(target_cid) == 'home_video':
+                for metadata_type in (1, 2, 99): # 文档、图片、其它
+                    if metadata_type not in fetch_types:
+                        fetch_types.append(metadata_type)
+
+            type_names = {1: "文档/字幕", 2: "图片", 4: "视频", 99: "其它文件"}
             for f_type in fetch_types:
-                type_name = "视频" if f_type == 4 else "文档/字幕"
+                type_name = type_names.get(f_type, str(f_type))
                 offset = 0
                 limit = 1000
                 page = 1
@@ -1714,7 +1751,10 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             if not target_invalid:
                 successful_target_cids.add(target_cid)
 
-        logger.info(f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, 下载字幕: {subs_downloaded} 个。")
+        logger.info(
+            f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, "
+            f"下载字幕: {subs_downloaded} 个, 下载家庭视频元数据: {metadata_downloaded} 个。"
+        )
         moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
         if root_anomaly_skipped:
             sample_names = "、".join(path_anomaly_names[:3])
