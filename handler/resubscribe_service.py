@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from database import settings_db
 from database.connection import get_db_connection
 from tasks.helpers import (
     extract_release_groups_from_filename,
@@ -768,6 +769,97 @@ class WashingService:
             # 普通模式，跑完了所有的 if 都没有 return False，说明全部满足，成功命中
             return True, "匹配成功"
 
+    @staticmethod
+    def _slot_match_has_conditions(match_rule: dict) -> bool:
+        if not isinstance(match_rule, dict):
+            return False
+        for key in ('resolution', 'source', 'codec', 'effect', 'audio', 'subtitle', 'release_group'):
+            if match_rule.get(key):
+                return True
+        return bool(
+            match_rule.get('subtitle_effect')
+            or match_rule.get('clean_version')
+            or match_rule.get('min_size_gb') not in (None, '')
+            or match_rule.get('max_size_gb') not in (None, '')
+        )
+
+    @classmethod
+    def _resolve_version_slot_from_norm(cls, norm_info: dict, config: Optional[dict] = None) -> Optional[dict]:
+        config = config if isinstance(config, dict) else settings_db.get_washing_priority_config()
+        slots = config.get('version_slots') or []
+        if not config.get('version_slots_enabled') or not slots:
+            return {
+                'enabled': False,
+                'id': '__single__',
+                'name': '主版本',
+                'suffix': '',
+            }
+
+        fallback = None
+        for slot in slots:
+            if not isinstance(slot, dict):
+                continue
+            slot_info = {
+                'enabled': True,
+                'id': str(slot.get('id') or '').strip(),
+                'name': str(slot.get('name') or '未命名槽位').strip(),
+                'suffix': str(slot.get('suffix') or slot.get('name') or '').strip(),
+            }
+            if slot.get('fallback'):
+                if fallback is None:
+                    fallback = slot_info
+                continue
+
+            match_rule = slot.get('match') if isinstance(slot.get('match'), dict) else {}
+            if not cls._slot_match_has_conditions(match_rule):
+                continue
+            matched, _ = cls._match_priority(norm_info, dict(match_rule, is_exclude=False))
+            if matched:
+                return slot_info
+
+        return fallback
+
+    @classmethod
+    def resolve_file_version_slot(
+        cls,
+        sha1: str,
+        file_name: str = '',
+        file_size: int = 0,
+        media_type: str = '',
+        tmdb_id: str = '',
+        season_num: Optional[int] = None,
+        episode_num: Optional[int] = None,
+        original_lang: str = None,
+        has_external_subtitle: bool = False,
+        config: Optional[dict] = None,
+    ) -> Optional[dict]:
+        raw_info = cls._get_raw_info_by_sha1(sha1)
+        if not raw_info:
+            return None
+        if isinstance(raw_info, list) and raw_info and isinstance(raw_info[0], dict):
+            info = dict(raw_info[0])
+        elif isinstance(raw_info, dict):
+            info = dict(raw_info)
+        else:
+            return None
+
+        info['filename'] = file_name
+        info['_file_size'] = file_size
+        info['_original_lang'] = original_lang
+        info['has_external_subtitle'] = has_external_subtitle
+        info['_media_type'] = media_type
+        info['_tmdb_id'] = tmdb_id
+        info['_season_num'] = season_num
+        info['_episode_num'] = episode_num
+        config = config if isinstance(config, dict) else settings_db.get_washing_priority_config()
+        if any(
+            bool((slot.get('match') or {}).get('clean_version'))
+            for slot in (config.get('version_slots') or [])
+            if isinstance(slot, dict)
+        ):
+            info['_need_clean_version_check'] = True
+        return cls._resolve_version_slot_from_norm(cls._normalize_info(info), config=config)
+
     @classmethod
     def get_level(cls, norm_info: dict, priorities: list) -> tuple[int, str]:
         fail_reasons = []
@@ -1122,14 +1214,28 @@ class WashingService:
         result["db_media_type"] = db_media_type
 
         priorities = cls._load_priorities(db_media_type, str(target_cid or ""))
+        slot_config = settings_db.get_washing_priority_config()
+        slot_needs_clean = any(
+            bool((slot.get('match') or {}).get('clean_version'))
+            for slot in (slot_config.get('version_slots') or [])
+            if isinstance(slot, dict)
+        )
+        new_video_info["_need_clean_version_check"] = (
+            cls._priorities_need_clean_version(priorities)
+            or slot_needs_clean
+        )
+        norm_new = cls._normalize_info(new_video_info)
+        version_slot = cls._resolve_version_slot_from_norm(norm_new, config=slot_config)
+        result['version_slot'] = version_slot
+        if version_slot is None:
+            result['level'] = 0
+            result['reason'] = '未命中任何多版本槽位'
+            return result
         if not priorities:
             result["ok"] = True
             result["level"] = None
             result["reason"] = "未配置优先级规则，未记录洗版等级"
             return result
-
-        new_video_info["_need_clean_version_check"] = cls._priorities_need_clean_version(priorities)
-        norm_new = cls._normalize_info(new_video_info)
         level, reason = cls.get_level(norm_new, priorities)
         result["ok"] = True
         result["level"] = int(level) if level is not None else None
@@ -1151,6 +1257,7 @@ class WashingService:
         original_lang: str = None,
         is_active_washing: bool = False,
         has_external_subtitle: bool = False, # ★★★ 新增参数 ★★★
+        return_details: bool = False,
     ) -> tuple[str, str]:
         """
         返回:
@@ -1159,16 +1266,19 @@ class WashingService:
         SKIP    已有更好版本/同级版本
         REJECT  不符合优先级规则
         """
+        version_slot = None
+
+        def _decision(action, reason):
+            if return_details:
+                return action, reason, {'version_slot': version_slot}
+            return action, reason
+
         # 1. 直接通过 SHA1 获取最原始的视频流 JSON
         raw_info = cls._get_raw_info_by_sha1(sha1)
         
         # 拦截逻辑：如果没有获取到媒体信息，直接视为不达标 (即使有特权也不能放行坏文件)
         if not raw_info:
-            return "REJECT", "无法获取媒体流信息(可能是不支持的格式或文件损坏)"
-        
-        # ★★★ 核心修改：完结洗版特权通道 ★★★
-        if is_active_washing:
-            return "REPLACE", "完结洗版特权：无视优先级规则，强制替换零散旧版"
+            return _decision("REJECT", "无法获取媒体流信息(可能是不支持的格式或文件损坏)")
         
         # 2. 转换为字典以便注入辅助信息
         if isinstance(raw_info, list) and len(raw_info) > 0:
@@ -1192,22 +1302,38 @@ class WashingService:
 
         # 1. 加载并合并所有匹配的优先级规则
         priorities = cls._load_priorities(db_media_type, target_cid)
-        if not priorities:
-            return "ACCEPT", "未配置优先级规则，默认放行"
-
-        new_video_info["_need_clean_version_check"] = cls._priorities_need_clean_version(priorities)
+        slot_config = settings_db.get_washing_priority_config()
+        slot_needs_clean = any(
+            bool((slot.get('match') or {}).get('clean_version'))
+            for slot in (slot_config.get('version_slots') or [])
+            if isinstance(slot, dict)
+        )
+        new_video_info["_need_clean_version_check"] = (
+            cls._priorities_need_clean_version(priorities)
+            or slot_needs_clean
+        )
 
         # 4. 统一调用标准化解析
         norm_new = cls._normalize_info(new_video_info)
+        version_slot = cls._resolve_version_slot_from_norm(norm_new, config=slot_config)
+        if version_slot is None:
+            return _decision("REJECT", "未命中任何多版本槽位")
+        slot_name = version_slot.get('name') or '主版本'
+
+        # ★★★ 完结洗版特权通道：多版本模式下也只替换当前槽位 ★★★
+        if is_active_washing:
+            return _decision("REPLACE", f"槽位[{slot_name}] 完结洗版特权：强制替换当前槽位旧版")
+        if not priorities:
+            return _decision("ACCEPT", f"槽位[{slot_name}] 未配置优先级规则，默认放行")
 
         # 2. 新文件是否达标
         new_level, new_reason_detail = cls.get_level(norm_new, priorities)
         
         # ★★★ 核心修改：处理命中排除规则的情况 ★★★
         if new_level == -1:
-            return "REJECT", new_reason_detail
+            return _decision("REJECT", new_reason_detail)
         if new_level == 0:
-            return "REJECT", f"未达标 ({new_reason_detail})"
+            return _decision("REJECT", f"槽位[{slot_name}] 未达标 ({new_reason_detail})")
 
         # 3. 取库内旧版原始流
         existing_raw_infos = cls._load_existing_raw_infos(
@@ -1222,10 +1348,11 @@ class WashingService:
         # 4. 没有旧版
         if not existing_raw_infos:
             # ★ 直接使用 new_reason_detail，它现在包含了规则组名称
-            return "ACCEPT", f"命中{new_reason_detail}，库内无旧版，直接入库"
+            return _decision("ACCEPT", f"槽位[{slot_name}] 命中{new_reason_detail}，库内无旧版，直接入库")
 
         # 5. 找最优旧版
         best_old_level = 999
+        comparable_old_count = 0
         for raw_old_info in existing_raw_infos:
             if isinstance(raw_old_info, list) and len(raw_old_info) > 0:
                 old_info = dict(raw_old_info[0])
@@ -1241,6 +1368,10 @@ class WashingService:
             old_info["_episode_num"] = episode_num
             old_info["_need_clean_version_check"] = cls._priorities_need_clean_version(priorities)
             norm_old = cls._normalize_info(old_info)
+            old_slot = cls._resolve_version_slot_from_norm(norm_old, config=slot_config)
+            if not old_slot or old_slot.get('id') != version_slot.get('id'):
+                continue
+            comparable_old_count += 1
 
             old_level, _ = cls.get_level(norm_old, priorities)
             
@@ -1250,13 +1381,19 @@ class WashingService:
             if old_level < best_old_level:
                 best_old_level = old_level
 
+        if comparable_old_count == 0:
+            return _decision(
+                "ACCEPT",
+                f"槽位[{slot_name}] 命中{new_reason_detail}，当前槽位无旧版，直接入库",
+            )
+
         # 6. 比较结果
         if new_level < best_old_level:
-            return "REPLACE", (
-                f"新版(命中{new_reason_detail}) 优于 "
+            return _decision("REPLACE", (
+                f"槽位[{slot_name}] 新版(命中{new_reason_detail}) 优于 "
                 f"旧版(优先级 {best_old_level if best_old_level != 999 else '不合格'})，执行洗版替换"
-            )
+            ))
         elif new_level == best_old_level:
-            return "SKIP", f"新版(命中{new_reason_detail}) 与旧版同级，跳过"
+            return _decision("SKIP", f"槽位[{slot_name}] 新版(命中{new_reason_detail}) 与旧版同级，跳过")
         else:
-            return "SKIP", f"新版(命中{new_reason_detail}) 劣于 旧版(优先级 {best_old_level})，跳过"
+            return _decision("SKIP", f"槽位[{slot_name}] 新版(命中{new_reason_detail}) 劣于旧版(优先级 {best_old_level})，跳过")

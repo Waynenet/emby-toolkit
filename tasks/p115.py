@@ -2756,6 +2756,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
         level = None
         reason = '未计算'
+        version_slot = None
 
         raw_row = _lookup_mediainfo_by_sha1(cursor, sha1) if sha1 else None
         if not raw_row or raw_row.get('mediainfo_json') in (None, '', [], {}):
@@ -2777,7 +2778,34 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                             f"{old_target_cid or '-'} -> {target_cid} ({inferred_category_path or '-'}) | {file_name}"
                         )
 
-                if not _has_normal_washing_priorities(priorities):
+                slot_config = settings_db.get_washing_priority_config()
+                slot_needs_clean = any(
+                    bool((slot.get('match') or {}).get('clean_version'))
+                    for slot in (slot_config.get('version_slots') or [])
+                    if isinstance(slot, dict)
+                )
+                priority_input = _build_priority_input(
+                    raw_row.get('mediainfo_json'),
+                    file_name=file_name,
+                    file_size=file_size,
+                    original_lang=original_lang,
+                    media_type=media_type,
+                    tmdb_id=row.get('parent_series_tmdb_id') or row.get('tmdb_id') or '',
+                    season_num=row.get('season_number'),
+                    episode_num=row.get('episode_number'),
+                    need_clean_version_check=(
+                        WashingService._priorities_need_clean_version(priorities)
+                        or slot_needs_clean
+                    ),
+                )
+                norm = WashingService._normalize_info(priority_input)
+                version_slot = WashingService._resolve_version_slot_from_norm(norm)
+
+                if version_slot is None:
+                    level = 0
+                    reason = '未命中任何多版本槽位'
+                    stats['evaluated_versions'] += 1
+                elif not _has_normal_washing_priorities(priorities):
                     level = None
                     if inferred_target_cid and target_cid != inferred_target_cid:
                         reason = f'原目标分类CID({target_cid or "-"})只命中全局/排除规则，local_path 推导分类CID({inferred_target_cid})后仍未命中普通优先级规则'
@@ -2787,18 +2815,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                         reason = '缺少整理目标分类CID，且 local_path 未命中分类规则'
                     stats['no_priority_rules'] += 1
                 else:
-                    priority_input = _build_priority_input(
-                        raw_row.get('mediainfo_json'),
-                        file_name=file_name,
-                        file_size=file_size,
-                        original_lang=original_lang,
-                        media_type=media_type,
-                        tmdb_id=row.get('parent_series_tmdb_id') or row.get('tmdb_id') or '',
-                        season_num=row.get('season_number'),
-                        episode_num=row.get('episode_number'),
-                        need_clean_version_check=WashingService._priorities_need_clean_version(priorities),
-                    )
-                    norm = WashingService._normalize_info(priority_input)
                     level, reason = WashingService.get_level(norm, priorities)
                     if inferred_target_cid and target_cid == inferred_target_cid and inferred_category_path:
                         reason = f"{reason}（分类路径: {inferred_category_path}）"
@@ -2835,6 +2851,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             'pick_code': pc,
             'media_type': media_type,
             'target_cid': target_cid,
+            'version_slot': version_slot,
             'evaluated_at': evaluated_at,
         }
         versions.append(version)
@@ -2844,6 +2861,7 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                 'reason': reason,
                 'target_cid': target_cid or None,
                 'media_type': media_type,
+                'version_slot': version_slot,
                 'identity': identity,
                 'evaluated_at': evaluated_at
             }
