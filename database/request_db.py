@@ -658,18 +658,16 @@ def get_season_tmdb_id(parent_tmdb_id: str, season_number: int) -> Optional[str]
         logger.error(f"DB: 查询季 ID (Series:{parent_tmdb_id} S{season_number}) 失败: {e}", exc_info=True)
         return None
     
-def get_movies_to_pause(search_window_days: int, protection_days: int) -> List[Dict[str, Any]]:
+def get_movies_to_pause(search_window_days: int) -> List[Dict[str, Any]]:
     """
     获取需要暂停搜索的电影。
     条件：
     1. 状态为 SUBSCRIBED
     2. 未入库
     3. 订阅时间超过 search_window_days (搜索窗口期)
-    4. 发行日期在 protection_days 内 (保护期内的新片才进行呼吸式搜索，老片直接由超时规则取消)
     """
     # 防止参数为0导致SQL错误
     search_window_days = max(1, search_window_days)
-    protection_days = max(30, protection_days)
 
     sql = f"""
         SELECT tmdb_id, title
@@ -677,8 +675,7 @@ def get_movies_to_pause(search_window_days: int, protection_days: int) -> List[D
         WHERE item_type = 'Movie'
           AND subscription_status = 'SUBSCRIBED'
           AND in_library = FALSE
-          AND last_subscribed_at < NOW() - INTERVAL '{search_window_days} days'
-          AND release_date > NOW() - INTERVAL '{protection_days} days';
+          AND last_subscribed_at < NOW() - INTERVAL '{search_window_days} days';
     """
     try:
         with get_db_connection() as conn:

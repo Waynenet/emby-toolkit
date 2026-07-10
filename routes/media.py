@@ -23,6 +23,22 @@ media_proxy_bp = Blueprint('media_proxy', __name__)
 
 logger = logging.getLogger(__name__)
 
+def _disable_mp_subscribe_assistant() -> None:
+    config = settings_db.get_setting('mp_config') or {}
+    assistant = config.get('subscribe_assistant')
+    if isinstance(assistant, dict) and assistant.get('enabled'):
+        assistant['enabled'] = False
+        settings_db.save_setting('mp_config', config)
+
+def _available_subscription_sources() -> set:
+    sources = set()
+    mp_config = settings_db.get_setting('mp_config') or {}
+    if mp_config.get('moviepilot_url'):
+        sources.add('mp')
+    except Exception:
+        pass
+    return sources
+
 @media_api_bp.route('/search_emby_library', methods=['GET'])
 @processor_ready_required
 def api_search_emby_library():
@@ -633,11 +649,7 @@ def api_get_subscription_strategy():
         
         # 默认配置
         default_config = {
-            'movie_protection_days': 180,
-            'movie_search_window_days': 1,
-            'movie_pause_days': 7,
-            'delay_subscription_days': 30,
-            'subscription_priority': 'mp'
+            'subscription_sources': ['mp']
         }
         
         if not config:
@@ -663,7 +675,16 @@ def api_save_subscription_strategy():
         # 简单的校验
         if not isinstance(data, dict):
             return jsonify({"error": "无效的配置格式"}), 400
-            
+        sources = data.get('subscription_sources')
+        if isinstance(sources, list):
+            available_sources = _available_subscription_sources()
+            data['subscription_sources'] = [
+                source for source in sources
+                if source in available_sources
+            ]
+            if 'mp' not in data['subscription_sources']:
+                _disable_mp_subscribe_assistant()
+
         settings_db.save_setting('subscription_strategy_config', data)
         return jsonify({"message": "策略配置已保存"})
     except Exception as e:

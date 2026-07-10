@@ -53,6 +53,43 @@ class AssistantConfig:
         if self.subscription_cleanup_history_scenes is None:
             self.subscription_cleanup_history_scenes = ["completed"]
 
+def default_assistant_config_dict() -> Dict[str, Any]:
+    cfg = AssistantConfig()
+    return {
+        "enabled": cfg.enabled,
+        "guard_mode": cfg.guard_mode,
+        "season_cooldown_days": cfg.season_cooldown_days,
+        "volatility_enabled": cfg.volatility_enabled,
+        "volatility_window_days": cfg.volatility_window_days,
+        "pending_enhanced_enabled": cfg.auto_pending_enabled,
+        "pending_use_volatility": cfg.pending_use_volatility,
+        "pending_fake_total_episodes": cfg.pending_fake_total_episodes,
+        "pause_enhanced_enabled": cfg.pause_enabled,
+        "tv_air_pause_days": cfg.tv_air_pause_days,
+        "airing_pause_days": cfg.airing_pause_days,
+        "tv_no_download_days": cfg.tv_no_download_days,
+        "no_download_actions": list(cfg.no_download_actions),
+        "download_monitor_enabled": cfg.download_monitor_enabled,
+        "manual_delete_listen": cfg.manual_delete_listen,
+        "tracker_response_listen": cfg.tracker_response_listen,
+        "download_timeout_minutes": cfg.download_timeout_minutes,
+        "download_progress_threshold": cfg.download_progress_threshold,
+        "download_retry_limit": cfg.download_retry_limit,
+        "auto_search_when_delete": cfg.auto_search_when_delete,
+        "skip_deletion": cfg.skip_deletion,
+        "delete_record_retention_hours": cfg.delete_record_retention_hours,
+        "delete_exclude_tags": list(cfg.delete_exclude_tags),
+        "tracker_keywords": list(cfg.tracker_keywords),
+        "best_version_type": cfg.best_version_type,
+        "best_version_episode_to_full": cfg.best_version_episode_to_full,
+        "best_version_full_consistency_check_enabled": cfg.best_version_full_consistency_check_enabled,
+        "full_washing_timeout_hours": cfg.full_washing_timeout_hours,
+        "subscription_cleanup_history_type": cfg.subscription_cleanup_history_type,
+        "subscription_cleanup_history_scenes": list(cfg.subscription_cleanup_history_scenes),
+        "verify_enabled": cfg.verify_enabled,
+        "verify_interval_hours": cfg.verify_interval_hours,
+        "snapshot_retention_days": cfg.snapshot_retention_days,
+    }
 
 def _as_bool(value: Any, default: bool = False) -> bool:
     if value is None:

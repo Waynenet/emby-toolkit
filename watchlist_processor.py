@@ -65,7 +65,10 @@ def _series_has_animation_genre(series_data: Dict[str, Any]) -> bool:
     return False
 
 def _watchlist_mp_wash_kwargs(watchlist_cfg: Dict[str, Any], *, force_full: bool = False) -> Dict[str, Optional[int]]:
-    assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
+    mp_config = settings_db.get_setting('mp_config') or {}
+    assistant = mp_config.get('subscribe_assistant')
+    if not isinstance(assistant, dict):
+        assistant = watchlist_cfg.get('subscribe_assistant') if isinstance(watchlist_cfg.get('subscribe_assistant'), dict) else {}
     best_version_type = str(assistant.get('best_version_type') or 'no').strip().lower()
     if force_full or best_version_type in ('tv', 'all'):
         return {'best_version': 1, 'best_version_full': 1}
