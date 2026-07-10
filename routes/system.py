@@ -73,6 +73,41 @@ def api_get_task_status():
     status_data['logs'] = list(frontend_log_queue)
     return jsonify(status_data)
 
+@system_bp.route('/status', methods=['GET'])
+def get_subscription_status():
+    mp_config = settings_db.get_setting('mp_config') or {}
+    mp_url = mp_config.get('moviepilot_url')
+    
+    return jsonify({
+        "success": True,
+        "mp_configured": bool(mp_url)
+    })
+
+# ==========================================
+# MoviePilot 配置接口
+# ==========================================
+@system_bp.route('/mp/config', methods=['GET'])
+@admin_required
+def get_mp_config():
+    """获取 MoviePilot 配置"""
+    cfg = settings_db.get_setting('mp_config') or {}
+    # 提供默认值
+    default_cfg = {
+        'moviepilot_url': '', 'moviepilot_username': '', 'moviepilot_password': '',
+        'moviepilot_recognition': False, 'resubscribe_daily_cap': 10, 'resubscribe_delay_seconds': 2.0
+    }
+    default_cfg.update(cfg)
+    return jsonify({"success": True, "data": default_cfg})
+
+@system_bp.route('/mp/config', methods=['POST'])
+@admin_required
+def save_mp_config():
+    """保存 MoviePilot 配置"""
+    new_cfg = request.json
+    settings_db.save_setting('mp_config', new_cfg)
+    
+    return jsonify({"success": True, "message": "MoviePilot 配置已保存生效"})
+
 @system_bp.route('/trigger_stop_task', methods=['POST'])
 def api_handle_trigger_stop_task():
     logger.debug("API (Blueprint): Received request to stop current task.")

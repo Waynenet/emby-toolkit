@@ -91,16 +91,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_DOUBAN_SYNC_EXCLUDE: (constants.CONFIG_SECTION_API_DOUBAN, 'list', []),
     constants.CONFIG_OPTION_DOUBAN_SYNC_PRIVATE: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', True),
     constants.CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST: (constants.CONFIG_SECTION_API_DOUBAN, 'boolean', True),
-
-    # [MoviePilot]
-    constants.CONFIG_OPTION_MOVIEPILOT_URL: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
-    constants.CONFIG_OPTION_MOVIEPILOT_USERNAME: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
-    constants.CONFIG_OPTION_MOVIEPILOT_PASSWORD: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
-    constants.CONFIG_OPTION_LINK_DELETE_TRANSFER_HISTORY: (constants.CONFIG_SECTION_MOVIEPILOT, 'boolean', False),
-    constants.CONFIG_OPTION_LINK_DELETE_DOWNLOAD_FILES: (constants.CONFIG_SECTION_MOVIEPILOT, 'boolean', False),
-
-    constants.CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP: (constants.CONFIG_SECTION_MOVIEPILOT, 'int', 200),
-    constants.CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS: (constants.CONFIG_SECTION_MOVIEPILOT, 'float', 1.5),
     
     # [Monitor] 
     constants.CONFIG_OPTION_MONITOR_ENABLED: (constants.CONFIG_SECTION_MONITOR, 'boolean', False),

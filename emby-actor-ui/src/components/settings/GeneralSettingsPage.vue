@@ -340,10 +340,9 @@
 
             <!-- ================== 标签页 3: 智能服务  ================== -->
             <n-tab-pane name="services" tab="智能服务">
-              <!-- AI增强、MoviePilot 设置、Telegram 设置 3个一行显示 -->
-              <n-grid cols="1 m:2 l:3" :x-gap="12" :y-gap="12" responsive="screen">
+              <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
                 
-                <!-- 卡片 1: AI增强 -->
+                <!-- 【第一列】: AI增强 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header>
@@ -419,95 +418,82 @@
                   </n-card>
                 </n-gi>
 
-                <!-- 卡片 2: MoviePilot 设置 -->
+                <!-- 【第二列】: Telegram 设置 + MoviePilot 设置 -->
                 <n-gi>
-                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">MoviePilot 设置</span></template>
-                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                      <n-form-item-grid-item span="1 s:2" label="MoviePilot URL" path="moviepilot_url">
-                        <n-input v-model:value="configModel.moviepilot_url" placeholder="http://192.168.1.100:3000"/>
-                      </n-form-item-grid-item> 
-                      <n-form-item-grid-item label="用户名" path="moviepilot_username">
-                        <n-input v-model:value="configModel.moviepilot_username" placeholder="登录用户名"/>
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="密码" path="moviepilot_password">
-                        <n-input type="password" show-password-on="mousedown" v-model:value="configModel.moviepilot_password" placeholder="登录密码"/>
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="每日上限(订阅规则)" path="resubscribe_daily_cap">
-                        <n-input-number v-model:value="configModel.resubscribe_daily_cap" :min="1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item label="请求间隔(秒)" path="resubscribe_delay_seconds">
-                        <n-input-number v-model:value="configModel.resubscribe_delay_seconds" :min="0.1" :step="0.1" :disabled="!isMoviePilotConfigured" style="width: 100%;" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 s:2" label="联动删除整理记录" path="link_delete_transfer_history">
-                        <n-switch v-model:value="configModel.link_delete_transfer_history" />
-                        <template #feedback>
-                          <n-text style="font-size:0.8em;">Emby删除媒体项时，同步删除 MoviePilot 记录</n-text>
-                        </template>
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 s:2" label="联动删除种子及源文件" path="link_delete_download_files">
-                        <n-switch v-model:value="configModel.link_delete_download_files" />
-                        <template #feedback>
-                          <n-text style="font-size:0.8em;">Emby删除媒体项时，同步删除下载器的种子和源文件</n-text>
-                        </template>
-                      </n-form-item-grid-item>
-                    </n-grid>
-                  </n-card>
+                  <!-- 使用 n-space vertical 将两个卡片垂直组合在一起，间距设为 12 保持与网格 y-gap 统一 -->
+                  <n-space vertical :size="12">
+                    
+                    <!-- 卡片: Telegram 设置 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header><span class="card-title">Telegram 设置</span></template>
+                      <template #header-extra>
+                        <n-space>
+                          <n-button size="tiny" type="primary" ghost @click="openTelegramTemplateModal">
+                            通知模板
+                          </n-button>
+                          <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
+                            发送测试
+                          </n-button>
+                        </n-space>
+                      </template>
+                      <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
+                        <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
+                          <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
+                        </n-form-item-grid-item>
+                        <n-form-item-grid-item span="1 s:2" label="频道/群组 ID" path="telegram_channel_id">
+                          <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">公开频道名（@your_channel_name）或邀请链接</n-text>
+                          </template>
+                        </n-form-item-grid-item>
+
+                        <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
+                          <n-input-group>
+                            <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
+                            <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
+                          </n-input-group>
+                          <template #feedback>
+                            <n-space style="margin-top: 4px; margin-bottom: 8px; width: 100%;" justify="space-between" align="center" :wrap="false">
+                              <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
+                              <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取播报</n-button>
+                            </n-space>
+                          </template>
+                        </n-form-item-grid-item>
+
+                        <n-form-item-grid-item span="1 s:2" label="通知事件" path="telegram_notify_types">
+                          <n-checkbox-group v-model:value="configModel.telegram_notify_types">
+                            <n-space :size="16">
+                              <n-checkbox value="library_new" label="入库" />
+                              <n-checkbox value="playback" label="播放" />
+                            </n-space>
+                          </n-checkbox-group>
+                          <template #feedback>
+                            <n-text style="font-size:0.8em;">入库通知无限制，播放只通知机器人</n-text>
+                          </template>
+                        </n-form-item-grid-item>
+
+                      </n-grid>
+                    </n-card>
+
+                    <!-- 卡片: MoviePilot 设置 -->
+                    <n-card :bordered="false" class="dashboard-card">
+                      <template #header>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                          <span class="card-title">MoviePilot</span>
+                          <n-button secondary type="primary" @click="mpModalRef?.open()">
+                            <template #icon><n-icon :component="ListIcon" /></template>
+                            配置
+                          </n-button>
+                        </div>
+                      </template>
+                      <n-alert type="info" :show-icon="true">
+                        配置 MoviePilot 订阅源，实现自动化追剧、洗版及下载管理。
+                      </n-alert>
+                    </n-card>
+
+                  </n-space>
                 </n-gi>
-
-                <!-- 卡片 3: Telegram 设置 -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">Telegram 设置</span></template>
-                    <template #header-extra>
-                      <n-space>
-                        <n-button size="tiny" type="primary" ghost @click="openTelegramTemplateModal">
-                          通知模板
-                        </n-button>
-                        <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
-                          发送测试
-                        </n-button>
-                      </n-space>
-                    </template>
-                    <n-grid cols="1 s:2" :x-gap="10" :y-gap="4" responsive="screen">
-                      <n-form-item-grid-item span="1 s:2" label="Bot Token" path="telegram_bot_token">
-                        <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="@BotFather 获取" />
-                      </n-form-item-grid-item>
-                      <n-form-item-grid-item span="1 s:2" label="频道/群组 ID" path="telegram_channel_id">
-                        <n-input v-model:value="configModel.telegram_channel_id" placeholder="-100123456789" />
-                        <template #feedback>
-                          <n-text style="font-size:0.8em;">公开频道名（@your_channel_name）或邀请链接</n-text>
-                        </template>
-                      </n-form-item-grid-item>
-
-                      <n-form-item-grid-item span="1 s:2" label="私人通知 Chat ID">
-                        <n-input-group>
-                          <n-input v-model:value="personalChatId" placeholder="用于接收个人通知的 Chat ID" />
-                          <n-button type="primary" ghost :loading="isSavingChatId" @click="saveChatId">保存个人 ID</n-button>
-                        </n-input-group>
-                        <template #feedback>
-                          <n-space style="margin-top: 4px; margin-bottom: 8px; width: 100%;" justify="space-between" align="center" :wrap="false">
-                            <n-text style="font-size:0.8em; color: var(--n-text-color-3);">绑定管理账号接收私人状态播报等。</n-text>
-                            <n-button size="tiny" text type="primary" @click="openBotChat" :loading="isFetchingBotLink">点此找机器人获取播报</n-button>
-                          </n-space>
-                        </template>
-                      </n-form-item-grid-item>
-
-                      <n-form-item-grid-item span="1 s:2" label="通知事件" path="telegram_notify_types">
-                        <n-checkbox-group v-model:value="configModel.telegram_notify_types">
-                          <n-space :size="16">
-                            <n-checkbox value="library_new" label="入库" />
-                            <n-checkbox value="playback" label="播放" />
-                          </n-space>
-                        </n-checkbox-group>
-                        <template #feedback>
-                          <n-text style="font-size:0.8em;">入库通知无限制，播放只通知机器人</n-text>
-                        </template>
-                      </n-form-item-grid-item>
-                      
-                    </n-grid>
-                  </n-card>
-                </n-gi>
+                
               </n-grid>
             </n-tab-pane>
 
@@ -780,6 +766,7 @@
     </template>
   </n-modal>
 
+  <MoviePilotConfigModal ref="mpModalRef" />
   <TelegramTemplateModal ref="telegramTemplateModalRef" />
 </template>
 
@@ -815,9 +802,11 @@ import {
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import MappingManager from '../modals/MappingManager.vue';
+import MoviePilotConfigModal from './MoviePilotConfigModal.vue';
 import TelegramTemplateModal from './TelegramTemplateModal.vue';
 import axios from 'axios';
 
+const mpModalRef = ref(null);
 const mappingManagerModalVisible = ref(false);
 const telegramTemplateModalRef = ref(null);
 
@@ -1032,10 +1021,6 @@ const handleResetActorMappings = async () => {
     isResettingMappings.value = false;
   }
 };
-const isMoviePilotConfigured = computed(() => {
-  if (!configModel.value) return false;
-  return !!(configModel.value.moviepilot_url && configModel.value.moviepilot_username && configModel.value.moviepilot_password);
-});
 const testProxy = async () => {
   if (!configModel.value.network_http_proxy_url) {
     message.warning('请先填写 HTTP 代理地址再进行测试。');

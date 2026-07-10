@@ -316,8 +316,7 @@
 
                 <div class="actions-container">
                   <div 
-                    v-if="media.media_type === 'tv' || (!media.in_library && ((isPrivilegedUser && media.subscription_status === 'REQUESTED') || (!media.subscription_status || media.subscription_status === 'NONE')))"
-                    class="action-btn"
+                    v-if="isMpConfigured && (media.media_type === 'tv' || (!media.in_library && ((isPrivilegedUser && media.subscription_status === 'REQUESTED') || (!media.subscription_status || media.subscription_status === 'NONE'))))"                    class="action-btn"
                     @click.stop="handleSubscribe(media)"
                     :title="media.media_type === 'tv' ? '选择季' : (isPrivilegedUser ? '订阅' : '想看')"
                   >
@@ -378,7 +377,7 @@
           </n-card>
           <n-divider style="margin: 12px 0;" />
           <n-space vertical>
-            <n-button block type="primary" @click="submitAllSeasonsSubscription" :loading="subscribingAllSeasons">
+            <n-button v-if="isMpConfigured" block type="primary" @click="submitAllSeasonsSubscription" :loading="subscribingAllSeasons">
               一键提交整剧到 MoviePilot
             </n-button>
           </n-space>
@@ -429,6 +428,19 @@ const keywordOptions = ref([]);
 const selectedKeywords = ref([]); 
 const allStudios = ref([]); 
 const selectedStudios = ref([]);
+// ★ 新增：订阅源状态
+const isMpConfigured = ref(false);
+
+const fetchSubscriptionStatus = async () => {
+  try {
+    const res = await axios.get('/api/system/status');
+    if (res.data.success) {
+      isMpConfigured.value = res.data.mp_configured;
+    }
+  } catch (e) {
+    console.error("获取订阅源状态失败", e);
+  }
+};
 
 const filters = reactive({
   sort_by: 'popularity.desc',
@@ -851,7 +863,7 @@ let observer = null;
 onMounted(() => {
   checkMobile();
   window.addEventListener('resize', checkMobile);
-  fetchGenres(); fetchCountries(); fetchLanguages(); fetchKeywords(); fetchStudios(); fetchRatings(); fetchEmbyConfig(); fetchRecommendationPool();
+  fetchGenres(); fetchCountries(); fetchLanguages(); fetchKeywords(); fetchStudios(); fetchRatings(); fetchEmbyConfig(); fetchSubscriptionStatus(); fetchRecommendationPool();
   resetAndFetch();
   observer = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting) { loadMore(); }

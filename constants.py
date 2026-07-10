@@ -130,18 +130,6 @@ CONFIG_OPTION_DOUBAN_SYNC_SKIP_FIRST = "douban_sync_skip_first"   # 剧集跳过
 CONFIG_SECTION_LOCAL_DATA = "LocalDataSource"
 CONFIG_OPTION_LOCAL_DATA_PATH = "local_data_path" # 本地JSON元数据（TMDbHelper等生成）的根路径
 
-# --- MoviePilot ---
-CONFIG_SECTION_MOVIEPILOT = "MoviePilot"
-CONFIG_OPTION_MOVIEPILOT_URL = "moviepilot_url"
-CONFIG_OPTION_MOVIEPILOT_USERNAME = "moviepilot_username"
-CONFIG_OPTION_MOVIEPILOT_PASSWORD = "moviepilot_password"
-CONFIG_OPTION_LINK_DELETE_TRANSFER_HISTORY = "link_delete_transfer_history"
-CONFIG_OPTION_LINK_DELETE_DOWNLOAD_FILES = "link_delete_download_files"
-
-# --- 智能订阅相关配置 ---
-CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP = "resubscribe_daily_cap"
-CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS = "resubscribe_delay_seconds"
-
 # --- AI 翻译 ---
 CONFIG_SECTION_AI_TRANSLATION = "AITranslation"
 CONFIG_OPTION_AI_PROVIDER = "ai_provider"                       # AI服务提供商 (如 'siliconflow', 'openai')

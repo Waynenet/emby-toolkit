@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 import handler.tmdb as tmdb
 import constants
+from database import settings_db
 
 logger = logging.getLogger(__name__)
 
@@ -15,23 +16,23 @@ logger = logging.getLogger(__name__)
 # 核心基础函数 (Token管理与API请求)
 # ======================================================================
 
-def _get_access_token(config: Dict[str, Any]) -> Optional[str]:
+def _get_access_token(config: Dict[str, Any] = None) -> Optional[str]:
     """
     【内部辅助】获取 MoviePilot 的 Access Token。
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
-        mp_username = config.get(constants.CONFIG_OPTION_MOVIEPILOT_USERNAME, '')
-        mp_password = config.get(constants.CONFIG_OPTION_MOVIEPILOT_PASSWORD, '')
+        # ★★★ 统一从 mp_config 读取
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+        mp_username = mp_config.get('moviepilot_username', '')
+        mp_password = mp_config.get('moviepilot_password', '')
         
         if not all([moviepilot_url, mp_username, mp_password]):
-            # 仅在第一次调用或配置缺失时记录警告，避免刷屏
             return None
 
         login_url = f"{moviepilot_url}/api/v1/login/access-token"
         login_data = {"username": mp_username, "password": mp_password}
         
-        # 设置超时
         login_response = requests.post(login_url, data=login_data, timeout=10)
         login_response.raise_for_status()
         
@@ -46,7 +47,9 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, 
     所有其他订阅函数最终都应调用此函数。
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+
         access_token = _get_access_token(config)
         if not access_token:
             logger.error("  ➜ MoviePilot订阅失败：认证失败，未能获取到 Token。")
@@ -69,7 +72,6 @@ def subscribe_with_custom_payload(payload: dict, config: Dict[str, Any] = None, 
                 settings_db.decrement_subscription_quota()
             return True
         else:
-            # 尝试解析错误信息
             try:
                 err_msg = sub_response.json().get('detail') or sub_response.text
             except:
@@ -85,13 +87,14 @@ def cancel_subscription(tmdb_id: str, item_type: str, config: Dict[str, Any], se
     【取消订阅】根据 TMDB ID 和类型取消订阅。
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+
         access_token = _get_access_token(config)
         if not access_token:
             logger.error("  ➜ MoviePilot 取消订阅失败：认证失败。")
             return False
 
-        # 内部函数：执行单次取消请求
         def _do_cancel_request(target_season: Optional[int]) -> bool:
             media_id_for_api = f"tmdb:{tmdb_id}"
             cancel_url = f"{moviepilot_url}/api/v1/subscribe/media/{media_id_for_api}"
@@ -101,7 +104,6 @@ def cancel_subscription(tmdb_id: str, item_type: str, config: Dict[str, Any], se
                 params['season'] = target_season
             
             headers = {"Authorization": f"Bearer {access_token}"}
-            
             season_log = f" Season {target_season}" if target_season is not None else ""
             logger.info(f"  ➜ 正在向 MoviePilot 发送取消订阅请求: {media_id_for_api}{season_log}")
 
@@ -120,13 +122,9 @@ def cancel_subscription(tmdb_id: str, item_type: str, config: Dict[str, Any], se
                 logger.error(f"  ➜ 请求 MoviePilot API 发生异常: {req_e}")
                 return False
 
-        # --- 逻辑分支 ---
-
-        # 情况 1: 电影，或者指定了具体季号的剧集 -> 直接取消
         if item_type == 'Movie' or season is not None:
             return _do_cancel_request(season)
 
-        # 情况 2: 剧集 (Series) 且未指定季号 -> 查询 TMDb 遍历取消所有季
         if item_type == 'Series':
             tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
             if not tmdb_api_key:
@@ -146,29 +144,28 @@ def cancel_subscription(tmdb_id: str, item_type: str, config: Dict[str, Any], se
                 return _do_cancel_request(None)
 
             all_success = True
-            # 遍历所有季
             for s in seasons:
                 s_num = s.get('season_number')
-                # 只处理 season_number > 0 的季，跳过第0季 ★★★
                 if s_num is not None and s_num > 0:
                     if not _do_cancel_request(s_num):
                         all_success = False
             
             return all_success
 
-        # 默认 fallback
         return _do_cancel_request(None)
 
     except Exception as e:
         logger.error(f"  ➜ 调用 MoviePilot 取消订阅 API 时发生未知错误: {e}", exc_info=True)
         return False
 
-def check_subscription_exists(tmdb_id: str, item_type: str, config: Dict[str, Any], season: Optional[int] = None) -> bool:
+def check_subscription_exists(tmdb_id: str, item_type: str, config: Dict[str, Any] = None, season: Optional[int] = None) -> bool:
     """
     【查询订阅】检查订阅是否存在。
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+
         access_token = _get_access_token(config)
         if not access_token:
             return False
@@ -235,7 +232,7 @@ def delete_subscription_by_id(subscribe_id: int, config: Dict[str, Any] = None) 
         return False
 
 # ======================================================================
-# 业务封装函数 (保持原有逻辑，底层复用 subscribe_with_custom_payload)
+# 业务封装函数
 # ======================================================================
 
 def subscribe_series_to_moviepilot(
@@ -272,26 +269,26 @@ def subscribe_series_to_moviepilot(
     
     return subscribe_with_custom_payload(payload, config, consume_quota=consume_quota)
 
-def update_subscription_status(tmdb_id: int, season: Optional[int], status: str, config: Dict[str, Any], total_episodes: Optional[int] = None) -> bool:
+def update_subscription_status(tmdb_id: int, season: Optional[int], status: str, config: Dict[str, Any] = None, total_episodes: Optional[int] = None) -> bool:
     """
     调用 MoviePilot 接口更新订阅状态。
     兼容电影 (season=None) 和 剧集 (season=int)。
     status: 'R' (运行/订阅), 'S' (暂停/停止), 'P' (待定)
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+
         access_token = _get_access_token(config)
         if not access_token:
             return False
         
         headers = {"Authorization": f"Bearer {access_token}"}
 
-        # 1. 查询订阅 ID (subid)
         media_id_param = f"tmdb:{tmdb_id}"
         get_url = f"{moviepilot_url}/api/v1/subscribe/media/{media_id_param}"
         get_params = {}
         
-        # ★★★ 修改点：只有当 season 有值时才传参，电影不传 season ★★★
         if season is not None:
             get_params['season'] = season
         
@@ -304,17 +301,13 @@ def update_subscription_status(tmdb_id: int, season: Optional[int], status: str,
                 sub_id = data.get('id')
         
         if not sub_id:
-            # 如果没找到订阅ID，说明可能还没订阅，或者已经被删除了
             return False
 
-        # 2. 更新状态
         status_url = f"{moviepilot_url}/api/v1/subscribe/status/{sub_id}"
         status_params = {"state": status}
         requests.put(status_url, headers=headers, params=status_params, timeout=10)
         
-        # 3. 如果提供了 total_episodes，更新订阅详情 ★★★
         if total_episodes is not None:
-            # A. 获取完整的订阅详情
             detail_url = f"{moviepilot_url}/api/v1/subscribe/{sub_id}"
             detail_res = requests.get(detail_url, headers=headers, timeout=10)
             
@@ -324,20 +317,15 @@ def update_subscription_status(tmdb_id: int, season: Optional[int], status: str,
                 old_total = sub_data.get('total_episode', 0)
                 old_lack = sub_data.get('lack_episode', 0)
                 
-                # 只有当当前集数不等于目标集数时才更新
                 if old_total != total_episodes:
-                    # B. 修改总集数
                     sub_data['total_episode'] = total_episodes
                     
                     if old_total > total_episodes:
                         diff = old_total - total_episodes
-                        # 确保不小于 0
                         new_lack = max(0, old_lack - diff)
                         sub_data['lack_episode'] = new_lack
-                        
                         logger.info(f"  ➜ [MP修正] 自动修正缺失集数: {old_lack} -> {new_lack} (因总集数 {old_total}->{total_episodes})")
 
-                    # C. 提交更新 (PUT /api/v1/subscribe/)
                     update_url = f"{moviepilot_url}/api/v1/subscribe/"
                     update_res = requests.put(update_url, headers=headers, json=sub_data, timeout=10)
                     
@@ -767,7 +755,7 @@ def _expand_hashes_with_same_data(target_hashes: list, all_tasks: list, action_n
     return expanded
 
 
-def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], config: Dict[str, Any]) -> tuple:
+def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], config: Dict[str, Any] = None) -> tuple:
     """
     从 MP 下载历史补充 Hash。
     辅种如果也是通过 MP 加入下载器，通常没有整理记录，但会有下载历史；只看 transfer 会漏掉。
@@ -777,7 +765,8 @@ def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, seaso
     hashes_to_pause = set()
     
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token or not moviepilot_url:
             return [], []
@@ -850,7 +839,7 @@ def analyze_mp_download_history_for_deletion(tmdb_id: str, item_type: str, seaso
         return [], []
 
 
-def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any]) -> tuple:
+def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any] = None) -> tuple:
     """
     智能分析 MP 整理记录，计算出哪些记录该删，哪些种子该删，哪些种子该暂停。
     返回: (records_to_delete, hashes_to_delete, hashes_to_pause)
@@ -860,7 +849,8 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
     hashes_to_pause = set()
 
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return [], [], []
 
@@ -987,12 +977,13 @@ def analyze_mp_records_for_deletion(tmdb_id: str, item_type: str, season: Option
         return [], [], []
 
 
-def smart_cleanup_mp_media(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any], delete_history: bool = True, delete_files: bool = True) -> bool:
+def smart_cleanup_mp_media(tmdb_id: str, item_type: str, season: Optional[int], episode: Optional[int], title: str, config: Dict[str, Any] = None, delete_history: bool = True, delete_files: bool = True) -> bool:
     """
     【全新入口】智能清理 MP 媒体 (支持独立控制记录和文件，支持辅种清理)
     """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return False
 
@@ -1083,25 +1074,25 @@ def smart_cleanup_mp_media(tmdb_id: str, item_type: str, season: Optional[int], 
         logger.error(f"  ➜ [MP智能清理] 发生异常: {e}", exc_info=True)
         return False
 
-def delete_download_tasks(keyword: str, config: Dict[str, Any], hashes: list = None) -> bool:
+def delete_download_tasks(keyword: str, config: Dict[str, Any] = None, hashes: list = None) -> bool:
     """
     清理下载任务 - 安全版
     Strict Mode: 仅接受 hashes 列表进行精确删除。
     如果不传 hashes 或为空，直接跳过，绝不使用 keyword 搜索兜底。
     """
-    # --- 1. 安全检查：无 Hash 直接熔断 ---
     if not hashes:
         return False
 
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+
         access_token = _get_access_token(config)
         if not access_token: return False
 
         headers = {"Authorization": f"Bearer {access_token}"}
         deleted_count = 0
 
-        # --- 2. 策略 A: 精确打击 (仅使用 Hash) ---
         logger.info(f"  ➜ [下载器清理] 正在根据 Hash 精确删除 {len(hashes)} 个任务...")
         
         for task_hash in hashes:
@@ -1109,7 +1100,6 @@ def delete_download_tasks(keyword: str, config: Dict[str, Any], hashes: list = N
             
             del_url = f"{moviepilot_url}/api/v1/download/{task_hash}"
             try:
-                # 只有这里才是真正执行删除的地方
                 del_res = requests.delete(del_url, headers=headers, timeout=10)
                 if del_res.status_code == 200:
                     logger.info(f" ➜ [下载器清理] 已精确删除任务 Hash: {task_hash[:8]}...")
@@ -1117,14 +1107,12 @@ def delete_download_tasks(keyword: str, config: Dict[str, Any], hashes: list = N
             except Exception as e:
                 logger.debug(f" [下载器清理] 删除 Hash {task_hash[:8]} 失败: {e}")
         
-        # --- 3. 结果反馈 ---
         if deleted_count > 0:
             logger.info(f"  ➜ [下载器清理] Hash 精确清理完成，共删除 {deleted_count} 个任务。")
             import time
             time.sleep(2)
             return True
         else:
-            # 即使没删掉（比如任务早就不在了），也到此为止，绝不搜索关键词
             logger.info(f"  ➜ [下载器清理] 提供的 Hash 均未在下载器中找到活跃任务，无需操作。")
             return True
 
@@ -1132,10 +1120,11 @@ def delete_download_tasks(keyword: str, config: Dict[str, Any], hashes: list = N
         logger.error(f"  ➜ [下载器清理] 执行出错: {e}")
         return False
     
-def get_downloading_tasks(config: Dict[str, Any]) -> list:
+def get_downloading_tasks(config: Dict[str, Any] = None) -> list:
     """获取 MP 正在下载列表。注意：这个接口只返回“下载中”，不包含全部做种任务。"""
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return []
 
@@ -1151,10 +1140,11 @@ def get_downloading_tasks(config: Dict[str, Any]) -> list:
         logger.error(f"  ➜ 获取 MP 下载队列失败: {e}")
         return []
 
-def get_subscription_by_tmdbid(tmdb_id: int, season: Optional[int], config: Dict[str, Any]) -> dict:
+def get_subscription_by_tmdbid(tmdb_id: int, season: Optional[int], config: Dict[str, Any] = None) -> dict:
     """根据 TMDb ID 获取单条订阅详情 (通过遍历所有订阅实现，更可靠)"""
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return {}
 
@@ -1175,10 +1165,13 @@ def get_subscription_by_tmdbid(tmdb_id: int, season: Optional[int], config: Dict
         logger.error(f"  ➜ 获取 MP 订阅详情失败: {e}")
         return {}
 
-def update_subscription(payload: dict, config: Dict[str, Any]) -> bool:
-    """更新完整的订阅信息"""
+def update_subscription(payload: dict, config: Dict[str, Any] = None) -> bool:
+    """
+    【更新订阅】根据提供的 payload 更新订阅信息。
+    """
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return False
 
@@ -1189,10 +1182,11 @@ def update_subscription(payload: dict, config: Dict[str, Any]) -> bool:
         logger.error(f"  ➜ 更新 MP 订阅失败: {e}")
         return False
 
-def search_subscription(sub_id: int, config: Dict[str, Any]) -> bool:
+def search_subscription(sub_id: int, config: Dict[str, Any] = None) -> bool:
     """触发指定订阅的立即搜索"""
     try:
-        moviepilot_url = config.get(constants.CONFIG_OPTION_MOVIEPILOT_URL, '').rstrip('/')
+        mp_config = settings_db.get_setting('mp_config') or {}
+        moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
         access_token = _get_access_token(config)
         if not access_token: return False
 
@@ -1203,7 +1197,7 @@ def search_subscription(sub_id: int, config: Dict[str, Any]) -> bool:
         logger.error(f"  ➜ 触发 MP 订阅搜索失败: {e}")
         return False
 
-def cleanup_stale_washing_subscriptions(config: Dict[str, Any], timeout_days: int) -> List[Dict]:
+def cleanup_stale_washing_subscriptions(config: Dict[str, Any] = None, timeout_days: int = 7) -> List[Dict]:
     """
     【新增】清理超时的僵尸洗版订阅
     返回被清理的订阅信息列表: [{'tmdbid': 123, 'season': 1}, ...]
