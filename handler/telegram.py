@@ -67,6 +67,77 @@ def _format_episode_ranges(episode_list: list) -> str:
             
     return ", ".join(final_parts)
 
+def _extract_episode_refs_from_text(text: str) -> list:
+    """从待复核原因等文本里提取季集引用，支持 S1E1 / S01E01-E03。"""
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    matches = []
+    for season_str, start_str, end_str in _EPISODE_REF_PATTERN.findall(text):
+        try:
+            season = int(season_str)
+            start_ep = int(start_str)
+            end_ep = int(end_str) if end_str else start_ep
+        except Exception:
+            continue
+
+        if season <= 0 or start_ep <= 0 or end_ep <= 0:
+            continue
+        if end_ep < start_ep:
+            start_ep, end_ep = end_ep, start_ep
+
+        # 防御性限制，避免异常文本把通知撑爆。
+        if end_ep - start_ep > 500:
+            end_ep = start_ep
+
+        for episode in range(start_ep, end_ep + 1):
+            matches.append((season, episode))
+
+    # 保持原始顺序去重，方便后续格式化为连续区间。
+    seen = set()
+    result = []
+    for item in matches:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+def _build_episode_notice_text(episode_list: list, label: str = "🎞️ *集数*") -> str:
+    """格式化通知中的季集文本，并在过长时压缩为摘要，避免 Telegram caption 过长。"""
+    normalized = []
+    seen = set()
+    for season, episode in episode_list or []:
+        try:
+            season = int(season)
+            episode = int(episode)
+        except Exception:
+            continue
+        if season <= 0 or episode <= 0:
+            continue
+        key = (season, episode)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+
+    if not normalized:
+        return ""
+
+    formatted = _format_episode_ranges(normalized)
+    if not formatted:
+        return ""
+
+    if len(formatted) > 72:
+        season_count = len({season for season, _ in normalized})
+        episode_count = len(normalized)
+        parts = formatted.split(", ")
+        head = ", ".join(parts[:3])
+        suffix = f"等{season_count}季{episode_count}集"
+        formatted = f"{head} ... {suffix}" if head else suffix
+
+    return f"{label}: `{_markdown_code_text(formatted)}`\n"
+
 def escape_markdown(text: str) -> str:
     """
     Helper function to escape characters for Telegram's MarkdownV2.
@@ -78,16 +149,130 @@ def escape_markdown(text: str) -> str:
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
-def _format_ticks_to_time(ticks: int) -> str:
-    """辅助函数：将 Emby 的 Ticks (1 tick = 100 ns) 转换为 HH:MM:SS 或 MM:SS 格式"""
-    if not ticks or ticks <= 0:
-        return "00:00"
-    seconds = int(ticks / 10000000)
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h:02d}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
+
+def _markdown_code_text(text) -> str:
+    """MarkdownV2 code span 内只需要处理反斜杠和反引号。"""
+    return str(text or '').replace('\\', '\\\\').replace('`', '\\`')
+
+
+def _format_size_for_notice(size_bytes) -> str:
+    try:
+        size = float(size_bytes or 0)
+    except Exception:
+        return ''
+    if size <= 0:
+        return ''
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    if units[idx] in {'GB', 'TB'}:
+        return f"{size:.1f}{units[idx]}" if size < 100 else f"{size:.0f}{units[idx]}"
+    if units[idx] == 'MB':
+        return f"{size:.0f}MB"
+    return f"{int(size)}{units[idx]}"
+
+def _notice_asset_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _load_episode_refs_by_emby_ids(emby_item_ids: list) -> list:
+    """从数据库回退查询分集季号/集号，避免通知强依赖 Emby 实时详情。"""
+    refs = []
+    seen = set()
+    normalized_ids = []
+    for value in emby_item_ids or []:
+        value = str(value or '').strip()
+        if value and value not in seen:
+            seen.add(value)
+            normalized_ids.append(value)
+
+    if not normalized_ids:
+        return refs
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for emby_item_id in normalized_ids:
+                    cursor.execute(
+                        """
+                        SELECT season_number, episode_number
+                        FROM media_metadata
+                        WHERE item_type = 'Episode'
+                          AND emby_item_ids_json @> %s::jsonb
+                        ORDER BY in_library DESC, date_added DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (json.dumps([emby_item_id], ensure_ascii=False),),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        continue
+                    season = row.get('season_number')
+                    episode = row.get('episode_number')
+                    try:
+                        season = int(season)
+                        episode = int(episode)
+                    except Exception:
+                        continue
+                    if season > 0 and episode > 0:
+                        refs.append((season, episode))
+    except Exception as e:
+        logger.debug(f"  ➜ [通知] 数据库回退查询剧集季集失败: {e}")
+
+    return refs
+
+
+def _load_series_inventory_episode_refs(parent_series_tmdb_id: str, limit: int = 2000) -> list:
+    """读取整部剧当前在库的分集，用于普通入库通知回退展示季集范围。"""
+    parent_series_tmdb_id = str(parent_series_tmdb_id or '').strip()
+    if not parent_series_tmdb_id:
+        return []
+
+    refs = []
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT season_number, episode_number
+                    FROM media_metadata
+                    WHERE parent_series_tmdb_id = %s
+                      AND item_type = 'Episode'
+                      AND in_library = TRUE
+                      AND season_number IS NOT NULL
+                      AND episode_number IS NOT NULL
+                    ORDER BY season_number ASC, episode_number ASC
+                    LIMIT %s
+                    """,
+                    (parent_series_tmdb_id, limit),
+                )
+                for row in cursor.fetchall():
+                    season = row.get('season_number')
+                    episode = row.get('episode_number')
+                    try:
+                        season = int(season)
+                        episode = int(episode)
+                    except Exception:
+                        continue
+                    if season > 0 and episode > 0:
+                        refs.append((season, episode))
+    except Exception as e:
+        logger.debug(f"  ➜ [通知] 读取整剧季集库存失败: series={parent_series_tmdb_id}, err={e}")
+
+    return refs
 
 def _translate_to_chinese(text: str) -> str:
     """利用 Google Translate 免费接口将英文地理位置翻译为中文"""
