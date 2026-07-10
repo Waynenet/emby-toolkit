@@ -35,8 +35,6 @@ def _available_subscription_sources() -> set:
     mp_config = settings_db.get_setting('mp_config') or {}
     if mp_config.get('moviepilot_url'):
         sources.add('mp')
-    except Exception:
-        pass
     return sources
 
 @media_api_bp.route('/search_emby_library', methods=['GET'])
