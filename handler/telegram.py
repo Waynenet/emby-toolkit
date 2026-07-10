@@ -348,6 +348,17 @@ def _get_ip_location(clean_ip: str) -> str:
         
     return ""
 
+def _format_ticks_to_time(ticks: int) -> str:
+    """辅助函数：将 Emby 的 Ticks (1 tick = 100 ns) 转换为 HH:MM:SS 或 MM:SS 格式"""
+    if not ticks or ticks <= 0:
+        return "00:00"
+    seconds = int(ticks / 10000000)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
 def _markdown_code_text(text) -> str:
     """MarkdownV2 code span 内只需要处理反斜杠和反引号。"""
     return str(text or '').replace('\\', '\\\\').replace('`', '\\`')
@@ -555,7 +566,7 @@ def _build_notice_asset_params_text(emby_item_ids: list) -> str:
     if quality_parts:
         lines.append(f"🎞️ *画质*: `{_markdown_code_text(' / '.join(quality_parts))}`")
     if effect:
-        lines.append(f"🌈 *格式*: `{_markdown_code_text(effect)}`")
+        lines.append(f"🌈 *特效*: `{_markdown_code_text(effect)}`")
 
     size_text = _format_size_for_notice(total_size)
     if size_text:
