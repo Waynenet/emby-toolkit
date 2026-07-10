@@ -153,7 +153,7 @@ def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
     all_items = []
     for g in greenlets:
         if g.value: all_items.extend(g.value)
-
+        
     return all_items
 
 def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, limit, offset, fields, total_record_count):
@@ -1061,7 +1061,7 @@ def proxy_all(path):
         # ★★★ 拦截：虚拟库业务及各接口路由 (双重兼容版) ★★★
         # ====================================================================
 
-        # 1. 缺失占位符海报
+        # --- 拦截 A: 虚拟项目海报图片 ---
         if path.startswith('emby/Items/') and '/Images/Primary' in path:
             item_id = path.split('/')[2]
             if is_missing_item_id(item_id):
@@ -1082,52 +1082,45 @@ def proxy_all(path):
                     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
                     return resp
 
-        # 2. Views 拦截
+        # --- 拦截 B: 视图列表 (Views) ---
         if path.endswith('/Views') and path.startswith('emby/Users/'):
-            user_id_match = re.search(r'emby/Users/([^/]+)/', path)
-            if user_id_match:
-                return handle_get_views(user_id_match.group(1))
+            return handle_get_views()
 
-        # 3. Latest 拦截
+        # --- 拦截 C: 最新项目 (Latest) ---
         if path.endswith('/Items/Latest'):
             user_id_match = re.search(r'/emby/Users/([^/]+)/', full_path)
             if user_id_match:
                 return handle_get_latest_items(user_id_match.group(1), request.args)
 
-        # 4. Details 拦截
-        # 【核心恢复】优先使用精确正则，保证 Yamby 原汁原味的兼容性
-        details_match = MIMICKED_ITEM_DETAILS_RE.search(full_path)
-        if details_match:
-            user_id = details_match.group(1)
-            mimicked_id = details_match.group(2)
+        # --- 拦截 D: 虚拟库详情 (增强版拦截) ---
+        # 修复 iOS 有时不带 /Users/xxx，直接请求 /emby/Items/-900001 的老六行为
+        details_match = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path)
+        if details_match and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
+            mimicked_id = details_match.group(1)
+            # 尝试从路径或参数获取 user_id
+            user_id_match = re.search(r'/Users/([^/]+)/', full_path)
+            user_id = user_id_match.group(1) if user_id_match else request.args.get('UserId')
             return handle_get_mimicked_library_details(user_id, mimicked_id)
-        else:
-            # 兼容 iOS / Infuse 不带 Users 路径的客户端
-            details_match_ios = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path, re.IGNORECASE)
-            if details_match_ios and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
-                mimicked_id = details_match_ios.group(1)
-                user_id_match = re.search(r'/Users/([^/]+)/', full_path, re.IGNORECASE)
-                user_id = user_id_match.group(1) if user_id_match else request.args.get('UserId')
-                if user_id:
-                    return handle_get_mimicked_library_details(user_id, mimicked_id)
 
-        # 5. 虚拟库图片 拦截
+        # --- 拦截 E: 虚拟库图片 ---
         if path.startswith('emby/Items/') and '/Images/' in path:
             item_id = path.split('/')[2]
             if is_mimicked_id(item_id):
                 return handle_get_mimicked_library_image(path)
         
-        # 6. Items / Metadata 拦截 (核心恢复)
+        # --- 拦截 F: 虚拟库内容浏览 (Items) ---
+        # 修复 iOS 传参大小写问题 (有时传 ParentId，有时传 parentId)
         parent_id = request.args.get("ParentId") or request.args.get("parentId")
+        
         if parent_id and is_mimicked_id(parent_id):
-            # 遇到不支持的明确返回空，没命中的放给底层服务端
-            if any(path.endswith(endpoint) for endpoint in UNSUPPORTED_METADATA_ENDPOINTS + ['/Items/Prefixes', '/Genres', '/Studios', '/Tags', '/OfficialRatings', '/Years']):
-                return handle_mimicked_library_metadata_endpoint(path, parent_id, request.args)
-            
-            user_id_match = re.search(r'emby/Users/([^/]+)/Items', path, re.IGNORECASE)
+            # 1. 处理核心的内容列表请求 (严格匹配结尾，防止误伤 Filters)
+            user_id_match = re.search(r'emby/Users/([^/]+)/Items$', path)
             if user_id_match:
                 user_id = user_id_match.group(1)
                 return handle_get_mimicked_library_items(user_id, parent_id, request.args)
+
+            # 2. 处理所有其他带有虚拟 ParentId 的请求 (如 /Filters, /Genres 等)
+            return handle_mimicked_library_metadata_endpoint(path, parent_id, request.args)
 
         # ====================================================================
         # ★★★ 兜底透传 (非拦截请求走这里) ★★★
