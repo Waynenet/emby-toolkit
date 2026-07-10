@@ -13,6 +13,7 @@ from handler.p115_service import (
     _p115_as_list,
     _p115_is_severe_failure,
     _p115_normalize_common_response,
+    _p115_normalize_info_response,
     _p115_normalize_list_response,
     _p115_normalize_mkdir_response,
 )
@@ -108,6 +109,13 @@ class P115PlayPoolOpenAPIClient:
             f"{self.base_url}/open/ufile/downurl",
             data={"pick_code": str(pick_code)},
             headers=headers,
+        )
+
+    def fs_get_info(self, file_id):
+        return self._request_json(
+            "GET",
+            f"{self.base_url}/open/folder/get_info",
+            params={"file_id": str(file_id)},
         )
 
     def fs_mkdir(self, name, pid):
@@ -252,6 +260,20 @@ class P115PlayPoolClient:
                     raise
         resp = self.request("https://webapi.115.com/files", method="GET", params=params)
         return _p115_normalize_list_response(self._json_result(resp))
+
+    def fs_get_info(self, file_id):
+        file_id = str(file_id)
+        if self.openapi:
+            return _p115_normalize_info_response(self.openapi.fs_get_info(file_id))
+        payload = {"file_id": file_id}
+        if self.webapi and hasattr(self.webapi, "fs_file_skim"):
+            try:
+                return _p115_normalize_info_response(self.webapi.fs_file_skim(payload))
+            except Exception as e:
+                if not _p115_is_severe_failure(e):
+                    raise
+        resp = self.request("https://webapi.115.com/files/file", method="GET", params=payload)
+        return _p115_normalize_info_response(self._json_result(resp))
 
     def fs_mkdir(self, name, pid):
         if self.openapi:
