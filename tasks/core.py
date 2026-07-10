@@ -302,7 +302,7 @@ def get_task_registry(context: str = 'all'):
         'scan-organize-115': (task_scan_and_organize_115, "网盘文件整理", 'media', True),
         'full-sync-strm': (task_full_sync_strm_and_subs, "全量生成STRM", 'media', True),
         # 保留旧任务 key，兼容用户现有任务链配置。
-        'monitor-115-life-events': (task_sync_home_video_strm, "同步家庭视频STRM", 'media', True),
+        'monitor-115-life-events': (task_sync_home_video_strm, "同步家庭视频", 'media', True),
         'backup-mediainfo': (task_backup_mediainfo, "备份媒体信息", 'media', True),
         'repair-p115-fingerprints': (task_repair_p115_fingerprints, "补齐缓存指纹", 'media', True),
         'restore_mediainfo': (task_restore_mediainfo, "还原媒体信息", 'media', True),
