@@ -2895,8 +2895,72 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
     return stats
 
 
-def task_recalculate_library_washing_priorities(processor=None, item_type='all', limit=None):
-    """重算当前媒体库所有电影/分集的洗版优先级快照。"""
+def _build_washing_priority_scope_filter(affected_scope, allowed_types):
+    scope = settings_db.normalize_washing_priority_recalculate_scope(affected_scope)
+    clauses = []
+    params = []
+    processed_scope = {}
+    item_type_map = {'Movie': 'Movie', 'Series': 'Episode'}
+
+    for media_type, item_type in item_type_map.items():
+        if item_type not in allowed_types:
+            continue
+        entry = scope.get(media_type)
+        if not entry:
+            continue
+        processed_scope[media_type] = entry
+        if entry.get('all'):
+            clauses.append("mm.item_type = %s")
+            params.append(item_type)
+            continue
+
+        target_cids = entry.get('target_cids') or []
+        if not target_cids:
+            continue
+        clauses.append("""
+            (
+                mm.item_type = %s
+                AND (
+                    COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->>'target_cid' = ANY(%s)
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->'versions') = 'array'
+                                THEN COALESCE(mm.washing_snapshot_json, '{}'::jsonb)->'versions'
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS version
+                        WHERE version->>'target_cid' = ANY(%s)
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements_text(
+                            CASE
+                                WHEN jsonb_typeof(mm.file_pickcode_json) = 'array'
+                                THEN mm.file_pickcode_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS pc(value)
+                        JOIN p115_organize_records por ON por.pick_code = pc.value
+                        WHERE por.target_cid = ANY(%s)
+                    )
+                )
+            )
+        """)
+        params.extend([item_type, target_cids, target_cids, target_cids])
+
+    return (' OR '.join(clauses) if clauses else 'FALSE'), params, processed_scope
+
+
+def task_recalculate_library_washing_priorities(
+    processor=None,
+    item_type='all',
+    limit=None,
+    affected_scope=None,
+    scope_revision=None,
+):
+    """重算当前媒体库中受规则变更影响的电影/分集洗版优先级快照。"""
     from database.connection import get_db_connection
 
     try:
@@ -2957,6 +3021,8 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
         'no_priority_rules': 0,
         'backfilled_target_cid': 0,
         'errors': 0,
+        'affected_scope': settings_db.normalize_washing_priority_recalculate_scope(affected_scope),
+        'scope_acknowledged': False,
         'started_at': datetime.utcnow().isoformat() + 'Z',
         'finished_at': None,
     }
@@ -2964,6 +3030,15 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             params = [allowed_types]
+            scope_sql = ''
+            processed_scope = {}
+            if affected_scope is not None:
+                scope_filter, scope_params, processed_scope = _build_washing_priority_scope_filter(
+                    affected_scope,
+                    allowed_types,
+                )
+                scope_sql = f'AND ({scope_filter})'
+                params.extend(scope_params)
             limit_sql = ''
             if limit:
                 try:
@@ -2993,12 +3068,13 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
                 ) parent ON TRUE
                 WHERE mm.in_library = TRUE
                   AND mm.item_type = ANY(%s)
+                  {scope_sql}
                 ORDER BY mm.item_type ASC, COALESCE(mm.title, '') ASC, mm.tmdb_id ASC
                 {limit_sql}
             """, tuple(params))
             rows = cursor.fetchall() or []
             total_rows = len(rows)
-            update_progress(1, f"  ➜ [洗版优先级重算] 开始执行，待处理 {total_rows} 个媒体项")
+            update_progress(1, f"  ➜ [洗版优先级重算] 开始执行，待处理 {total_rows} 个受影响媒体项")
 
             for row in rows:
                 stats['scanned_items'] += 1
@@ -3037,6 +3113,20 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
 
             conn.commit()
 
+    if (
+        scope_revision is not None
+        and not limit
+        and stats['errors'] == 0
+        and processed_scope
+    ):
+        try:
+            stats['scope_acknowledged'] = settings_db.acknowledge_washing_priority_recalculate_scope(
+                scope_revision,
+                processed_scope,
+            )
+        except Exception as e:
+            logger.warning(f"  ➜ [洗版优先级重算] 清理已处理影响范围失败: {e}", exc_info=True)
+
     stats['finished_at'] = datetime.utcnow().isoformat() + 'Z'
     update_progress(
         100,
@@ -3046,8 +3136,13 @@ def task_recalculate_library_washing_priorities(processor=None, item_type='all',
     )
     return stats
 
-def submit_washing_priority_recalculate_task(item_type='all', limit=None):
-    """提交后台任务：重算媒体库所有资源的洗版优先级快照。"""
+def submit_washing_priority_recalculate_task(
+    item_type='all',
+    limit=None,
+    affected_scope=None,
+    scope_revision=None,
+):
+    """提交后台任务：重算受规则变更影响的媒体项洗版优先级快照。"""
     try:
         import task_manager
     except Exception as e:
@@ -3061,10 +3156,12 @@ def submit_washing_priority_recalculate_task(item_type='all', limit=None):
             processor=processor,
             item_type=item_type,
             limit=limit,
+            affected_scope=affected_scope,
+            scope_revision=scope_revision,
         )
 
     task_manager.submit_task(
         _task,
-        task_name="重算媒体库洗版优先级",
+        task_name="重算受影响媒体洗版优先级",
         processor_type='media'
     )

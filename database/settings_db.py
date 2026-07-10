@@ -12,6 +12,7 @@ import config_manager
 import constants
 
 logger = logging.getLogger(__name__)
+WASHING_PRIORITY_RECALCULATE_SETTING_KEY = 'p115_washing_priority_recalculate_state'
 
 # ======================================================================
 # 模块: 配置数据访问
@@ -100,6 +101,208 @@ def _normalize_washing_skip_scope(value: Any, default: str = 'directory') -> str
     }
     scope = aliases.get(scope, scope)
     return scope if scope in {'directory', 'library'} else default
+
+
+def _washing_json_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or '[]')
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _canonicalize_washing_rule_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonicalize_washing_rule_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if key not in {'_uid', '_group_name'}
+        }
+    if isinstance(value, list):
+        normalized = [_canonicalize_washing_rule_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
+        )
+    return value
+
+
+def _normalize_washing_priority_groups(groups: Any) -> list:
+    normalized = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        media_type = str(group.get('media_type') or 'All').strip().title()
+        if media_type not in {'All', 'Movie', 'Series'}:
+            media_type = 'All'
+        target_cids = sorted({
+            str(cid).strip()
+            for cid in _washing_json_list(group.get('target_cids'))
+            if str(cid or '').strip()
+        })
+        priorities = [
+            _canonicalize_washing_rule_value(rule)
+            for rule in _washing_json_list(group.get('priorities'))
+            if isinstance(rule, dict)
+        ]
+        normalized.append({
+            'media_type': media_type,
+            'target_cids': target_cids,
+            'priorities': priorities,
+        })
+    return normalized
+
+
+def _effective_washing_priorities(groups: list, media_type: str, target_cid: str) -> list:
+    priorities = []
+    for group in groups:
+        if group['media_type'] not in {media_type, 'All'}:
+            continue
+        target_cids = group['target_cids']
+        if target_cids and target_cid not in target_cids:
+            continue
+        priorities.extend(group['priorities'])
+    return priorities
+
+
+def build_washing_priority_recalculate_scope(old_groups: Any, new_groups: Any) -> Dict[str, Any]:
+    """计算规则变更实际影响的媒体类型和分类 CID。"""
+    old_normalized = _normalize_washing_priority_groups(old_groups)
+    new_normalized = _normalize_washing_priority_groups(new_groups)
+    explicit_cids = sorted({
+        cid
+        for group in old_normalized + new_normalized
+        for cid in group['target_cids']
+    })
+
+    affected = {}
+    unmatched_cid = '__etk_unmatched_washing_priority_cid__'
+    for media_type in ('Movie', 'Series'):
+        old_global = _effective_washing_priorities(old_normalized, media_type, unmatched_cid)
+        new_global = _effective_washing_priorities(new_normalized, media_type, unmatched_cid)
+        if old_global != new_global:
+            affected[media_type] = {'all': True, 'target_cids': []}
+            continue
+
+        changed_cids = [
+            cid
+            for cid in explicit_cids
+            if _effective_washing_priorities(old_normalized, media_type, cid)
+            != _effective_washing_priorities(new_normalized, media_type, cid)
+        ]
+        if changed_cids:
+            affected[media_type] = {'all': False, 'target_cids': changed_cids}
+    return affected
+
+
+def normalize_washing_priority_recalculate_scope(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    raw_scope = value.get('media_types') if isinstance(value.get('media_types'), dict) else value
+    normalized = {}
+    for media_type in ('Movie', 'Series'):
+        entry = raw_scope.get(media_type)
+        if not isinstance(entry, dict):
+            continue
+        is_all = bool(entry.get('all'))
+        target_cids = sorted({
+            str(cid).strip()
+            for cid in _washing_json_list(entry.get('target_cids'))
+            if str(cid or '').strip()
+        })
+        if is_all or target_cids:
+            normalized[media_type] = {
+                'all': is_all,
+                'target_cids': [] if is_all else target_cids,
+            }
+    return normalized
+
+
+def merge_washing_priority_recalculate_state(current: Any, added_scope: Any) -> Dict[str, Any]:
+    current = current if isinstance(current, dict) else {}
+    merged = normalize_washing_priority_recalculate_scope(current)
+    added = normalize_washing_priority_recalculate_scope(added_scope)
+    if not added:
+        return {
+            'revision': int(current.get('revision') or 0),
+            'media_types': merged,
+        }
+
+    for media_type, entry in added.items():
+        existing = merged.get(media_type, {'all': False, 'target_cids': []})
+        if existing.get('all') or entry.get('all'):
+            merged[media_type] = {'all': True, 'target_cids': []}
+        else:
+            merged[media_type] = {
+                'all': False,
+                'target_cids': sorted(set(existing.get('target_cids', [])) | set(entry.get('target_cids', []))),
+            }
+
+    return {
+        'revision': int(current.get('revision') or 0) + 1,
+        'media_types': merged,
+    }
+
+
+def get_washing_priority_recalculate_state() -> Dict[str, Any]:
+    state = get_setting(WASHING_PRIORITY_RECALCULATE_SETTING_KEY) or {}
+    if not isinstance(state, dict):
+        state = {}
+    return {
+        'revision': int(state.get('revision') or 0),
+        'media_types': normalize_washing_priority_recalculate_scope(state),
+    }
+
+
+def acknowledge_washing_priority_recalculate_scope(
+    expected_revision: int,
+    processed_scope: Any,
+) -> bool:
+    """任务成功后清除已处理范围；期间若规则再次变化则保留待处理状态。"""
+    processed = normalize_washing_priority_recalculate_scope(processed_scope)
+    if not processed:
+        return False
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT value_json FROM app_settings WHERE setting_key = %s FOR UPDATE",
+                (WASHING_PRIORITY_RECALCULATE_SETTING_KEY,),
+            )
+            row = cursor.fetchone()
+            current = row.get('value_json') if row else {}
+            current = current if isinstance(current, dict) else {}
+            if int(current.get('revision') or 0) != int(expected_revision or 0):
+                return False
+
+            remaining = normalize_washing_priority_recalculate_scope(current)
+            for media_type, entry in processed.items():
+                existing = remaining.get(media_type)
+                if not existing:
+                    continue
+                if entry.get('all'):
+                    remaining.pop(media_type, None)
+                    continue
+                if existing.get('all'):
+                    continue
+                target_cids = sorted(
+                    set(existing.get('target_cids', [])) - set(entry.get('target_cids', []))
+                )
+                if target_cids:
+                    existing['target_cids'] = target_cids
+                else:
+                    remaining.pop(media_type, None)
+
+            _save_setting_with_cursor(cursor, WASHING_PRIORITY_RECALCULATE_SETTING_KEY, {
+                'revision': int(expected_revision or 0),
+                'media_types': remaining,
+            })
+        conn.commit()
+    return True
 
 def get_washing_priority_config(default_conflict_mode: str = 'replace') -> Dict[str, Any]:
     """读取洗版相关配置，并从旧重命名配置无感迁移覆盖模式。"""

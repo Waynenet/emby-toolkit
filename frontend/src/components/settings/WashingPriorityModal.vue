@@ -289,7 +289,7 @@
     <template #action>
       <n-space justify="space-between" style="width: 100%;">
         <n-button v-if="config.conflict_mode === 'replace'" secondary type="warning" :loading="recalcLoading" @click="confirmRecalculate">
-          一键重算媒体库优先级
+          重算受影响媒体优先级
         </n-button>
         <span v-else></span>
         <n-space>
@@ -479,15 +479,20 @@ const saveGroups = async () => {
     });
 
     await axios.post('/api/p115/washing_priority_config', config.value);
-    await axios.post('/api/p115/washing_priority_groups', payload);
+    const groupsRes = await axios.post('/api/p115/washing_priority_groups', payload);
     message.success('保存成功');
     if (config.value.conflict_mode !== 'replace') {
       showModal.value = false;
       return;
     }
+    const pendingScope = groupsRes.data?.data?.pending_scope || {};
+    if (Object.keys(pendingScope).length === 0) {
+      showModal.value = false;
+      return;
+    }
     dialog.warning({
-      title: '建议重算媒体库优先级',
-      content: '洗版优先级规则已经保存。若规则有调整，旧媒体项记录的优先级可能已经过期，建议立即重算。',
+      title: '建议重算受影响媒体优先级',
+      content: '洗版优先级规则已经保存。系统只会重算本次及此前规则变更实际影响的媒体类型和分类目录。',
       positiveText: '立即重算',
       negativeText: '稍后',
       onPositiveClick: async () => {
@@ -530,8 +535,8 @@ const triggerRecalculate = async () => {
 
 const confirmRecalculate = () => {
   dialog.warning({
-    title: '重算媒体库洗版优先级',
-    content: '将扫描当前已入库的电影和分集，按当前已保存的洗版优先级规则重新计算 washing_level，并写回 115 文件缓存与媒体元数据。大库会在后台执行。确认开始？',
+    title: '重算受影响媒体洗版优先级',
+    content: '仅重新计算已保存规则变更影响的电影或分集，并写回 115 文件缓存与媒体元数据；未受影响的媒体项不会重复计算。确认开始？',
     positiveText: '开始重算',
     negativeText: '取消',
     onPositiveClick: triggerRecalculate
