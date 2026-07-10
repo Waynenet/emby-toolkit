@@ -9,6 +9,7 @@ from email.utils import formatdate
 import json
 import re
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from gevent import spawn_later
 from typing import Any, Dict
@@ -31,7 +32,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 FORCE_GENERATE_MEDIAINFO = True
 
-from collections import OrderedDict
+
+def _exclude_batch_conflict_rows(rows, batch_file_ids):
+    """原地重组时，不把本批文件本身当成待替换旧版本。"""
+    excluded = {
+        str(file_id or '').strip()
+        for file_id in (batch_file_ids or [])
+        if str(file_id or '').strip()
+    }
+    return [
+        row for row in (rows or [])
+        if str((row or {}).get('id') or '').strip() not in excluded
+    ]
+
+
+def _normalize_cached_local_path(path):
+    value = str(path or '').strip().replace('\\', '/')
+    return re.sub(r'/+', '/', value).strip('/')
+
+
+def _is_same_cached_local_path(old_path, current_path):
+    old_normalized = _normalize_cached_local_path(old_path)
+    current_normalized = _normalize_cached_local_path(current_path)
+    return bool(old_normalized and current_normalized and old_normalized == current_normalized)
 
 P115_APP_LABELS = {
     "web": "网页版",
@@ -5845,7 +5868,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         规则匹配逻辑 (支持 AND / OR 复合匹配)
         """
         if not self.raw_metadata: return False
-
         # ==========================================
         # 1. 绝对前置过滤条件 (必须满足，无视 AND/OR)
         # ==========================================
@@ -7991,7 +8013,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
                         cursor.execute("SELECT id, name FROM p115_filesystem_cache WHERE parent_id = %s", (str(batch_target_cid),))
-                        for row in cursor.fetchall():
+                        for row in _exclude_batch_conflict_rows(cursor.fetchall(), batch_new_fids):
                             e_name = row['name']
                             e_fid = str(row['id'])
                             e_ext = e_name.split('.')[-1].lower() if '.' in e_name else ''
@@ -10406,6 +10428,21 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
         logger.info(f"  🔤 [批量重组] 发现 {len(sub_items)} 个关联字幕，跟随重组...")
         organizer.execute(sub_items, target_cid)
 
+    current_local_paths = {}
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, local_path FROM p115_filesystem_cache WHERE id = ANY(%s)",
+                    (list(file_ids),),
+                )
+                current_local_paths = {
+                    str(row.get('id') or ''): row.get('local_path')
+                    for row in cursor.fetchall()
+                }
+    except Exception as e:
+        logger.debug(f"  ➜ [批量重组] 回查整理后本地路径失败: {e}")
+
     # ★ 本地擦屁股：精准删除旧的本地 STRM 和空目录
     if local_root:
         import shutil
@@ -10423,6 +10460,10 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
             if not old_cache or not old_cache.get('local_path'): continue
 
             old_file_rel_path = str(old_cache['local_path']).lstrip('\\/')
+            file_id = str(r_item.get('fid') or r_item.get('file_id') or '')
+            if _is_same_cached_local_path(old_file_rel_path, current_local_paths.get(file_id)):
+                logger.debug(f"  ➜ [批量重组] 原地路径未变化，保留当前 STRM: {old_file_rel_path}")
+                continue
             old_strm_rel_path = os.path.splitext(old_file_rel_path)[0] + ".strm"
             old_strm_full_path = os.path.join(local_root, old_strm_rel_path)
 

@@ -16,6 +16,7 @@
           <n-radio-button value="movie">电影</n-radio-button>
           <n-radio-button value="tv">剧集</n-radio-button>
           <n-radio-button value="mixed">混合</n-radio-button>
+          <n-radio-button value="home_video">家庭视频</n-radio-button>
         </n-radio-group>
         <n-divider vertical />
         <n-tag v-if="ruleFilterType === 'all'" type="warning" size="small" :bordered="false">拖拽可调整优先级</n-tag>
@@ -43,6 +44,7 @@
                     <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
                     <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
                     <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                    <n-tag v-else-if="rule.media_type === 'home_video'" size="tiny" type="warning" :bordered="false">家庭视频</n-tag>
                     <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
                     <n-tag v-if="rule.watching_status === 'watching'" size="tiny" type="warning" :bordered="false">追剧中</n-tag>
                   </div>
@@ -71,6 +73,7 @@
                   <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
                   <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
                   <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                  <n-tag v-else-if="rule.media_type === 'home_video'" size="tiny" type="warning" :bordered="false">家庭视频</n-tag>
                   <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
                   <n-tag v-if="rule.watching_status === 'watching'" size="tiny" type="warning" :bordered="false">追剧中</n-tag>
                 </div>
@@ -120,6 +123,24 @@
           </n-button>
         </n-input-group>
       </n-form-item>
+
+      <n-form-item label="媒体类型">
+        <n-radio-group v-model:value="currentRule.media_type">
+          <n-radio-button value="all">混合</n-radio-button>
+          <n-radio-button value="movie">仅电影</n-radio-button>
+          <n-radio-button value="tv">仅剧集</n-radio-button>
+          <n-radio-button value="home_video">家庭视频</n-radio-button>
+        </n-radio-group>
+        <template #feedback>
+          <n-text depth="3" style="font-size: 12px;">
+            {{ currentRule.media_type === 'home_video'
+              ? '不参与 TMDb 智能分类，按目标目录原结构同步 STRM。'
+              : '“混合”仅包含电影和剧集，不包含家庭视频。' }}
+          </n-text>
+        </template>
+      </n-form-item>
+
+      <template v-if="currentRule.media_type !== 'home_video'">
       
       <n-divider title-placement="left" style="font-size: 12px; color: #999;">匹配条件</n-divider>
       
@@ -134,14 +155,6 @@
             <b>OR:</b> 只要满足下方任意一个条件即可命中。
           </n-text>
         </template>
-      </n-form-item>
-
-      <n-form-item label="媒体类型">
-        <n-radio-group v-model:value="currentRule.media_type">
-          <n-radio-button value="all">不限</n-radio-button>
-          <n-radio-button value="movie">仅电影</n-radio-button>
-          <n-radio-button value="tv">仅剧集</n-radio-button>
-        </n-radio-group>
       </n-form-item>
 
       <n-form-item label="追剧状态" v-if="currentRule.media_type === 'tv'">
@@ -222,6 +235,7 @@
         </n-input-number>
       </n-form-item>
 
+      </template>
     </n-form>
     <template #footer>
       <n-space justify="end">
@@ -399,6 +413,7 @@ const filteredSortingRules = computed(() => {
     if (ruleFilterType.value === 'movie') return rule.media_type === 'movie';
     if (ruleFilterType.value === 'tv') return rule.media_type === 'tv';
     if (ruleFilterType.value === 'mixed') return rule.media_type === 'all';
+    if (ruleFilterType.value === 'home_video') return rule.media_type === 'home_video';
     return true;
   });
 });
@@ -432,6 +447,10 @@ const genreOptions = computed(() => {
 });
 
 const getRuleSummary = (rule) => {
+  if (rule.media_type === 'home_video') {
+    return '按原目录同步 STRM，不参与 TMDb 分类';
+  }
+
   const parts = [];
   
   // 1. 演员

@@ -67,8 +67,6 @@ CONFIG_OPTION_115_MEDIAINFO_ASSISTED_RECOGNITION = "p115_mediainfo_assisted_reco
 CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"           # 是否下载字幕文件
 CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"           # 是否启用本地清理功能
 CONFIG_OPTION_115_APP_ID = "p115_app_id"                         # 115 自定义 AppID
-CONFIG_OPTION_115_LIFE_MONITOR_ENABLED = "p115_life_monitor_enabled" # 是否开启生活事件监控
-CONFIG_OPTION_115_LIFE_MONITOR_INTERVAL = "p115_life_monitor_interval" # 监控间隔(分钟)
 # 共享资源配置不再进入 dynamic_app_config；统一保存到 app_settings.shared_resource_config。
 APP_SETTING_SHARED_RESOURCE_CONFIG = "shared_resource_config"
 
