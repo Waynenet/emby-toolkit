@@ -1003,6 +1003,8 @@ def send_playback_notification(data: dict):
             'client': escape_markdown(client_name),
             'time': escape_markdown(current_time),
             'overview': overview_text.strip(),
+            'progress': progress_text.strip(), # 新增：暴露播放进度
+            'ip': display_ip,                  # 新增：暴露IP和归属地
         }, default_caption)
         
         admin_ids = set(user_db.get_admin_telegram_chat_ids())
