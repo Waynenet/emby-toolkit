@@ -459,7 +459,7 @@ def _current_play_concurrency_client_signature():
     try:
         parts = [
             request.remote_addr or "",
-            request.headers.get('X-Emby-Client') or _extract_emby_auth_header_value('Client'),
+            request.args.get('X-Emby-Client') or request.headers.get('X-Emby-Client') or _extract_emby_auth_header_value('Client'),
             request.headers.get('X-Emby-Device-Name') or _extract_emby_auth_header_value('Device'),
             request.headers.get('User-Agent') or "",
         ]
@@ -471,6 +471,26 @@ def _current_play_concurrency_client_signature():
         if text:
             normalized.append(text)
     return "|".join(normalized)
+
+
+def _virtual_library_collection_type(definition, client_signature=""):
+    signature = str(client_signature or "").lower()
+    if "emby web" in signature:
+        return "mixed"
+
+    item_types = definition.get("item_type", []) if isinstance(definition, dict) else []
+    if isinstance(item_types, str):
+        item_types = [item_types]
+    normalized_types = {
+        str(item_type).strip().lower()
+        for item_type in item_types
+        if str(item_type).strip()
+    }
+    if normalized_types == {"movie"}:
+        return "movies"
+    if normalized_types and normalized_types <= {"series", "season", "episode"}:
+        return "tvshows"
+    return None
 
 
 def _request_context_keys(full_path="", play_session_id=""):
@@ -886,6 +906,7 @@ def handle_get_views():
         # 2. 生成虚拟库
         collections = custom_collection_db.get_all_active_custom_collections()
         fake_views_items = []
+        client_signature = _current_play_concurrency_client_signature()
         
         for coll in collections:
             # 物理检查：库在Emby里有实体吗？
@@ -912,11 +933,9 @@ def handle_get_views():
                 except Exception:
                     definition = {}
 
-            # 前端展示层统一伪装为 mixed，避免 Emby Web 4.9.5 按 movies/tvshows
-            # 加载一堆原生库专用标签页（标签/合集/文件夹等）。
-            # 注意：这里只影响前端视图类型，不影响 handle_get_mimicked_library_items
-            # 里的 item_type 查询规则；剧集虚拟库仍然只查 Series，电影虚拟库仍然只查 Movie。
-            collection_type = "mixed"
+            # Emby Web keeps the generic view to avoid native-only tabs.
+            # All other clients receive the actual media-library type.
+            collection_type = _virtual_library_collection_type(definition, client_signature)
 
             fake_view = {
                 "Name": coll['name'], "ServerId": real_server_id, "Id": mimicked_id,
@@ -932,6 +951,8 @@ def handle_get_views():
                 "CollectionType": collection_type, "ImageTags": image_tags, "BackdropImageTags": [], 
                 "LockedFields": [], "LockData": False, "Tags": []
             }
+            if collection_type is None:
+                fake_view.pop("CollectionType", None)
             fake_views_items.append(fake_view)
         
         # 3. 合并与排序
@@ -980,11 +1001,10 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
             except Exception:
                 definition = {}
 
-        # 前端展示层统一伪装为 mixed，避免 Emby Web 4.9.5 按 movies/tvshows
-        # 加载一堆原生库专用标签页（标签/合集/文件夹等）。
-        # 注意：这里只影响前端视图类型，不影响 handle_get_mimicked_library_items
-        # 里的 item_type 查询规则；剧集虚拟库仍然只查 Series，电影虚拟库仍然只查 Movie。
-        collection_type = "mixed"
+        collection_type = _virtual_library_collection_type(
+            definition,
+            _current_play_concurrency_client_signature()
+        )
 
         fake_library_details = {
             "Name": coll['name'], 
@@ -1017,6 +1037,8 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
             "LockData": False,
             "Tags": []
         }
+        if collection_type is None:
+            fake_library_details.pop("CollectionType", None)
         return Response(json.dumps(fake_library_details), mimetype='application/json')
     except Exception as e:
         logger.error(f"获取伪造库详情时出错: {e}", exc_info=True)
