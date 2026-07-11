@@ -42,6 +42,9 @@ MISSING_ID_PREFIX = "-800000_"
 _USER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
 _USER_CONTEXT_LOCK = threading.Lock()
 _USER_CONTEXT_CACHE = {}
+_PLAYBACK_INFO_TTL_SECONDS = 30
+_PLAYBACK_INFO_LOCK = threading.Lock()
+_PLAYBACK_INFO_CACHE = {}
 _PLAY_CONCURRENCY_TTL_SECONDS = 8 * 60 * 60
 _PLAY_CONCURRENCY_LOCK = threading.Lock()
 _PLAY_CONCURRENCY_SESSIONS = {}
@@ -586,6 +589,83 @@ def _cache_request_user_context(user_id, full_path="", play_session_id=""):
             for key, (_, expire_at) in list(_USER_CONTEXT_CACHE.items()):
                 if expire_at < now:
                     _USER_CONTEXT_CACHE.pop(key, None)
+
+
+def _playback_info_cache_key(user_id, item_id, play_session_id=""):
+    user_id = str(user_id or "").strip()
+    item_id = str(item_id or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    if play_session_id:
+        return f"{user_id}|{item_id}|ps:{play_session_id}"
+    device_id = _current_play_concurrency_device_id()
+    if device_id:
+        return f"{user_id}|{item_id}|device:{device_id}"
+    return f"{user_id}|{item_id}|{_current_play_concurrency_client_signature()}"
+
+
+def _cache_playback_info(user_id, item_id, data, play_session_id=""):
+    if not user_id or not item_id or not isinstance(data, dict):
+        return
+    keys = [_playback_info_cache_key(user_id, item_id, play_session_id)]
+    if play_session_id:
+        keys.append(_playback_info_cache_key(user_id, item_id, ""))
+    expires_at = time.time() + _PLAYBACK_INFO_TTL_SECONDS
+    with _PLAYBACK_INFO_LOCK:
+        for key in dict.fromkeys(keys):
+            _PLAYBACK_INFO_CACHE[key] = (data, expires_at)
+        if len(_PLAYBACK_INFO_CACHE) > 500:
+            now = time.time()
+            for cache_key, (_, expire_at) in list(_PLAYBACK_INFO_CACHE.items()):
+                if expire_at < now:
+                    _PLAYBACK_INFO_CACHE.pop(cache_key, None)
+
+
+def _lookup_playback_info(user_id, item_id, play_session_id=""):
+    if not user_id or not item_id:
+        return None
+    keys = [_playback_info_cache_key(user_id, item_id, play_session_id)]
+    if play_session_id:
+        keys.append(_playback_info_cache_key(user_id, item_id, ""))
+    now = time.time()
+    with _PLAYBACK_INFO_LOCK:
+        for key in dict.fromkeys(keys):
+            cached = _PLAYBACK_INFO_CACHE.get(key)
+            if not cached:
+                continue
+            data, expires_at = cached
+            if expires_at < now:
+                _PLAYBACK_INFO_CACHE.pop(key, None)
+                continue
+            return data
+    return None
+
+
+def _extract_playback_source_info(data, item_id):
+    pick_code = None
+    virtual_play_info = None
+    display_name = ""
+    source_paths = []
+    for source in (data or {}).get('MediaSources', []):
+        strm_url = source.get('Path', '')
+        if isinstance(strm_url, str) and strm_url:
+            source_paths.append(strm_url)
+
+        name_from_emby = source.get('Name', '')
+        if name_from_emby:
+            display_name = name_from_emby
+        elif isinstance(strm_url, str) and strm_url:
+            display_name = os.path.basename(strm_url).replace('.strm', '')
+
+        if isinstance(strm_url, str):
+            virtual_play_info = _resolve_virtual_play_info_from_source_path(strm_url)
+            if virtual_play_info:
+                break
+            pick_code = extract_pickcode_from_strm_url(strm_url)
+            if not pick_code:
+                pick_code = media_db.get_pickcode_by_emby_id(item_id)
+            if pick_code:
+                break
+    return pick_code, virtual_play_info, display_name, source_paths
 
 
 def _lookup_cached_request_user(full_path="", play_session_id=""):
@@ -1690,6 +1770,49 @@ def proxy_all(path):
             item_id = request.args.get('ItemId', '') or payload.get('ItemId', '')
             current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
             _clear_play_concurrency_session(current_user_id, item_id=item_id, play_session_id=play_session_id)
+
+        if (
+            request.method in ('GET', 'POST')
+            and '/items/' in full_path_lower
+            and full_path_lower.endswith('/playbackinfo')
+        ):
+            base_url, api_key = _get_real_emby_url_and_key()
+            item_match = re.search(r'/items/(\d+)/playbackinfo$', full_path_lower)
+            item_id = item_match.group(1) if item_match else ''
+            play_session_id = request.args.get('PlaySessionId', '')
+            current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
+
+            target_url = f"{base_url}/{path.lstrip('/')}"
+            forward_headers = {
+                k: v
+                for k, v in request.headers
+                if k.lower() not in ['host', 'accept-encoding', 'connection', 'upgrade']
+            }
+            forward_headers['Host'] = urlparse(base_url).netloc
+            forward_params = request.args.copy()
+            forward_params['api_key'] = api_key
+
+            resp = requests.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                params=forward_params,
+                data=request.get_data(),
+                stream=True,
+                timeout=(10.0, 1800.0)
+            )
+
+            excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+            if resp.status_code == 200 and current_user_id and item_id:
+                try:
+                    playback_info = resp.json()
+                    play_session_id = play_session_id or str(playback_info.get('PlaySessionId') or '').strip()
+                    _cache_playback_info(current_user_id, item_id, playback_info, play_session_id)
+                    return Response(resp.content, resp.status_code, response_headers)
+                except Exception as e:
+                    logger.debug("  ➜ [PlaybackInfo缓存] 缓存失败: item=%s, err=%s", item_id, e)
+            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         # ===== 调试日志：打印所有请求路径 =====
         # logger.info(f"[PROXY] 请求路径: {full_path}")
         
@@ -1725,42 +1848,35 @@ def proxy_all(path):
                 return concurrency_block
 
             try:
-                playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
-                params = {
-                    'api_key': api_key,
-                    'UserId': current_user_id,
-                    'MaxStreamingBitrate': 140000000,
-                    'PlaySessionId': play_session_id,
-                }
-                
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                
-                resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for source in data.get('MediaSources', []):
-                        strm_url = source.get('Path', '')
-                        if isinstance(strm_url, str) and strm_url:
-                            source_paths.append(strm_url)
-                        
-                        # ★ 优先从 Emby 的数据源里提取友好的文件名
-                        name_from_emby = source.get('Name', '')
-                        if name_from_emby:
-                            display_name = name_from_emby
-                        elif isinstance(strm_url, str) and strm_url:
-                            display_name = os.path.basename(strm_url).replace('.strm', '')
+                data = _lookup_playback_info(current_user_id, item_id, play_session_id)
+                if data:
+                    pick_code, virtual_play_info, name_from_playback, source_paths = _extract_playback_source_info(data, item_id)
+                    if name_from_playback:
+                        display_name = name_from_playback
 
-                        if isinstance(strm_url, str):
-                            virtual_play_info = _resolve_virtual_play_info_from_source_path(strm_url)
-                            if virtual_play_info:
-                                break
-                            pick_code = extract_pickcode_from_strm_url(strm_url)
-                            if not pick_code:
-                                pick_code = media_db.get_pickcode_by_emby_id(item_id)
-                            if pick_code:
-                                break # 找到 pick_code，跳出循环
+                if not pick_code and not virtual_play_info:
+                    pick_code = media_db.get_pickcode_by_emby_id(item_id)
+
+                if not data:
+                    if not pick_code:
+                        playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
+                        params = {
+                            'api_key': api_key,
+                            'UserId': current_user_id,
+                            'MaxStreamingBitrate': 140000000,
+                            'PlaySessionId': play_session_id,
+                        }
+                        
+                        forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+                        forward_headers['Host'] = urlparse(base_url).netloc
+                        
+                        resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
+                        data = resp.json() if resp.status_code == 200 else {}
+                        if data:
+                            _cache_playback_info(current_user_id, item_id, data, play_session_id or str(data.get('PlaySessionId') or '').strip())
+                            pick_code, virtual_play_info, name_from_playback, source_paths = _extract_playback_source_info(data, item_id)
+                            if name_from_playback:
+                                display_name = name_from_playback
             except Exception as e:
                 logger.error(f"  ❌ [STREAM] 获取 PlaybackInfo 失败: {e}")
             
