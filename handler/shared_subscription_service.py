@@ -1931,6 +1931,19 @@ def _prepare_files_before_rapid_transfer(
             f"target_cid={target_cid_for_washing}, tmdb={tmdb_for_washing}, "
             f"S{s_num if s_num is not None else '-'}E{e_num if e_num is not None else '-'}, size={file_size}"
         )
+        local_active_washing = _local_active_washing_for_media(
+            media_type,
+            tmdb_for_washing,
+            season_num=s_num,
+            episode_num=e_num,
+        )
+        effective_active_washing = bool(local_active_washing and virtual_auto_promote)
+        if local_active_washing and not effective_active_washing:
+            logger.debug(
+                f"  ➜ [共享资源] 秒传前预检：共享来源不使用 active_washing 强制放行，"
+                f"改按洗版优先级比较：{file_name}"
+            )
+
         action, reason = WashingService.decide_washing_action(
             sha1=sha1,
             file_name=file_name,
@@ -1941,12 +1954,7 @@ def _prepare_files_before_rapid_transfer(
             season_num=s_num,
             episode_num=e_num,
             original_lang=original_lang,
-            is_active_washing=_local_active_washing_for_media(
-                media_type,
-                tmdb_for_washing,
-                season_num=s_num,
-                episode_num=e_num,
-            ),
+            is_active_washing=effective_active_washing,
             has_external_subtitle=False,
         )
         logger.debug(

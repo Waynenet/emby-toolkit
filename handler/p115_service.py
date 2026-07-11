@@ -5626,6 +5626,19 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         self.country_map = settings_db.get_setting('country_mapping') or utils.DEFAULT_COUNTRY_MAPPING
         self.language_map = settings_db.get_setting('language_mapping') or utils.DEFAULT_LANGUAGE_MAPPING
         self.recognition_hints = candidate_to_recognition_hints(recognition_hints or {})
+        hint_sources = {
+            str(self.recognition_hints.get("source") or "").strip().lower(),
+            str(self.recognition_hints.get("source_kind") or "").strip().lower(),
+        }
+        hint_sources.update(
+            str(x or "").strip().lower()
+            for x in (self.recognition_hints.get("source_kinds") or [])
+        )
+        self.is_shared_transfer_context = any(
+            x.startswith("shared_") or x in {"logical_episode", "logical_season", "season_hub", "completed_season", "episode"}
+            for x in hint_sources
+            if x
+        )
 
         self.raw_metadata = self._fetch_raw_metadata()
         self.details = self.raw_metadata
@@ -8330,8 +8343,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     is_ep_active_washing = (s_num, e_num) in active_washing_eps
                 elif self.media_type == 'movie':
                     is_ep_active_washing = movie_active_washing
-                
-                effective_conflict_mode = 'replace' if is_ep_active_washing else conflict_mode
+                if is_ep_active_washing and getattr(self, 'is_shared_transfer_context', False):
+                    logger.info(f"  ➜ [洗版特权] 共享来源不使用 active_washing 强制替换，改走洗版优先级比较: {new_name}")
+                    is_ep_active_washing = False
+                 
+                effective_conflict_mode = 'replace' if (is_ep_active_washing or getattr(self, 'is_shared_transfer_context', False)) else conflict_mode
 
                 # ★ 判断是否享有外挂字幕豁免权
                 has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
