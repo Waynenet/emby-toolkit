@@ -78,8 +78,8 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             p.emby_item_ids_json,
             p.watchlist_tmdb_status as tmdb_status,
             
-            COALESCE(es.collected_count, 0) as collected_count,       
-            COALESCE(NULLIF(s.total_episodes, 0), COALESCE(es.total_count, 0)) as total_count,   
+            COALESCE(es.collected_count, 0) as collected_count,
+            COALESCE(NULLIF(s.total_episodes, 0), COALESCE(es.total_count, 0)) as total_count,
             COALESCE(ss.series_collected_count, 0) as series_collected_count,
                
             p.total_episodes as series_total_episodes,
@@ -98,7 +98,6 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             AND (s.watching_status != 'Completed' OR s.in_library = TRUE)
             AND (
                 (s.total_episodes = 0 OR COALESCE(es.collected_count, 0) < s.total_episodes)
-
                 OR s.season_number = ls.max_season_number
                 OR p.watching_status IN ('Completed', 'Paused')
                 OR s.watching_status = 'Completed'
@@ -715,7 +714,7 @@ def find_missing_old_seasons(library_ids: Optional[List[str]] = None) -> List[Di
                     -- 1. 计算每部剧的最大季号
                     SELECT parent_series_tmdb_id, MAX(season_number) as max_seq
                     FROM media_metadata
-                    WHERE item_type = 'Season' AND season_number > 0
+                    WHERE item_type = 'Season' AND season_number > 0 AND in_library = TRUE
                     GROUP BY parent_series_tmdb_id
                 )
                 SELECT 
@@ -1121,7 +1120,7 @@ def transfer_dummy_episode_assets(parent_tmdb_id: str, unified_episodes_dict: di
                     if real_ep_data and str(real_ep_data.get('id')).isdigit():
                         real_id = str(real_ep_data['id'])
 
-                        logger.info(f"  ➜ 发现 S{s_num}E{e_num} 的真实 TMDb ID ({real_id})，正在从临时 ID ({dummy_id}) 转移资产...")
+                        logger.info(f"  ➜ 发现 S{s_num}E{e_num} 的真实 TMDb ID ({real_id})，正在从临时 ID ({dummy_id}) 转移数据...")
 
                         # 3. 检查真实 ID 是否已经在数据库中存在
                         cursor.execute("SELECT 1 FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Episode'", (real_id,))
