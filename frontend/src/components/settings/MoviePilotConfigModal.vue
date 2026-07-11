@@ -510,28 +510,22 @@ defineExpose({ open });
   justify-content: space-between;
   gap: 16px;
   padding: 18px;
-  /* border: 1px solid var(--card-border-color); */
   border-radius: 8px;
-  /* background: color-mix(in srgb, var(--card-bg-color) 84%, var(--accent-color) 16%);
-  box-shadow: 0 10px 28px -20px var(--accent-glow-color); */
 }
 
 .assistant-title {
   font-size: 15px;
   font-weight: 600;
-  /* color: var(--n-text-color-1); */
 }
 
 .assistant-desc {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.5;
-  /* color: var(--n-text-color-3); */
 }
 
 .assistant-wiki-link {
   margin-left: 8px;
-  /* color: var(--accent-color); */
   font-weight: 600;
   text-decoration: none;
 }
@@ -543,17 +537,13 @@ defineExpose({ open });
 .settings-group-title {
   font-size: 13px;
   font-weight: 600;
-  /* color: var(--n-text-color-3); */
   margin-bottom: 8px;
   padding-left: 4px;
 }
 
 .settings-card {
-  /* background-color: var(--card-bg-color);
-  border: 1px solid var(--card-border-color); */
   border-radius: 8px;
   overflow: hidden;
-  /* box-shadow: 0 8px 24px -18px var(--card-shadow-color); */
 }
 
 .compact-settings-row {
@@ -569,7 +559,6 @@ defineExpose({ open });
 .assistant-section-title {
   font-size: 13px;
   font-weight: 600;
-  /* color: var(--n-text-color-1); */
   margin-bottom: 12px;
 }
 
@@ -583,28 +572,8 @@ defineExpose({ open });
 
 .sub-label {
   font-size: 12px;
-  /* color: var(--n-text-color-2); */
   margin-bottom: 4px;
 }
-
-/* :deep(.n-input),
-:deep(.n-input-number),
-:deep(.n-base-selection) {
-  --n-color: color-mix(in srgb, var(--card-bg-color) 72%, transparent) !important;
-  --n-color-focus: color-mix(in srgb, var(--card-bg-color) 86%, transparent) !important;
-  --n-color-disabled: color-mix(in srgb, var(--card-bg-color) 52%, transparent) !important;
-  --n-border: 1px solid color-mix(in srgb, var(--card-border-color) 82%, transparent) !important;
-  --n-border-hover: 1px solid color-mix(in srgb, var(--accent-color) 42%, var(--card-border-color)) !important;
-  --n-border-focus: 1px solid var(--accent-color) !important;
-  --n-box-shadow-focus: 0 0 0 2px var(--accent-glow-color) !important;
-}
-
-:deep(.n-input-wrapper),
-:deep(.n-input__input),
-:deep(.n-input__suffix),
-:deep(.n-base-selection-label) {
-  background: transparent !important;
-} */
 
 @media (max-width: 760px) {
   .mp-config-grid,

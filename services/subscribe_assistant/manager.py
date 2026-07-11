@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 STATE_SUBSCRIBES = "subscribes"
 STATE_TORRENTS = "torrents"
-STATE_HISTORY_RECONCILE = "history_reconcile"
 STATE_SNAPSHOT_RESTORE_SUPPRESSIONS = "snapshot_restore_suppressions"
 SOURCE_PENDING_JUDGE = "pending_judge"
 SOURCE_GUARD_VETO = "guard_veto"
@@ -225,7 +224,6 @@ class SubscribeAssistantManager:
             "no_download_checked": 0,
             "mp_subscriptions_synced": 0,
             "washing_timeouts": 0,
-            "history_reconciled": 0,
             "snapshots_checked": 0,
             "snapshots_cleaned": 0,
             "delete_records_cleaned": 0,
@@ -233,7 +231,6 @@ class SubscribeAssistantManager:
         stats["delete_records_cleaned"] = store.cleanup_delete_records()
         stats["snapshots_cleaned"] = store.cleanup_snapshots(self.cfg.snapshot_retention_days)
         stats["washing_timeouts"] = self.run_full_washing_timeout_check()
-        stats["history_reconciled"] = self.run_transfer_history_reconcile(limit=limit)
         stats["mp_subscriptions_synced"] = self.run_moviepilot_subscription_sync()
         stats["no_download_checked"] = self.run_no_download_check()
         if self.cfg.download_monitor_enabled:

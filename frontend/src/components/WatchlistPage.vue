@@ -1181,9 +1181,6 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 .settings-card {
-  /* background: var(--card-bg-color);
-  background-color: var(--card-bg-color);
-  border: 1px solid var(--card-border-color); */
   border-radius: 8px;
   padding: 0 16px;
 }
@@ -1196,10 +1193,7 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   gap: 16px;
   padding: 18px;
   margin-bottom: 18px;
-  /* border: 1px solid var(--card-border-color); */
   border-radius: 8px;
-  /* background: color-mix(in srgb, var(--card-bg-color) 84%, var(--accent-color) 16%);
-  box-shadow: 0 10px 28px -20px var(--accent-glow-color); */
 }
 .assistant-section {
   padding: 16px;
@@ -1207,7 +1201,6 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 .assistant-section-title {
   font-size: 13px;
   font-weight: 600;
-  /* color: var(--n-text-color-1); */
   margin-bottom: 12px;
 }
 .assistant-wide-control {
@@ -1266,7 +1259,6 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 .assistant-wiki-link {
   margin-left: 8px;
-  /* color: var(--accent-color); */
   text-decoration: none;
   font-weight: 600;
 }
