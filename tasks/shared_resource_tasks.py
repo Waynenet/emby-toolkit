@@ -3266,6 +3266,28 @@ def _local_event_should_bypass_transfer_lease(event: Dict[str, Any], source: Dic
             payload = _event_source_payload(event)
             source_kind, source_id, files = event_sources(event if isinstance(event, dict) else {}, client)
             if files:
+                broadcast_gate = getattr(shared_subscription_service, 'center_broadcast_event_consumption_gate', None)
+                if callable(broadcast_gate):
+                    gate = broadcast_gate(
+                        event if isinstance(event, dict) else {},
+                        payload=payload,
+                        source_kind=source_kind,
+                        source_id=source_id,
+                        files=files,
+                    ) or {}
+                    if gate.get('checked') and not gate.get('allow'):
+                        return {
+                            'bypass': True,
+                            'reason': gate.get('reason') or 'center_broadcast_not_needed',
+                            'message': gate.get('message') or '中心入池广播资源不是本机需要的资源，跳过秒传许可排队。',
+                            'details': gate,
+                        }
+                    if gate.get('checked') and gate.get('requested_episode_numbers'):
+                        payload['_requested_missing_episode_numbers'] = gate.get('requested_episode_numbers')
+                        try:
+                            event['payload_json'] = payload
+                        except Exception:
+                            pass
                 requested_missing = missing_episodes(payload, event) if callable(missing_episodes) else []
                 kept, match_filter = filter_files(
                     client=client,
