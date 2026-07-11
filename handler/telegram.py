@@ -495,7 +495,7 @@ def _build_notice_asset_params_text(emby_item_ids: list) -> str:
 
     quality_parts = [part for part in (quality, resolution, codec) if part]
     if quality_parts:
-        lines.append(f"🎞️ *画质*: `{_markdown_code_text(' / '.join(quality_parts))}`")
+        lines.append(f"📀 *画质*: `{_markdown_code_text(' / '.join(quality_parts))}`")
     if effect:
         lines.append(f"🌈 *特效*: `{_markdown_code_text(effect)}`")
 
