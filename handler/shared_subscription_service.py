@@ -1673,7 +1673,7 @@ def _prepare_files_before_rapid_transfer(
     payload: Dict[str, Any],
     files: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """秒传前预处理：缓存中心 RAW；replace 模式下执行洗版预检。
+    """秒传前预处理：缓存中心 RAW；skip/replace 模式下执行洗版预检。
 
     纯净版不在这里识别，只根据中心 is_clean_version 标签做策略拦截。
     """
@@ -1762,9 +1762,9 @@ def _prepare_files_before_rapid_transfer(
             f"  ➜ [共享资源] 虚拟入库自动转正：强制进入洗版预检，命中 active_washing 的媒体允许替换"
         )
 
-    if conflict_mode != 'replace' and not virtual_auto_promote:
+    if conflict_mode == 'keep_both' and not virtual_auto_promote:
         logger.info(
-            f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 {conflict_mode or '未配置'}，"
+            f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 keep_both，"
             f"跳过洗版预检，耗时 {time.time() - preflight_started_at:.1f}s"
         )
         return files, {
@@ -1774,7 +1774,7 @@ def _prepare_files_before_rapid_transfer(
             'intro_merge_errors': intro_errors[:20],
             'washing_checked': False,
             'virtual_auto_promote': virtual_auto_promote,
-            'message': f'当前覆盖模式为 {conflict_mode or "未配置"}，跳过洗版预检',
+            'message': 'keep_both 模式：跳过洗版预检',
         }
 
     p115 = P115Service.get_client()
