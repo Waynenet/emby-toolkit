@@ -2752,7 +2752,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
         level = None
         reason = '未计算'
-        version_slot = None
 
         raw_row = _lookup_mediainfo_by_sha1(cursor, sha1) if sha1 else None
         if not raw_row or raw_row.get('mediainfo_json') in (None, '', [], {}):
@@ -2774,12 +2773,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                             f"{old_target_cid or '-'} -> {target_cid} ({inferred_category_path or '-'}) | {file_name}"
                         )
 
-                slot_config = settings_db.get_washing_priority_config()
-                slot_needs_clean = any(
-                    bool((slot.get('match') or {}).get('clean_version'))
-                    for slot in (slot_config.get('version_slots') or [])
-                    if isinstance(slot, dict)
-                )
                 priority_input = _build_priority_input(
                     raw_row.get('mediainfo_json'),
                     file_name=file_name,
@@ -2789,19 +2782,11 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                     tmdb_id=row.get('parent_series_tmdb_id') or row.get('tmdb_id') or '',
                     season_num=row.get('season_number'),
                     episode_num=row.get('episode_number'),
-                    need_clean_version_check=(
-                        WashingService._priorities_need_clean_version(priorities)
-                        or slot_needs_clean
-                    ),
+                    need_clean_version_check=WashingService._priorities_need_clean_version(priorities),
                 )
                 norm = WashingService._normalize_info(priority_input)
-                version_slot = WashingService._resolve_version_slot_from_norm(norm)
 
-                if version_slot is None:
-                    level = 0
-                    reason = '未命中任何多版本槽位'
-                    stats['evaluated_versions'] += 1
-                elif not _has_normal_washing_priorities(priorities):
+                if not _has_normal_washing_priorities(priorities):
                     level = None
                     if inferred_target_cid and target_cid != inferred_target_cid:
                         reason = f'原目标分类CID({target_cid or "-"})只命中全局/排除规则，local_path 推导分类CID({inferred_target_cid})后仍未命中普通优先级规则'
@@ -2847,7 +2832,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             'pick_code': pc,
             'media_type': media_type,
             'target_cid': target_cid,
-            'version_slot': version_slot,
             'evaluated_at': evaluated_at,
         }
         versions.append(version)
@@ -2857,7 +2841,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
                 'reason': reason,
                 'target_cid': target_cid or None,
                 'media_type': media_type,
-                'version_slot': version_slot,
                 'identity': identity,
                 'evaluated_at': evaluated_at
             }
@@ -2883,30 +2866,13 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
 
     best = sorted(versions, key=_best_sort_key)[0] if versions else {}
     best_level = best.get('level') if best else None
-    slot_levels = {}
-    for version in versions:
-        slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
-        slot_id = str(slot.get('id') or '__single__')
-        current = slot_levels.get(slot_id)
-        if current and _best_sort_key(current) <= _best_sort_key(version):
-            continue
-        slot_levels[slot_id] = {
-            'id': slot_id,
-            'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
-            'suffix': slot.get('suffix') or '',
-            'level': version.get('level'),
-            'reason': version.get('reason'),
-            'sha1': version.get('sha1'),
-        }
 
     new_mm_snapshot = {
         'versions': versions,
-        'slot_levels': slot_levels,
         'reason': best.get('reason') if best else '无有效版本',
         'sha1': best.get('sha1') if best else None,
         'target_cid': best.get('target_cid') if best else None,
         'media_type': media_type,
-        'version_slot': best.get('version_slot') if best else {},
         'evaluated_at': evaluated_at
     }
 
@@ -2917,7 +2883,6 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
             last_updated_at = NOW()
         WHERE tmdb_id = %s AND item_type = %s
     """, (
-        # washing_level 保留为旧逻辑使用的全版本最佳汇总值；逐槽等级以 slot_levels 为准。
         best_level,
         json.dumps(new_mm_snapshot, ensure_ascii=False),
         row.get('tmdb_id'),

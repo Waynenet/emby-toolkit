@@ -55,8 +55,6 @@ def _install_test_stubs():
     class _WashingService:
         @staticmethod
         def decide_washing_action(*args, **kwargs):
-            if kwargs.get("return_details"):
-                return "ACCEPT", "stub", {}
             return "ACCEPT", "stub"
     resubscribe_mod.WashingService = _WashingService
     sys.modules.setdefault("handler.resubscribe_service", resubscribe_mod)
