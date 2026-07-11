@@ -3370,11 +3370,10 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
     source = _event_source_payload(event)
     bypass = _local_event_should_bypass_transfer_lease(event, source)
     if bypass.get('bypass'):
-        logger.info(f"  ➜ [共享资源] 跳过中心秒传许可：{bypass.get('message') or bypass.get('reason')}")
         return original_consume(event, *args, **kwargs)
     gate = _shared_transfer_gate(source)
     if not gate.get('ok'):
-        logger.info(f"  ➜ [共享资源] 秒传拦截：{gate.get('message') or gate.get('reason')}")
+        logger.debug(f"  ➜ [共享资源] 秒传拦截：{gate.get('message') or gate.get('reason')}")
         return {
             'ok': True,
             'skipped': True,
@@ -3386,7 +3385,7 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
         }
     share_bypass = _completed_season_share_lease_bypass(event, source)
     if share_bypass.get('bypass'):
-        logger.info(
+        logger.debug(
             f"  ➜ [共享资源] 跳过中心秒传许可：完结季/逻辑季存在有效 115 分享通道，"
             f"直接尝试分享转存，channel={share_bypass.get('channel_id') or '-'}"
         )

@@ -2708,7 +2708,7 @@ def _replace_mode_short_circuit_best_inventory(
         # 完结季不能单集洗。只有整季所有视频都已在库内达到优先级 1，才整包短路。
         if all(x.get('known') and x.get('best') for x in completed_video_checks):
             message = f"本地完结季库存所有分集均已是最佳版本，跳过整季秒传：{payload.get('title') or source_id}"
-            logger.info(f"  ➜ [共享资源] {message}")
+            logger.debug(f"  ➜ [共享资源] {message}")
             return [], {
                 'checked': True,
                 'short_circuit': True,
@@ -3846,7 +3846,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
@@ -3870,7 +3870,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
@@ -3916,7 +3916,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
