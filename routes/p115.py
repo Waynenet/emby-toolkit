@@ -1569,7 +1569,6 @@ def _quick_deploy_payload(progress=None):
         constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME: unrecognized_root['name'],
         constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: media_root['cid'],
         constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: media_root['name'],
-        constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: True,
         constants.CONFIG_OPTION_115_MP_CLASSIFY: False,
         constants.CONFIG_OPTION_115_API_PRIORITY: config.get(constants.CONFIG_OPTION_115_API_PRIORITY, 'openapi'),
         constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE: config.get(constants.CONFIG_OPTION_115_MIN_VIDEO_SIZE, 10),

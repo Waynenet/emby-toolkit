@@ -55,6 +55,12 @@ server {
         proxy_pass http://virtual_library_proxy;
     }
 
+    location ~ "^/emby/Users/[a-f0-9]{32}/?$" {
+        proxy_pass http://virtual_library_proxy;
+        proxy_set_header Upgrade "";
+        proxy_set_header Connection "";
+    }
+
     # ★★★ 规则 2：【新增的关键规则】拦截“获取库内容”的请求 ★★★
     # 这是我们之前一直缺失的规则！
     location ~ /emby/Users/([a-f0-9]+)/Items$ {

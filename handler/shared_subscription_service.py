@@ -25,6 +25,9 @@ _ORGANIZE_KICK_LOCK = threading.Lock()
 _LAST_ORGANIZE_KICK_AT = 0
 
 VIDEO_EXTS = {'.mkv', '.mp4', '.ts', '.m2ts', '.avi', '.mov', '.wmv', '.flv', '.rmvb', '.webm', '.iso'}
+_CENTER_BROADCAST_STRATEGIES = {'center_available_at_v1'}
+_CENTER_BROADCAST_EVENT_TYPES = {'movie_available', 'episode_available', 'logical_episode_available', 'logical_season_available'}
+_CENTER_BROADCAST_INACTIVE_SUB_STATUSES = {'', 'NONE', 'IGNORED'}
 
 # 中心转存结果上报重试队列：秒传/分享转存已经成功落盘时，中心 report
 # 如果遇到 TLS/反代瞬断，不能只打一条 warning 就丢失热度、扣点和 lease 释放。
@@ -1673,7 +1676,7 @@ def _prepare_files_before_rapid_transfer(
     payload: Dict[str, Any],
     files: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """秒传前预处理：缓存中心 RAW；replace 模式下执行洗版预检。
+    """秒传前预处理：缓存中心 RAW；skip/replace 模式下执行洗版预检。
 
     纯净版不在这里识别，只根据中心 is_clean_version 标签做策略拦截。
     """
@@ -1762,9 +1765,9 @@ def _prepare_files_before_rapid_transfer(
             f"  ➜ [共享资源] 虚拟入库自动转正：强制进入洗版预检，命中 active_washing 的媒体允许替换"
         )
 
-    if conflict_mode != 'replace' and not virtual_auto_promote:
+    if conflict_mode == 'keep_both' and not virtual_auto_promote:
         logger.info(
-            f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 {conflict_mode or '未配置'}，"
+            f"  ➜ [共享资源] 秒传前预检结束：当前覆盖模式为 keep_both，"
             f"跳过洗版预检，耗时 {time.time() - preflight_started_at:.1f}s"
         )
         return files, {
@@ -1774,7 +1777,7 @@ def _prepare_files_before_rapid_transfer(
             'intro_merge_errors': intro_errors[:20],
             'washing_checked': False,
             'virtual_auto_promote': virtual_auto_promote,
-            'message': f'当前覆盖模式为 {conflict_mode or "未配置"}，跳过洗版预检',
+            'message': 'keep_both 模式：跳过洗版预检',
         }
 
     p115 = P115Service.get_client()
@@ -2648,20 +2651,6 @@ def _replace_mode_short_circuit_best_inventory(
     """
     payload = payload if isinstance(payload, dict) else {}
     files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
-    washing_config = settings_db.get_washing_priority_config()
-    if (
-        washing_config.get('conflict_mode') == 'replace'
-        and washing_config.get('version_slots_enabled')
-        and washing_config.get('version_slots')
-    ):
-        return files, {
-            'checked': False,
-            'short_circuit': False,
-            'reason': 'version_slots_require_candidate_preflight',
-            'message': '多版本槽位已启用，跳过单版本库存最佳值短路。',
-            'best_count': 0,
-            'kept_count': len(files),
-        }
     normalized_source_kind = _normalize_source_kind(source_kind)
     context = _preflight_context(source_kind, source_id, payload, files)
     source_label = f"{source_kind or '-'}:{source_id or '-'}"
@@ -2956,6 +2945,248 @@ def _filter_files_before_transfer(
         'skipped': {k: v[:20] for k, v in skipped.items() if v},
         'reason': reason,
         'message': message,
+    }
+
+
+def _is_center_pool_broadcast_event(event: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    payload = payload if isinstance(payload, dict) else {}
+    event = event if isinstance(event, dict) else {}
+    if payload.get('share_request_group_id'):
+        return False
+    strategy = str(payload.get('broadcast_strategy') or '').strip()
+    if strategy in _CENTER_BROADCAST_STRATEGIES:
+        return True
+    event_type = str(event.get('event_type') or payload.get('event_type') or '').strip()
+    return (
+        event_type in _CENTER_BROADCAST_EVENT_TYPES
+        and any(k in payload for k in ('broadcast_tier', 'broadcast_delay_seconds', 'broadcast_delay_window_seconds'))
+    )
+
+
+def _broadcast_has_subscription_status(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    status = str(row.get('subscription_status') or '').strip().upper()
+    return status not in _CENTER_BROADCAST_INACTIVE_SUB_STATUSES
+
+
+def _broadcast_washing_allowed(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    if not bool(row.get('active_washing')):
+        return False
+    level = _safe_int_or_none(row.get('washing_level'))
+    return level != 1
+
+
+def _broadcast_status_active(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    return _broadcast_has_subscription_status(row) or _broadcast_washing_allowed(row)
+
+
+def _local_movie_broadcast_state(tmdb_id: Any) -> Dict[str, Any]:
+    tmdb = str(tmdb_id or '').strip()
+    if not tmdb:
+        return {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tmdb_id, title, subscription_status, watching_status, in_library, active_washing, washing_level
+                    FROM media_metadata
+                    WHERE item_type='Movie' AND tmdb_id=%s
+                    LIMIT 1
+                    """,
+                    (tmdb,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 广播消费前查询电影订阅状态失败: tmdb={tmdb}, err={e}")
+        return {}
+
+
+def _local_season_broadcast_state(parent_tmdb_id: Any, season_number: Any) -> Dict[str, Any]:
+    parent = str(parent_tmdb_id or '').strip()
+    season = _safe_int_or_none(season_number)
+    if not parent:
+        return {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if season is not None:
+                    cur.execute(
+                        """
+                        SELECT tmdb_id, parent_series_tmdb_id, season_number, title,
+                               subscription_status, watching_status, in_library, active_washing, washing_level, total_episodes
+                        FROM media_metadata
+                        WHERE item_type='Season'
+                          AND parent_series_tmdb_id=%s
+                          AND season_number=%s
+                        LIMIT 1
+                        """,
+                        (parent, season),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return dict(row)
+                cur.execute(
+                    """
+                    SELECT tmdb_id, title, subscription_status, watching_status, in_library, active_washing, washing_level, total_episodes
+                    FROM media_metadata
+                    WHERE item_type='Series' AND tmdb_id=%s
+                    LIMIT 1
+                    """,
+                    (parent,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 广播消费前查询剧集订阅状态失败: tmdb={parent}, season={season}, err={e}")
+        return {}
+
+
+def _local_episode_broadcast_state(parent_tmdb_id: Any, season_number: Any, episode_number: Any) -> Dict[str, Any]:
+    parent = str(parent_tmdb_id or '').strip()
+    season = _safe_int_or_none(season_number)
+    episode = _safe_int_or_none(episode_number)
+    if not parent or season is None or episode is None:
+        return {}
+    try:
+        from database.connection import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT parent_series_tmdb_id, season_number, episode_number, title,
+                           subscription_status, watching_status, in_library, active_washing, washing_level
+                    FROM media_metadata
+                    WHERE item_type='Episode'
+                      AND parent_series_tmdb_id=%s
+                      AND season_number=%s
+                      AND episode_number=%s
+                    LIMIT 1
+                    """,
+                    (parent, season, episode),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {
+                    'parent_series_tmdb_id': parent,
+                    'season_number': season,
+                    'episode_number': episode,
+                    'in_library': False,
+                    'subscription_status': 'NONE',
+                    'watching_status': 'NONE',
+                    'active_washing': False,
+                    'washing_level': None,
+                    'missing_row': True,
+                }
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 广播消费前查询分集状态失败: tmdb={parent}, S{season}E{episode}, err={e}")
+        return {}
+
+
+def center_broadcast_event_consumption_gate(
+    event: Dict[str, Any],
+    *,
+    payload: Dict[str, Any] = None,
+    source_kind: str = '',
+    source_id: str = '',
+    files: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """中心入池广播消费门禁：只消费本机订阅且确实缺失/可洗版的资源。"""
+    event = event if isinstance(event, dict) else {}
+    payload = payload if isinstance(payload, dict) else _event_payload(event)
+    if not _is_center_pool_broadcast_event(event, payload):
+        return {'checked': False, 'allow': True}
+
+    files = [dict(f or {}) for f in (files or []) if isinstance(f, dict)]
+    normalized_kind = _normalize_source_kind(source_kind or event.get('source_kind') or payload.get('source_kind') or '')
+    context = _preflight_context(normalized_kind, source_id, payload, files)
+    if normalized_kind == 'movie' or str(context.get('item_type') or payload.get('item_type') or '').strip() == 'Movie':
+        tmdb_id = payload.get('tmdb_id') or context.get('tmdb_id')
+        state = _local_movie_broadcast_state(tmdb_id)
+        if not state or not _broadcast_status_active(state):
+            return {
+                'checked': True,
+                'allow': False,
+                'reason': 'not_in_subscription_list',
+                'message': f"跳过入池广播：电影 {payload.get('title') or tmdb_id or source_id} 不在本机订阅列表，也没有可用洗版标记。",
+                'state': state,
+            }
+        return {'checked': True, 'allow': True, 'reason': 'movie_subscription_or_washing', 'state': state}
+
+    parent_tmdb = _source_parent_series_tmdb_id(payload, context)
+    season_number = context.get('season_number')
+    if season_number in (None, '') and files:
+        season_number, _ = _guess_se_from_source(files[0], context)
+    season_state = _local_season_broadcast_state(parent_tmdb, season_number)
+    if not season_state or not _broadcast_status_active(season_state):
+        return {
+            'checked': True,
+            'allow': False,
+            'reason': 'not_in_subscription_list',
+            'message': f"跳过入池广播：剧集 {payload.get('title') or parent_tmdb or source_id} S{season_number or '-'} 不在本机订阅列表，也没有可用洗版标记。",
+            'state': season_state,
+        }
+
+    eligible_episodes: List[int] = []
+    missing_episodes: List[int] = []
+    washing_episodes: List[int] = []
+    skipped = {'unknown_identity': [], 'already_in_library': [], 'inventory_best': []}
+    video_files = []
+    for f in files:
+        file_name = f.get('file_name') or f.get('name') or f.get('sha1') or ''
+        ext = os.path.splitext(str(file_name or ''))[1].lower()
+        if ext and ext not in VIDEO_EXTS:
+            continue
+        video_files.append(f)
+
+    for f in video_files or files[:1]:
+        file_name = f.get('file_name') or f.get('name') or f.get('sha1') or ''
+        s_num, e_num = _guess_se_from_source(f, context)
+        ep_parent = _source_parent_series_tmdb_id(f, context) or parent_tmdb
+        if e_num is None:
+            skipped['unknown_identity'].append(file_name)
+            continue
+        ep_state = _local_episode_broadcast_state(ep_parent, s_num, e_num)
+        if not ep_state:
+            skipped['unknown_identity'].append(file_name)
+            continue
+        ep = int(e_num)
+        if _broadcast_has_subscription_status(season_state) and not bool(ep_state.get('in_library')):
+            missing_episodes.append(ep)
+            eligible_episodes.append(ep)
+            continue
+        if _broadcast_washing_allowed(ep_state) or _broadcast_washing_allowed(season_state):
+            washing_episodes.append(ep)
+            eligible_episodes.append(ep)
+            continue
+        skipped['already_in_library'].append(f"E{ep:02d} {file_name}".strip())
+
+    eligible_episodes = sorted({x for x in eligible_episodes if x > 0})
+    if not eligible_episodes:
+        return {
+            'checked': True,
+            'allow': False,
+            'reason': 'no_missing_or_washable_episode',
+            'message': (
+                f"跳过入池广播：{payload.get('title') or parent_tmdb or source_id} "
+                f"S{season_number or '-'} 没有本机缺失或可洗版的集。"
+            ),
+            'state': season_state,
+            'skipped': {k: v[:20] for k, v in skipped.items() if v},
+        }
+
+    return {
+        'checked': True,
+        'allow': True,
+        'reason': 'episode_needed',
+        'requested_episode_numbers': eligible_episodes,
+        'missing_episode_numbers': sorted({x for x in missing_episodes if x > 0}),
+        'washing_episode_numbers': sorted({x for x in washing_episodes if x > 0}),
+        'state': season_state,
     }
 
 
@@ -3671,8 +3902,39 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'success_count': 0, 'total': 0, 'errors': [{'error': message}],
         }
 
+    broadcast_gate = center_broadcast_event_consumption_gate(
+        event,
+        payload=payload,
+        source_kind=source_kind,
+        source_id=source_id,
+        files=files,
+    )
+    if broadcast_gate.get('checked') and not broadcast_gate.get('allow'):
+        message = broadcast_gate.get('message') or '中心入池广播资源不是本机需要的资源，已跳过。'
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='ok', message=message[:500])
+            except Exception:
+                pass
+        logger.info(f"  ➜ [共享资源] {message}")
+        return {
+            'ok': False,
+            'skipped': True,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': 0,
+            'errors': [],
+            'skip_reason': broadcast_gate.get('reason') or 'center_broadcast_not_needed',
+            'broadcast_gate': broadcast_gate,
+        }
+
     original_file_count = len(files)
     requested_missing_episode_numbers = _requested_missing_episodes_from_payload(payload, event)
+    if broadcast_gate.get('checked') and broadcast_gate.get('requested_episode_numbers'):
+        requested_missing_episode_numbers = _normalize_episode_numbers(broadcast_gate.get('requested_episode_numbers'))
     files, match_filter = _filter_files_before_transfer(
         client=client,
         source_kind=source_kind,

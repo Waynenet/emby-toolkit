@@ -2223,6 +2223,15 @@ def api_register_center_device():
 def api_center_device_status():
     try:
         resp = SharedCenterClient().device_status()
+        device = resp.get('device') if isinstance(resp, dict) else None
+        if isinstance(device, dict):
+            meta = device.get('share_heartbeat_meta_json')
+            if isinstance(meta, dict):
+                device.setdefault('forced_offline', meta.get('forced_offline'))
+                device.setdefault('forced_offline_reason', meta.get('forced_offline_reason') or meta.get('ban_reason') or '')
+                device.setdefault('ban_reason', meta.get('ban_reason') or meta.get('forced_offline_reason') or '')
+                device.setdefault('banned_by', meta.get('banned_by') or '')
+                device.setdefault('banned_at', meta.get('banned_at'))
         data = {
             **resp,
             'local_server_id_hash': _current_server_id_hash(),

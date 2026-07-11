@@ -117,7 +117,7 @@ class P115RenameRenderer:
         year = date_text[:4] if date_text else ''
         title_zh = self.sanitize_name_component(safe_title if safe_title else (self.details.get('title') or self.original_title))
         title_en = self.sanitize_name_component(self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title)
-        title_orig = self.sanitize_name_component(original_title or self.details.get('original_title') or self.original_title)
+        title_orig = self.sanitize_name_component(self.details.get('title_orig') or original_title or self.details.get('original_title') or self.original_title)
         season_val = season_num if season_num is not None else (1 if is_tv else None)
         episode_val = episode_num if episode_num is not None else (1 if is_tv else None)
         season_no = f"{season_val:02d}" if season_val is not None else ""
@@ -308,7 +308,7 @@ class P115RenameRenderer:
                 raw_title = self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title
                 val = self.sanitize_name_component(raw_title)
             elif block == 'title_orig':
-                raw_title = original_title or self.details.get('original_title') or self.original_title
+                raw_title = self.details.get('title_orig') or original_title or self.details.get('original_title') or self.original_title
                 val = self.sanitize_name_component(raw_title)
             elif block == 'year':
                 val = f"({self.details.get('date', '')[:4]})" if self.details.get('date') else None

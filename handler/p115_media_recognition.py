@@ -55,8 +55,6 @@ def _install_test_stubs():
     class _WashingService:
         @staticmethod
         def decide_washing_action(*args, **kwargs):
-            if kwargs.get("return_details"):
-                return "ACCEPT", "stub", {}
             return "ACCEPT", "stub"
     resubscribe_mod.WashingService = _WashingService
     sys.modules.setdefault("handler.resubscribe_service", resubscribe_mod)
@@ -691,6 +689,66 @@ class P115RecognitionRuleTests(unittest.TestCase):
 
         self.assertEqual(metadata.get("title"), "The Lead")
         self.assertEqual(metadata.get("original_title"), "The Lead")
+
+    def test_fetch_raw_metadata_uses_main_titles_not_aliases(self):
+        organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)
+        organizer.api_key = "fake"
+        organizer.media_type = "movie"
+        organizer.tmdb_id = "999"
+        organizer.rating_map = {}
+        organizer.rating_priority = []
+        organizer.recognition_hints = {}
+
+        class _Cursor:
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class _Conn:
+            def cursor(self):
+                return _Cursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        raw_details = {
+            "title": "中文主片名",
+            "original_title": "原文主片名",
+            "original_language": "ja",
+            "genres": [],
+            "production_countries": [],
+            "production_companies": [],
+            "keywords": {"keywords": []},
+            "credits": {"cast": []},
+            "alternative_titles": {
+                "titles": [{"iso_3166_1": "US", "title": "English Alias"}]
+            },
+            "release_date": "2026-01-01",
+            "vote_average": 0,
+            "runtime": 0,
+        }
+        english_details = {"title": "English Main Title"}
+
+        p115_service._TMDB_METADATA_CACHE.clear()
+        with mock.patch.object(p115_service.tmdb, "get_movie_details", side_effect=[raw_details, english_details]):
+            with mock.patch.object(p115_service.utils, "get_rating_label", return_value="未知"):
+                with mock.patch("database.connection.get_db_connection", return_value=_Conn()):
+                    metadata = organizer._fetch_raw_metadata()
+
+        self.assertEqual(metadata.get("title_en"), "English Main Title")
+        self.assertEqual(metadata.get("title_orig"), "原文主片名")
+        self.assertEqual(metadata.get("original_title"), "原文主片名")
 
     def test_rename_file_node_consumes_rule_episode_result(self):
         organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)

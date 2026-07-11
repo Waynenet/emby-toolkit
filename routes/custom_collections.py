@@ -553,11 +553,12 @@ def api_get_emby_libraries_for_filter():
         if all_views is None:
             return jsonify({"error": "无法从 Emby 获取媒体库列表"}), 500
 
-        # 筛选出真正的媒体库（电影、电视剧类型）并格式化为前端需要的格式
+        # Emby 的混合内容库在部分版本中会返回空 CollectionType。
         library_options = []
         for view in all_views:
             collection_type = view.get('CollectionType')
-            if collection_type in ['movies', 'tvshows']:
+            is_mixed_library = not collection_type and view.get('Type') == 'CollectionFolder'
+            if collection_type in ['movies', 'tvshows', 'mixed'] or is_mixed_library:
                 library_options.append({
                     "label": view.get('Name'),
                     "value": view.get('Id')

@@ -171,12 +171,6 @@ def task_download_from_hdhive(api_key=None, slug=None, tmdb_id=None, media_type=
         except Exception as e:
             logger.debug(f"  ➜ 保存影巢转存整理上下文失败: {receive_title} -> {e}")
 
-        # ★ 新增：检查智能整理总开关，未开启则直接下班回家
-        enable_organize = config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
-        if str(enable_organize).lower() != 'true' and enable_organize is not True:
-            logger.info("  ➜ 智能整理功能未开启，转存任务结束！")
-            return True
-
         # ★ 2：去待整理目录搜索刚刚转存的文件，获取真实的 file_id (增加重试逻辑)
         logger.info(f"  ➜ 正在定位转存文件，准备执行精准整理...")
         

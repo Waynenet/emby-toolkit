@@ -1674,7 +1674,6 @@ class MediaProcessor:
                     'reason': snapshot.get('reason') or '',
                     'target_cid': snapshot.get('target_cid') or '',
                     'media_type': snapshot.get('media_type') or '',
-                    'version_slot': snapshot.get('version_slot') or {},
                     'identity': snapshot.get('identity') or {},
                     'evaluated_at': snapshot.get('evaluated_at'),
                 })
@@ -1684,32 +1683,14 @@ class MediaProcessor:
 
         def _apply_washing_snapshot(record, sha1_list, pickcode_list):
             versions, best = _load_washing_snapshot_from_p115_cache(sha1_list, pickcode_list)
-            slot_levels = {}
-            for version in versions:
-                slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
-                slot_id = str(slot.get('id') or '__single__')
-                current = slot_levels.get(slot_id)
-                if current and _washing_best_sort_key(current) <= _washing_best_sort_key(version):
-                    continue
-                slot_levels[slot_id] = {
-                    'id': slot_id,
-                    'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
-                    'suffix': slot.get('suffix') or '',
-                    'level': version.get('level'),
-                    'reason': version.get('reason'),
-                    'sha1': version.get('sha1'),
-                }
-
-            snapshot_data = {'versions': versions, 'slot_levels': slot_levels}
+            snapshot_data = {'versions': versions}
             if best:
-                # washing_level 保留为旧逻辑使用的全版本最佳汇总值；逐槽等级以 slot_levels 为准。
                 record['washing_level'] = best.get('level')
                 snapshot_data.update({
                     'reason': best.get('reason'),
                     'sha1': best.get('sha1'),
                     'target_cid': best.get('target_cid'),
                     'media_type': best.get('media_type'),
-                    'version_slot': best.get('version_slot') or {},
                     'evaluated_at': best.get('evaluated_at')
                 })
             else:

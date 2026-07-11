@@ -42,6 +42,9 @@ MISSING_ID_PREFIX = "-800000_"
 _USER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
 _USER_CONTEXT_LOCK = threading.Lock()
 _USER_CONTEXT_CACHE = {}
+_PLAYBACK_INFO_TTL_SECONDS = 30
+_PLAYBACK_INFO_LOCK = threading.Lock()
+_PLAYBACK_INFO_CACHE = {}
 _PLAY_CONCURRENCY_TTL_SECONDS = 8 * 60 * 60
 _PLAY_CONCURRENCY_LOCK = threading.Lock()
 _PLAY_CONCURRENCY_SESSIONS = {}
@@ -493,6 +496,70 @@ def _virtual_library_collection_type(definition, client_signature=""):
     return None
 
 
+def _is_official_ios_client(client_signature=""):
+    signature = str(client_signature or "").lower()
+    return "emby for ios" in signature or (
+        "cfnetwork" in signature and "darwin" in signature
+    )
+
+
+def _stable_virtual_library_token(db_id, purpose):
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"emby-toolkit:virtual-library:{db_id}:{purpose}"
+    ).hex
+
+
+def _build_mimicked_library_view(coll, mimicked_id, collection_type, real_server_id):
+    db_id = coll["id"]
+    name = coll["name"]
+    real_emby_collection_id = coll.get("emby_collection_id")
+    identity = _stable_virtual_library_token(db_id, "identity")
+    image_tags = {}
+    if real_emby_collection_id:
+        image_tags["Primary"] = _stable_virtual_library_token(
+            f"{db_id}:{real_emby_collection_id}",
+            "primary-image"
+        )
+
+    view = {
+        "Name": name,
+        "ServerId": real_server_id,
+        "Id": mimicked_id,
+        "Guid": identity,
+        "Etag": _stable_virtual_library_token(db_id, "etag"),
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "DateModified": "0001-01-01T00:00:00.0000000Z",
+        "CanDelete": False,
+        "CanDownload": False,
+        "SortName": name,
+        "ExternalUrls": [],
+        "ProviderIds": {},
+        "IsFolder": True,
+        "ParentId": "2",
+        "Type": "CollectionFolder",
+        "PresentationUniqueKey": identity,
+        "DisplayPreferencesId": identity,
+        "ForcedSortName": name,
+        "Taglines": [],
+        "RemoteTrailers": [],
+        "UserData": {
+            "PlaybackPositionTicks": 0,
+            "IsFavorite": False,
+            "Played": False
+        },
+        "PrimaryImageAspectRatio": 1.7777777777777777,
+        "CollectionType": collection_type,
+        "ImageTags": image_tags,
+        "BackdropImageTags": [],
+        "LockedFields": [],
+        "LockData": False
+    }
+    if collection_type is None:
+        view.pop("CollectionType", None)
+    return view
+
+
 def _request_context_keys(full_path="", play_session_id=""):
     keys = []
 
@@ -522,6 +589,83 @@ def _cache_request_user_context(user_id, full_path="", play_session_id=""):
             for key, (_, expire_at) in list(_USER_CONTEXT_CACHE.items()):
                 if expire_at < now:
                     _USER_CONTEXT_CACHE.pop(key, None)
+
+
+def _playback_info_cache_key(user_id, item_id, play_session_id=""):
+    user_id = str(user_id or "").strip()
+    item_id = str(item_id or "").strip()
+    play_session_id = str(play_session_id or "").strip()
+    if play_session_id:
+        return f"{user_id}|{item_id}|ps:{play_session_id}"
+    device_id = _current_play_concurrency_device_id()
+    if device_id:
+        return f"{user_id}|{item_id}|device:{device_id}"
+    return f"{user_id}|{item_id}|{_current_play_concurrency_client_signature()}"
+
+
+def _cache_playback_info(user_id, item_id, data, play_session_id=""):
+    if not user_id or not item_id or not isinstance(data, dict):
+        return
+    keys = [_playback_info_cache_key(user_id, item_id, play_session_id)]
+    if play_session_id:
+        keys.append(_playback_info_cache_key(user_id, item_id, ""))
+    expires_at = time.time() + _PLAYBACK_INFO_TTL_SECONDS
+    with _PLAYBACK_INFO_LOCK:
+        for key in dict.fromkeys(keys):
+            _PLAYBACK_INFO_CACHE[key] = (data, expires_at)
+        if len(_PLAYBACK_INFO_CACHE) > 500:
+            now = time.time()
+            for cache_key, (_, expire_at) in list(_PLAYBACK_INFO_CACHE.items()):
+                if expire_at < now:
+                    _PLAYBACK_INFO_CACHE.pop(cache_key, None)
+
+
+def _lookup_playback_info(user_id, item_id, play_session_id=""):
+    if not user_id or not item_id:
+        return None
+    keys = [_playback_info_cache_key(user_id, item_id, play_session_id)]
+    if play_session_id:
+        keys.append(_playback_info_cache_key(user_id, item_id, ""))
+    now = time.time()
+    with _PLAYBACK_INFO_LOCK:
+        for key in dict.fromkeys(keys):
+            cached = _PLAYBACK_INFO_CACHE.get(key)
+            if not cached:
+                continue
+            data, expires_at = cached
+            if expires_at < now:
+                _PLAYBACK_INFO_CACHE.pop(key, None)
+                continue
+            return data
+    return None
+
+
+def _extract_playback_source_info(data, item_id):
+    pick_code = None
+    virtual_play_info = None
+    display_name = ""
+    source_paths = []
+    for source in (data or {}).get('MediaSources', []):
+        strm_url = source.get('Path', '')
+        if isinstance(strm_url, str) and strm_url:
+            source_paths.append(strm_url)
+
+        name_from_emby = source.get('Name', '')
+        if name_from_emby:
+            display_name = name_from_emby
+        elif isinstance(strm_url, str) and strm_url:
+            display_name = os.path.basename(strm_url).replace('.strm', '')
+
+        if isinstance(strm_url, str):
+            virtual_play_info = _resolve_virtual_play_info_from_source_path(strm_url)
+            if virtual_play_info:
+                break
+            pick_code = extract_pickcode_from_strm_url(strm_url)
+            if not pick_code:
+                pick_code = media_db.get_pickcode_by_emby_id(item_id)
+            if pick_code:
+                break
+    return pick_code, virtual_play_info, display_name, source_paths
 
 
 def _lookup_cached_request_user(full_path="", play_session_id=""):
@@ -894,6 +1038,42 @@ def handle_get_views():
         if not user_id_match:
             return "Could not determine user from request path", 400
         user_id = user_id_match.group(1)
+        client_signature = _current_play_concurrency_client_signature()
+
+        if _is_official_ios_client(client_signature):
+            base_url, api_key = _get_real_emby_url_and_key()
+            target_url = f"{base_url}/{request.path.lstrip('/')}"
+            headers = {
+                key: value
+                for key, value in request.headers
+                if key.lower() not in [
+                    'host',
+                    'accept-encoding',
+                    'connection',
+                    'upgrade'
+                ]
+            }
+            headers['Host'] = urlparse(base_url).netloc
+            params = request.args.copy()
+            params['api_key'] = api_key
+            resp = requests.get(
+                target_url,
+                headers=headers,
+                params=params,
+                timeout=(10.0, 30.0)
+            )
+            excluded_headers = [
+                'content-encoding',
+                'content-length',
+                'transfer-encoding',
+                'connection'
+            ]
+            response_headers = [
+                (name, value)
+                for name, value in resp.headers.items()
+                if name.lower() not in excluded_headers
+            ]
+            return Response(resp.content, resp.status_code, response_headers)
 
         # 1. 获取原生库
         user_visible_native_libs = emby.get_emby_libraries(
@@ -904,9 +1084,12 @@ def handle_get_views():
         if user_visible_native_libs is None: user_visible_native_libs = []
 
         # 2. 生成虚拟库
-        collections = custom_collection_db.get_all_active_custom_collections()
+        collections = (
+            []
+            if _is_official_ios_client(client_signature)
+            else custom_collection_db.get_all_active_custom_collections()
+        )
         fake_views_items = []
-        client_signature = _current_play_concurrency_client_signature()
         
         for coll in collections:
             # 物理检查：库在Emby里有实体吗？
@@ -923,8 +1106,6 @@ def handle_get_views():
             # 生成虚拟库对象
             db_id = coll['id']
             mimicked_id = to_mimicked_id(db_id)
-            # 使用时间戳强制刷新封面
-            image_tags = {"Primary": f"{real_emby_collection_id}?timestamp={int(time.time())}"}
             definition = coll.get('definition_json') or {}
             
             if isinstance(definition, str):
@@ -937,23 +1118,12 @@ def handle_get_views():
             # All other clients receive the actual media-library type.
             collection_type = _virtual_library_collection_type(definition, client_signature)
 
-            fake_view = {
-                "Name": coll['name'], "ServerId": real_server_id, "Id": mimicked_id,
-                "Guid": str(uuid.uuid4()), "Etag": f"{db_id}{int(time.time())}",
-                "DateCreated": "2025-01-01T00:00:00.0000000Z", "CanDelete": False, "CanDownload": False,
-                "SortName": coll['name'], "ExternalUrls": [], "ProviderIds": {}, "IsFolder": True,
-                "ParentId": "2", "Type": "CollectionFolder", "PresentationUniqueKey": str(uuid.uuid4()),
-                "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{db_id}", "ForcedSortName": coll['name'],
-                "Taglines": [], "RemoteTrailers": [],
-                "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
-                "ChildCount": coll.get('in_library_count', 1),
-                "PrimaryImageAspectRatio": 1.7777777777777777, 
-                "CollectionType": collection_type, "ImageTags": image_tags, "BackdropImageTags": [], 
-                "LockedFields": [], "LockData": False, "Tags": []
-            }
-            if collection_type is None:
-                fake_view.pop("CollectionType", None)
-            fake_views_items.append(fake_view)
+            fake_views_items.append(_build_mimicked_library_view(
+                coll,
+                mimicked_id,
+                collection_type,
+                real_server_id
+            ))
         
         # 3. 合并与排序
         native_views_items = []
@@ -991,8 +1161,6 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
         if not coll: return "Not Found", 404
 
         real_server_id = extensions.EMBY_SERVER_ID
-        real_emby_collection_id = coll.get('emby_collection_id')
-        image_tags = {"Primary": real_emby_collection_id} if real_emby_collection_id else {}
         
         definition = coll.get('definition_json') or {}
         if isinstance(definition, str):
@@ -1006,39 +1174,12 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
             _current_play_concurrency_client_signature()
         )
 
-        fake_library_details = {
-            "Name": coll['name'], 
-            "ServerId": real_server_id, 
-            "Id": mimicked_id,
-            "Guid": str(uuid.uuid4()), 
-            "Etag": f"{real_db_id}{int(time.time())}",
-            "DateCreated": "2025-01-01T00:00:00.0000000Z", 
-            "CanDelete": False, 
-            "CanDownload": False,
-            "SortName": coll['name'], 
-            "ExternalUrls": [], 
-            "ProviderIds": {}, 
-            "IsFolder": True,
-            "ParentId": "2", 
-            "Type": "CollectionFolder", 
-            "PresentationUniqueKey": str(uuid.uuid4()),
-            # 【关键修复】继承真实库的偏好设置ID，防止前端读取不到 Tabs 配置报错
-            "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{real_db_id}", 
-            "ForcedSortName": coll['name'],
-            "Taglines": [], 
-            "RemoteTrailers": [],
-            "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
-            "ChildCount": coll.get('in_library_count', 1),
-            "PrimaryImageAspectRatio": 1.7777777777777777, 
-            "CollectionType": collection_type, 
-            "ImageTags": image_tags, 
-            "BackdropImageTags": [], 
-            "LockedFields": [], 
-            "LockData": False,
-            "Tags": []
-        }
-        if collection_type is None:
-            fake_library_details.pop("CollectionType", None)
+        fake_library_details = _build_mimicked_library_view(
+            coll,
+            mimicked_id,
+            collection_type,
+            real_server_id
+        )
         return Response(json.dumps(fake_library_details), mimetype='application/json')
     except Exception as e:
         logger.error(f"获取伪造库详情时出错: {e}", exc_info=True)
@@ -1046,14 +1187,24 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
 
 def handle_get_mimicked_library_image(path):
     try:
-        tag_with_timestamp = request.args.get('tag') or request.args.get('Tag')
-        if not tag_with_timestamp: return "Bad Request", 400
-        real_emby_collection_id = tag_with_timestamp.split('?')[0]
-        base_url, _ = _get_real_emby_url_and_key()
+        item_id_match = re.search(r'/Items/((?:-\d+|19\d{8}|8\d{18}))/Images/', f"/{path.lstrip('/')}")
+        if not item_id_match:
+            return "Bad Request", 400
+        real_db_id = from_mimicked_id(item_id_match.group(1))
+        coll = custom_collection_db.get_custom_collection_by_id(real_db_id)
+        real_emby_collection_id = coll.get('emby_collection_id') if coll else None
+        if not real_emby_collection_id:
+            return "Not Found", 404
+
+        base_url, api_key = _get_real_emby_url_and_key()
         image_url = f"{base_url}/Items/{real_emby_collection_id}/Images/Primary"
         headers = {key: value for key, value in request.headers if key.lower() != 'host'}
         headers['Host'] = urlparse(base_url).netloc
-        resp = requests.get(image_url, headers=headers, stream=True, params=request.args)
+        params = request.args.copy()
+        params.pop('tag', None)
+        params.pop('Tag', None)
+        params['api_key'] = api_key
+        resp = requests.get(image_url, headers=headers, stream=True, params=params)
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_headers]
         return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
@@ -1619,6 +1770,49 @@ def proxy_all(path):
             item_id = request.args.get('ItemId', '') or payload.get('ItemId', '')
             current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
             _clear_play_concurrency_session(current_user_id, item_id=item_id, play_session_id=play_session_id)
+
+        if (
+            request.method in ('GET', 'POST')
+            and '/items/' in full_path_lower
+            and full_path_lower.endswith('/playbackinfo')
+        ):
+            base_url, api_key = _get_real_emby_url_and_key()
+            item_match = re.search(r'/items/(\d+)/playbackinfo$', full_path_lower)
+            item_id = item_match.group(1) if item_match else ''
+            play_session_id = request.args.get('PlaySessionId', '')
+            current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
+
+            target_url = f"{base_url}/{path.lstrip('/')}"
+            forward_headers = {
+                k: v
+                for k, v in request.headers
+                if k.lower() not in ['host', 'accept-encoding', 'connection', 'upgrade']
+            }
+            forward_headers['Host'] = urlparse(base_url).netloc
+            forward_params = request.args.copy()
+            forward_params['api_key'] = api_key
+
+            resp = requests.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                params=forward_params,
+                data=request.get_data(),
+                stream=True,
+                timeout=(10.0, 1800.0)
+            )
+
+            excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+            response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
+            if resp.status_code == 200 and current_user_id and item_id:
+                try:
+                    playback_info = resp.json()
+                    play_session_id = play_session_id or str(playback_info.get('PlaySessionId') or '').strip()
+                    _cache_playback_info(current_user_id, item_id, playback_info, play_session_id)
+                    return Response(resp.content, resp.status_code, response_headers)
+                except Exception as e:
+                    logger.debug("  ➜ [PlaybackInfo缓存] 缓存失败: item=%s, err=%s", item_id, e)
+            return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         # ===== 调试日志：打印所有请求路径 =====
         # logger.info(f"[PROXY] 请求路径: {full_path}")
         
@@ -1654,42 +1848,35 @@ def proxy_all(path):
                 return concurrency_block
 
             try:
-                playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
-                params = {
-                    'api_key': api_key,
-                    'UserId': current_user_id,
-                    'MaxStreamingBitrate': 140000000,
-                    'PlaySessionId': play_session_id,
-                }
-                
-                forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
-                forward_headers['Host'] = urlparse(base_url).netloc
-                
-                resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for source in data.get('MediaSources', []):
-                        strm_url = source.get('Path', '')
-                        if isinstance(strm_url, str) and strm_url:
-                            source_paths.append(strm_url)
-                        
-                        # ★ 优先从 Emby 的数据源里提取友好的文件名
-                        name_from_emby = source.get('Name', '')
-                        if name_from_emby:
-                            display_name = name_from_emby
-                        elif isinstance(strm_url, str) and strm_url:
-                            display_name = os.path.basename(strm_url).replace('.strm', '')
+                data = _lookup_playback_info(current_user_id, item_id, play_session_id)
+                if data:
+                    pick_code, virtual_play_info, name_from_playback, source_paths = _extract_playback_source_info(data, item_id)
+                    if name_from_playback:
+                        display_name = name_from_playback
 
-                        if isinstance(strm_url, str):
-                            virtual_play_info = _resolve_virtual_play_info_from_source_path(strm_url)
-                            if virtual_play_info:
-                                break
-                            pick_code = extract_pickcode_from_strm_url(strm_url)
-                            if not pick_code:
-                                pick_code = media_db.get_pickcode_by_emby_id(item_id)
-                            if pick_code:
-                                break # 找到 pick_code，跳出循环
+                if not pick_code and not virtual_play_info:
+                    pick_code = media_db.get_pickcode_by_emby_id(item_id)
+
+                if not data:
+                    if not pick_code:
+                        playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
+                        params = {
+                            'api_key': api_key,
+                            'UserId': current_user_id,
+                            'MaxStreamingBitrate': 140000000,
+                            'PlaySessionId': play_session_id,
+                        }
+                        
+                        forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+                        forward_headers['Host'] = urlparse(base_url).netloc
+                        
+                        resp = requests.get(playback_info_url, params=params, headers=forward_headers, timeout=10)
+                        data = resp.json() if resp.status_code == 200 else {}
+                        if data:
+                            _cache_playback_info(current_user_id, item_id, data, play_session_id or str(data.get('PlaySessionId') or '').strip())
+                            pick_code, virtual_play_info, name_from_playback, source_paths = _extract_playback_source_info(data, item_id)
+                            if name_from_playback:
+                                display_name = name_from_playback
             except Exception as e:
                 logger.error(f"  ❌ [STREAM] 获取 PlaybackInfo 失败: {e}")
             
@@ -1885,7 +2072,6 @@ def proxy_all(path):
                 return handle_get_latest_items(user_id_match.group(1), request.args)
 
         # --- 拦截 D: 虚拟库详情 (增强版拦截) ---
-        # 修复 iOS 有时不带 /Users/xxx，直接请求 /emby/Items/-900001 的老六行为
         details_match = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path)
         if details_match and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
             mimicked_id = details_match.group(1)
@@ -1918,7 +2104,11 @@ def proxy_all(path):
         base_url, api_key = _get_real_emby_url_and_key()
         target_url = f"{base_url}/{path.lstrip('/')}"
         
-        forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+        forward_headers = {
+            k: v
+            for k, v in request.headers
+            if k.lower() not in ['host', 'accept-encoding', 'connection', 'upgrade']
+        }
         forward_headers['Host'] = urlparse(base_url).netloc
         
         forward_params = request.args.copy()
