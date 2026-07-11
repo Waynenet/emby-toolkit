@@ -4,6 +4,10 @@ from flask import session, jsonify
 from functools import wraps
 from typing import Optional
 import threading
+import time
+from datetime import datetime, timezone
+import requests
+import constants
 import config_manager 
 
 # ======================================================================
@@ -107,6 +111,101 @@ watchlist_processor_instance: Optional['WatchlistProcessor'] = None
 actor_subscription_processor_instance: Optional['ActorSubscriptionProcessor'] = None
 EMBY_SERVER_ID: Optional[str] = None
 TASK_REGISTRY = {}
+LAST_EMBY_WEBHOOK_INFO = {}
+LAST_EMBY_WEBHOOK_LOCK = threading.Lock()
+
+
+def mark_emby_webhook_seen(event_type: str = "", item_type: str = "", item_id: str = "", item_name: str = "", remote_addr: str = "") -> None:
+    now = time.time()
+    info = {
+        "last_emby_webhook_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "last_emby_webhook_epoch": now,
+        "last_emby_webhook_event": str(event_type or "")[:80],
+        "last_emby_webhook_item_type": str(item_type or "")[:40],
+        "last_emby_webhook_item_id": str(item_id or "")[:80],
+        "last_emby_webhook_item_name": str(item_name or "")[:200],
+        "last_emby_webhook_remote_addr": str(remote_addr or "")[:80],
+    }
+    with LAST_EMBY_WEBHOOK_LOCK:
+        LAST_EMBY_WEBHOOK_INFO.clear()
+        LAST_EMBY_WEBHOOK_INFO.update(info)
+
+
+def get_emby_webhook_status() -> dict:
+    with LAST_EMBY_WEBHOOK_LOCK:
+        info = dict(LAST_EMBY_WEBHOOK_INFO)
+    cfg = config_manager.APP_CONFIG or {}
+    emby_url = str(cfg.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or "").strip().rstrip("/")
+    emby_key = str(cfg.get(constants.CONFIG_OPTION_EMBY_API_KEY) or "").strip()
+    emby_user_id = str(cfg.get(constants.CONFIG_OPTION_EMBY_USER_ID) or "").strip()
+    etk_url = str(cfg.get("etk_server_url") or "").strip().rstrip("/")
+    expected_url = f"{etk_url}/webhook/emby" if etk_url else ""
+    status = {
+        "emby_webhook_seen": bool(info),
+        "emby_webhook_configured": False,
+        "expected_url": expected_url,
+        "required_event": "library.new",
+    }
+    if info:
+        age = max(0, int(time.time() - float(info.get("last_emby_webhook_epoch") or 0)))
+        status.update(info)
+        status["last_emby_webhook_age_seconds"] = age
+    missing = []
+    if not emby_url:
+        missing.append("emby_server_url")
+    if not emby_key:
+        missing.append("emby_api_key")
+    if not emby_user_id:
+        missing.append("emby_user_id")
+    if not expected_url:
+        missing.append("etk_server_url")
+    if missing:
+        status["reason"] = "missing_" + "_".join(missing)
+        return status
+    try:
+        resp = requests.get(
+            f"{emby_url}/Notifications/Services/Configured",
+            params={"UserId": emby_user_id},
+            headers={"X-Emby-Token": emby_key, "Accept": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        entries = resp.json()
+    except Exception as e:
+        status["reason"] = "emby_notification_config_api_failed"
+        status["error"] = str(e)[:200]
+        return status
+    if not isinstance(entries, list):
+        status["reason"] = "emby_notification_config_invalid_response"
+        return status
+    normalized_expected = expected_url.rstrip("/").lower()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("NotifierKey") != "webhooknotifications":
+            continue
+        options = entry.get("Options") if isinstance(entry.get("Options"), dict) else {}
+        target_url = str(options.get("Url") or "").strip().rstrip("/")
+        event_ids = entry.get("EventIds") if isinstance(entry.get("EventIds"), list) else []
+        if (
+            entry.get("Enabled") is True
+            and target_url.lower() == normalized_expected
+            and "library.new" in event_ids
+        ):
+            status.update({
+                "emby_webhook_configured": True,
+                "configured_url": target_url,
+                "configured_event_ids": event_ids,
+                "configured_notification_id": str(entry.get("Id") or ""),
+                "configured_notification_name": str(entry.get("FriendlyName") or ""),
+            })
+            return status
+    status["reason"] = "required_emby_webhook_config_not_found"
+    status["configured_webhook_count"] = sum(
+        1 for entry in entries
+        if isinstance(entry, dict) and entry.get("NotifierKey") == "webhooknotifications"
+    )
+    return status
 
 # 为了让类型检查器正常工作
 from typing import TYPE_CHECKING

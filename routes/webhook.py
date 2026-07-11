@@ -1520,6 +1520,17 @@ def emby_webhook():
     # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
+    item_for_webhook_status = data.get("Item", {}) if isinstance(data, dict) else {}
+    try:
+        extensions.mark_emby_webhook_seen(
+            event_type=event_type,
+            item_type=item_for_webhook_status.get("Type"),
+            item_id=item_for_webhook_status.get("Id"),
+            item_name=item_for_webhook_status.get("Name"),
+            remote_addr=request.remote_addr or "",
+        )
+    except Exception:
+        pass
     # ======================================================================
     # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
     # ======================================================================

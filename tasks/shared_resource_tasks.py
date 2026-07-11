@@ -15,6 +15,7 @@ import requests
 import task_manager
 import config_manager
 import constants
+import extensions
 import utils
 from database import shared_credit_db, shared_share_db, settings_db
 from database.connection import get_db_connection
@@ -2303,12 +2304,17 @@ def _report_share_sync_heartbeat(summary: Dict[str, Any] = None, *, status: str 
     """向中心端签到：客户端分享同步任务硬编码 10 分钟一次，中心三次缺失判离线。"""
     if not _enabled():
         return {'ok': False, 'skipped': True, 'message': '共享资源未启用'}
+    summary_payload = dict(summary or {}) if isinstance(summary, dict) else {}
+    try:
+        summary_payload["emby_webhook_status"] = extensions.get_emby_webhook_status()
+    except Exception as e:
+        summary_payload["emby_webhook_status"] = {"ok": False, "error": str(e)[:200]}
     payload = {
         'task_name': 'shared_share_status_sync_high_freq',
         'task_interval_seconds': 600,
         'client_version': str(getattr(constants, 'APP_VERSION', '0.0.0') or '0.0.0'),
         'status': str(status or 'ok')[:80],
-        'summary_json': summary if isinstance(summary, dict) else {},
+        'summary_json': summary_payload,
     }
     if valid_logical_share_channels is not None:
         payload['valid_logical_share_channels'] = valid_logical_share_channels
@@ -3250,6 +3256,39 @@ def _local_event_should_bypass_transfer_lease(event: Dict[str, Any], source: Dic
                 }
     except Exception as e:
         logger.debug(f"  ➜ [共享资源] 预判本机源失败，交给消费端兜底：{e}")
+
+    try:
+        event_sources = getattr(shared_subscription_service, '_event_sources', None)
+        filter_files = getattr(shared_subscription_service, '_filter_files_before_transfer', None)
+        missing_episodes = getattr(shared_subscription_service, '_requested_missing_episodes_from_payload', None)
+        if callable(event_sources) and callable(filter_files):
+            client = SharedCenterClient()
+            payload = _event_source_payload(event)
+            source_kind, source_id, files = event_sources(event if isinstance(event, dict) else {}, client)
+            if files:
+                requested_missing = missing_episodes(payload, event) if callable(missing_episodes) else []
+                kept, match_filter = filter_files(
+                    client=client,
+                    source_kind=source_kind,
+                    source_id=source_id,
+                    payload=payload,
+                    files=files,
+                    requested_missing_episode_numbers=requested_missing,
+                )
+                match_filter = match_filter if isinstance(match_filter, dict) else {}
+                skipped = match_filter.get('skipped') if isinstance(match_filter.get('skipped'), dict) else {}
+                if not kept and (
+                    match_filter.get('reason') in {'inventory_best_level_1', 'completed_pack_inventory_best_level_1'}
+                    or skipped.get('inventory_best_level_1')
+                ):
+                    return {
+                        'bypass': True,
+                        'reason': match_filter.get('reason') or 'inventory_best_level_1',
+                        'message': match_filter.get('message') or '本地已是最佳版本，跳过共享秒传。',
+                        'details': match_filter,
+                    }
+    except Exception as e:
+        logger.debug(f"  ➜ [共享资源] 预判本地库存最佳版本失败，交给消费端兜底：{e}")
 
     return {'bypass': False}
 
