@@ -99,6 +99,53 @@ class EmbyAPIClient:
 # 初始化全局客户端实例
 emby_client = EmbyAPIClient()
 
+def _api_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+def _item_query_params(api_key: str, params: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
+    merged = dict(params or {})
+    merged["api_key"] = api_key
+    if user_id:
+        merged["UserId"] = user_id
+    return merged
+
+def request_items(
+    base_url: str,
+    api_key: str,
+    user_id: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    **kwargs
+) -> requests.Response:
+    return emby_client.get(
+        _api_url(base_url, "Items"),
+        params=_item_query_params(api_key, params, user_id),
+        headers=headers,
+        **kwargs
+    )
+
+def request_user_views(
+    base_url: str,
+    api_key: str,
+    user_id: str,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    **kwargs
+) -> requests.Response:
+    base_params = {"api_key": api_key, **(params or {})}
+    attempts = [
+        (_api_url(base_url, f"Users/{user_id}/Views"), dict(base_params)),
+        (_api_url(base_url, f"emby/Users/{user_id}/Views"), dict(base_params)),
+        (_api_url(base_url, "UserViews"), {**base_params, "userId": user_id}),
+    ]
+    last_response = None
+    for url, request_params in attempts:
+        response = emby_client.get(url, params=request_params, headers=headers, **kwargs)
+        last_response = response
+        if response.status_code != 404:
+            return response
+    return last_response
+
 def get_running_tasks(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     """
     获取当前正在运行的 Emby 后台任务
@@ -319,9 +366,10 @@ def get_item_count(base_url: str, api_key: str, user_id: Optional[str], item_typ
         logger.error(f"get_item_count: 缺少必要的参数 (需要 user_id)。")
         return None
     
-    api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
+    api_url = _api_url(base_url, "Items")
     params = {
         "api_key": api_key,
+        "UserId": user_id,
         "IncludeItemTypes": item_type,
         "Recursive": "true",
         "Limit": 0 # ★★★ 核心：Limit=0 只返回元数据（包括总数），不返回任何项目，速度极快
@@ -356,7 +404,7 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
         logger.error("获取Emby项目详情参数不足：缺少ItemID、服务器URL、API Key或UserID。")
         return None
 
-    url = f"{emby_server_url.rstrip('/')}/Users/{user_id}/Items/{item_id}"
+    url = _api_url(emby_server_url, f"Items/{item_id}")
 
     if fields:
         fields_to_request = fields
@@ -365,6 +413,7 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
 
     params = {
         "api_key": emby_api_key,
+        "UserId": user_id,
         "Fields": fields_to_request
     }
     
@@ -418,8 +467,8 @@ def update_person_details(person_id: str, new_data: Dict[str, Any], emby_server_
         logger.error("update_person_details: 参数不足 (需要 user_id)。")
         return False
 
-    api_url = f"{emby_server_url.rstrip('/')}/Users/{user_id}/Items/{person_id}"
-    params = {"api_key": emby_api_key}
+    api_url = _api_url(emby_server_url, f"Items/{person_id}")
+    params = {"api_key": emby_api_key, "UserId": user_id}
     # wait_for_server_idle(emby_server_url, emby_api_key)
     try:
         logger.trace(f"准备获取 Person 详情 (ID: {person_id}, UserID: {user_id}) at {api_url}")
@@ -452,12 +501,9 @@ def get_emby_libraries(emby_server_url, emby_api_key, user_id):
         logger.error("get_emby_libraries: 缺少必要的Emby配置信息。")
         return None
 
-    target_url = f"{emby_server_url.rstrip('/')}/emby/Users/{user_id}/Views"
-    params = {'api_key': emby_api_key}
-    
     try:
-        logger.trace(f"  ➜ 正在从 {target_url} 获取媒体库和合集...")
-        response = emby_client.get(target_url, params=params)
+        logger.trace("  ➜ 正在获取媒体库和合集...")
+        response = request_user_views(emby_server_url, emby_api_key, user_id)
         response.raise_for_status()
         data = response.json()
         
@@ -748,7 +794,7 @@ def get_emby_library_items(
     if search_term and search_term.strip():
         # ... (搜索逻辑保持不变) ...
         logger.info(f"  ➜ 进入搜索模式，关键词: '{search_term}'")
-        api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
+        api_url = _api_url(base_url, "Items")
         params = {
             "api_key": api_key,
             "SearchTerm": search_term.strip(),
@@ -757,6 +803,8 @@ def get_emby_library_items(
             "Fields": "Id,Name,Type,ProductionYear,ProviderIds,Path",
             "Limit": 100
         }
+        if user_id:
+            params["UserId"] = user_id
         try:
             response = emby_client.get(api_url, params=params)
             response.raise_for_status()
@@ -795,12 +843,9 @@ def get_emby_library_items(
             if limit is not None:
                 params["Limit"] = limit
 
-            if force_user_endpoint and user_id:
-                api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
-            else:
-                api_url = f"{base_url.rstrip('/')}/Items"
-                if user_id:
-                    params["UserId"] = user_id
+            api_url = _api_url(base_url, "Items")
+            if user_id:
+                params["UserId"] = user_id
 
             logger.trace(f"Requesting items from library '{library_name}' (ID: {lib_id}) using URL: {api_url}.")
             
@@ -1128,9 +1173,10 @@ def get_series_children(
         logger.error("get_series_children: 参数不足。")
         return None
 
-    api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
+    api_url = _api_url(base_url, "Items")
     params = {
         "api_key": api_key,
+        "UserId": user_id,
         "ParentId": series_id,
         "IncludeItemTypes": include_item_types,
         "Recursive": "true",
@@ -1237,7 +1283,7 @@ def download_emby_image(
         return False
 
     image_url = f"{emby_server_url.rstrip('/')}/Items/{item_id}/Images/{image_type}"
-    params = {"api_key": emby_api_key}
+    params = {"api_key": emby_api_key, "UserId": user_id}
     if max_width: params["maxWidth"] = max_width
     if max_height: params["maxHeight"] = max_height
 
@@ -1281,7 +1327,7 @@ def get_all_studios_from_emby(
         return []
 
     base_url = base_url.rstrip('/')
-    api_url = f"{base_url}/Users/{user_id}/Items" if user_id else f"{base_url}/Items"
+    api_url = _api_url(base_url, "Items")
 
     headers = {
         "X-Emby-Token": api_key,
@@ -1300,6 +1346,8 @@ def get_all_studios_from_emby(
             "StartIndex": start_index,
             "Limit": batch_size,
         }
+        if user_id:
+            params["UserId"] = user_id
 
         try:
             response = emby_client.get(api_url, params=params, headers=headers)
@@ -1424,9 +1472,10 @@ def get_all_collections_from_emby_generic(base_url: str, api_key: str, user_id: 
         logger.error("get_all_collections_from_emby_generic: 缺少必要的参数。")
         return None
 
-    api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
+    api_url = _api_url(base_url, "Items")
     params = {
         "api_key": api_key,
+        "UserId": user_id,
         "IncludeItemTypes": "BoxSet",
         "Recursive": "true",
         "Fields": "ProviderIds,Name,ImageTags"
@@ -1474,8 +1523,8 @@ def get_all_native_collections_from_emby(base_url: str, api_key: str, user_id: s
             library_id = library.get('Id')
             library_name = library.get('Name')
             
-            collections_url = f"{base_url}/Users/{user_id}/Items"
-            params = { "ParentId": library_id, "IncludeItemTypes": "BoxSet", "Recursive": "true", "fields": "ProviderIds,Name,Id,ImageTags", "api_key": api_key }
+            collections_url = _api_url(base_url, "Items")
+            params = { "ParentId": library_id, "IncludeItemTypes": "BoxSet", "Recursive": "true", "fields": "ProviderIds,Name,Id,ImageTags", "api_key": api_key, "UserId": user_id }
             
             try:
                 response = emby_client.get(collections_url, params=params)
@@ -1551,10 +1600,10 @@ def update_collection_overview(collection_id: str, overview: str, base_url: str,
         item_details["LockedFields"] = locked_fields
         
         # 4. POST 提交回 Emby
-        url = f"{base_url}/emby/Items/{collection_id}?api_key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        import requests
-        resp = requests.post(url, json=item_details, headers=headers, timeout=10)
+        url = _api_url(base_url, f"Items/{collection_id}")
+        params = {"api_key": api_key, "UserId": user_id}
+        headers = {"Content-Type": "application/json", "X-Emby-Token": api_key}
+        resp = emby_client.post(url, params=params, json=item_details, headers=headers, timeout=10)
         
         if resp.status_code in [200, 204]:
             logger.debug(f"  ➜ [Emby API] 成功更新并锁定合集 (ID: {collection_id}) 的简介。")
@@ -1576,9 +1625,10 @@ def get_collections_containing_item(item_id: str, base_url: str, api_key: str, u
     if not all([item_id, base_url, api_key, user_id]):
         return []
 
-    api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
+    api_url = _api_url(base_url, "Items")
     params = {
         "api_key": api_key,
+        "UserId": user_id,
         "IncludeItemTypes": "BoxSet", # 只找合集
         "Recursive": "true",
         "ListItemIds": item_id,       # ★★★ 核心参数：包含此ID的容器 ★★★
@@ -1630,8 +1680,8 @@ def get_collection_by_name(name: str, base_url: str, api_key: str, user_id: str)
 
 # --- 获取合集成员列表 ---
 def get_collection_members(collection_id: str, base_url: str, api_key: str, user_id: str) -> Optional[List[str]]:
-    api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
-    params = {'api_key': api_key, 'ParentId': collection_id, 'Fields': 'Id'}
+    api_url = _api_url(base_url, "Items")
+    params = {'api_key': api_key, 'UserId': user_id, 'ParentId': collection_id, 'Fields': 'Id'}
     try:
         response = emby_client.get(api_url, params=params)
         response.raise_for_status()
@@ -2090,7 +2140,7 @@ def update_emby_item_details(item_id: str, new_data: Dict[str, Any], emby_server
 
         # 3. 执行 POST
         update_url = f"{emby_server_url.rstrip('/')}/Items/{item_id}"
-        params = {"api_key": emby_api_key}
+        params = {"api_key": emby_api_key, "UserId": user_id}
         headers = {'Content-Type': 'application/json'}
 
         response_post = emby_client.post(update_url, json=item_to_update, headers=headers, params=params)
@@ -2362,8 +2412,12 @@ def create_user_with_policy(
             }
             
             pw_response = emby_client.post(password_url, headers=headers, json=password_payload)
+            if pw_response.status_code == 404:
+                password_url = _api_url(base_url, "Users/Password")
+                password_payload = {"CurrentPw": "", "NewPw": password}
+                pw_response = emby_client.post(password_url, headers=headers, params={"userId": new_user_id}, json=password_payload)
             
-            if pw_response.status_code == 204:
+            if pw_response.status_code in (200, 204):
                 logger.info(f"  ➜ 成功为用户 '{username}' 设置密码。")
                 return new_user_id
             else:
@@ -2463,7 +2517,13 @@ def get_user_details(user_id: str, base_url: str, api_key: str) -> Optional[Dict
     except requests.RequestException as e:
         # 如果专用接口不存在，这不是一个错误，只是版本差异。
         if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
-            logger.warning(f"  ➜ 专用 /Configuration 接口不存在，您的 Emby 版本可能较旧。将跳过首选项同步。")
+            jellyfin_config_url = _api_url(base_url, "Users/Configuration")
+            try:
+                response = emby_client.get(jellyfin_config_url, headers=headers, params={"userId": user_id})
+                response.raise_for_status()
+                details['Configuration'] = response.json()
+            except requests.RequestException:
+                logger.warning(f"  ➜ 专用 /Configuration 接口不存在，您的 Emby/Jellyfin 版本可能不支持独立读取首选项。将跳过首选项同步。")
         else:
             # 其他网络错误则需要记录
             logger.error(f"请求专用 /Configuration 接口时发生未知错误: {e}")
@@ -2487,7 +2547,18 @@ def force_set_user_configuration(user_id: str, configuration_dict: Dict[str, Any
     except requests.RequestException as e:
         # 如果是因为接口不存在 (404)，则启动备用策略
         if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
-            logger.warning(f"  ➜ 专用 /Configuration 接口不存在，将回退到兼容模式更新用户 {user_id} 的首选项...")
+            logger.warning(f"  ➜ 专用 /Configuration 接口不存在，尝试 Jellyfin /Users/Configuration...")
+            jellyfin_url = _api_url(base_url, "Users/Configuration")
+            try:
+                jellyfin_response = emby_client.post(jellyfin_url, headers=headers, params={"userId": user_id}, json=configuration_dict)
+                if jellyfin_response.status_code in (200, 204):
+                    logger.info(f"  ➜ 成功为用户 {user_id} 应用了个性化配置 (Jellyfin 接口)。")
+                    return True
+                if jellyfin_response.status_code != 404:
+                    jellyfin_response.raise_for_status()
+            except requests.RequestException as jellyfin_e:
+                if not (hasattr(jellyfin_e, 'response') and jellyfin_e.response is not None and jellyfin_e.response.status_code == 404):
+                    logger.warning(f"  ➜ Jellyfin /Users/Configuration 更新失败，将继续回退: {jellyfin_e}")
             
             # 策略2：回退到旧版的、兼容的完整更新模式
             # a. 先获取当前用户的完整对象
@@ -2687,31 +2758,39 @@ def authenticate_emby_user(username: str, password: str) -> Optional[Dict[str, A
 # --- 测试连接 Emby 服务器 ---
 def test_connection(url: str, api_key: str) -> dict:
     """
-    测试给定的 URL 和 Key 是否能连通 Emby。
+    测试给定的 URL 和 Key 是否能连通 Emby/Jellyfin。
     用于设置页面验证配置有效性。
     """
     if not url or not api_key:
         return {'success': False, 'error': 'URL 或 API Key 为空'}
 
-    # 去掉末尾斜杠，确保格式统一
     url = url.rstrip('/')
-    
-    # 使用 System/Info 端点，这是一个轻量级且通常开放的端点
-    endpoint = f"{url}/emby/System/Info"
     params = {'api_key': api_key}
+    endpoints = [_api_url(url, "System/Info"), _api_url(url, "emby/System/Info")]
+    last_resp = None
     
     try:
-        # 设置较短的超时时间，避免前端长时间等待
-        resp = emby_client.get(endpoint, params=params)
-        
-        if resp.status_code == 200:
-            return {'success': True}
-        elif resp.status_code == 401:
+        for endpoint in endpoints:
+            resp = emby_client.get(endpoint, params=params)
+            last_resp = resp
+            if resp.status_code == 200:
+                info = resp.json() if resp.content else {}
+                return {
+                    'success': True,
+                    'server_name': info.get('ServerName'),
+                    'product_name': info.get('ProductName') or info.get('Name')
+                }
+            if resp.status_code != 404:
+                break
+
+        resp = last_resp
+        if resp is not None and resp.status_code == 401:
             return {'success': False, 'error': 'API Key 无效或无权限'}
-        elif resp.status_code == 404:
-            return {'success': False, 'error': '找不到 Emby 服务器 (404)，请检查 URL'}
-        else:
+        if resp is not None and resp.status_code == 404:
+            return {'success': False, 'error': '找不到 Emby/Jellyfin 服务器 (404)，请检查 URL'}
+        if resp is not None:
             return {'success': False, 'error': f'连接失败 (HTTP {resp.status_code})'}
+        return {'success': False, 'error': '连接失败'}
             
     except requests.exceptions.ConnectionError:
         return {'success': False, 'error': '无法连接到服务器，请检查 URL 或网络'}
@@ -2723,42 +2802,56 @@ def test_connection(url: str, api_key: str) -> dict:
 # --- 上传用户头像 ---
 def upload_user_image(base_url, api_key, user_id, image_data, content_type):
     """
-    上传用户头像到 Emby 服务器。
-    策略：使用 /Users 接口 + Base64 编码。
+    上传用户头像到 Emby/Jellyfin。
+    Emby 接收 Base64 图片体，Jellyfin 使用 /UserImage?userId=... 接收原始二进制。
     """
-    # 1. 构造 URL：改回 /Users 接口
     base_url = base_url.rstrip('/')
-    url = f"{base_url}/Users/{user_id}/Images/Primary"
-    
-    # 2. Base64 编码
+    emby_url = _api_url(base_url, f"Users/{user_id}/Images/Primary")
+    headers = {
+        'X-Emby-Token': api_key,
+        'Content-Type': content_type
+    }
+
     try:
         b64_data = base64.b64encode(image_data)
     except Exception as e:
         logger.error(f"图片 Base64 编码失败: {e}")
         return False
 
-    headers = {
-        'X-Emby-Token': api_key,
-        'Content-Type': content_type # 保持 image/jpeg 或 image/png，Emby靠这个识别文件后缀
-    }
-    
-    # 3. (可选) 先尝试删除旧头像，防止覆盖失败
     try:
-        emby_client.delete(url, headers=headers, timeout=10)
+        emby_client.delete(emby_url, headers=headers, timeout=10)
     except Exception:
-        pass # 删除失败也不影响，可能是本来就没有头像
+        pass
 
-    # 4. 发送上传请求
     try:
-        # 增加超时时间
-        response = emby_client.post(url, headers=headers, data=b64_data, timeout=60)
+        response = emby_client.post(emby_url, headers=headers, data=b64_data, timeout=60)
+        if response.status_code != 404:
+            response.raise_for_status()
+            return True
+    except Exception as e:
+        status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status_code != 404:
+            error_msg = str(e)
+            if hasattr(e, 'response') and e.response is not None:
+                error_msg += f" | Response: {e.response.text}"
+            logger.error(f"向 Emby 上传用户 {user_id} 头像失败: {error_msg}")
+            return False
+
+    jellyfin_url = _api_url(base_url, "UserImage")
+    params = {"userId": user_id, "api_key": api_key}
+    try:
+        try:
+            emby_client.delete(jellyfin_url, headers=headers, params=params, timeout=10)
+        except Exception:
+            pass
+        response = emby_client.post(jellyfin_url, headers=headers, params=params, data=image_data, timeout=60)
         response.raise_for_status()
         return True
     except Exception as e:
         error_msg = str(e)
         if hasattr(e, 'response') and e.response is not None:
             error_msg += f" | Response: {e.response.text}"
-        logger.error(f"向 Emby 上传用户 {user_id} 头像失败: {error_msg}")
+        logger.error(f"向 Jellyfin 上传用户 {user_id} 头像失败: {error_msg}")
         return False
 
 # --- 获取单个用户信息 ---
