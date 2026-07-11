@@ -5691,6 +5691,39 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
             if not raw_details: return {}
 
+            def _main_title_from(details):
+                if not isinstance(details, dict):
+                    return ""
+                key = "name" if self.media_type == "tv" else "title"
+                return utils.clean_invisible_chars(details.get(key))
+
+            original_main_title = utils.clean_invisible_chars(
+                raw_details.get("original_title") or raw_details.get("original_name")
+            )
+            english_main_title = utils.clean_invisible_chars(
+                raw_details.get("english_title") or raw_details.get("english_name")
+            )
+            if not english_main_title:
+                try:
+                    if self.media_type == "tv":
+                        english_details = tmdb.get_tv_details(
+                            self.tmdb_id,
+                            self.api_key,
+                            append_to_response=None,
+                            language="en-US",
+                            allow_english_fallback=False,
+                        )
+                    else:
+                        english_details = tmdb.get_movie_details(
+                            self.tmdb_id,
+                            self.api_key,
+                            append_to_response=None,
+                            language="en-US",
+                        )
+                    english_main_title = _main_title_from(english_details)
+                except Exception as e:
+                    logger.debug(f"  ➜ [115整理] 获取英文版主片名失败，已忽略: {e}")
+
             # 1. 基础 ID/Code 提取
             data['genre_ids'] = [g.get('id') for g in raw_details.get('genres', [])]
             data['country_codes'] = [c.get('iso_3166_1') for c in raw_details.get('production_countries', [])]
@@ -5803,34 +5836,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         logger.info(f"  ➜ [115整理] 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
                         current_title = chinese_alias
                     else:
-                        raw_original = raw_details.get("original_title") or raw_details.get("original_name")
-                        original_title = utils.clean_invisible_chars(raw_original)
+                        original_title = original_main_title
                         logger.info(f"  ➜ [115整理] 未找到干净的中文别名，回退到原名: '{original_title}'")
                         current_title = original_title
                 else:
                     # 如果主标题正常，提取原名
-                    raw_original = raw_details.get("original_title") or raw_details.get("original_name")
-                    original_title = utils.clean_invisible_chars(raw_original)
+                    original_title = original_main_title
 
             data['title'] = current_title
-            data['original_title'] = original_title
-
-            # ★★★ 尝试提取纯英文名 (title_en) ★★★
-            english_title = None
-            # 如果原名本身就是英文，直接用原名
-            if original_title and not utils.contains_chinese(original_title) and re.match(r'^[a-zA-Z0-9\s\-_:\.,!\?\'"&]+$', original_title):
-                english_title = original_title
-            else:
-                # 否则去别名里找美国的别名
-                alt_titles_data = raw_details.get("alternative_titles", {})
-                alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
-                for alt in alt_list:
-                    if alt.get("iso_3166_1", "").upper() == "US":
-                        english_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        break
-            
-            # 存入 data 供后续调用
-            data['title_en'] = english_title or original_title # 兜底用原名
+            data['original_title'] = original_main_title or original_title
+            data['title_orig'] = data['original_title']
+            data['title_en'] = english_main_title or data['original_title']
             
             # 提取年份
             date_str = raw_details.get('release_date') or raw_details.get('first_air_date')
