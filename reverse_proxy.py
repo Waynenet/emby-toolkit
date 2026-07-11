@@ -121,6 +121,69 @@ def _virtual_library_collection_type(definition, client_signature=""):
         return "tvshows"
     return None
 
+def _is_official_ios_client(client_signature=""):
+    signature = str(client_signature or "").lower()
+    return "emby for ios" in signature or (
+        "cfnetwork" in signature and "darwin" in signature
+    )
+
+
+def _stable_virtual_library_token(db_id, purpose):
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"emby-toolkit:virtual-library:{db_id}:{purpose}"
+    ).hex
+
+
+def _build_mimicked_library_view(coll, mimicked_id, collection_type, real_server_id):
+    db_id = coll["id"]
+    name = coll["name"]
+    real_emby_collection_id = coll.get("emby_collection_id")
+    identity = _stable_virtual_library_token(db_id, "identity")
+    image_tags = {}
+    if real_emby_collection_id:
+        image_tags["Primary"] = _stable_virtual_library_token(
+            f"{db_id}:{real_emby_collection_id}",
+            "primary-image"
+        )
+
+    view = {
+        "Name": name,
+        "ServerId": real_server_id,
+        "Id": mimicked_id,
+        "Guid": identity,
+        "Etag": _stable_virtual_library_token(db_id, "etag"),
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "DateModified": "0001-01-01T00:00:00.0000000Z",
+        "CanDelete": False,
+        "CanDownload": False,
+        "SortName": name,
+        "ExternalUrls": [],
+        "ProviderIds": {},
+        "IsFolder": True,
+        "ParentId": "2",
+        "Type": "CollectionFolder",
+        "PresentationUniqueKey": identity,
+        "DisplayPreferencesId": identity,
+        "ForcedSortName": name,
+        "Taglines": [],
+        "RemoteTrailers": [],
+        "UserData": {
+            "PlaybackPositionTicks": 0,
+            "IsFavorite": False,
+            "Played": False
+        },
+        "PrimaryImageAspectRatio": 1.7777777777777777,
+        "CollectionType": collection_type,
+        "ImageTags": image_tags,
+        "BackdropImageTags": [],
+        "LockedFields": [],
+        "LockData": False
+    }
+    if collection_type is None:
+        view.pop("CollectionType", None)
+    return view
+
 def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
     """
     并发分块获取 Emby 项目详情。
@@ -240,6 +303,42 @@ def handle_get_views():
         if not user_id_match:
             return "Could not determine user from request path", 400
         user_id = user_id_match.group(1)
+        client_signature = _current_play_concurrency_client_signature()
+
+        if _is_official_ios_client(client_signature):
+            base_url, api_key = _get_real_emby_url_and_key()
+            target_url = f"{base_url}/{request.path.lstrip('/')}"
+            headers = {
+                key: value
+                for key, value in request.headers
+                if key.lower() not in [
+                    'host',
+                    'accept-encoding',
+                    'connection',
+                    'upgrade'
+                ]
+            }
+            headers['Host'] = urlparse(base_url).netloc
+            params = request.args.copy()
+            params['api_key'] = api_key
+            resp = requests.get(
+                target_url,
+                headers=headers,
+                params=params,
+                timeout=(10.0, 30.0)
+            )
+            excluded_headers = [
+                'content-encoding',
+                'content-length',
+                'transfer-encoding',
+                'connection'
+            ]
+            response_headers = [
+                (name, value)
+                for name, value in resp.headers.items()
+                if name.lower() not in excluded_headers
+            ]
+            return Response(resp.content, resp.status_code, response_headers)
 
         # 1. 获取原生库
         user_visible_native_libs = emby.get_emby_libraries(
@@ -250,9 +349,12 @@ def handle_get_views():
         if user_visible_native_libs is None: user_visible_native_libs = []
 
         # 2. 生成虚拟库
-        collections = custom_collection_db.get_all_active_custom_collections()
+        collections = (
+            []
+            if _is_official_ios_client(client_signature)
+            else custom_collection_db.get_all_active_custom_collections()
+        )
         fake_views_items = []
-        client_signature = _current_play_concurrency_client_signature()
         
         for coll in collections:
             # 物理检查：库在Emby里有实体吗？
@@ -269,8 +371,6 @@ def handle_get_views():
             # 生成虚拟库对象
             db_id = coll['id']
             mimicked_id = to_mimicked_id(db_id)
-            # 使用时间戳强制刷新封面
-            image_tags = {"Primary": f"{real_emby_collection_id}?timestamp={int(time.time())}"}
             definition = coll.get('definition_json') or {}
             
             if isinstance(definition, str):
@@ -283,23 +383,12 @@ def handle_get_views():
             # All other clients receive the actual media-library type.
             collection_type = _virtual_library_collection_type(definition, client_signature)
 
-            fake_view = {
-                "Name": coll['name'], "ServerId": real_server_id, "Id": mimicked_id,
-                "Guid": str(uuid.uuid4()), "Etag": f"{db_id}{int(time.time())}",
-                "DateCreated": "2025-01-01T00:00:00.0000000Z", "CanDelete": False, "CanDownload": False,
-                "SortName": coll['name'], "ExternalUrls": [], "ProviderIds": {}, "IsFolder": True,
-                "ParentId": "2", "Type": "CollectionFolder", "PresentationUniqueKey": str(uuid.uuid4()),
-                "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{db_id}", "ForcedSortName": coll['name'],
-                "Taglines": [], "RemoteTrailers": [],
-                "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
-                "ChildCount": coll.get('in_library_count', 1),
-                "PrimaryImageAspectRatio": 1.7777777777777777, 
-                "CollectionType": collection_type, "ImageTags": image_tags, "BackdropImageTags": [], 
-                "LockedFields": [], "LockData": False, "Tags": []
-            }
-            if collection_type is None:
-                fake_view.pop("CollectionType", None)
-            fake_views_items.append(fake_view)
+            fake_views_items.append(_build_mimicked_library_view(
+                coll,
+                mimicked_id,
+                collection_type,
+                real_server_id
+            ))
         
         # 3. 合并与排序
         native_views_items = []
@@ -337,8 +426,6 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
         if not coll: return "Not Found", 404
 
         real_server_id = extensions.EMBY_SERVER_ID
-        real_emby_collection_id = coll.get('emby_collection_id')
-        image_tags = {"Primary": real_emby_collection_id} if real_emby_collection_id else {}
         
         definition = coll.get('definition_json') or {}
         if isinstance(definition, str):
@@ -352,39 +439,12 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
             _current_play_concurrency_client_signature()
         )
 
-        fake_library_details = {
-            "Name": coll['name'], 
-            "ServerId": real_server_id, 
-            "Id": mimicked_id,
-            "Guid": str(uuid.uuid4()), 
-            "Etag": f"{real_db_id}{int(time.time())}",
-            "DateCreated": "2025-01-01T00:00:00.0000000Z", 
-            "CanDelete": False, 
-            "CanDownload": False,
-            "SortName": coll['name'], 
-            "ExternalUrls": [], 
-            "ProviderIds": {}, 
-            "IsFolder": True,
-            "ParentId": "2", 
-            "Type": "CollectionFolder", 
-            "PresentationUniqueKey": str(uuid.uuid4()),
-            # 【关键修复】继承真实库的偏好设置ID，防止前端读取不到 Tabs 配置报错
-            "DisplayPreferencesId": real_emby_collection_id if real_emby_collection_id else f"custom-{real_db_id}", 
-            "ForcedSortName": coll['name'],
-            "Taglines": [], 
-            "RemoteTrailers": [],
-            "UserData": {"PlaybackPositionTicks": 0, "IsFavorite": False, "Played": False},
-            "ChildCount": coll.get('in_library_count', 1),
-            "PrimaryImageAspectRatio": 1.7777777777777777, 
-            "CollectionType": collection_type, 
-            "ImageTags": image_tags, 
-            "BackdropImageTags": [], 
-            "LockedFields": [], 
-            "LockData": False,
-            "Tags": []
-        }
-        if collection_type is None:
-            fake_library_details.pop("CollectionType", None)
+        fake_library_details = _build_mimicked_library_view(
+            coll,
+            mimicked_id,
+            collection_type,
+            real_server_id
+        )
         return Response(json.dumps(fake_library_details), mimetype='application/json')
     except Exception as e:
         logger.error(f"获取伪造库详情时出错: {e}", exc_info=True)
@@ -392,14 +452,24 @@ def handle_get_mimicked_library_details(user_id, mimicked_id):
 
 def handle_get_mimicked_library_image(path):
     try:
-        tag_with_timestamp = request.args.get('tag') or request.args.get('Tag')
-        if not tag_with_timestamp: return "Bad Request", 400
-        real_emby_collection_id = tag_with_timestamp.split('?')[0]
-        base_url, _ = _get_real_emby_url_and_key()
+        item_id_match = re.search(r'/Items/((?:-\d+|19\d{8}|8\d{18}))/Images/', f"/{path.lstrip('/')}")
+        if not item_id_match:
+            return "Bad Request", 400
+        real_db_id = from_mimicked_id(item_id_match.group(1))
+        coll = custom_collection_db.get_custom_collection_by_id(real_db_id)
+        real_emby_collection_id = coll.get('emby_collection_id') if coll else None
+        if not real_emby_collection_id:
+            return "Not Found", 404
+
+        base_url, api_key = _get_real_emby_url_and_key()
         image_url = f"{base_url}/Items/{real_emby_collection_id}/Images/Primary"
         headers = {key: value for key, value in request.headers if key.lower() != 'host'}
         headers['Host'] = urlparse(base_url).netloc
-        resp = requests.get(image_url, headers=headers, stream=True, params=request.args)
+        params = request.args.copy()
+        params.pop('tag', None)
+        params.pop('Tag', None)
+        params['api_key'] = api_key
+        resp = requests.get(image_url, headers=headers, stream=True, params=params)
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_headers]
         return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
@@ -1093,7 +1163,6 @@ def proxy_all(path):
                 return handle_get_latest_items(user_id_match.group(1), request.args)
 
         # --- 拦截 D: 虚拟库详情 (增强版拦截) ---
-        # 修复 iOS 有时不带 /Users/xxx，直接请求 /emby/Items/-900001 的老六行为
         details_match = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path)
         if details_match and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
             mimicked_id = details_match.group(1)
@@ -1149,7 +1218,11 @@ def proxy_all(path):
         # 【分支 2】：POST / PUT / DELETE 请求（上报播放记录、修改数据等），保留 Python 代理透传！
         else:
             target_url = f"{base_url}/{path.lstrip('/')}"
-            forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
+            forward_headers = {
+                k: v
+                for k, v in request.headers
+                if k.lower() not in ['host', 'accept-encoding', 'connection', 'upgrade']
+            }
             forward_headers['Host'] = urlparse(base_url).netloc
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
