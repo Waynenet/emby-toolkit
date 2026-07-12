@@ -347,6 +347,7 @@ class MediaProcessor:
             search_query = None
             search_year = None
 
+            # 1.1 优先：直接从文件名/目录名解析 [tmdb-xxx] ID (秒级识别，无磁盘IO开销)
             tmdb_regex = r'(?:tmdb|tmdbid)[-_=\s]*(\d+)'
             match = re.search(tmdb_regex, folder_name, re.IGNORECASE)
             if not match:
@@ -357,8 +358,10 @@ class MediaProcessor:
             if match:
                 temp_id = match.group(1)
                 if is_valid_tmdb_id(temp_id):
-                    tmdb_id = temp_id
-                    logger.info(f"  ➜ [实时监控] 成功提取 TMDb ID: {tmdb_id}")
+                    tmdb_id = str(temp_id)
+                    logger.info(f"  ➜ [实时监控] 本地正则成功提取 TMDb ID: {tmdb_id}")
+
+            # 1.2 备选：若未解析到 ID，提取标题和年份进行后续在线搜索
             if not tmdb_id:
                 # 优化：先尝试从目录名提取搜索信息
                 def is_season_folder(name: str) -> bool:
@@ -381,13 +384,13 @@ class MediaProcessor:
                     query = raw_title.replace('.', ' ').replace('_', ' ').strip(' -[]()')
                     return query, year
 
-                # 首先尝试folder_name，但如果是季目录名，则换用grandparent_name
+                # 首先尝试 folder_name，如果是季目录（如 Season 1），则向上使用 grandparent_name
                 if is_season_folder(folder_name):
                     search_query, search_year = extract_title_year(grandparent_name)
                 else:
                     search_query, search_year = extract_title_year(folder_name)
 
-                # 如果目录名都没提取到有效标题，再用filename
+                # 如果目录名都没提取到有效标题，再用 filename
                 if not search_query or search_query == '':
                     search_query, search_year = extract_title_year(os.path.splitext(filename)[0])
 
