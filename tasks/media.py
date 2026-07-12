@@ -1978,24 +1978,8 @@ def task_scan_monitor_folders(processor):
 
     valid_exts = set(ext.lower() for ext in monitor_extensions)
 
-    # 2. 获取已知 TMDb ID (白名单)
-    known_tmdb_ids = set()
-    try:
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT tmdb_id FROM media_metadata WHERE tmdb_id IS NOT NULL")
-            for row in cursor.fetchall():
-                known_tmdb_ids.add(str(row['tmdb_id']))
-        logger.info(f"  ➜ 加载了 {len(known_tmdb_ids)} 个已知 TMDb ID (白名单)。")
-    except Exception as e:
-        logger.error(f"  ➜ 无法读取数据库白名单，任务中止: {e}")
-        return
-    
-    tmdb_regex = r'(?:tmdb|tmdbid)[-_=\s]*(\d+)'
-    processed_in_this_run = set()
-    
-    # Key: tmdb_id, Value: Set[filenames]
-    db_assets_cache = {}
+    processed_dirs = set()
+    filename_exists_cache = {}
 
     scan_count = 0
     trigger_count = 0
@@ -2032,12 +2016,6 @@ def task_scan_monitor_folders(processor):
                 dirnames[:] = [] # 停止向下递归
                 continue 
 
-            folder_name = os.path.basename(dirpath)
-            match_folder = re.search(tmdb_regex, folder_name, re.IGNORECASE)
-            
-            # 提取当前目录可能的 ID (优先用文件夹ID)
-            folder_tmdb_id = match_folder.group(1) if match_folder else None
-
             for filename in filenames:
                 if filename.startswith('.'): continue
                 _, ext = os.path.splitext(filename)
@@ -2065,46 +2043,26 @@ def task_scan_monitor_folders(processor):
                         f"扫描中... (已扫 {scan_count}, 跳过旧文件 {skipped_old_count}, 跳过已存 {skipped_exists_count})"
                     )
 
-                # --- ID 提取 ---
-                target_id = folder_tmdb_id
-                
-                if not target_id:
-                    grandparent_path = os.path.dirname(dirpath)
-                    grandparent_name = os.path.basename(grandparent_path)
-                    match_grand = re.search(tmdb_regex, grandparent_name, re.IGNORECASE)
-                    if match_grand:
-                        target_id = match_grand.group(1)
-                
-                if not target_id:
-                    match_file = re.search(tmdb_regex, filename, re.IGNORECASE)
-                    if match_file:
-                        target_id = match_file.group(1)
-                
                 # --- 判定逻辑 ---
-                if target_id:
-                    if target_id in processed_in_this_run:
-                        continue
+                if filename not in filename_exists_cache:
+                    filename_exists_cache[filename] = bool(media_db.get_media_info_by_filename(filename))
 
-                    if target_id not in db_assets_cache:
-                        db_assets_cache[target_id] = media_db.get_known_filenames_by_tmdb_id(target_id)
-                    
-                    name_without_ext, _ = os.path.splitext(filename)
-                    
-                    if name_without_ext in db_assets_cache[target_id]:
-                        skipped_exists_count += 1
-                        continue
+                if filename_exists_cache[filename]:
+                    skipped_exists_count += 1
+                    continue
 
-                    logger.info(f"  ➜ 发现未入库文件: {filename} (ID: {target_id})，触发检查...")
-                    try:
-                        processor.process_file_actively(file_path)
-                        processed_in_this_run.add(target_id)
-                        if target_id in db_assets_cache:
-                            # ★ 存入缓存时也存无扩展名的版本
-                            db_assets_cache[target_id].add(name_without_ext)
-                        trigger_count += 1
-                        time.sleep(1) 
-                    except Exception as e:
-                        logger.error(f"  ➜ 处理文件失败: {e}")
+                dir_key = os.path.normpath(dirpath).lower()
+                if dir_key in processed_dirs:
+                    continue
+
+                logger.info(f"  ➜ 发现未入库文件: {filename}，按目录触发主动处理...")
+                try:
+                    processor.process_file_actively(file_path)
+                    processed_dirs.add(dir_key)
+                    trigger_count += 1
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"  ➜ 处理文件失败: {e}")
 
     logger.info(f"  ➜ 监控目录扫描完成。扫描: {scan_count}, 触发处理: {trigger_count}")
     task_manager.update_status_from_thread(100, f"扫描完成，处理了 {trigger_count} 个新项目")

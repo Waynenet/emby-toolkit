@@ -404,38 +404,59 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
         logger.error("获取Emby项目详情参数不足：缺少ItemID、服务器URL、API Key或UserID。")
         return None
 
-    url = _api_url(emby_server_url, f"Items/{item_id}")
-
     if fields:
         fields_to_request = fields
     else:
         fields_to_request = "Type,ProviderIds,People,Path,OriginalTitle,DateCreated,PremiereDate,ProductionYear,ChildCount,RecursiveItemCount,Overview,CommunityRating,OfficialRating,Genres,Studios,Taglines,MediaStreams,TagItems,Tags,Path"
 
-    params = {
+    common_params = {
         "api_key": emby_api_key,
-        "UserId": user_id,
         "Fields": fields_to_request
     }
-    
-    params["PersonFields"] = "ImageTags,ProviderIds"
+    common_params["PersonFields"] = "ImageTags,ProviderIds"
+    attempts = [
+        (
+            _api_url(emby_server_url, f"Users/{user_id}/Items/{item_id}"),
+            dict(common_params),
+        ),
+        (
+            _api_url(emby_server_url, f"Items/{item_id}"),
+            {**common_params, "UserId": user_id},
+        ),
+    ]
+    last_url = attempts[0][0]
+    last_404_response = None
     
     try:
-        response = emby_client.get(url, params=params)
+        for url, params in attempts:
+            last_url = url
+            response = emby_client.get(url, params=params)
 
-        if response.status_code != 200:
-            pass
-            # logger.trace(f"响应头部: {response.headers}")
-            # logger.trace(f"响应内容 (前500字符): {response.text[:500]}")
+            if response.status_code == 404:
+                last_404_response = response
+                continue
 
-        response.raise_for_status()
-        item_data = response.json()
-        logger.trace(
-            f"成功获取Emby项目 '{item_data.get('Name', item_id)}' (ID: {item_id}) 的详情。")
+            if response.status_code != 200:
+                pass
+                # logger.trace(f"响应头部: {response.headers}")
+                # logger.trace(f"响应内容 (前500字符): {response.text[:500]}")
 
-        if not item_data.get('Name') or not item_data.get('Type'):
-            logger.warning(f"  ➜ Emby项目 {item_id} 返回的数据缺少Name或Type字段。")
+            response.raise_for_status()
+            item_data = response.json()
+            logger.trace(
+                f"成功获取Emby项目 '{item_data.get('Name', item_id)}' (ID: {item_id}) 的详情。")
 
-        return item_data
+            if not item_data.get('Name') or not item_data.get('Type'):
+                logger.warning(f"  ➜ Emby项目 {item_id} 返回的数据缺少Name或Type字段。")
+
+            return item_data
+
+        if last_404_response is not None:
+            if silent_404:
+                logger.debug(f"  ➜ Emby API未找到项目ID: {item_id} (预期内的 404，已忽略)。")
+            else:
+                logger.warning(f"  ➜ Emby API未找到项目ID: {item_id} (UserID: {user_id})。URL: {last_404_response.request.url}")
+        return None
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
@@ -451,7 +472,7 @@ def get_emby_item_details(item_id: str, emby_server_url: str, emby_api_key: str,
                 f"  ➜ 获取Emby项目详情时发生HTTP错误 (ItemID: {item_id}, UserID: {user_id}): {e.response.status_code} - {e.response.text[:200]}. URL: {e.request.url}")
         return None
     except requests.exceptions.RequestException as e:
-        url_requested = e.request.url if e.request else url
+        url_requested = e.request.url if e.request else last_url
         logger.error(
             f"  ➜ 获取Emby项目详情时发生请求错误 (ItemID: {item_id}, UserID: {user_id}): {e}. URL: {url_requested}")
         return None
