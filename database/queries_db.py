@@ -619,8 +619,25 @@ def query_virtual_library_items(
         # --- 10. 追剧状态 ---
         elif field == 'is_in_progress':
             if op == 'is':
-                clause = "m.watchlist_is_airing = %s"
-                params.append(bool(value))
+                season_in_progress_sql = """
+                EXISTS (
+                    SELECT 1
+                    FROM media_metadata s
+                    WHERE s.item_type = 'Season'
+                      AND s.parent_series_tmdb_id = m.tmdb_id
+                      AND COALESCE(s.season_number, 0) > 0
+                      AND LOWER(TRIM(COALESCE(s.watching_status, ''))) IN ('watching', 'paused')
+                      AND EXISTS (
+                          SELECT 1
+                          FROM media_metadata e
+                          WHERE e.item_type = 'Episode'
+                            AND e.parent_series_tmdb_id = s.parent_series_tmdb_id
+                            AND e.season_number = s.season_number
+                            AND COALESCE(e.in_library, FALSE) = TRUE
+                      )
+                )
+                """
+                clause = season_in_progress_sql if bool(value) else f"NOT ({season_in_progress_sql})"
 
         # --- 11. 视频流属性 ---
         asset_map = {
