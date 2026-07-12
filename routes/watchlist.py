@@ -222,13 +222,13 @@ def api_trigger_single_watchlist_refresh(item_id):
     
     return jsonify({"message": f"《{item_name}》的刷新任务已在后台启动！"}), 202
 
-# --- 批量强制完结选中的追剧项目 ---
+# --- 批量强制完结选中的季 ---
 @watchlist_bp.route('/batch_force_end', methods=['POST'])
 @admin_required
 def api_batch_force_end_watchlist_items():
     """
-    【V2】接收前端请求，批量强制完结选中的追剧项目。
-    这可以解决因TMDB数据不准确导致已完结剧集被错误复活的问题，但保留了对新一季的检查。
+    接收前端请求，批量强制完结选中的季。
+    这可以解决因 TMDb 数据不准确导致已完结季被错误复活的问题，但不影响同剧其它季。
     """
     data = request.json
     item_ids = data.get('item_ids')
@@ -236,7 +236,7 @@ def api_batch_force_end_watchlist_items():
     if not isinstance(item_ids, list) or not item_ids:
         return jsonify({"error": "请求参数无效：必须提供一个包含项目ID的列表 (item_ids)。"}), 400
 
-    logger.info(f"API (Blueprint): 收到对 {len(item_ids)} 个项目的批量强制完结请求。")
+    logger.info(f"API (Blueprint): 收到对 {len(item_ids)} 个季的批量强制完结请求。")
     
     try:
         # 调用更新后的 watchlist_db 函数
@@ -245,8 +245,7 @@ def api_batch_force_end_watchlist_items():
         )
         
         return jsonify({
-            # 【修改】更新返回信息，使其更准确
-            "message": f"操作成功！已将 {updated_count} 个项目标记为强制完结。它们不会因集数更新而复活，但若有新一季发布仍会自动恢复追剧。",
+            "message": f"操作成功！已将 {updated_count} 个季标记为强制完结。它们不会因集数更新而复活，也不会影响同剧其它季。",
             "updated_count": updated_count
         }), 200
     except Exception as e:
