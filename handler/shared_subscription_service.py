@@ -2979,15 +2979,18 @@ def _broadcast_has_subscription_status(row: Dict[str, Any]) -> bool:
 
 def _broadcast_washing_allowed(row: Dict[str, Any]) -> bool:
     row = row if isinstance(row, dict) else {}
-    if not bool(row.get('active_washing')):
-        return False
     level = _safe_int_or_none(row.get('washing_level'))
-    return level != 1
+    return level is not None and level > 1
 
 
 def _broadcast_status_active(row: Dict[str, Any]) -> bool:
     row = row if isinstance(row, dict) else {}
     return _broadcast_has_subscription_status(row) or _broadcast_washing_allowed(row)
+
+
+def _broadcast_season_completed(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    return str(row.get('watching_status') or '').strip().lower() == 'completed'
 
 
 def _local_movie_broadcast_state(tmdb_id: Any) -> Dict[str, Any]:
@@ -3130,16 +3133,21 @@ def center_broadcast_event_consumption_gate(
     if season_number in (None, '') and files:
         season_number, _ = _guess_se_from_source(files[0], context)
     season_state = _local_season_broadcast_state(parent_tmdb, season_number)
-    if not season_state or not _broadcast_status_active(season_state):
+    season_active = _broadcast_status_active(season_state)
+
+    season_completed = _broadcast_season_completed(season_state)
+    if season_completed and normalized_kind != 'logical_season':
         return {
             'checked': True,
             'allow': False,
-            'reason': 'not_in_subscription_list',
-            'message': f"跳过入池广播：剧集 {payload.get('title') or parent_tmdb or source_id} S{season_number or '-'} 不在本机订阅列表，也没有可用洗版标记。",
+            'reason': 'completed_season_requires_share_pack',
+            'message': (
+                f"跳过入池广播：{payload.get('title') or parent_tmdb or source_id} "
+                f"S{season_number or '-'} 已完结，只接受分享型整季包洗版。"
+            ),
             'state': season_state,
         }
 
-    eligible_episodes: List[int] = []
     missing_episodes: List[int] = []
     washing_episodes: List[int] = []
     skipped = {'unknown_identity': [], 'already_in_library': [], 'inventory_best': []}
@@ -3165,16 +3173,15 @@ def center_broadcast_event_consumption_gate(
         ep = int(e_num)
         if _broadcast_has_subscription_status(season_state) and not bool(ep_state.get('in_library')):
             missing_episodes.append(ep)
-            eligible_episodes.append(ep)
             continue
         if _broadcast_washing_allowed(ep_state) or _broadcast_washing_allowed(season_state):
             washing_episodes.append(ep)
-            eligible_episodes.append(ep)
             continue
         skipped['already_in_library'].append(f"E{ep:02d} {file_name}".strip())
 
-    eligible_episodes = sorted({x for x in eligible_episodes if x > 0})
-    if not eligible_episodes:
+    missing_episodes = sorted({x for x in missing_episodes if x > 0})
+    washing_episodes = sorted({x for x in washing_episodes if x > 0})
+    if not missing_episodes and not washing_episodes:
         return {
             'checked': True,
             'allow': False,
@@ -3191,9 +3198,11 @@ def center_broadcast_event_consumption_gate(
         'checked': True,
         'allow': True,
         'reason': 'episode_needed',
-        'requested_episode_numbers': eligible_episodes,
-        'missing_episode_numbers': sorted({x for x in missing_episodes if x > 0}),
-        'washing_episode_numbers': sorted({x for x in washing_episodes if x > 0}),
+        'requested_episode_numbers': [] if season_completed else sorted({x for x in (missing_episodes + washing_episodes) if x > 0}),
+        'missing_episode_numbers': missing_episodes,
+        'washing_episode_numbers': washing_episodes,
+        'season_active': season_active,
+        'completed_season_share_only': bool(season_completed and normalized_kind == 'logical_season'),
         'state': season_state,
     }
 
@@ -3941,7 +3950,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
 
     original_file_count = len(files)
     requested_missing_episode_numbers = _requested_missing_episodes_from_payload(payload, event)
-    if broadcast_gate.get('checked') and broadcast_gate.get('requested_episode_numbers'):
+    if broadcast_gate.get('checked') and 'requested_episode_numbers' in broadcast_gate:
         requested_missing_episode_numbers = _normalize_episode_numbers(broadcast_gate.get('requested_episode_numbers'))
     files, match_filter = _filter_files_before_transfer(
         client=client,
@@ -4000,6 +4009,64 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'clean_version_filter': {'enabled': True, 'blocked': clean_flag},
         }
 
+    payload['source_kind'] = source_kind
+    payload['source_id'] = source_id
+    payload['source_ref_id'] = source_id
+
+    # 已完结洗版只接受分享型整季包：先尝试 115 分享转存，不进入 Rapid 秒传预检/回退。
+    if source_kind == 'logical_season' and broadcast_gate.get('completed_season_share_only'):
+        share_transfer = _try_completed_season_share_transfer(
+            client=client,
+            source_id=source_id,
+            payload=payload,
+            files=files,
+            target_cid=base_target_cid,
+        )
+        if share_transfer.get('ok'):
+            if ack and event_id:
+                try:
+                    client.ack_device_events([event_id], result='ok', message=f"转存 {len(files)}/{len(files)}")
+                except Exception as e:
+                    logger.debug(f"  ➜ [共享资源] ACK 中心事件失败: {e}")
+            return {
+                'ok': True,
+                'message': f"转存完成：{len(files)}/{len(files)}",
+                'event_id': event_id,
+                'source_kind': source_kind,
+                'source_id': source_id,
+                'success_count': len(files),
+                'total': len(files),
+                'errors': [],
+                'transfer_mode': 'share',
+                'share_transfer': share_transfer,
+                'preflight': {'skipped': True, 'reason': 'completed_season_share_only'},
+                'rapid_target': {},
+            }
+        message = (
+            f"已完结季只接受分享型整季包洗版，跳过 Rapid 秒传回退："
+            f"{payload.get('title') or source_id}"
+        )
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='ok', message=message[:500])
+            except Exception:
+                pass
+        logger.info(f"  ➜ [共享资源] {message}")
+        return {
+            'ok': False,
+            'skipped': True,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': len(files),
+            'errors': [],
+            'transfer_mode': 'share',
+            'share_transfer': share_transfer,
+            'skip_reason': 'completed_season_share_only',
+        }
+
     files, preflight = _prepare_files_before_rapid_transfer(
         client,
         source_kind=source_kind,
@@ -4039,9 +4106,6 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
         and len(files) > 1
         and not partial_missing_episode_transfer
     )
-    payload['source_kind'] = source_kind
-    payload['source_id'] = source_id
-    payload['source_ref_id'] = source_id
 
     # 完结季如果已有可用 115 分享通道，先直接转存到待整理根目录；
     # 不等 Rapid 秒传许可，也不提前创建 Rapid 临时目录。
