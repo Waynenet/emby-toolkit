@@ -1931,6 +1931,19 @@ def _prepare_files_before_rapid_transfer(
             f"target_cid={target_cid_for_washing}, tmdb={tmdb_for_washing}, "
             f"S{s_num if s_num is not None else '-'}E{e_num if e_num is not None else '-'}, size={file_size}"
         )
+        local_active_washing = _local_active_washing_for_media(
+            media_type,
+            tmdb_for_washing,
+            season_num=s_num,
+            episode_num=e_num,
+        )
+        effective_active_washing = bool(local_active_washing and virtual_auto_promote)
+        if local_active_washing and not effective_active_washing:
+            logger.debug(
+                f"  ➜ [共享资源] 秒传前预检：共享来源不使用 active_washing 强制放行，"
+                f"改按洗版优先级比较：{file_name}"
+            )
+
         action, reason = WashingService.decide_washing_action(
             sha1=sha1,
             file_name=file_name,
@@ -1941,12 +1954,7 @@ def _prepare_files_before_rapid_transfer(
             season_num=s_num,
             episode_num=e_num,
             original_lang=original_lang,
-            is_active_washing=_local_active_washing_for_media(
-                media_type,
-                tmdb_for_washing,
-                season_num=s_num,
-                episode_num=e_num,
-            ),
+            is_active_washing=effective_active_washing,
             has_external_subtitle=False,
         )
         logger.debug(
@@ -2708,7 +2716,7 @@ def _replace_mode_short_circuit_best_inventory(
         # 完结季不能单集洗。只有整季所有视频都已在库内达到优先级 1，才整包短路。
         if all(x.get('known') and x.get('best') for x in completed_video_checks):
             message = f"本地完结季库存所有分集均已是最佳版本，跳过整季秒传：{payload.get('title') or source_id}"
-            logger.info(f"  ➜ [共享资源] {message}")
+            logger.debug(f"  ➜ [共享资源] {message}")
             return [], {
                 'checked': True,
                 'short_circuit': True,
@@ -2971,15 +2979,18 @@ def _broadcast_has_subscription_status(row: Dict[str, Any]) -> bool:
 
 def _broadcast_washing_allowed(row: Dict[str, Any]) -> bool:
     row = row if isinstance(row, dict) else {}
-    if not bool(row.get('active_washing')):
-        return False
     level = _safe_int_or_none(row.get('washing_level'))
-    return level != 1
+    return level is not None and level > 1
 
 
 def _broadcast_status_active(row: Dict[str, Any]) -> bool:
     row = row if isinstance(row, dict) else {}
     return _broadcast_has_subscription_status(row) or _broadcast_washing_allowed(row)
+
+
+def _broadcast_season_completed(row: Dict[str, Any]) -> bool:
+    row = row if isinstance(row, dict) else {}
+    return str(row.get('watching_status') or '').strip().lower() == 'completed'
 
 
 def _local_movie_broadcast_state(tmdb_id: Any) -> Dict[str, Any]:
@@ -3122,16 +3133,21 @@ def center_broadcast_event_consumption_gate(
     if season_number in (None, '') and files:
         season_number, _ = _guess_se_from_source(files[0], context)
     season_state = _local_season_broadcast_state(parent_tmdb, season_number)
-    if not season_state or not _broadcast_status_active(season_state):
+    season_active = _broadcast_status_active(season_state)
+
+    season_completed = _broadcast_season_completed(season_state)
+    if season_completed and normalized_kind != 'logical_season':
         return {
             'checked': True,
             'allow': False,
-            'reason': 'not_in_subscription_list',
-            'message': f"跳过入池广播：剧集 {payload.get('title') or parent_tmdb or source_id} S{season_number or '-'} 不在本机订阅列表，也没有可用洗版标记。",
+            'reason': 'completed_season_requires_share_pack',
+            'message': (
+                f"跳过入池广播：{payload.get('title') or parent_tmdb or source_id} "
+                f"S{season_number or '-'} 已完结，只接受分享型整季包洗版。"
+            ),
             'state': season_state,
         }
 
-    eligible_episodes: List[int] = []
     missing_episodes: List[int] = []
     washing_episodes: List[int] = []
     skipped = {'unknown_identity': [], 'already_in_library': [], 'inventory_best': []}
@@ -3157,16 +3173,15 @@ def center_broadcast_event_consumption_gate(
         ep = int(e_num)
         if _broadcast_has_subscription_status(season_state) and not bool(ep_state.get('in_library')):
             missing_episodes.append(ep)
-            eligible_episodes.append(ep)
             continue
         if _broadcast_washing_allowed(ep_state) or _broadcast_washing_allowed(season_state):
             washing_episodes.append(ep)
-            eligible_episodes.append(ep)
             continue
         skipped['already_in_library'].append(f"E{ep:02d} {file_name}".strip())
 
-    eligible_episodes = sorted({x for x in eligible_episodes if x > 0})
-    if not eligible_episodes:
+    missing_episodes = sorted({x for x in missing_episodes if x > 0})
+    washing_episodes = sorted({x for x in washing_episodes if x > 0})
+    if not missing_episodes and not washing_episodes:
         return {
             'checked': True,
             'allow': False,
@@ -3183,9 +3198,11 @@ def center_broadcast_event_consumption_gate(
         'checked': True,
         'allow': True,
         'reason': 'episode_needed',
-        'requested_episode_numbers': eligible_episodes,
-        'missing_episode_numbers': sorted({x for x in missing_episodes if x > 0}),
-        'washing_episode_numbers': sorted({x for x in washing_episodes if x > 0}),
+        'requested_episode_numbers': [] if season_completed else sorted({x for x in (missing_episodes + washing_episodes) if x > 0}),
+        'missing_episode_numbers': missing_episodes,
+        'washing_episode_numbers': washing_episodes,
+        'season_active': season_active,
+        'completed_season_share_only': bool(season_completed and normalized_kind == 'logical_season'),
         'state': season_state,
     }
 
@@ -3625,6 +3642,80 @@ def _wait_rapid_transfer_lease_for_fallback(
         time.sleep(retry_after)
 
 
+def _wait_rapid_transfer_lease_before_transfer(
+    client: SharedCenterClient,
+    *,
+    source_kind: str,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    event_id: str = '',
+    max_wait_seconds: int = 60,
+) -> Dict[str, Any]:
+    """预检通过后、真正 Rapid 秒传前申请中心许可。"""
+    existing = _event_transfer_lease_id(payload)
+    if existing:
+        return {'ok': True, 'skipped': True, 'reason': 'lease_already_present', 'lease_id': existing}
+
+    first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
+    source_kind = _normalize_source_kind(first.get('source_kind') or source_kind)
+    source_id = str(first.get('source_id') or first.get('source_ref_id') or source_id or '').strip()
+    if source_kind not in ('movie', 'episode', 'logical_episode') or not source_id:
+        return {'ok': True, 'skipped': True, 'reason': 'not_rapid_transfer_lease_source'}
+
+    sha1 = _norm_sha1(first.get('sha1') or (payload or {}).get('sha1'))
+    label = str(first.get('file_name') or first.get('name') or (payload or {}).get('title') or source_id)
+    request_payload = {
+        'source_kind': source_kind,
+        'source_id': source_id,
+        'sha1': sha1 or None,
+        'transfer_mode': 'rapid',
+        'request_meta_json': {
+            'event_id': str(event_id or ''),
+            'event_type': str((payload or {}).get('event_type') or ''),
+            'client_gate': 'shared_subscription_service_post_preflight_v1',
+            'reason': 'after_preflight_before_rapid_transfer',
+        },
+    }
+
+    deadline = time.time() + max(10, int(max_wait_seconds or 60))
+    attempts = 0
+    last_resp: Dict[str, Any] = {}
+    while True:
+        attempts += 1
+        try:
+            resp = _client_call_rapid_transfer_lease(client, request_payload) or {}
+        except Exception as e:
+            logger.debug(f"  ➜ [共享资源] 秒传许可接口不可用，预检通过后按旧流程继续：{source_kind}:{source_id}, err={e}")
+            return {'ok': True, 'skipped': True, 'reason': 'lease_api_unavailable', 'error': str(e)}
+        last_resp = resp if isinstance(resp, dict) else {'raw': resp}
+        if last_resp.get('ok') and last_resp.get('allow') is False and not last_resp.get('deferred'):
+            logger.info(
+                f"  ➜ [共享资源] 预检通过后中心秒传许可明确拒绝："
+                f"{label}，reason={last_resp.get('reason') or 'not_allowed'}"
+            )
+            return {'ok': True, 'blocked': True, 'lease': last_resp, 'attempts': attempts}
+        if last_resp.get('allow') or (last_resp.get('ok') and not last_resp.get('deferred') and last_resp.get('allow') is not False):
+            lease_id = str(last_resp.get('lease_id') or '').strip()
+            if lease_id:
+                payload['rapid_transfer_lease_id'] = lease_id
+                payload['transfer_lease_id'] = lease_id
+            logger.info(f"  ➜ [共享资源] 预检通过后秒传许可已发放：{label}")
+            return {'ok': True, 'lease': last_resp, 'lease_id': lease_id, 'attempts': attempts}
+
+        retry_after = _safe_int(last_resp.get('retry_after'), 30)
+        retry_after = max(5, min(retry_after, 120))
+        reason = str(last_resp.get('reason') or 'deferred')
+        if time.time() + retry_after > deadline:
+            logger.warning(
+                f"  ➜ [共享资源] 预检通过后秒传许可等待超时，转入旧流程并交由中心签名阀兜底："
+                f"{source_kind}:{source_id}, reason={reason}, last={last_resp}"
+            )
+            return {'ok': True, 'lease_timeout': True, 'lease': last_resp, 'attempts': attempts}
+        logger.debug(f"  ➜ [共享资源] 预检通过后中心秒传许可排队中：{label}，{retry_after}s 后重试，reason={reason}")
+        time.sleep(retry_after)
+
+
 def _try_completed_season_share_transfer(
     *,
     client: SharedCenterClient,
@@ -3846,7 +3937,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
@@ -3870,7 +3961,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.debug(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
@@ -3916,7 +4007,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.info(f"  ➜ [共享资源] {message}")
+        logger.trace(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
@@ -3933,7 +4024,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
 
     original_file_count = len(files)
     requested_missing_episode_numbers = _requested_missing_episodes_from_payload(payload, event)
-    if broadcast_gate.get('checked') and broadcast_gate.get('requested_episode_numbers'):
+    if broadcast_gate.get('checked') and 'requested_episode_numbers' in broadcast_gate:
         requested_missing_episode_numbers = _normalize_episode_numbers(broadcast_gate.get('requested_episode_numbers'))
     files, match_filter = _filter_files_before_transfer(
         client=client,
@@ -3992,6 +4083,64 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'clean_version_filter': {'enabled': True, 'blocked': clean_flag},
         }
 
+    payload['source_kind'] = source_kind
+    payload['source_id'] = source_id
+    payload['source_ref_id'] = source_id
+
+    # 已完结洗版只接受分享型整季包：先尝试 115 分享转存，不进入 Rapid 秒传预检/回退。
+    if source_kind == 'logical_season' and broadcast_gate.get('completed_season_share_only'):
+        share_transfer = _try_completed_season_share_transfer(
+            client=client,
+            source_id=source_id,
+            payload=payload,
+            files=files,
+            target_cid=base_target_cid,
+        )
+        if share_transfer.get('ok'):
+            if ack and event_id:
+                try:
+                    client.ack_device_events([event_id], result='ok', message=f"转存 {len(files)}/{len(files)}")
+                except Exception as e:
+                    logger.debug(f"  ➜ [共享资源] ACK 中心事件失败: {e}")
+            return {
+                'ok': True,
+                'message': f"转存完成：{len(files)}/{len(files)}",
+                'event_id': event_id,
+                'source_kind': source_kind,
+                'source_id': source_id,
+                'success_count': len(files),
+                'total': len(files),
+                'errors': [],
+                'transfer_mode': 'share',
+                'share_transfer': share_transfer,
+                'preflight': {'skipped': True, 'reason': 'completed_season_share_only'},
+                'rapid_target': {},
+            }
+        message = (
+            f"已完结季只接受分享型整季包洗版，跳过 Rapid 秒传回退："
+            f"{payload.get('title') or source_id}"
+        )
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='ok', message=message[:500])
+            except Exception:
+                pass
+        logger.info(f"  ➜ [共享资源] {message}")
+        return {
+            'ok': False,
+            'skipped': True,
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': len(files),
+            'errors': [],
+            'transfer_mode': 'share',
+            'share_transfer': share_transfer,
+            'skip_reason': 'completed_season_share_only',
+        }
+
     files, preflight = _prepare_files_before_rapid_transfer(
         client,
         source_kind=source_kind,
@@ -4031,9 +4180,6 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
         and len(files) > 1
         and not partial_missing_episode_transfer
     )
-    payload['source_kind'] = source_kind
-    payload['source_id'] = source_id
-    payload['source_ref_id'] = source_id
 
     # 完结季如果已有可用 115 分享通道，先直接转存到待整理根目录；
     # 不等 Rapid 秒传许可，也不提前创建 Rapid 临时目录。
@@ -4137,6 +4283,42 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'rapid_target': rapid_target,
             'aborted_season_package': True,
         }
+
+    lease_wait = _wait_rapid_transfer_lease_before_transfer(
+        client,
+        source_kind=source_kind,
+        source_id=source_id,
+        payload=payload,
+        files=files,
+        event_id=event_id,
+        max_wait_seconds=_safe_int(payload.get('_lease_max_wait_seconds'), 60),
+    )
+    if lease_wait.get('blocked'):
+        lease = lease_wait.get('lease') if isinstance(lease_wait.get('lease'), dict) else {}
+        message = lease.get('message') or '中心秒传许可拒绝，跳过该共享事件'
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='skipped', message=message[:500])
+            except Exception:
+                pass
+        return {
+            'ok': True,
+            'skipped': True,
+            'blocked': True,
+            'blocked_reason': lease.get('reason') or 'transfer_lease_blocked',
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': len(files),
+            'errors': [],
+            'transfer_mode': 'rapid',
+            'preflight': locals().get('preflight', {}),
+            'rapid_target': rapid_target,
+            'lease': lease_wait,
+        }
+    lease_id = _event_transfer_lease_id(payload, event)
 
     ok_count = 0
     errors = []

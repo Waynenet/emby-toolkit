@@ -438,23 +438,36 @@ class MediaProcessor:
             tmdb_id = None
             search_query = None
             search_year = None
+            media_type_hint = None
 
-            tmdb_regex = r'(?:tmdb|tmdbid)[-_=\s]*(\d+)'
-            match = re.search(tmdb_regex, folder_name, re.IGNORECASE)
-            if not match:
-                match = re.search(tmdb_regex, grandparent_name, re.IGNORECASE)
-            if not match:
-                match = re.search(tmdb_regex, filename, re.IGNORECASE)
+            def is_season_folder(name: str) -> bool:
+                return self._extract_season_from_path_or_text(name) is not None
 
-            if match:
-                temp_id = match.group(1)
-                if is_valid_tmdb_id(temp_id):
-                    tmdb_id = temp_id
-                    logger.info(f"  ➜ [实时监控] 已从路径识别到 TMDb：{tmdb_id}")
+            try:
+                from handler.p115_service import _identify_media_enhanced
+
+                identify_main_dir = grandparent_name if is_season_folder(folder_name) else folder_name
+                forced_media_type = 'tv' if is_series_by_path else None
+                _pc, sha1 = self._extract_115_fingerprints(file_path)
+                identified_id, identified_type, identified_title = _identify_media_enhanced(
+                    filename,
+                    main_dir_name=identify_main_dir,
+                    has_season_subdirs=is_season_folder(folder_name),
+                    forced_media_type=forced_media_type,
+                    ai_translator=self.ai_translator,
+                    use_ai=bool(self.ai_translator and self.config.get(constants.CONFIG_OPTION_AI_RECOGNITION, False)),
+                    is_folder=False,
+                    sha1=sha1,
+                )
+                if is_valid_tmdb_id(identified_id):
+                    tmdb_id = str(identified_id)
+                    media_type_hint = identified_type
+                    logger.info(f"  ➜ [实时监控] 增强识别命中《{identified_title or filename}》，TMDb：{tmdb_id}")
+            except Exception as e:
+                logger.debug(f"  ➜ [实时监控] 增强识别失败，回退简易识别: {e}")
+
             if not tmdb_id:
                 # 优化：先尝试从目录名提取搜索信息
-                def is_season_folder(name: str) -> bool:
-                    return self._extract_season_from_path_or_text(name) is not None
                 def extract_title_year(text: str):
                     year_regex = r'\b(19|20)\d{2}\b'
                     season_episode_regex = r'[sS](\d{1,2})[eE](\d{1,2})'
@@ -503,7 +516,7 @@ class MediaProcessor:
                 return None
 
             # 确定类型
-            is_series = is_series_by_path or bool(re.search(r'S\d+E\d+', filename, re.IGNORECASE))
+            is_series = media_type_hint == 'tv' or is_series_by_path or bool(re.search(r'S\d+E\d+', filename, re.IGNORECASE))
             item_type = "Series" if is_series else "Movie"
 
             # =========================================================

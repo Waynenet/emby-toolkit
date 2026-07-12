@@ -81,6 +81,7 @@ class P115RenameRenderer:
     @classmethod
     def sanitize_name_component(cls, text):
         cleaned = utils.clean_invisible_chars(text)
+        cleaned = cleaned.replace(':', '：')
         cleaned = cls._P115_INVALID_NAME_CHARS_RE.sub('', cleaned).strip()
         return cleaned
 
@@ -88,6 +89,7 @@ class P115RenameRenderer:
     def sanitize_rendered_template(text):
         cleaned = utils.clean_invisible_chars(text).replace("\\", "/")
         cleaned = re.sub(r'[\r\n\t]+', ' ', cleaned)
+        cleaned = cleaned.replace(':', '：')
         cleaned = re.sub(r'[:*?"<>|]', '', cleaned).strip()
         cleaned = P115RenameRenderer.cleanup_empty_separators(cleaned)
         return cleaned

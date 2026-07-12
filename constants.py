@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "10.7.87"  # 更新版本号
+APP_VERSION = "10.7.91"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -36,6 +36,10 @@ CONFIG_OPTION_MONITOR_EXTENSIONS = "monitor_extensions" # 监控扩展名列表
 DEFAULT_MONITOR_EXTENSIONS = [".mp4", ".mkv", ".avi", ".mov", ".iso", ".ts", ".strm"] # 默认监控的文件扩展名
 CONFIG_OPTION_MONITOR_SCAN_LOOKBACK_DAYS = "monitor_scan_lookback_days" # 定时扫描回溯天数
 DEFAULT_MONITOR_SCAN_LOOKBACK_DAYS = 1  # 默认回溯扫描天数
+CONFIG_OPTION_MONITOR_SCAN_MAX_TASKS = "monitor_scan_max_tasks" # 单次扫描最多主动处理的目录数
+DEFAULT_MONITOR_SCAN_MAX_TASKS = 10
+CONFIG_OPTION_MONITOR_SCAN_BATCH_SIZE = "monitor_scan_batch_size" # 扫描任务批量处理大小
+DEFAULT_MONITOR_SCAN_BATCH_SIZE = 2
 CONFIG_OPTION_MONITOR_EXCLUDE_DIRS = "monitor_exclude_dirs" 
 DEFAULT_MONITOR_EXCLUDE_DIRS = [] # 默认排除路径列表
 CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY = "monitor_exclude_refresh_delay"

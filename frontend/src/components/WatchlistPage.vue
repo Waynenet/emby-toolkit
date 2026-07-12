@@ -14,6 +14,7 @@
         <n-alert v-if="!isMobile" title="操作提示" type="info" style="margin-top: 24px;">
           <li>本模块高度自动化，几乎无需人工干涉。新入库剧集，会自动判断是否完结，未完结剧集会进入追剧列表，并根据状态自动处理。</li>
           <li>当剧集完结后，会转入已完结列表，后台可以设置定时刷新剧集元数据以及有新季上线会自动转成追剧中，并从上线之日开始自动订阅新季。</li>
+          <li>不想继续追踪某一季时，可以强制完结该季；后续刷新不会把该季自动改回追剧中，也不会影响同剧其它季。</li>
         </n-alert>
         <template #extra>
           <n-space>
@@ -210,6 +211,13 @@
                           <n-icon :component="CollectionsIcon" class="icon-fix" />
                           <n-text :depth="3">
                             包含: {{ item.seasons_contains.length }} 个季度 ({{ formatSeasonRange(item.seasons_contains) }})
+                          </n-text>
+                        </div>
+
+                        <div v-if="item.seasons_force_ended && item.seasons_force_ended.length > 0" class="info-line">
+                          <n-icon :component="ForceEndIcon" class="icon-fix" style="color: var(--n-warning-color)" />
+                          <n-text :depth="3" style="color: var(--n-warning-color)">
+                            强制完结: {{ item.seasons_force_ended.length }} 个季度 ({{ formatSeasonRange(item.seasons_force_ended) }})
                           </n-text>
                         </div>
 
@@ -679,7 +687,8 @@ const filteredWatchlist = computed(() => {
           
           seasons_contains: [], 
           seasons_missing: [],  
-          seasons_airing: []    
+          seasons_airing: [],
+          seasons_force_ended: []
         };
       }
 
@@ -708,6 +717,10 @@ const filteredWatchlist = computed(() => {
       } else {
         // 3. 缺失
         groups[pid].seasons_missing.push(season.season_number);
+      }
+
+      if (season.force_ended) {
+        groups[pid].seasons_force_ended.push(season.season_number);
       }
       
       // 更新时间取最新的
@@ -891,16 +904,15 @@ const handleBatchAction = (key) => {
   };
 
   if (key === 'forceEnd') {
-    const parentIds = getParentIds(); // 获取剧集ID
+    const seasonIds = [...new Set(selectedItems.value)]; // 强制完结只作用于选中的季
     dialog.warning({
       title: '确认操作',
-      content: `确定要将选中的 ${parentIds.length} 部剧集标记为“强制完结”吗？`,
+      content: `确定要将选中的 ${seasonIds.length} 个季标记为“强制完结”吗？`,
       positiveText: '确定',
       negativeText: '取消',
       onPositiveClick: async () => {
         try {
-          // ★★★ 传 parentIds 给后端 ★★★
-          const response = await axios.post('/api/watchlist/batch_force_end', { item_ids: parentIds });
+          const response = await axios.post('/api/watchlist/batch_force_end', { item_ids: seasonIds });
           message.success(response.data.message || '批量操作成功！');
           await fetchWatchlist();
           selectedItems.value = [];

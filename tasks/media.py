@@ -111,8 +111,91 @@ def _parse_timestamp(value) -> Optional[datetime]:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
+def _safe_json_list(value) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+def _first_video_stream(item: Dict[str, Any]) -> Dict[str, Any]:
+    streams = item.get("MediaStreams")
+    if not isinstance(streams, list):
+        streams = []
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("Type") == "Video":
+            return stream
+    return {}
+
+def _normalize_asset_path(path: Any) -> str:
+    return str(path or '').replace('\\', '/').strip().lower()
+
+def _asset_changed_since_sync(item: Dict[str, Any], db_state: Dict[str, Any]) -> bool:
+    """
+    Emby 有时替换媒体源后不会更新 DateModified。
+    这里用轻量资产特征兜底识别 ISO -> MKV、路径/体积/分辨率变化等情况。
+    """
+    if item.get("Type") not in ("Movie", "Episode"):
+        return False
+
+    item_id = str(item.get("Id") or '')
+    assets = _safe_json_list(db_state.get('asset_details_json'))
+    if not assets:
+        return True
+
+    matched_asset = None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get('emby_item_id') or '')
+        if asset_id and asset_id == item_id:
+            matched_asset = asset
+            break
+
+    if matched_asset is None:
+        if len(assets) == 1 and isinstance(assets[0], dict):
+            matched_asset = assets[0]
+        else:
+            return True
+
+    item_path = _normalize_asset_path(item.get('Path'))
+    db_path = _normalize_asset_path(matched_asset.get('path'))
+    if item_path and db_path and item_path != db_path:
+        return True
+
+    item_container = str(item.get('Container') or '').strip().lower()
+    db_container = str(matched_asset.get('container') or '').strip().lower()
+    if item_container and db_container and item_container != db_container:
+        return True
+
+    try:
+        item_size = int(item.get('Size') or 0)
+        db_size = int(matched_asset.get('size_bytes') or 0)
+        if item_size > 0 and db_size > 0 and item_size != db_size:
+            return True
+    except Exception:
+        pass
+
+    video_stream = _first_video_stream(item)
+    for item_key, asset_key in (('Width', 'width'), ('Height', 'height'), ('BitDepth', 'bit_depth')):
+        try:
+            item_value = int(video_stream.get(item_key) or item.get(item_key) or 0)
+            asset_value = int(matched_asset.get(asset_key) or 0)
+            if item_value > 0 and asset_value > 0 and item_value != asset_value:
+                return True
+        except Exception:
+            continue
+
+    return False
+
 def _emby_item_changed_since_sync(item: Dict[str, Any], db_state: Optional[Dict[str, Any]]) -> bool:
     if not db_state:
+        return True
+    if _asset_changed_since_sync(item, db_state):
         return True
     emby_modified = _parse_timestamp(item.get("DateModified"))
     last_synced = _parse_timestamp(db_state.get("last_synced_at"))
@@ -764,7 +847,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             
             # A. 预加载映射
             cursor.execute("""
-                SELECT tmdb_id, item_type, last_synced_at, jsonb_array_elements_text(emby_item_ids_json) as eid
+                SELECT tmdb_id, item_type, last_synced_at, asset_details_json,
+                       jsonb_array_elements_text(emby_item_ids_json) as eid
                 FROM media_metadata 
                 WHERE item_type IN ('Movie', 'Series')
             """)
@@ -777,12 +861,13 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     top_level_sync_state[e_id] = {
                         'tmdb_id': t_id,
                         'item_type': i_type,
-                        'last_synced_at': row.get('last_synced_at')
+                        'last_synced_at': row.get('last_synced_at'),
+                        'asset_details_json': row.get('asset_details_json')
                     }
 
             # B. 获取在线状态 (★ 修复：无论是否全量更新，都必须获取在线状态，否则无法检测离线)
             cursor.execute("""
-                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at,
+                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at, asset_details_json,
                        jsonb_array_elements_text(emby_item_ids_json) AS emby_id
                 FROM media_metadata 
                 WHERE in_library = TRUE
@@ -794,7 +879,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     'tmdb_id': row.get('tmdb_id'),
                     'item_type': row.get('item_type'),
                     'parent_series_tmdb_id': row.get('parent_series_tmdb_id'),
-                    'last_synced_at': row.get('last_synced_at')
+                    'last_synced_at': row.get('last_synced_at'),
+                    'asset_details_json': row.get('asset_details_json')
                 }
             
             cursor.execute("""
@@ -1674,6 +1760,10 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                                     update_clauses.append(
                                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
                                     )
+                                elif current_type == 'Series' and col == 'watchlist_tmdb_status':
+                                    update_clauses.append(
+                                        "watchlist_tmdb_status = CASE WHEN media_metadata.force_ended IS TRUE THEN media_metadata.watchlist_tmdb_status ELSE EXCLUDED.watchlist_tmdb_status END"
+                                    )
                                 else:
                                     # 其他字段正常更新
                                     update_clauses.append(f"{col} = EXCLUDED.{col}")
@@ -1961,37 +2051,41 @@ def task_scan_monitor_folders(processor):
     monitor_paths = processor.config.get(constants.CONFIG_OPTION_MONITOR_PATHS, [])
     monitor_extensions = processor.config.get(constants.CONFIG_OPTION_MONITOR_EXTENSIONS, constants.DEFAULT_MONITOR_EXTENSIONS)
     lookback_days = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_LOOKBACK_DAYS, constants.DEFAULT_MONITOR_SCAN_LOOKBACK_DAYS)
+    scan_max_tasks = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_MAX_TASKS, constants.DEFAULT_MONITOR_SCAN_MAX_TASKS)
+    scan_batch_size = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_BATCH_SIZE, constants.DEFAULT_MONITOR_SCAN_BATCH_SIZE)
+
+    try:
+        scan_max_tasks = max(1, int(scan_max_tasks))
+    except (TypeError, ValueError):
+        scan_max_tasks = constants.DEFAULT_MONITOR_SCAN_MAX_TASKS
+
+    try:
+        scan_batch_size = max(1, int(scan_batch_size))
+    except (TypeError, ValueError):
+        scan_batch_size = constants.DEFAULT_MONITOR_SCAN_BATCH_SIZE
     
     # 获取排除路径配置并规范化
     monitor_exclude_dirs = processor.config.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, constants.DEFAULT_MONITOR_EXCLUDE_DIRS)
     exclude_paths = [os.path.normpath(d).lower() for d in (monitor_exclude_dirs or [])]
 
-    logger.info(f"  ➜ 开始执行监控目录查漏扫描 (回溯 {lookback_days} 天)")
+    logger.info(
+        f"  ➜ 开始执行监控目录查漏扫描 "
+        f"(回溯 {lookback_days} 天，单次最多处理 {scan_max_tasks} 个目录，批量 {scan_batch_size})"
+    )
 
     if not monitor_enabled or not monitor_paths:
         logger.info("  ➜ 实时监控未启用或未配置路径，跳过扫描。")
         return
 
+    task_manager.update_status_from_thread(1, "正在加载已入库文件名索引...")
+    known_filenames = media_db.get_all_asset_filenames()
+    logger.info(f"  ➜ 已加载 {len(known_filenames)} 个已入库文件名用于扫描去重。")
+
     valid_exts = set(ext.lower() for ext in monitor_extensions)
 
-    # 2. 获取已知 TMDb ID (白名单)
-    known_tmdb_ids = set()
-    try:
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT tmdb_id FROM media_metadata WHERE tmdb_id IS NOT NULL")
-            for row in cursor.fetchall():
-                known_tmdb_ids.add(str(row['tmdb_id']))
-        logger.info(f"  ➜ 加载了 {len(known_tmdb_ids)} 个已知 TMDb ID (白名单)。")
-    except Exception as e:
-        logger.error(f"  ➜ 无法读取数据库白名单，任务中止: {e}")
-        return
-    
-    tmdb_regex = r'(?:tmdb|tmdbid)[-_=\s]*(\d+)'
-    processed_in_this_run = set()
-    
-    # Key: tmdb_id, Value: Set[filenames]
-    db_assets_cache = {}
+    processed_dirs = set()
+    files_to_process = []
+    limit_reached = False
 
     scan_count = 0
     trigger_count = 0
@@ -2002,6 +2096,9 @@ def task_scan_monitor_folders(processor):
     cutoff_time = now - (lookback_days * 24 * 3600)
 
     for root_path in monitor_paths:
+        if processor.is_stop_requested() or limit_reached:
+            break
+
         if not os.path.exists(root_path):
             logger.warning(f"  ➜ 监控路径不存在: {root_path}")
             continue
@@ -2009,6 +2106,9 @@ def task_scan_monitor_folders(processor):
         logger.info(f"  ➜ 正在扫描目录: {root_path}")
         
         for dirpath, dirnames, filenames in os.walk(root_path):
+            if processor.is_stop_requested() or limit_reached:
+                break
+
             # ★★★ 修正：排除路径检查逻辑 ★★★
             norm_dirpath = os.path.normpath(dirpath).lower()
             hit_exclude = False
@@ -2028,13 +2128,10 @@ def task_scan_monitor_folders(processor):
                 dirnames[:] = [] # 停止向下递归
                 continue 
 
-            folder_name = os.path.basename(dirpath)
-            match_folder = re.search(tmdb_regex, folder_name, re.IGNORECASE)
-            
-            # 提取当前目录可能的 ID (优先用文件夹ID)
-            folder_tmdb_id = match_folder.group(1) if match_folder else None
-
             for filename in filenames:
+                if processor.is_stop_requested():
+                    break
+
                 if filename.startswith('.'): continue
                 _, ext = os.path.splitext(filename)
                 if ext.lower() not in valid_exts: continue
@@ -2061,49 +2158,64 @@ def task_scan_monitor_folders(processor):
                         f"扫描中... (已扫 {scan_count}, 跳过旧文件 {skipped_old_count}, 跳过已存 {skipped_exists_count})"
                     )
 
-                # --- ID 提取 ---
-                target_id = folder_tmdb_id
-                
-                if not target_id:
-                    grandparent_path = os.path.dirname(dirpath)
-                    grandparent_name = os.path.basename(grandparent_path)
-                    match_grand = re.search(tmdb_regex, grandparent_name, re.IGNORECASE)
-                    if match_grand:
-                        target_id = match_grand.group(1)
-                
-                if not target_id:
-                    match_file = re.search(tmdb_regex, filename, re.IGNORECASE)
-                    if match_file:
-                        target_id = match_file.group(1)
-                
                 # --- 判定逻辑 ---
-                if target_id:
-                    if target_id in processed_in_this_run:
-                        continue
+                if filename.lower() in known_filenames:
+                    skipped_exists_count += 1
+                    continue
 
-                    if target_id not in db_assets_cache:
-                        db_assets_cache[target_id] = media_db.get_known_filenames_by_tmdb_id(target_id)
-                    
-                    name_without_ext, _ = os.path.splitext(filename)
-                    
-                    if name_without_ext in db_assets_cache[target_id]:
-                        skipped_exists_count += 1
-                        continue
+                dir_key = os.path.normpath(dirpath).lower()
+                if dir_key in processed_dirs:
+                    continue
 
-                    logger.info(f"  ➜ 发现未入库文件: {filename} (ID: {target_id})，触发检查...")
-                    try:
-                        processor.process_file_actively(file_path)
-                        processed_in_this_run.add(target_id)
-                        if target_id in db_assets_cache:
-                            # ★ 存入缓存时也存无扩展名的版本
-                            db_assets_cache[target_id].add(name_without_ext)
-                        trigger_count += 1
-                        time.sleep(1) 
-                    except Exception as e:
-                        logger.error(f"  ➜ 处理文件失败: {e}")
+                logger.info(f"  ➜ 发现未入库文件: {filename}，加入本轮扫描处理队列...")
+                files_to_process.append(file_path)
+                processed_dirs.add(dir_key)
+                trigger_count += 1
 
-    logger.info(f"  ➜ 监控目录扫描完成。扫描: {scan_count}, 触发处理: {trigger_count}")
-    task_manager.update_status_from_thread(100, f"扫描完成，处理了 {trigger_count} 个新项目")
+                if trigger_count >= scan_max_tasks:
+                    limit_reached = True
+                    logger.warning(
+                        f"  ➜ 本轮监控目录扫描已达到处理上限 {scan_max_tasks}，"
+                        "剩余积压将留到后续扫描继续处理。"
+                    )
+                    break
+
+    total_to_process = len(files_to_process)
+    processed_count = 0
+
+    if total_to_process:
+        logger.info(f"  ➜ 扫描完成，准备分批处理 {total_to_process} 个漏网目录。")
+        for start in range(0, total_to_process, scan_batch_size):
+            if processor.is_stop_requested():
+                logger.warning("  ➜ 收到停止信号，监控目录扫描处理提前结束。")
+                break
+
+            batch = files_to_process[start:start + scan_batch_size]
+            end = start + len(batch)
+            progress = 80 + int((start / total_to_process) * 15)
+            task_manager.update_status_from_thread(
+                progress,
+                f"正在分批处理漏网项目 {start + 1}-{end}/{total_to_process}"
+            )
+
+            try:
+                processor.process_file_actively_batch(batch)
+                processed_count += len(batch)
+            except Exception as e:
+                logger.error(f"  ➜ 批量处理漏网文件失败: {e}", exc_info=True)
+
+            if end < total_to_process:
+                time.sleep(2)
+
+    suffix = f"，达到本轮上限 {scan_max_tasks}" if limit_reached else ""
+    logger.info(
+        f"  ➜ 监控目录扫描完成。扫描: {scan_count}, "
+        f"加入处理: {trigger_count}, 已处理批次项: {processed_count}{suffix}"
+    )
+    task_manager.update_status_from_thread(
+        100,
+        f"扫描完成，处理了 {processed_count} 个新项目{suffix}"
+    )
 
 
 # --- 补齐共享资源所需的 115 指纹 ---

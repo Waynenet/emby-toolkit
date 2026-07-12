@@ -3370,11 +3370,10 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
     source = _event_source_payload(event)
     bypass = _local_event_should_bypass_transfer_lease(event, source)
     if bypass.get('bypass'):
-        logger.info(f"  ➜ [共享资源] 跳过中心秒传许可：{bypass.get('message') or bypass.get('reason')}")
         return original_consume(event, *args, **kwargs)
     gate = _shared_transfer_gate(source)
     if not gate.get('ok'):
-        logger.info(f"  ➜ [共享资源] 秒传拦截：{gate.get('message') or gate.get('reason')}")
+        logger.debug(f"  ➜ [共享资源] 秒传拦截：{gate.get('message') or gate.get('reason')}")
         return {
             'ok': True,
             'skipped': True,
@@ -3384,29 +3383,14 @@ def _consume_device_event_with_transfer_gate(original_consume, event, *args, **k
             'total': 0,
             'message': gate.get('message') or '该资源已被共享资源配置拦截',
         }
-    share_bypass = _completed_season_share_lease_bypass(event, source)
-    if share_bypass.get('bypass'):
-        logger.info(
-            f"  ➜ [共享资源] 跳过中心秒传许可：完结季/逻辑季存在有效 115 分享通道，"
-            f"直接尝试分享转存，channel={share_bypass.get('channel_id') or '-'}"
-        )
-        return original_consume(event, *args, **kwargs)
-    lease_result = _wait_transfer_lease_for_event(
-        event,
-        max_wait_seconds=lease_max_wait_seconds,
-        stop_event=stop_event,
-    )
-    if lease_result.get('blocked'):
-        lease = lease_result.get('lease') if isinstance(lease_result.get('lease'), dict) else {}
-        return {
-            'ok': True,
-            'skipped': True,
-            'blocked': True,
-            'blocked_reason': lease.get('reason') or 'transfer_lease_blocked',
-            'success_count': 0,
-            'total': 0,
-            'message': lease.get('message') or '中心秒传许可拒绝，跳过该共享事件',
-        }
+    try:
+        payload = _event_source_payload(event)
+        payload['_lease_max_wait_seconds'] = lease_max_wait_seconds
+        if stop_event is not None:
+            payload['_lease_stop_event_enabled'] = True
+        event['payload_json'] = payload
+    except Exception:
+        pass
     return original_consume(event, *args, **kwargs)
 
 

@@ -71,6 +71,7 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             
             s.watching_status as status,
             p.watching_status as series_status,
+            COALESCE(s.force_ended, FALSE) as force_ended,
 
             p.watchlist_last_checked_at as last_checked_at,
             p.watchlist_next_episode_json as next_episode_to_air_json,
@@ -95,7 +96,7 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             s.item_type = 'Season'
             AND s.season_number > 0
             AND s.watching_status != 'NONE'
-            AND (s.watching_status != 'Completed' OR s.in_library = TRUE)
+            AND (s.watching_status != 'Completed' OR s.in_library = TRUE OR COALESCE(s.force_ended, FALSE) = TRUE)
             AND (
                 (s.total_episodes = 0 OR COALESCE(es.collected_count, 0) < s.total_episodes)
                 OR s.season_number = ls.max_season_number
@@ -232,28 +233,33 @@ def get_watchlist_item_name(tmdb_id: str) -> Optional[str]:
 
 def batch_force_end_watchlist_items(tmdb_ids: List[str]) -> int:
     """
-    批量将追剧项目标记为“强制完结”。
+    批量将选中的季标记为“强制完结”。
     """
     if not tmdb_ids:
         return 0
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            
-            sql = """
+
+            season_sql = """
                 UPDATE media_metadata
                 SET watching_status = 'Completed',
                     force_ended = TRUE,
-                    watchlist_is_airing = FALSE
-                WHERE 
-                    tmdb_id = ANY(%s) AND item_type = 'Series'
+                    paused_until = NULL,
+                    watchlist_is_airing = FALSE,
+                    watchlist_last_checked_at = NOW()
+                WHERE tmdb_id = ANY(%s)
+                  AND item_type = 'Season'
+                  AND season_number > 0
             """
-            cursor.execute(sql, (tmdb_ids,))
-            conn.commit()
-            
+            cursor.execute(season_sql, (tmdb_ids,))
             updated_count = cursor.rowcount
+
+            conn.commit()
             if updated_count > 0:
-                logger.info(f"  ➜ 批量强制完结了 {len(tmdb_ids)} 个剧集系列，共更新 {updated_count} 条剧记录。")
+                logger.info(
+                    f"  ➜ 批量强制完结了 {len(tmdb_ids)} 个季条目，共更新 {updated_count} 条季记录。"
+                )
             return updated_count
     except Exception as e:
         logger.error(f"  ➜ 批量强制完结追剧项目时发生错误: {e}", exc_info=True)
@@ -294,10 +300,30 @@ def batch_update_watchlist_status(item_ids: list, new_status: str) -> int:
             values.append(item_ids)
             
             cursor.execute(sql, tuple(values))
+            updated_count = cursor.rowcount
+
+            if new_status == 'Watching':
+                cursor.execute(
+                    """
+                    UPDATE media_metadata
+                    SET watching_status = 'Watching',
+                        force_ended = FALSE,
+                        paused_until = NULL,
+                        watchlist_is_airing = TRUE,
+                        watchlist_last_checked_at = NOW()
+                    WHERE parent_series_tmdb_id = ANY(%s)
+                      AND item_type = 'Season'
+                      AND season_number > 0
+                      AND force_ended = TRUE
+                    """,
+                    (item_ids,),
+                )
+                updated_count += cursor.rowcount
+
             conn.commit()
             
-            logger.info(f"  ➜ 成功将 {len(item_ids)} 个剧集系列的状态批量更新为 '{new_status}'，共更新 {cursor.rowcount} 条剧记录。")
-            return cursor.rowcount
+            logger.info(f"  ➜ 成功将 {len(item_ids)} 个剧集系列的状态批量更新为 '{new_status}'，共更新 {updated_count} 条记录。")
+            return updated_count
             
     except Exception as e:
         logger.error(f"  ➜ 批量更新项目状态时数据库出错: {e}", exc_info=True)
@@ -493,6 +519,7 @@ def sync_seasons_watching_status(parent_tmdb_id: str, active_season_numbers: Lis
 
     口径：
     - Series.watching_status 由智能追剧按 TMDb 状态单独维护；
+    - 强制完结的 Season 固定为 Completed，不再按本地集齐情况回写；
     - Season.watching_status 只看本地是否集齐：本地集齐则 Completed，否则 Watching。
     """
     try:
@@ -512,12 +539,16 @@ def sync_seasons_watching_status(parent_tmdb_id: str, active_season_numbers: Lis
                 )
                 UPDATE media_metadata s
                 SET watching_status = CASE
+                    WHEN COALESCE(s0.force_ended, FALSE)
+                    THEN 'Completed'
                     WHEN COALESCE(s.total_episodes, 0) > 0
                      AND COALESCE(l.local_count, 0) >= s.total_episodes
                     THEN 'Completed'
                     ELSE 'Watching'
                 END,
                 watchlist_is_airing = CASE
+                    WHEN COALESCE(s0.force_ended, FALSE)
+                    THEN FALSE
                     WHEN COALESCE(s.total_episodes, 0) > 0
                      AND COALESCE(l.local_count, 0) >= s.total_episodes
                     THEN FALSE
@@ -966,30 +997,50 @@ def update_watchlist_metadata(tmdb_id: str, updates: Dict[str, Any]):
     if not updates:
         return
 
-    # 自动补充最后检查时间
-    updates['watchlist_last_checked_at'] = 'NOW()'
-    
-    # 动态构建 SET 子句
-    # 特殊处理 NOW()，它不需要占位符 %s
-    set_clauses = []
-    values = []
-    for k, v in updates.items():
-        if v == 'NOW()':
-            set_clauses.append(f"{k} = NOW()")
-        else:
-            set_clauses.append(f"{k} = %s")
-            values.append(v)
-    
-    sql = f"""
-        UPDATE media_metadata 
-        SET {', '.join(set_clauses)} 
-        WHERE tmdb_id = %s AND item_type = 'Series'
-    """
-    values.append(tmdb_id)
+    updates = dict(updates)
 
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT COALESCE(force_ended, FALSE) AS force_ended, item_type
+                FROM media_metadata
+                WHERE tmdb_id = %s
+                LIMIT 1
+                """,
+                (tmdb_id,),
+            )
+            row = cursor.fetchone()
+            if row and bool(row.get('force_ended')):
+                updates.pop('watchlist_tmdb_status', None)
+                updates['watching_status'] = 'Completed'
+                updates['force_ended'] = True
+                updates['paused_until'] = None
+                updates['watchlist_is_airing'] = False
+
+            # 自动补充最后检查时间
+            updates['watchlist_last_checked_at'] = 'NOW()'
+
+            # 动态构建 SET 子句
+            # 特殊处理 NOW()，它不需要占位符 %s
+            set_clauses = []
+            values = []
+            for k, v in updates.items():
+                if v == 'NOW()':
+                    set_clauses.append(f"{k} = NOW()")
+                else:
+                    set_clauses.append(f"{k} = %s")
+                    values.append(v)
+
+            sql = f"""
+                UPDATE media_metadata
+                SET {', '.join(set_clauses)}
+                WHERE tmdb_id = %s AND item_type = 'Series'
+            """
+            values.append(tmdb_id)
+
             cursor.execute(sql, tuple(values))
             conn.commit()
     except Exception as e:
@@ -1104,6 +1155,22 @@ def update_media_metadata_fields(tmdb_id: str, item_type: str, updates: Dict[str
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                if item_type in ('Series', 'Season') and 'watchlist_tmdb_status' in safe_updates:
+                    cursor.execute(
+                        """
+                        SELECT COALESCE(force_ended, FALSE) AS force_ended
+                        FROM media_metadata
+                        WHERE tmdb_id = %s AND item_type = %s
+                        LIMIT 1
+                        """,
+                        (tmdb_id, item_type),
+                    )
+                    row = cursor.fetchone()
+                    if row and bool(row.get('force_ended')):
+                        safe_updates.pop('watchlist_tmdb_status', None)
+                        if not safe_updates:
+                            return
+
                 # 动态构建 SET 子句
                 set_clauses = []
                 for key in safe_updates.keys():
