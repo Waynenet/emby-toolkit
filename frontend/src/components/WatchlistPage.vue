@@ -14,7 +14,7 @@
         <n-alert v-if="!isMobile" title="操作提示" type="info" style="margin-top: 24px;">
           <li>本模块高度自动化，几乎无需人工干涉。新入库剧集，会自动判断是否完结，未完结剧集会进入追剧列表，并根据状态自动处理。</li>
           <li>当剧集完结后，会转入已完结列表，后台可以设置定时刷新剧集元数据以及有新季上线会自动转成追剧中，并从上线之日开始自动订阅新季。</li>
-          <li>不想对某部剧追踪时，可以强制完结，一旦强制完结该剧所有季都会被标记为已完结，且不会再自动追踪新季。</li>
+          <li>不想继续追踪某一季时，可以强制完结该季；后续刷新不会把该季自动改回追剧中，也不会影响同剧其它季。</li>
         </n-alert>
         <template #extra>
           <n-space>
@@ -244,6 +244,13 @@
                           <span class="info-line-text">
                             包含: {{ item.seasons_contains.length }} 个季度 ({{ formatSeasonRange(item.seasons_contains) }})
                           </span>
+                        </div>
+
+                        <div v-if="item.seasons_force_ended && item.seasons_force_ended.length > 0" class="info-line">
+                          <n-icon :component="ForceEndIcon" class="icon-fix" style="color: var(--n-warning-color)" />
+                          <n-text :depth="3" style="color: var(--n-warning-color)">
+                            强制完结: {{ item.seasons_force_ended.length }} 个季度 ({{ formatSeasonRange(item.seasons_force_ended) }})
+                          </n-text>
                         </div>
 
                         <!-- B. 连载 (在库且活跃) - 绿色高亮 -->
@@ -543,7 +550,7 @@ const saveConfig = async () => {
 const triggerBackfillTask = async () => {
   dialog.info({
     title: '补全旧季',
-    content: '确定要扫描数据库并自动待订阅所有缺失的旧季吗？',
+    content: '确定要扫描数据库并自动待订阅所有缺失的旧季吗？\n\n逻辑说明：\n1. 仅针对“非最新季”的缺失季。\n2. 仅针对“未入库”且“未忽略”的季。',
     positiveText: '确定执行',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -574,10 +581,30 @@ const getMissingCountText = (item) => {
   return parts.join(' | ');
 };
 
-const statusFilterOptions = [{ label: '所有状态', value: 'all' }, { label: '追剧中', value: 'Watching' }, { label: '已暂停', value: 'Paused' }, { label: '待定中', value: 'Pending' }];
-const missingFilterOptions = computed(() => [{ label: '缺季筛选', value: 'all' }, { label: '有缺季', value: 'yes' }, { label: '无缺季', value: 'no' }]);
-const gapsFilterOptions = [{ label: '缺集筛选', value: 'all' }, { label: '有缺集', value: 'yes' }, { label: '无缺集', value: 'no' }];
-const sortKeyOptions = [{ label: '按上次检查时间', value: 'last_checked_at' }, { label: '按剧集名称', value: 'item_name' }, { label: '按添加时间', value: 'added_at' }, { label: '按发行年份', value: 'release_year' }];
+const statusFilterOptions = [
+  { label: '所有状态', value: 'all' },
+  { label: '追剧中', value: 'Watching' },
+  { label: '已暂停', value: 'Paused' },
+  { label: '待定中', value: 'Pending' },
+];
+const missingFilterOptions = computed(() => {
+    return [
+      { label: '缺季筛选', value: 'all' },
+      { label: '有缺季', value: 'yes' },
+      { label: '无缺季', value: 'no' },
+    ];
+});
+const gapsFilterOptions = [
+    { label: '缺集筛选', value: 'all' },
+    { label: '有缺集', value: 'yes' },
+    { label: '无缺集', value: 'no' },
+];
+const sortKeyOptions = [
+  { label: '按上次检查时间', value: 'last_checked_at' },
+  { label: '按剧集名称', value: 'item_name' },
+  { label: '按添加时间', value: 'added_at' },
+  { label: '按发行年份', value: 'release_year' },
+];
 
 const batchActions = computed(() => {
   const removeAction = { label: '批量移除', key: 'remove', icon: () => h(NIcon, { component: TrashIcon }) };
@@ -606,38 +633,55 @@ const filteredWatchlist = computed(() => {
     const seasonsToAggregate = list.filter(item => completedParentIds.has(item.parent_tmdb_id));
     const groups = {};
     
+    // 3. 对所有相关季度进行遍历聚合
     seasonsToAggregate.forEach(season => {
       const pid = season.parent_tmdb_id;
       if (!groups[pid]) {
         groups[pid] = { 
           ...season, 
-          item_name: season.item_name.replace(/ 第 \d+ 季$/, ''), 
-          collected_count: 0, total_count: 0, 
-          status: season.series_status, is_aggregated: true,
-          seasons_contains: [], seasons_missing: [], seasons_airing: []    
+          item_name: season.item_name.replace(/ 第 \d+ 季$/, ''), // 去掉季号作为总标题
+          collected_count: 0, // 重置计数，下面累加
+          total_count: 0,     // 重置计数，下面累加
+          status: season.series_status, 
+          is_aggregated: true,
+          seasons_contains: [], 
+          seasons_missing: [],  
+          seasons_airing: [],
+          seasons_force_ended: []
         };
       }
+      // 累加集数
       groups[pid].collected_count += (season.collected_count || 0);
       groups[pid].total_count += (season.total_count || 0);
       
+      // ★★★ 分类逻辑 ★★★
       const isInLibrary = (season.collected_count > 0);
-      const sNum = season.season_number;
       
       if (isInLibrary) {
-        // ★ 修复：只有当数组中不存在该季号时才推入，防止新老数据ID交替导致重复
-        if (!groups[pid].seasons_contains.includes(sNum)) {
-            groups[pid].seasons_contains.push(sNum);
+        // 只要在库，就算包含
+        // 注意：为了避免重复显示，通常 Completed 的才放入 seasons_contains，或者全部放入
+        // 根据你之前的逻辑，这里是放入所有在库的
+        if (season.status === 'Completed') {
+             groups[pid].seasons_contains.push(season.season_number);
+        } else {
+             // 如果在库但不是 Completed，通常也算 contains，但为了区分显示：
+             groups[pid].seasons_contains.push(season.season_number);
         }
+        
+        // 2. 判断是否连载中：在库 且 状态是 Watching/Paused
         if (season.status === 'Watching' || season.status === 'Paused') {
-           if (!groups[pid].seasons_airing.includes(sNum)) {
-               groups[pid].seasons_airing.push(sNum);
-           }
+           groups[pid].seasons_airing.push(season.season_number);
         }
       } else {
-        if (!groups[pid].seasons_missing.includes(sNum)) {
-            groups[pid].seasons_missing.push(sNum);
-        }
+        // 3. 缺失
+        groups[pid].seasons_missing.push(season.season_number);
       }
+
+      if (season.force_ended) {
+        groups[pid].seasons_force_ended.push(season.season_number);
+      }
+      
+      // 更新时间取最新的
       if (new Date(season.last_checked_at) > new Date(groups[pid].last_checked_at)) {
         groups[pid].last_checked_at = season.last_checked_at;
       }
@@ -747,16 +791,21 @@ const handleBatchAction = (key) => {
   };
 
   if (key === 'forceEnd') {
-    const parentIds = getParentIds();
+    const seasonIds = [...new Set(selectedItems.value)]; // 强制完结只作用于选中的季
     dialog.warning({
-      title: '确认操作', content: `确定要将选中的 ${parentIds.length} 部剧集标记为“强制完结”吗？`, positiveText: '确定', negativeText: '取消',
+      title: '确认操作',
+      content: `确定要将选中的 ${seasonIds.length} 个季标记为“强制完结”吗？`,
+      positiveText: '确定',
+      negativeText: '取消',
       onPositiveClick: async () => {
         try {
-          const response = await axios.post('/api/watchlist/batch_force_end', { item_ids: parentIds });
+          const response = await axios.post('/api/watchlist/batch_force_end', { item_ids: seasonIds });
           message.success(response.data.message || '批量操作成功！');
           await fetchWatchlist();
           selectedItems.value = [];
-        } catch (err) { message.error(err.response?.data?.error || '批量操作失败。'); }
+        } catch (err) {
+          message.error(err.response?.data?.error || '批量操作失败。');
+        }
       }
     });
   } else if (key === 'rewatch') {
