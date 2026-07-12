@@ -398,8 +398,54 @@ def from_mimicked_id(mimicked_id): return -(int(mimicked_id)) - MIMICKED_ID_BASE
 def is_mimicked_id(item_id):
     try: return isinstance(item_id, str) and item_id.startswith('-')
     except: return False
-MIMICKED_ITEMS_RE = re.compile(r'/emby/Users/([^/]+)/Items/(-(\d+))')
-MIMICKED_ITEM_DETAILS_RE = re.compile(r'emby/Users/([^/]+)/Items/(-(\d+))$')
+MIMICKED_ITEMS_RE = re.compile(r'/(?:emby/)?Users/([^/]+)/Items/(-(\d+))', re.IGNORECASE)
+MIMICKED_ITEM_DETAILS_RE = re.compile(r'(?:emby/)?Users/([^/]+)/Items/(-(\d+))$', re.IGNORECASE)
+
+
+def _server_api_url(base_url, path):
+    return f"{base_url.rstrip('/')}/{str(path).lstrip('/')}"
+
+
+def _strip_emby_api_prefix(path):
+    normalized = str(path or '').lstrip('/')
+    return normalized[5:] if normalized.lower().startswith('emby/') else normalized
+
+
+def _proxy_path_equals(path, expected):
+    return _strip_emby_api_prefix(path).strip('/').lower() == str(expected).strip('/').lower()
+
+
+def _proxy_path_startswith(path, expected):
+    return _strip_emby_api_prefix(path).lower().startswith(str(expected).lstrip('/').lower())
+
+
+def _match_user_views_path(path):
+    return re.match(r'^Users/([^/]+)/Views$', _strip_emby_api_prefix(path), re.IGNORECASE)
+
+
+def _match_user_items_path(path):
+    return re.match(r'^Users/([^/]+)/Items$', _strip_emby_api_prefix(path), re.IGNORECASE)
+
+
+def _match_user_latest_path(path):
+    return re.match(r'^Users/([^/]+)/Items/Latest$', _strip_emby_api_prefix(path), re.IGNORECASE)
+
+
+def _get_param_any(params, *names, default=None):
+    for name in names:
+        value = params.get(name)
+        if value is not None:
+            return value
+
+    wanted = {str(name).lower() for name in names}
+    try:
+        keys = params.keys()
+    except AttributeError:
+        keys = []
+    for key in keys:
+        if str(key).lower() in wanted:
+            return params.get(key)
+    return default
 
 def _get_real_emby_url_and_key():
     base_url = config_manager.APP_CONFIG.get("emby_server_url", "").rstrip('/')
@@ -449,7 +495,9 @@ def _current_play_concurrency_device_id():
         device_id = (
             request.args.get('DeviceId')
             or request.args.get('X-Emby-Device-Id')
+            or request.args.get('X-MediaBrowser-Device-Id')
             or request.headers.get('X-Emby-Device-Id')
+            or request.headers.get('X-MediaBrowser-Device-Id')
             or _extract_emby_auth_header_value('DeviceId')
             or ''
         )
@@ -462,8 +510,8 @@ def _current_play_concurrency_client_signature():
     try:
         parts = [
             request.remote_addr or "",
-            request.args.get('X-Emby-Client') or request.headers.get('X-Emby-Client') or _extract_emby_auth_header_value('Client'),
-            request.headers.get('X-Emby-Device-Name') or _extract_emby_auth_header_value('Device'),
+            request.args.get('X-Emby-Client') or request.args.get('X-MediaBrowser-Client') or request.headers.get('X-Emby-Client') or request.headers.get('X-MediaBrowser-Client') or _extract_emby_auth_header_value('Client'),
+            request.headers.get('X-Emby-Device-Name') or request.headers.get('X-MediaBrowser-Device-Name') or _extract_emby_auth_header_value('Device'),
             request.headers.get('User-Agent') or "",
         ]
     except RuntimeError:
@@ -570,8 +618,8 @@ def _request_context_keys(full_path="", play_session_id=""):
 
     token = _extract_emby_token_from_request()
     add("token", token)
-    add("device", request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or _extract_emby_auth_header_value('DeviceId'))
-    add("play_session", play_session_id or request.args.get('PlaySessionId'))
+    add("device", request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.args.get('X-MediaBrowser-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.headers.get('X-MediaBrowser-Device-Id') or _extract_emby_auth_header_value('DeviceId'))
+    add("play_session", play_session_id or _get_param_any(request.args, 'PlaySessionId', 'playSessionId'))
 
     return list(dict.fromkeys(keys))
 
@@ -684,12 +732,7 @@ def _lookup_cached_request_user(full_path="", play_session_id=""):
 
 
 def _extract_user_id_from_request_path_or_args(full_path=""):
-    user_id = (
-        request.args.get('UserId')
-        or request.args.get('userId')
-        or request.args.get('user_id')
-        or ''
-    )
+    user_id = _get_param_any(request.args, 'UserId', 'userId', 'user_id', default='')
     if user_id:
         return str(user_id).strip()
     user_id_match = re.search(r'/Users/([^/]+)/', full_path or '', re.IGNORECASE)
@@ -710,8 +753,8 @@ def _resolve_request_user_id(base_url, api_key, full_path="", play_session_id=""
     if token and token != api_key:
         try:
             resp = requests.get(
-                f"{base_url.rstrip('/')}/emby/Users/Me",
-                headers={"X-Emby-Token": token, "Accept": "application/json"},
+                _server_api_url(base_url, "Users/Me"),
+                headers={"X-Emby-Token": token, "X-MediaBrowser-Token": token, "Accept": "application/json"},
                 timeout=5,
             )
             if resp.status_code == 200:
@@ -724,7 +767,7 @@ def _resolve_request_user_id(base_url, api_key, full_path="", play_session_id=""
 
     if play_session_id:
         try:
-            resp = requests.get(f"{base_url.rstrip('/')}/emby/Sessions", params={"api_key": api_key}, timeout=5)
+            resp = requests.get(_server_api_url(base_url, "Sessions"), params={"api_key": api_key}, timeout=5)
             if resp.status_code == 200:
                 for item in resp.json() or []:
                     item_play_state = item.get('PlayState') or {}
@@ -933,10 +976,19 @@ def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
     
     # 适当增大分块大小以减少请求数
     id_chunks = list(chunk_list(unique_ids, 200))
-    target_url = f"{base_url}/emby/Users/{user_id}/Items"
+    target_url = _server_api_url(base_url, "Items")
     
     def fetch_chunk(chunk):
-        params = {'api_key': api_key, 'Ids': ",".join(chunk), 'Fields': fields}
+        ids = ",".join(chunk)
+        params = {
+            'api_key': api_key,
+            'Ids': ids,
+            'ids': ids,
+            'Fields': fields,
+            'fields': fields,
+            'UserId': user_id,
+            'userId': user_id,
+        }
         try:
             resp = requests.get(target_url, params=params, timeout=20)
             resp.raise_for_status()
@@ -971,11 +1023,24 @@ def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, l
         if estimated_ids_length < URL_LENGTH_THRESHOLD:
             # --- 路径 A: ID列表较短，直接请求 Emby (最快，且自动处理权限) ---
             logger.trace(f"  ➜ [Emby 代理排序] ID列表较短 ({len(item_ids)}个)，使用 GET 方法。")
-            target_url = f"{base_url}/emby/Users/{user_id}/Items"
+            target_url = _server_api_url(base_url, "Items")
+            ids = ",".join(item_ids)
             emby_params = {
-                'api_key': api_key, 'Ids': ",".join(item_ids), 'Fields': fields,
-                'SortBy': sort_by, 'SortOrder': sort_order,
-                'StartIndex': offset, 'Limit': limit,
+                'api_key': api_key,
+                'Ids': ids,
+                'ids': ids,
+                'Fields': fields,
+                'fields': fields,
+                'UserId': user_id,
+                'userId': user_id,
+                'SortBy': sort_by,
+                'sortBy': sort_by,
+                'SortOrder': sort_order,
+                'sortOrder': sort_order,
+                'StartIndex': offset,
+                'startIndex': offset,
+                'Limit': limit,
+                'limit': limit,
             }
             resp = requests.get(target_url, params=emby_params, timeout=25)
             resp.raise_for_status()
@@ -1034,10 +1099,10 @@ def handle_get_views():
         return "Proxy is not ready", 503
 
     try:
-        user_id_match = re.search(r'/emby/Users/([^/]+)/Views', request.path)
-        if not user_id_match:
+        user_id_match = _match_user_views_path(request.path)
+        user_id = user_id_match.group(1) if user_id_match else _get_param_any(request.args, 'userId', 'UserId', 'user_id', default='')
+        if not user_id:
             return "Could not determine user from request path", 400
-        user_id = user_id_match.group(1)
         client_signature = _current_play_concurrency_client_signature()
 
         if _is_official_ios_client(client_signature):
@@ -1245,6 +1310,7 @@ def handle_mimicked_library_metadata_endpoint(path, mimicked_id, params):
         
         new_params = params.copy()
         new_params['ParentId'] = real_emby_collection_id
+        new_params['parentId'] = real_emby_collection_id
         new_params['api_key'] = api_key
         
         resp = requests.get(target_url, headers=headers, params=new_params, timeout=15)
@@ -1276,16 +1342,16 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
         collection_type = collection_info.get('type')
         
         # 2. 获取分页和排序参数 (变量定义必须在此处)
-        emby_limit = int(params.get('Limit', 50))
-        offset = int(params.get('StartIndex', 0))
+        emby_limit = int(_get_param_any(params, 'Limit', 'limit', default=50))
+        offset = int(_get_param_any(params, 'StartIndex', 'startIndex', default=0))
         
         defined_limit = definition.get('limit')
         if defined_limit:
             defined_limit = int(defined_limit)
         
         # --- 排序优先级逻辑 ---
-        req_sort_by = params.get('SortBy')
-        req_sort_order = params.get('SortOrder')
+        req_sort_by = _get_param_any(params, 'SortBy', 'sortBy')
+        req_sort_order = _get_param_any(params, 'SortOrder', 'sortOrder')
         
         defined_sort_by = definition.get('default_sort_by')
         defined_sort_order = definition.get('default_sort_order')
@@ -1566,9 +1632,9 @@ def handle_get_latest_items(user_id, params):
     """
     try:
         base_url, api_key = _get_real_emby_url_and_key()
-        virtual_library_id = params.get('ParentId') or params.get('customViewId')
-        limit = int(params.get('Limit', 20))
-        fields = params.get('Fields', "PrimaryImageAspectRatio,BasicSyncInfo,DateCreated,UserData")
+        virtual_library_id = _get_param_any(params, 'ParentId', 'parentId', 'customViewId', default='')
+        limit = int(_get_param_any(params, 'Limit', 'limit', default=20))
+        fields = _get_param_any(params, 'Fields', 'fields', default="PrimaryImageAspectRatio,BasicSyncInfo,DateCreated,UserData")
 
         # --- 辅助函数：获取合集的过滤 ID ---
         def get_collection_filter_ids(coll_data):
@@ -1761,13 +1827,13 @@ def proxy_all(path):
         full_path = f'/{path}'
         observed_user_id = _extract_user_id_from_request_path_or_args(full_path)
         if observed_user_id:
-            _cache_request_user_context(observed_user_id, full_path, request.args.get('PlaySessionId', ''))
+            _cache_request_user_context(observed_user_id, full_path, _get_param_any(request.args, 'PlaySessionId', 'playSessionId', default=''))
         full_path_lower = full_path.lower()
         if request.method in ('POST', 'DELETE') and '/sessions/playing/stopped' in full_path_lower:
             base_url, api_key = _get_real_emby_url_and_key()
             payload = request.get_json(silent=True) or {}
-            play_session_id = request.args.get('PlaySessionId', '') or payload.get('PlaySessionId', '')
-            item_id = request.args.get('ItemId', '') or payload.get('ItemId', '')
+            play_session_id = _get_param_any(request.args, 'PlaySessionId', 'playSessionId', default='') or payload.get('PlaySessionId', '') or payload.get('playSessionId', '')
+            item_id = _get_param_any(request.args, 'ItemId', 'itemId', default='') or payload.get('ItemId', '') or payload.get('itemId', '')
             current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
             _clear_play_concurrency_session(current_user_id, item_id=item_id, play_session_id=play_session_id)
 
@@ -1777,9 +1843,9 @@ def proxy_all(path):
             and full_path_lower.endswith('/playbackinfo')
         ):
             base_url, api_key = _get_real_emby_url_and_key()
-            item_match = re.search(r'/items/(\d+)/playbackinfo$', full_path_lower)
+            item_match = re.search(r'/items/([^/?]+)/playbackinfo$', full_path, re.IGNORECASE)
             item_id = item_match.group(1) if item_match else ''
-            play_session_id = request.args.get('PlaySessionId', '')
+            play_session_id = _get_param_any(request.args, 'PlaySessionId', 'playSessionId', default='')
             current_user_id = _resolve_request_user_id(base_url, api_key, full_path, play_session_id)
 
             target_url = f"{base_url}/{path.lstrip('/')}"
@@ -1825,16 +1891,16 @@ def proxy_all(path):
         if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or ('/items/' in full_path_lower and '/download' in full_path_lower):
             # 检测浏览器客户端
             user_agent = request.headers.get('User-Agent', '').lower()
-            client_name = request.headers.get('X-Emby-Client', '').lower()
+            client_name = (request.headers.get('X-Emby-Client') or request.headers.get('X-MediaBrowser-Client') or '').lower()
             is_browser = 'mozilla' in user_agent or 'chrome' in user_agent or 'safari' in user_agent
             native_clients = ['androidtv', 'infuse', 'emby for ios', 'emby for android', 'emby theater', 'senplayer', 'applecoremedia']
             if any(nc in client_name for nc in native_clients) or 'infuse' in user_agent or 'dalvik' in user_agent or 'applecoremedia' in user_agent:
                 is_browser = False
             
             # 客户端处理逻辑
-            match = re.search(r'/(?:videos|items)/(\d+)/', full_path_lower)
+            match = re.search(r'/(?:videos|items)/([^/?]+)/', full_path, re.IGNORECASE)
             item_id = match.group(1) if match else ''
-            play_session_id = request.args.get('PlaySessionId', '')
+            play_session_id = _get_param_any(request.args, 'PlaySessionId', 'playSessionId', default='')
             
             pick_code = None
             virtual_play_info = None
@@ -1859,12 +1925,15 @@ def proxy_all(path):
 
                 if not data:
                     if not pick_code:
-                        playback_info_url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo"
+                        playback_info_url = _server_api_url(base_url, f"Items/{item_id}/PlaybackInfo")
                         params = {
                             'api_key': api_key,
                             'UserId': current_user_id,
+                            'userId': current_user_id,
                             'MaxStreamingBitrate': 140000000,
+                            'maxStreamingBitrate': 140000000,
                             'PlaySessionId': play_session_id,
+                            'playSessionId': play_session_id,
                         }
                         
                         forward_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'accept-encoding']}
@@ -1886,8 +1955,8 @@ def proxy_all(path):
             if virtual_play_info:
                 player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
                 play_client_key = "|".join([
-                    request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.remote_addr or "",
-                    request.headers.get('X-Emby-Client') or "",
+                    request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.args.get('X-MediaBrowser-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.headers.get('X-MediaBrowser-Device-Id') or request.remote_addr or "",
+                    request.headers.get('X-Emby-Client') or request.headers.get('X-MediaBrowser-Client') or "",
                     request.headers.get('User-Agent') or "",
                 ])
                 try:
@@ -1911,8 +1980,8 @@ def proxy_all(path):
             if pick_code:
                 player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
                 play_client_key = "|".join([
-                    request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.remote_addr or "",
-                    request.headers.get('X-Emby-Client') or "",
+                    request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.args.get('X-MediaBrowser-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.headers.get('X-MediaBrowser-Device-Id') or request.remote_addr or "",
+                    request.headers.get('X-Emby-Client') or request.headers.get('X-MediaBrowser-Client') or "",
                     request.headers.get('User-Agent') or "",
                 ])
 
@@ -1925,7 +1994,7 @@ def proxy_all(path):
                     "user_id": current_user_id,
                     "source": 'reverse_proxy',
                     "client_key": play_client_key,
-                    "client_name": request.headers.get('X-Emby-Client') or request.headers.get('User-Agent') or "",
+                    "client_name": request.headers.get('X-Emby-Client') or request.headers.get('X-MediaBrowser-Client') or request.headers.get('User-Agent') or "",
                 }
                 use_copy_play = False if play_pool_enabled else is_copy_play_enabled()
 
@@ -2040,8 +2109,9 @@ def proxy_all(path):
             return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
         
         # --- 4. 拦截 A: 虚拟项目海报图片 ---
-        if path.startswith('emby/Items/') and '/Images/Primary' in path:
-            item_id = path.split('/')[2]
+        if _proxy_path_startswith(path, 'Items/') and '/Images/Primary' in path:
+            item_match = re.search(r'^Items/([^/]+)/Images/Primary', _strip_emby_api_prefix(path), re.IGNORECASE)
+            item_id = item_match.group(1) if item_match else ''
             if is_missing_item_id(item_id):
                 combined_id = parse_missing_item_id(item_id)
                 real_tmdb_id = combined_id.split('_S_')[0] if '_S_' in combined_id else combined_id
@@ -2062,40 +2132,43 @@ def proxy_all(path):
                     return resp
 
         # --- 拦截 B: 视图列表 (Views) ---
-        if path.endswith('/Views') and path.startswith('emby/Users/'):
+        if _match_user_views_path(path) or _proxy_path_equals(path, 'UserViews'):
             return handle_get_views()
 
         # --- 拦截 C: 最新项目 (Latest) ---
-        if path.endswith('/Items/Latest'):
-            user_id_match = re.search(r'/emby/Users/([^/]+)/', full_path)
-            if user_id_match:
-                return handle_get_latest_items(user_id_match.group(1), request.args)
+        if _match_user_latest_path(path) or _proxy_path_equals(path, 'Items/Latest'):
+            user_id_match = _match_user_latest_path(path)
+            user_id = user_id_match.group(1) if user_id_match else _get_param_any(request.args, 'UserId', 'userId', 'user_id', default='')
+            if user_id:
+                return handle_get_latest_items(user_id, request.args)
 
         # --- 拦截 D: 虚拟库详情 (增强版拦截) ---
         details_match = re.search(r'/Items/(-(\d+))(?:$|\?)', full_path)
         if details_match and '/Images/' not in full_path and '/PlaybackInfo' not in full_path:
             mimicked_id = details_match.group(1)
             # 尝试从路径或参数获取 user_id
-            user_id_match = re.search(r'/Users/([^/]+)/', full_path)
-            user_id = user_id_match.group(1) if user_id_match else request.args.get('UserId')
+            user_id_match = re.search(r'/(?:emby/)?Users/([^/]+)/', full_path, re.IGNORECASE)
+            user_id = user_id_match.group(1) if user_id_match else _get_param_any(request.args, 'UserId', 'userId', 'user_id', default='')
             return handle_get_mimicked_library_details(user_id, mimicked_id)
 
         # --- 拦截 E: 虚拟库图片 ---
-        if path.startswith('emby/Items/') and '/Images/' in path:
-            item_id = path.split('/')[2]
+        if _proxy_path_startswith(path, 'Items/') and '/Images/' in path:
+            item_match = re.search(r'^Items/([^/]+)/Images/', _strip_emby_api_prefix(path), re.IGNORECASE)
+            item_id = item_match.group(1) if item_match else ''
             if is_mimicked_id(item_id):
                 return handle_get_mimicked_library_image(path)
         
         # --- 拦截 F: 虚拟库内容浏览 (Items) ---
         # 修复 iOS 传参大小写问题 (有时传 ParentId，有时传 parentId)
-        parent_id = request.args.get("ParentId") or request.args.get("parentId")
+        parent_id = _get_param_any(request.args, "ParentId", "parentId")
         
         if parent_id and is_mimicked_id(parent_id):
             # 1. 处理核心的内容列表请求 (严格匹配结尾，防止误伤 Filters)
-            user_id_match = re.search(r'emby/Users/([^/]+)/Items$', path)
-            if user_id_match:
-                user_id = user_id_match.group(1)
-                return handle_get_mimicked_library_items(user_id, parent_id, request.args)
+            user_id_match = _match_user_items_path(path)
+            if user_id_match or _proxy_path_equals(path, 'Items'):
+                user_id = user_id_match.group(1) if user_id_match else _get_param_any(request.args, 'UserId', 'userId', 'user_id', default='')
+                if user_id:
+                    return handle_get_mimicked_library_items(user_id, parent_id, request.args)
 
             # 2. 处理所有其他带有虚拟 ParentId 的请求 (如 /Filters, /Genres 等)
             return handle_mimicked_library_metadata_endpoint(path, parent_id, request.args)

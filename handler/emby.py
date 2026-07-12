@@ -938,44 +938,51 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
 def notify_emby_file_changes(file_paths: List[str], base_url: str, api_key: str, update_type: str = "Created") -> bool:
     """
     【极速轻量级刷新】
-    直接提取文件所在目录，向上寻根并触发 Emby 的局部精准扫描。
-    彻底抛弃 Emby 带有 90 秒延迟的 Updated 队列接口。
+    先通过 /Library/Media/Updated 通知媒体服务器具体文件变更；再触发父目录刷新作为补强。
+    Jellyfin 对新增 STRM 更依赖 Media Updated 事件，Emby 继续保留原来的目录精准扫描路径。
     """
-    if not file_paths: 
+    if not file_paths:
         return True
-        
+
     action_map = {
         "Created": "新增",
         "Modified": "修改",
         "Deleted": "删除"
     }
     action_zh = action_map.get(update_type, update_type)
-    
+
     try:
-        if str(update_type or "").lower() == "deleted":
-            api_url = f"{base_url.rstrip('/')}/Library/Media/Updated"
-            payload = {
-                "Updates": [
-                    {"Path": str(p), "UpdateType": "Deleted"}
-                    for p in file_paths
-                    if p
-                ]
-            }
-            if payload["Updates"]:
-                resp = emby_client.post(api_url, params={"api_key": api_key}, json=payload, timeout=10)
-                if resp.status_code not in (200, 204):
-                    logger.debug(f"  ➜ [极速通知] 删除事件通知返回 HTTP {resp.status_code}: {resp.text[:200]}")
+        normalized_update_type = str(update_type or "Created").strip() or "Created"
+        normalized_update_type = normalized_update_type[:1].upper() + normalized_update_type[1:].lower()
+        if normalized_update_type not in {"Created", "Modified", "Deleted"}:
+            normalized_update_type = "Modified"
+
+        api_url = f"{base_url.rstrip('/')}/Library/Media/Updated"
+        payload = {
+            "Updates": [
+                {"Path": str(p), "UpdateType": normalized_update_type}
+                for p in file_paths
+                if p
+            ]
+        }
+        media_updated_ok = True
+        if payload["Updates"]:
+            resp = emby_client.post(api_url, params={"api_key": api_key}, json=payload, timeout=10)
+            media_updated_ok = resp.status_code in (200, 204)
+            if media_updated_ok:
+                logger.debug(f"  ➜ [极速通知] 已发送 {len(payload['Updates'])} 个文件{action_zh}事件到媒体库更新接口。")
+            else:
+                logger.debug(f"  ➜ [极速通知] 媒体库更新接口返回 HTTP {resp.status_code}: {resp.text[:200]}")
 
         # 直接提取所有文件所在的目录，去重 (防止批量入库时重复刷新同一个父目录)
         dirs_to_refresh = set(os.path.dirname(p) for p in file_paths if p)
 
-        # logger.info(f"  ➜ 收到 {len(file_paths)} 个文件{action_zh}请求，准备对 {len(dirs_to_refresh)} 个父目录触发精准扫描...")
-
-        # 直接拿鞭子抽，让 Emby 扫目录
+        # Jellyfin 对 STRM 新文件更依赖 /Library/Media/Updated；目录刷新作为 Emby/Jellyfin 的补强与回退。
+        refresh_ok = True
         for d in dirs_to_refresh:
-            _force_refresh_directory_tree(d, base_url, api_key)
-            
-        return True
+            refresh_ok = _force_refresh_directory_tree(d, base_url, api_key) and refresh_ok
+
+        return media_updated_ok or refresh_ok
     except Exception as e:
         logger.error(f"  ➜ [极速通知] 触发扫描失败: {e}")
         return False
