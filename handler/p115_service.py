@@ -3527,14 +3527,25 @@ class P115CacheManager:
         """将 CID 和 SHA1 存入本地数据库缓存"""
         if not cid or not parent_cid or not name: return
         try:
+            cid_text = str(cid)
+            parent_text = str(parent_cid)
+            name_text = str(name)
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
+                        DELETE FROM p115_filesystem_cache
+                        WHERE parent_id = %s AND name = %s AND id <> %s
+                    """, (parent_text, name_text, cid_text))
+                    cursor.execute("""
                         INSERT INTO p115_filesystem_cache (id, parent_id, name, sha1)
                         VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (parent_id, name)
-                        DO UPDATE SET id = EXCLUDED.id, sha1 = EXCLUDED.sha1, updated_at = NOW()
-                    """, (str(cid), str(parent_cid), str(name), sha1))
+                        ON CONFLICT (id)
+                        DO UPDATE SET
+                            parent_id = EXCLUDED.parent_id,
+                            name = EXCLUDED.name,
+                            sha1 = COALESCE(EXCLUDED.sha1, p115_filesystem_cache.sha1),
+                            updated_at = NOW()
+                    """, (cid_text, parent_text, name_text, sha1))
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 DB 缓存失败: {e}")
