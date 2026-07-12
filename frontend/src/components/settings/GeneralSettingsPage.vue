@@ -191,8 +191,8 @@
                       </n-form-item-grid-item>
 
                       <n-form-item-grid-item span="1 m:2" label="用户ID" :rule="embyUserIdRule" path="emby_user_id">
-                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位或UUID格式用户ID" />
-                        <template #feedback><div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位或UUID格式。</div></template>
+                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位用户ID" />
+                        <template #feedback><div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位。</div></template>
                       </n-form-item-grid-item>
 
                       <n-form-item-grid-item label="APIKey" path="emby_api_key">
@@ -962,7 +962,7 @@ const nativeLibraryError = ref(null);
 let unwatchGlobal = null;
 let unwatchEmbyConfig = null;
 const isTestingProxy = ref(false);
-const embyUserIdRegex = /^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
+const embyUserIdRegex = /^[a-f0-9]{32}$/i;
 const isCleaningOffline = ref(false);
 const isClearingVectors = ref(false);
 const isTestingAI = ref(false);
@@ -1003,7 +1003,7 @@ const embyUserIdRule = {
   trigger: ['input', 'blur'],
   validator(rule, value) {
     if (value && !embyUserIdRegex.test(value)) {
-      return new Error('ID格式不正确，应为32位或UUID格式。');
+      return new Error('ID格式不正确，应为32位。');
     }
     return true;
   }
