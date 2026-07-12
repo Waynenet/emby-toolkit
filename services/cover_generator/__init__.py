@@ -251,11 +251,10 @@ class CoverGeneratorService:
 
     def __fetch_emby_items_by_ids(self, items_from_db: List[Dict], base_url: str, api_key: str, user_id: str, limit: int) -> List[Dict]:
         if not items_from_db: return []
-        url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
         headers = {"X-Emby-Token": api_key, "Content-Type": "application/json"}
         params = {'Ids': ",".join([str(item['Id']) for item in items_from_db]), 'Fields': "Id,Name,Type,ImageTags,BackdropImageTags,PrimaryImageTag,PrimaryImageItemId"}
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            resp = emby.request_items(base_url, api_key, user_id=user_id, params=params, headers=headers, timeout=30)
             resp.raise_for_status()
             valid_items = [item for item in resp.json().get('Items', []) if self.__get_image_url(item)]
             if self._sort_by == "Random": random.shuffle(valid_items)
