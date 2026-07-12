@@ -3642,6 +3642,80 @@ def _wait_rapid_transfer_lease_for_fallback(
         time.sleep(retry_after)
 
 
+def _wait_rapid_transfer_lease_before_transfer(
+    client: SharedCenterClient,
+    *,
+    source_kind: str,
+    source_id: str,
+    payload: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    event_id: str = '',
+    max_wait_seconds: int = 60,
+) -> Dict[str, Any]:
+    """预检通过后、真正 Rapid 秒传前申请中心许可。"""
+    existing = _event_transfer_lease_id(payload)
+    if existing:
+        return {'ok': True, 'skipped': True, 'reason': 'lease_already_present', 'lease_id': existing}
+
+    first = next((f for f in (files or []) if isinstance(f, dict)), {}) or {}
+    source_kind = _normalize_source_kind(first.get('source_kind') or source_kind)
+    source_id = str(first.get('source_id') or first.get('source_ref_id') or source_id or '').strip()
+    if source_kind not in ('movie', 'episode', 'logical_episode') or not source_id:
+        return {'ok': True, 'skipped': True, 'reason': 'not_rapid_transfer_lease_source'}
+
+    sha1 = _norm_sha1(first.get('sha1') or (payload or {}).get('sha1'))
+    label = str(first.get('file_name') or first.get('name') or (payload or {}).get('title') or source_id)
+    request_payload = {
+        'source_kind': source_kind,
+        'source_id': source_id,
+        'sha1': sha1 or None,
+        'transfer_mode': 'rapid',
+        'request_meta_json': {
+            'event_id': str(event_id or ''),
+            'event_type': str((payload or {}).get('event_type') or ''),
+            'client_gate': 'shared_subscription_service_post_preflight_v1',
+            'reason': 'after_preflight_before_rapid_transfer',
+        },
+    }
+
+    deadline = time.time() + max(10, int(max_wait_seconds or 60))
+    attempts = 0
+    last_resp: Dict[str, Any] = {}
+    while True:
+        attempts += 1
+        try:
+            resp = _client_call_rapid_transfer_lease(client, request_payload) or {}
+        except Exception as e:
+            logger.debug(f"  ➜ [共享资源] 秒传许可接口不可用，预检通过后按旧流程继续：{source_kind}:{source_id}, err={e}")
+            return {'ok': True, 'skipped': True, 'reason': 'lease_api_unavailable', 'error': str(e)}
+        last_resp = resp if isinstance(resp, dict) else {'raw': resp}
+        if last_resp.get('ok') and last_resp.get('allow') is False and not last_resp.get('deferred'):
+            logger.info(
+                f"  ➜ [共享资源] 预检通过后中心秒传许可明确拒绝："
+                f"{label}，reason={last_resp.get('reason') or 'not_allowed'}"
+            )
+            return {'ok': True, 'blocked': True, 'lease': last_resp, 'attempts': attempts}
+        if last_resp.get('allow') or (last_resp.get('ok') and not last_resp.get('deferred') and last_resp.get('allow') is not False):
+            lease_id = str(last_resp.get('lease_id') or '').strip()
+            if lease_id:
+                payload['rapid_transfer_lease_id'] = lease_id
+                payload['transfer_lease_id'] = lease_id
+            logger.info(f"  ➜ [共享资源] 预检通过后秒传许可已发放：{label}")
+            return {'ok': True, 'lease': last_resp, 'lease_id': lease_id, 'attempts': attempts}
+
+        retry_after = _safe_int(last_resp.get('retry_after'), 30)
+        retry_after = max(5, min(retry_after, 120))
+        reason = str(last_resp.get('reason') or 'deferred')
+        if time.time() + retry_after > deadline:
+            logger.warning(
+                f"  ➜ [共享资源] 预检通过后秒传许可等待超时，转入旧流程并交由中心签名阀兜底："
+                f"{source_kind}:{source_id}, reason={reason}, last={last_resp}"
+            )
+            return {'ok': True, 'lease_timeout': True, 'lease': last_resp, 'attempts': attempts}
+        logger.debug(f"  ➜ [共享资源] 预检通过后中心秒传许可排队中：{label}，{retry_after}s 后重试，reason={reason}")
+        time.sleep(retry_after)
+
+
 def _try_completed_season_share_transfer(
     *,
     client: SharedCenterClient,
@@ -4209,6 +4283,42 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
             'rapid_target': rapid_target,
             'aborted_season_package': True,
         }
+
+    lease_wait = _wait_rapid_transfer_lease_before_transfer(
+        client,
+        source_kind=source_kind,
+        source_id=source_id,
+        payload=payload,
+        files=files,
+        event_id=event_id,
+        max_wait_seconds=_safe_int(payload.get('_lease_max_wait_seconds'), 60),
+    )
+    if lease_wait.get('blocked'):
+        lease = lease_wait.get('lease') if isinstance(lease_wait.get('lease'), dict) else {}
+        message = lease.get('message') or '中心秒传许可拒绝，跳过该共享事件'
+        if ack and event_id:
+            try:
+                client.ack_device_events([event_id], result='skipped', message=message[:500])
+            except Exception:
+                pass
+        return {
+            'ok': True,
+            'skipped': True,
+            'blocked': True,
+            'blocked_reason': lease.get('reason') or 'transfer_lease_blocked',
+            'message': message,
+            'event_id': event_id,
+            'source_kind': source_kind,
+            'source_id': source_id,
+            'success_count': 0,
+            'total': len(files),
+            'errors': [],
+            'transfer_mode': 'rapid',
+            'preflight': locals().get('preflight', {}),
+            'rapid_target': rapid_target,
+            'lease': lease_wait,
+        }
+    lease_id = _event_transfer_lease_id(payload, event)
 
     ok_count = 0
     errors = []
