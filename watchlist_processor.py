@@ -2988,7 +2988,7 @@ class WatchlistProcessor:
                         FROM media_metadata
                         WHERE parent_series_tmdb_id = %s
                           AND season_number = %s
-                          AND item_type = 'Episode'
+                          AND item_type IN ('Season', 'Episode')
                           AND active_washing = TRUE
                         LIMIT 1
                         """,
