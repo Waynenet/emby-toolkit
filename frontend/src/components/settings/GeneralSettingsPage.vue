@@ -435,6 +435,40 @@
                       </template>
                     </n-form-item>
 
+                    <n-form-item label="单次处理上限" path="monitor_scan_max_tasks">
+                      <n-input-number
+                        v-model:value="configModel.monitor_scan_max_tasks"
+                        :min="1"
+                        :max="1000"
+                        placeholder="10"
+                        style="width: 100%"
+                      >
+                        <template #suffix>个目录</template>
+                      </n-input-number>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          定时扫描发现大量积压时，本轮最多主动处理的目录数，剩余项目留到后续扫描。
+                        </n-text>
+                      </template>
+                    </n-form-item>
+
+                    <n-form-item label="扫描处理批量" path="monitor_scan_batch_size">
+                      <n-input-number
+                        v-model:value="configModel.monitor_scan_batch_size"
+                        :min="1"
+                        :max="100"
+                        placeholder="2"
+                        style="width: 100%"
+                      >
+                        <template #suffix>个/批</template>
+                      </n-input-number>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          漏网项目进入核心处理器时的批量大小，数值越小越稳，数值越大处理越快。
+                        </n-text>
+                      </template>
+                    </n-form-item>
+
                     <n-form-item label="监控扩展名" path="monitor_extensions">
                       <n-select
                         v-model:value="configModel.monitor_extensions"
@@ -3475,6 +3509,12 @@ const save = async () => {
     if (configModel.value) {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
+    }
+    cleanConfigPayload.monitor_scan_max_tasks = Math.max(1, Math.floor(Number(cleanConfigPayload.monitor_scan_max_tasks || 10)));
+    cleanConfigPayload.monitor_scan_batch_size = Math.max(1, Math.floor(Number(cleanConfigPayload.monitor_scan_batch_size || 2)));
+    if (configModel.value) {
+        configModel.value.monitor_scan_max_tasks = cleanConfigPayload.monitor_scan_max_tasks;
+        configModel.value.monitor_scan_batch_size = cleanConfigPayload.monitor_scan_batch_size;
     }
     if (cleanConfigPayload.p115_shared_resource_enabled) {
         if (!['permanent', 'virtual'].includes(cleanConfigPayload.p115_shared_resource_mode)) {
