@@ -489,7 +489,7 @@ def update_person_details(person_id: str, new_data: Dict[str, Any], emby_server_
         return False
 
     api_url = _api_url(emby_server_url, f"Items/{person_id}")
-    params = {"api_key": emby_api_key, "UserId": user_id}
+    params = {"api_key": emby_api_key}
     # wait_for_server_idle(emby_server_url, emby_api_key)
     try:
         logger.trace(f"准备获取 Person 详情 (ID: {person_id}, UserID: {user_id}) at {api_url}")
