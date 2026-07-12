@@ -100,6 +100,8 @@ def get_mp_config():
     default_cfg = {
         'moviepilot_url': '', 'moviepilot_username': '', 'moviepilot_password': '',
         'moviepilot_recognition': False,
+        'link_delete_transfer_history',
+        'link_delete_download_files',
         'resubscribe_daily_cap': 10, 'resubscribe_delay_seconds': 2.0,
         'movie_search_window_days': 1,
         'movie_pause_days': 7,
@@ -119,8 +121,6 @@ def get_mp_config():
         )
     default_cfg.update(cfg)
     for removed_key in (
-        'link_delete_transfer_history',
-        'link_delete_download_files',
         'timeout_revive_days',
         'download_timeout_hours',
         'movie_protection_days',
@@ -140,8 +140,6 @@ def save_mp_config():
     if not isinstance(new_cfg, dict):
         return jsonify({"success": False, "message": "配置格式错误"}), 400
     for removed_key in (
-        'link_delete_transfer_history',
-        'link_delete_download_files',
         'timeout_revive_days',
         'download_timeout_hours',
         'movie_protection_days',

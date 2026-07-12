@@ -404,10 +404,6 @@
       :bordered="false"
       size="huge"
     >
-      <template #header-extra>
-        <n-icon size="20" :component="SettingsIcon" />
-      </template>
-
       <div class="assistant-settings">
         <div class="settings-layout assistant-aux-layout">
           <div class="settings-col">
