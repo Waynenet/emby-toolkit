@@ -509,7 +509,7 @@ const renderTemplate = (template, data) => {
     output = next;
   }
   output = output.replace(/{{\s*([^}]+?)\s*}}/g, (_, expr) => renderExpression(expr, data));
-  return cleanupEmptySeparators(output.replace(/[\\:*?"<>|]/g, '').trim());
+  return cleanupEmptySeparators(output.replace(/:/g, '：').replace(/[\\*?"<>|]/g, '').trim());
 };
 
 const formatVideoCodecLabel = (codec, style = config.value.video_codec_style) => {
