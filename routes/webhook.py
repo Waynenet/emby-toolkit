@@ -800,25 +800,25 @@ def emby_webhook():
         # --------------------------------------------------------
         # ★★★ 联动清理 MoviePilot (支持精准单集与辅种) ★★★
         # --------------------------------------------------------     
-        # 1. 在 webhook.py 中，使用全局的 APP_CONFIG 获取配置
-        app_config = config_manager.APP_CONFIG
+        # 1. 从 settings_db 读取专门的 MoviePilot 配置
+        mp_config = settings_db.get_setting('mp_config') or {}
         
-        # 2. 安全转换布尔值（防止配置文件里存的是字符串 "true" 或 "false"）
+        # 2. 安全转换布尔值
         def _is_true(val, default=False):
             if val is None: return default
             if isinstance(val, bool): return val
             return str(val).lower() in ['true', '1', 'yes', 'on']
             
-        # 3. 获取开关状态（默认值坚决设为 False 保平安）
-        del_history = _is_true(app_config.get('link_delete_transfer_history'), default=False)
-        del_files = _is_true(app_config.get('link_delete_download_files'), default=False)
+        # 3. 获取开关状态
+        del_history = _is_true(mp_config.get('link_delete_transfer_history'), default=False)
+        del_files = _is_true(mp_config.get('link_delete_download_files'), default=False)
 
-        # ★ 增加显式日志，让你一眼看出开关到底有没有打开
+        # 增加显式日志，方便排查开关状态
         logger.info(f"  ➜ [深度删除] 读取联动配置 -> 清理整理记录: {del_history}, 清理下载文件: {del_files}")
 
         if (del_history or del_files) and original_item_id:
             try:
-                # 尝试从本地数据库反查 TMDb ID 和季集信息 (此时数据库还没被删，完美拿到！)
+                # 尝试从本地数据库反查 TMDb ID 和季集信息
                 db_tmdb_id = None
                 db_season = None
                 db_episode = None
@@ -827,7 +827,6 @@ def emby_webhook():
 
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
-                        # 兼容不同数据库的 JSON 文本搜索，使用 CAST 更安全
                         cursor.execute("SELECT tmdb_id, item_type, season_number, episode_number, title, parent_series_tmdb_id FROM media_metadata WHERE CAST(emby_item_ids_json AS TEXT) LIKE %s", (f'%"{original_item_id}"%',))
                         row = cursor.fetchone()
                         if row:
@@ -839,7 +838,6 @@ def emby_webhook():
                                 db_tmdb_id = row['parent_series_tmdb_id']
                                 db_season = row['season_number']
                                 db_episode = row['episode_number']
-                                # 剧集需要用主剧名去搜 MP
                                 cursor.execute("SELECT title FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Series'", (db_tmdb_id,))
                                 p_row = cursor.fetchone()
                                 if p_row: db_title = p_row['title']
@@ -857,8 +855,7 @@ def emby_webhook():
                     logger.info(f"  ➜ [深度删除] 触发 MP 联动清理: {db_title} (TMDb:{db_tmdb_id}, S:{db_season}, E:{db_episode})")
                     from handler.moviepilot import smart_cleanup_mp_media
                     # 异步执行，防止阻塞 Webhook
-                    # ★ 修复崩溃Bug：将 None 替换为 config_manager.APP_CONFIG 传入
-                    spawn(smart_cleanup_mp_media, str(db_tmdb_id), db_item_type, db_season, db_episode, db_title, config_manager.APP_CONFIG, del_history, del_files)
+                    spawn(smart_cleanup_mp_media, str(db_tmdb_id), db_item_type, db_season, db_episode, db_title, mp_config, del_history, del_files)
                 else:
                     logger.warning(f"  ➜ [深度删除] 无法从本地数据库反查到 Emby ID {original_item_id} 的 TMDb 信息，跳过 MP 联动清理。")
             except Exception as e:
