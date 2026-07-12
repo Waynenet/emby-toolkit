@@ -3924,7 +3924,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 client.ack_device_events([event_id], result='ok', message=message[:500])
             except Exception:
                 pass
-        logger.debug(f"  ➜ [共享资源] {message}")
+        logger.trace(f"  ➜ [共享资源] {message}")
         return {
             'ok': False,
             'skipped': True,
