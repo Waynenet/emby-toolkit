@@ -1398,6 +1398,10 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                                     update_clauses.append(
                                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
                                     )
+                                elif current_type == 'Series' and col == 'watchlist_tmdb_status':
+                                    update_clauses.append(
+                                        "watchlist_tmdb_status = CASE WHEN media_metadata.force_ended IS TRUE THEN media_metadata.watchlist_tmdb_status ELSE EXCLUDED.watchlist_tmdb_status END"
+                                    )
                                 else:
                                     # 其他字段正常更新
                                     update_clauses.append(f"{col} = EXCLUDED.{col}")

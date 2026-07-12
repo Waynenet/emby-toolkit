@@ -785,7 +785,7 @@ class WatchlistProcessor:
             "networks_json": json.dumps(networks_json) if networks_json else None,
             "countries_json": json.dumps(countries_json) if countries_json else None
         }
-        media_db.update_media_metadata_fields(tmdb_id, 'Series', series_updates)
+        watchlist_db.update_media_metadata_fields(tmdb_id, 'Series', series_updates)
         logger.debug(f"  ➜ 已全量刷新 '{item_name}' 的 Series 元数据。")
 
         # 4. 处理季和集的数据 (保存 JSON + 收集列表)
