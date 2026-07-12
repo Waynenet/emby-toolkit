@@ -252,16 +252,9 @@ def proxy_emby_image(image_path):
 
         # 3. 发送请求
         emby_response = requests.get(target_url_with_key, stream=True, timeout=20)
-        if emby_response.status_code == 404 and image_path.startswith('Users/') and image_path.endswith('/Images/Primary'):
-            path_parts = image_path.split('/')
-            if len(path_parts) >= 4:
-                user_params = request.args.to_dict()
-                user_params['userId'] = path_parts[1]
-                user_params['api_key'] = emby_api_key
-                emby_response = requests.get(f"{emby_url}/UserImage", params=user_params, stream=True, timeout=20)
         emby_response.raise_for_status()
 
-        # 4. 将 Emby/Jellyfin 的响应流式传输回浏览器
+        # 4. 将 Emby 的响应流式传输回浏览器
         return Response(
             stream_with_context(emby_response.iter_content(chunk_size=8192)),
             content_type=emby_response.headers.get('Content-Type'),
@@ -411,6 +404,7 @@ def api_get_emby_user_views(user_id):
         return jsonify({"error": "缺少用户访问令牌(api_key或X-Emby-Token)"}), 400
     
     base_url = extensions.media_processor_instance.emby_url.rstrip('/')
+    real_views_url = f"{base_url}/emby/Users/{user_id}/Views"
     
     try:
         # 复制请求头，剔除不必要的
@@ -422,7 +416,7 @@ def api_get_emby_user_views(user_id):
         params = request.args.to_dict()
         params['api_key'] = user_token  # 兼容api_key参数
         
-        resp = emby.request_user_views(base_url, user_token, user_id, params=params, headers=headers, timeout=15)
+        resp = requests.get(real_views_url, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         
         views_data = resp.json()

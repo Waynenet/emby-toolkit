@@ -397,6 +397,7 @@ class CoverGeneratorService:
         target_ids = [item['Id'] for item in items_from_db]
         ids_str = ",".join(target_ids)
         
+        url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
         headers = {"X-Emby-Token": api_key, "Content-Type": "application/json"}
         params = {
             'Ids': ids_str,
@@ -404,7 +405,7 @@ class CoverGeneratorService:
         }
         
         try:
-            resp = emby.request_items(base_url, api_key, user_id=user_id, params=params, headers=headers, timeout=30)
+            resp = requests.get(url, params=params, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
             items_from_emby = data.get('Items', [])

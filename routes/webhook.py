@@ -61,156 +61,6 @@ UPDATE_DEBOUNCE_TIME = 15
 MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
 
-JELLYFIN_WEBHOOK_EVENT_MAP = {
-    "ItemAdded": "item.add",
-    "ItemUpdated": "metadata.update",
-    "ItemMetadataUpdated": "metadata.update",
-    "ItemImageUpdated": "image.update",
-    "ItemDeleted": "deep.delete",
-    "ItemRemoved": "deep.delete",
-    "PlaybackStart": "playback.start",
-    "PlaybackStop": "playback.stop",
-    "PlaybackProgress": "playback.progress",
-    "UserDataSaved": "item.rate",
-    "UserUpdated": "user.policyupdated",
-}
-
-
-def _pick_first(source, *keys):
-    if not isinstance(source, dict):
-        return None
-    for key in keys:
-        if key in source and source.get(key) not in (None, ""):
-            return source.get(key)
-    wanted = {str(key).lower() for key in keys}
-    for key, value in source.items():
-        if str(key).lower() in wanted and value not in (None, ""):
-            return value
-    return None
-
-
-def _coerce_bool(value):
-    if isinstance(value, bool):
-        return value
-    if value is None or value == "":
-        return None
-    text = str(value).strip().lower()
-    if text in {"true", "1", "yes", "y", "on"}:
-        return True
-    if text in {"false", "0", "no", "n", "off"}:
-        return False
-    return None
-
-
-def _normalize_jellyfin_webhook_payload(data):
-    if not isinstance(data, dict):
-        return data
-    if data.get("Event"):
-        return data
-
-    notification_type = _pick_first(data, "NotificationType", "notificationType", "Type")
-    if not notification_type:
-        return data
-
-    event_type = JELLYFIN_WEBHOOK_EVENT_MAP.get(str(notification_type))
-    if not event_type:
-        return data
-
-    normalized = dict(data)
-    item = dict(normalized.get("Item") or {})
-    user = dict(normalized.get("User") or {})
-    playback = dict(normalized.get("PlaybackInfo") or {})
-
-    item_id = _pick_first(data, "ItemId", "itemId", "Id", "id")
-    item_type = _pick_first(data, "ItemType", "itemType", "BaseItemKind")
-    item_name = _pick_first(data, "Name", "ItemName", "itemName")
-    series_id = _pick_first(data, "SeriesId", "seriesId")
-    series_name = _pick_first(data, "SeriesName", "seriesName")
-
-    if item_id is not None:
-        item.setdefault("Id", str(item_id))
-    if item_type is not None:
-        item.setdefault("Type", str(item_type))
-    if item_name is not None:
-        item.setdefault("Name", str(item_name))
-    if series_id is not None:
-        item.setdefault("SeriesId", str(series_id))
-    if series_name is not None:
-        item.setdefault("SeriesName", str(series_name))
-
-    for flat_key, item_key in (
-        ("Path", "Path"),
-        ("MediaSourceId", "MediaSourceId"),
-        ("RunTimeTicks", "RunTimeTicks"),
-        ("Overview", "Overview"),
-        ("Year", "ProductionYear"),
-    ):
-        value = _pick_first(data, flat_key, flat_key[:1].lower() + flat_key[1:])
-        if value is not None:
-            item.setdefault(item_key, value)
-
-    provider_ids = dict(item.get("ProviderIds") or {})
-    for source_key, provider_key in (
-        ("Provider_tmdb", "Tmdb"),
-        ("Provider_imdb", "Imdb"),
-        ("Provider_tvdb", "Tvdb"),
-    ):
-        value = _pick_first(data, source_key, source_key.lower(), source_key.upper())
-        if value is not None:
-            provider_ids.setdefault(provider_key, str(value))
-    if provider_ids:
-        item["ProviderIds"] = provider_ids
-
-    user_id = _pick_first(data, "UserId", "userId")
-    user_name = _pick_first(data, "Username", "NotificationUsername", "UserName", "userName")
-    if user_id is not None:
-        user.setdefault("Id", str(user_id))
-    if user_name is not None:
-        user.setdefault("Name", str(user_name))
-
-    user_data = dict(item.get("UserData") or {})
-    favorite = _coerce_bool(_pick_first(data, "Favorite", "IsFavorite", "favorite", "isFavorite"))
-    played = _coerce_bool(_pick_first(data, "Played", "played"))
-    likes = _coerce_bool(_pick_first(data, "Likes", "likes"))
-    rating = _pick_first(data, "Rating", "rating")
-    play_count = _pick_first(data, "PlayCount", "playCount")
-    if favorite is not None:
-        user_data.setdefault("IsFavorite", favorite)
-    if played is not None:
-        user_data.setdefault("Played", played)
-    if likes is not None:
-        user_data.setdefault("Likes", likes)
-    if rating is not None:
-        user_data.setdefault("Rating", rating)
-    if play_count is not None:
-        user_data.setdefault("PlayCount", play_count)
-
-    position_ticks = _pick_first(data, "PlaybackPositionTicks", "PositionTicks", "playbackPositionTicks", "positionTicks")
-    if position_ticks is not None:
-        playback.setdefault("PositionTicks", position_ticks)
-        user_data.setdefault("PlaybackPositionTicks", position_ticks)
-    played_to_completion = _coerce_bool(_pick_first(data, "PlayedToCompletion", "playedToCompletion"))
-    if played_to_completion is not None:
-        playback.setdefault("PlayedToCompletion", played_to_completion)
-    is_paused = _coerce_bool(_pick_first(data, "IsPaused", "isPaused"))
-    if is_paused is not None:
-        playback.setdefault("IsPaused", is_paused)
-    play_method = _pick_first(data, "PlayMethod", "playMethod")
-    if play_method is not None:
-        playback.setdefault("PlayMethod", play_method)
-
-    if user_data:
-        item["UserData"] = user_data
-    if item:
-        normalized["Item"] = item
-    if user:
-        normalized["User"] = user
-    if playback:
-        normalized["PlaybackInfo"] = playback
-    normalized["Event"] = event_type
-    normalized.setdefault("Source", "Jellyfin")
-    return normalized
-
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
     """Webhook 只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
@@ -1651,10 +1501,9 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
 
 # --- Webhook 路由 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])
-@webhook_bp.route('/webhook/jellyfin', methods=['POST'])
 @extensions.processor_ready_required
 def emby_webhook():
-    data = _normalize_jellyfin_webhook_payload(request.json)
+    data = request.json
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     # ★★★            魔法日志 - START            ★★★
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
@@ -1819,7 +1668,7 @@ def emby_webhook():
     USER_DATA_EVENTS = [
         "item.markfavorite", "item.unmarkfavorite",
         "item.markplayed", "item.markunplayed",
-        "playback.start", "playback.pause", "playback.stop", "playback.progress",
+        "playback.start", "playback.pause", "playback.stop",
         "item.rate"
     ]
 
@@ -1915,7 +1764,7 @@ def emby_webhook():
                     update_data['playback_position_ticks'] = 0
                     update_data['last_played_date'] = datetime.now(timezone.utc)
 
-        elif event_type in ["playback.start", "playback.pause", "playback.stop", "playback.progress"]:
+        elif event_type in ["playback.start", "playback.pause", "playback.stop"]:
             playback_info = data.get("PlaybackInfo", {})
             if playback_info:
                 position_ticks = playback_info.get('PositionTicks')

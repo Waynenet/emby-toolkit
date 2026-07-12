@@ -546,8 +546,8 @@ def api_save_config():
             error_message = "Emby User ID 不能为空！"
             logger.warning(f"API /api/config (POST): 拒绝保存，原因: {error_message}")
             return jsonify({"error": error_message}), 400
-        if not re.match(r'^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$', user_id_to_save, re.I):
-            error_message = "Emby/Jellyfin User ID 格式不正确！"
+        if not re.match(r'^[a-f0-9]{32}$', user_id_to_save, re.I):
+            error_message = "Emby User ID 格式不正确！"
             logger.warning(f"API /api/config (POST): 拒绝保存，原因: {error_message}")
             return jsonify({"error": error_message}), 400
         
