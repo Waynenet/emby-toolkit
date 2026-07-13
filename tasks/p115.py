@@ -62,7 +62,15 @@ GENERIC_PACKAGE_SEGMENT_RE = re.compile(
 )
 KNOWN_VIDEO_EXTS = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
 KNOWN_SKIP_EXTS = {'clpi', 'mpls', 'bdmv', 'jar', 'bup', 'ifo'}
+DISC_STRUCTURE_DIR_NAMES = frozenset({
+    'BDMV', 'CERTIFICATE', 'ANY!', 'VIDEO_TS', 'AUDIO_TS',
+    'PLAYLIST', 'CLIPINF', 'STREAM', 'BACKUP',
+})
 MIN_BIG_PACKAGE_VIDEO_SIZE = 50 * 1024 * 1024
+
+
+def _is_disc_structure_dir(name):
+    return str(name or '').strip().upper() in DISC_STRUCTURE_DIR_NAMES
 
 
 def _p115_response_path_contains_cid(response, target_cid):
@@ -718,9 +726,25 @@ def task_scan_and_organize_115(processor=None):
             local_processed = 0
             local_unidentified = []
 
-            # 过滤蓝光原盘特殊目录
-            if is_folder and top_name.upper() in ['BDMV', 'CERTIFICATE', 'ANY!', 'VIDEO_TS', 'AUDIO_TS', 'PLAYLIST', 'CLIPINF', 'STREAM', 'BACKUP']:
-                return 0, []
+            def reject_disc_root(detected_path):
+                if not top_id or not unidentified_cid:
+                    logger.error(f"  ➜ [原盘拦截] 无法移动 '{top_name}' 到未识别：缺少目录 ID。")
+                    return 0, 0
+                try:
+                    move_res = client.fs_move([top_id], unidentified_cid)
+                    if isinstance(move_res, dict) and not move_res.get('state'):
+                        raise RuntimeError(move_res.get('error') or move_res.get('message') or '115 移动失败')
+                    logger.warning(
+                        f"  ➜ [原盘拦截] 检测到原盘结构 '{detected_path}'，"
+                        f"已将顶层目录 '{top_name}' 原样移入未识别。"
+                    )
+                    return 0, 1
+                except Exception as e:
+                    logger.error(f"  ➜ [原盘拦截] 移动 '{top_name}' 到未识别失败: {e}")
+                    return 0, 0
+
+            if is_folder and _is_disc_structure_dir(top_name):
+                return reject_disc_root(top_name)
 
             groups_to_process = []
 
@@ -743,10 +767,11 @@ def task_scan_and_organize_115(processor=None):
                 gathered_files = []
                 is_tv_group = False
                 has_season_dir = False
+                disc_structure_path = None
                 
                 def sync_scan(current_cid, depth=0, rel_dir=""):
-                    nonlocal is_tv_group, has_season_dir
-                    if depth > 5: return
+                    nonlocal is_tv_group, has_season_dir, disc_structure_path
+                    if depth > 5 or disc_structure_path: return
                     
                     c_offset = 0
                     while True:
@@ -760,6 +785,8 @@ def task_scan_and_organize_115(processor=None):
                         if not c_data: break
                         
                         for child in c_data:
+                            if disc_structure_path:
+                                return
                             c_name = child.get('fn') or child.get('n') or child.get('file_name')
                             c_id = child.get('fid') or child.get('file_id')
                             c_fc = str(child.get('fc') if child.get('fc') is not None else child.get('type'))
@@ -771,6 +798,9 @@ def task_scan_and_organize_115(processor=None):
                             c_is_season_dir = c_is_folder and _name_is_season_dir(c_name)
                             
                             if c_is_folder:
+                                if _is_disc_structure_dir(c_name):
+                                    disc_structure_path = child_rel_dir
+                                    return
                                 if not force_nested_package_scan and (c_is_season_dir or c_is_tv_hint):
                                     is_tv_group = True
                                     if c_is_season_dir: has_season_dir = True
@@ -783,6 +813,8 @@ def task_scan_and_organize_115(processor=None):
                                     gathered_files.append(child)
                                 else:
                                     sync_scan(c_id, depth + 1, child_rel_dir)
+                                    if disc_structure_path:
+                                        return
                             else:
                                 c_ext = c_name.split('.')[-1].lower() if '.' in c_name else ''
                                 if c_ext in allowed_exts:
@@ -798,6 +830,8 @@ def task_scan_and_organize_115(processor=None):
 
                 # 执行同步扫盘
                 sync_scan(top_id, 0, "")
+                if disc_structure_path:
+                    return reject_disc_root(disc_structure_path)
                 
                 # ★ 大包逐文件识别逻辑
                 has_tmdb = _name_has_tmdb_tag(top_name)
