@@ -60,6 +60,68 @@ UPDATE_DEBOUNCE_TIME = 15
 # --- MP 单文件上传智能合并缓冲池 ---
 MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
+ACTIVE_SERIES_NOTIFICATION_QUEUE = {}
+ACTIVE_SERIES_NOTIFICATION_TIMERS = {}
+ACTIVE_SERIES_NOTIFICATION_LOCK = threading.Lock()
+ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME = 30
+
+
+def _flush_active_series_notification(series_key: str):
+    with ACTIVE_SERIES_NOTIFICATION_LOCK:
+        pending = ACTIVE_SERIES_NOTIFICATION_QUEUE.pop(series_key, None)
+        ACTIVE_SERIES_NOTIFICATION_TIMERS.pop(series_key, None)
+    if not pending:
+        return
+    try:
+        telegram.send_media_notification(
+            item_details=pending["item_details"],
+            notification_type=pending["notification_type"],
+            new_episode_ids=pending["new_episode_ids"] or None,
+        )
+    except Exception as e:
+        logger.error(f"触发主动入库聚合通知失败: {e}")
+
+
+def _enqueue_active_series_notification(item_details: dict, notification_type: str, new_episode_ids: List[str]):
+    provider_ids = item_details.get("ProviderIds") if isinstance(item_details.get("ProviderIds"), dict) else {}
+    series_key = str(item_details.get("Id") or provider_ids.get("Tmdb") or item_details.get("Name") or "").strip()
+    if not series_key:
+        telegram.send_media_notification(
+            item_details=item_details,
+            notification_type=notification_type,
+            new_episode_ids=new_episode_ids or None,
+        )
+        return
+
+    with ACTIVE_SERIES_NOTIFICATION_LOCK:
+        pending = ACTIVE_SERIES_NOTIFICATION_QUEUE.setdefault(series_key, {
+            "item_details": dict(item_details),
+            "notification_type": notification_type,
+            "new_episode_ids": [],
+        })
+        pending["item_details"] = dict(item_details)
+        if notification_type == "new":
+            pending["notification_type"] = "new"
+        for episode_id in new_episode_ids or []:
+            episode_id = str(episode_id or "").strip()
+            if episode_id and episode_id not in pending["new_episode_ids"]:
+                pending["new_episode_ids"].append(episode_id)
+
+        old_timer = ACTIVE_SERIES_NOTIFICATION_TIMERS.get(series_key)
+        if old_timer is not None:
+            old_timer.kill()
+        ACTIVE_SERIES_NOTIFICATION_TIMERS[series_key] = spawn_later(
+            ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME,
+            _flush_active_series_notification,
+            series_key,
+        )
+
+    logger.info(
+        "  ➜ [主动入库通知] 《%s》已聚合 %s 个单集通知，%s 秒内有新集将继续合并。",
+        item_details.get("Name") or series_key,
+        len(pending["new_episode_ids"]),
+        ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME,
+    )
 
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
@@ -992,7 +1054,7 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
         logger.warning(f"  ➜ [指纹补齐] 执行失败: {e}", exc_info=True)
         return 0
 
-def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True):
+def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True, aggregate_notification: bool = False):
     """
     【Webhook 统一入口】
     统一处理 新入库(New) 和 追更(Update) 两种情况。
@@ -1157,11 +1219,14 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         # 如果 is_new_item 为 True，说明是新入库通知
         notif_type = 'update' if (precise_new_episode_ids and not is_new_item) else 'new'
         
-        telegram.send_media_notification(
-            item_details=item_details, 
-            notification_type=notif_type, 
-            new_episode_ids=precise_new_episode_ids or None
-        )
+        if aggregate_notification and item_type == "Series" and len(precise_new_episode_ids) == 1:
+            _enqueue_active_series_notification(item_details, notif_type, precise_new_episode_ids)
+        else:
+            telegram.send_media_notification(
+                item_details=item_details,
+                notification_type=notif_type,
+                new_episode_ids=precise_new_episode_ids or None
+            )
     except Exception as e:
         logger.error(f"触发通知失败: {e}")
 
@@ -1450,6 +1515,7 @@ def dispatch_active_emby_items(items):
             force_full_update=False,
             new_episode_ids=episode_ids or None,
             is_new_item=not already_processed,
+            aggregate_notification=len(episode_ids) == 1,
         )
 
 def _trigger_metadata_update_task(item_id, item_name):

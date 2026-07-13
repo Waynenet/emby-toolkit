@@ -38,6 +38,9 @@ EMBY_BIND_QUEUE = set()
 EMBY_BIND_LOCK = threading.Lock()
 EMBY_BIND_TIMER = None
 EMBY_BIND_DEBOUNCE_SECONDS = 3
+EMBY_BIND_RETRY_COUNTS = {}
+EMBY_BIND_MAX_RETRIES = 2
+EMBY_BIND_RETRY_DELAY_SECONDS = 10
 
 # --- 全局队列抑制标志 ---
 IS_PROCESSING_PAUSED = False
@@ -364,18 +367,61 @@ def _process_emby_binding_queue():
 
     logger.info("  ➜ [主动入库] 通知 Emby 扫描 %s 个 STRM，随后主动获取 Item ID。", len(ready_paths))
     emby.notify_emby_file_changes(ready_paths, base_url, api_key)
-    found = emby.wait_for_emby_items_by_path(ready_paths, base_url, api_key, user_id)
+    found = emby.wait_for_emby_items_by_path(
+        ready_paths,
+        base_url,
+        api_key,
+        user_id,
+        retry_delays=(0, 0.25, 0.5, 1, 2, 4, 8),
+    )
 
     if found:
         from routes.webhook import dispatch_active_emby_items
         dispatch_active_emby_items(list(found.values()))
+
+        with EMBY_BIND_LOCK:
+            for path in ready_paths:
+                normalized = emby._normalize_emby_media_path(path)
+                if normalized in found:
+                    EMBY_BIND_RETRY_COUNTS.pop(os.path.normpath(path), None)
 
     missing = [
         path for path in ready_paths
         if emby._normalize_emby_media_path(path) not in found
     ]
     if missing:
-        logger.error("  ➜ [主动入库] %s 个 STRM 在短轮询内未取到 Emby Item ID。", len(missing))
+        retrying = []
+        exhausted = []
+        with EMBY_BIND_LOCK:
+            for path in missing:
+                normalized_path = os.path.normpath(path)
+                attempts = EMBY_BIND_RETRY_COUNTS.get(normalized_path, 0) + 1
+                if attempts <= EMBY_BIND_MAX_RETRIES:
+                    EMBY_BIND_RETRY_COUNTS[normalized_path] = attempts
+                    EMBY_BIND_QUEUE.add(normalized_path)
+                    retrying.append(path)
+                else:
+                    EMBY_BIND_RETRY_COUNTS.pop(normalized_path, None)
+                    exhausted.append(path)
+
+            if retrying and EMBY_BIND_TIMER is None:
+                EMBY_BIND_TIMER = threading.Timer(
+                    EMBY_BIND_RETRY_DELAY_SECONDS,
+                    _process_emby_binding_queue,
+                )
+                EMBY_BIND_TIMER.daemon = True
+                EMBY_BIND_TIMER.start()
+
+        if retrying:
+            logger.warning(
+                "  ➜ [主动入库] %s 个 STRM 暂未取得 Emby Item ID，%s 秒后重扫重试。",
+                len(retrying), EMBY_BIND_RETRY_DELAY_SECONDS,
+            )
+        if exhausted:
+            logger.error(
+                "  ➜ [主动入库] %s 个 STRM 连续 %s 轮未取得 Emby Item ID，已停止自动重试。",
+                len(exhausted), EMBY_BIND_MAX_RETRIES + 1,
+            )
 
 def enqueue_file_actively(file_path: str):
     """主动将文件推入监控队列"""
@@ -384,7 +430,10 @@ def enqueue_file_actively(file_path: str):
         logger.warning(f"  ➜ [实时监控] 非 ETK 标准 STRM，已跳过：{os.path.basename(file_path)}")
         return
 
-    enqueue_emby_binding(file_path)
+    if str(file_path or "").lower().endswith(".strm"):
+        logger.info("  ➜ [主动入库] STRM 加入 Item ID 绑定队列: %s", os.path.basename(file_path))
+        enqueue_emby_binding(file_path)
+        return
 
     with QUEUE_LOCK:
         if file_path not in FILE_EVENT_QUEUE:

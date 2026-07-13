@@ -2181,7 +2181,34 @@ def task_scan_monitor_folders(processor):
             )
 
             try:
-                processor.process_file_actively_batch(batch)
+                strm_files = []
+                physical_files = []
+                for file_path in batch:
+                    if not str(file_path or '').lower().endswith('.strm'):
+                        physical_files.append(file_path)
+                        continue
+
+                    directory = os.path.dirname(file_path)
+                    try:
+                        for name in os.listdir(directory):
+                            sibling = os.path.join(directory, name)
+                            if name.lower().endswith('.strm') and name.lower() not in known_filenames:
+                                strm_files.append(sibling)
+                    except Exception:
+                        strm_files.append(file_path)
+
+                if strm_files:
+                    from monitor_service import enqueue_file_actively
+                    unique_strm_files = list(dict.fromkeys(strm_files))
+                    logger.info(
+                        f"  ➜ 查漏扫描发现 {len(unique_strm_files)} 个 STRM，"
+                        "统一进入主动 Item ID 绑定队列。"
+                    )
+                    for file_path in unique_strm_files:
+                        enqueue_file_actively(file_path)
+
+                if physical_files:
+                    processor.process_file_actively_batch(physical_files)
                 processed_count += len(batch)
             except Exception as e:
                 logger.error(f"  ➜ 批量处理漏网文件失败: {e}", exc_info=True)
