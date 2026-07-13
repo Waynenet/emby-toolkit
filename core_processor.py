@@ -365,7 +365,7 @@ class MediaProcessor:
         return id_to_parent_map, lib_guid
 
     # --- 直接从 STRM 文件或 HTTP 链接中提取 115 提取码 (PC) 和 SHA1 ---
-    def _extract_115_fingerprints(self, file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    def _extract_115_fingerprints(self, file_path: str, allow_api_fallback: bool = True) -> Tuple[Optional[str], Optional[str]]:
         if not self.config.get("monitor_sha1_pc_search", True):
             return None, None
         
@@ -391,12 +391,12 @@ class MediaProcessor:
             logger.warning(f"读取 STRM 文件失败: {e}")
 
         if pc and not sha1:
-            sha1 = self._get_sha1_by_pickcode(pc)
+            sha1 = self._get_sha1_by_pickcode(pc, allow_api_fallback=allow_api_fallback)
 
         return pc, sha1
 
     # --- 通过 PC 码反查 SHA1 (自带 115 API 兜底) ---
-    def _get_sha1_by_pickcode(self, pick_code: str) -> Optional[str]:
+    def _get_sha1_by_pickcode(self, pick_code: str, allow_api_fallback: bool = True) -> Optional[str]:
         if not self.config.get("monitor_sha1_pc_search", True):
             return None
         
@@ -411,6 +411,10 @@ class MediaProcessor:
                 if row and row['sha1']: 
                     return row['sha1']
         except Exception: pass
+
+        if not allow_api_fallback:
+            logger.debug(f"  ➜ 本地 p115_filesystem_cache 未找到 PC 对应 SHA1，跳过 115 API: {pick_code}")
+            return None
 
         # 2. 查不到时现场算 FID 调 API 查。
         logger.trace(f"  ➜ 未在本地数据库找到 SHA1，尝试通过 115api 获取...")

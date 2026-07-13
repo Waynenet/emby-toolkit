@@ -8812,6 +8812,34 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
 
                             if is_video:
+                                if not file_sha1 and fid:
+                                    try:
+                                        info_res = self.client.fs_get_info(fid)
+                                        if info_res.get('state') and info_res.get('data'):
+                                            file_sha1 = info_res['data'].get('sha1')
+                                    except Exception:
+                                        pass
+
+                                # STRM 一落盘就会触发监控，必须先提交 PC/SHA1 缓存。
+                                if self.media_type == 'tv' and season_num is not None and s_name:
+                                    file_local_path = os.path.join(relative_category_path, std_root_name, s_name, new_filename)
+                                else:
+                                    file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
+                                file_local_path = file_local_path.replace('\\', '/')
+                                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+                                washing_snapshot = file_item.get('_washing_snapshot') if isinstance(file_item, dict) else {}
+                                if not washing_snapshot:
+                                    washing_snapshot = _build_washing_snapshot(file_item, new_filename, '', file_size, False)
+
+                                if pick_code and fid:
+                                    P115CacheManager.save_file_cache(
+                                        fid, batch_target_cid, new_filename,
+                                        sha1=file_sha1, pick_code=pick_code,
+                                        local_path=file_local_path, size=file_size,
+                                        preid=file_item.get('preid'),
+                                        **(washing_snapshot or {})
+                                    )
+
                                 strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                                 strm_filepath = os.path.join(local_dir, strm_filename)
                                 strm_content = f"{etk_url}/api/p115/play/{pick_code}"
@@ -8826,13 +8854,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     from monitor_service import enqueue_file_actively
                                     enqueue_file_actively(strm_filepath)
                                 except Exception: pass
-
-                                if not file_sha1 and fid:
-                                    try:
-                                        info_res = self.client.fs_get_info(fid)
-                                        if info_res.get('state') and info_res.get('data'):
-                                            file_sha1 = info_res['data'].get('sha1')
-                                    except Exception: pass
 
                                 if FORCE_GENERATE_MEDIAINFO:
                                     try:
@@ -8853,27 +8874,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     except Exception as e:
                                         logger.error(f"  ➜ 生成媒体信息文件失败: {e}")
 
-                                # ★ 保留原名只影响文件名，缓存路径仍走标准目录
-                                if self.media_type == 'tv' and season_num is not None and s_name:
-                                    file_local_path = os.path.join(relative_category_path, std_root_name, s_name, new_filename)
-                                else:
-                                    file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
-                                
-                                file_local_path = file_local_path.replace('\\', '/')
-                                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
-
-                                washing_snapshot = file_item.get('_washing_snapshot') if isinstance(file_item, dict) else {}
-                                if is_video and not washing_snapshot:
-                                    washing_snapshot = _build_washing_snapshot(file_item, new_filename, '', file_size, False)
-
                                 if pick_code and fid:
-                                    P115CacheManager.save_file_cache(
-                                        fid, batch_target_cid, new_filename, 
-                                        sha1=file_sha1, pick_code=pick_code, 
-                                        local_path=file_local_path, size=file_size,
-                                        preid=file_item.get('preid'),
-                                        **(washing_snapshot or {})
-                                    )
                                     # 负载均衡分享资产记录钩子：
                                     # 对影巢/TG 等外部分享导入后再整理的资源，只有这里拿到的
                                     # fid / pick_code / sha1 才是 STRM 实际播放文件身份。
@@ -9097,6 +9098,25 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except Exception:
                     pass
 
+            try:
+                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+            except Exception:
+                file_size = 0
+            file_local_path = os.path.join(parent_rel_path, original_name).replace("\\", "/") if parent_rel_path else original_name
+
+            # 与标准整理一致：先落 PC/SHA1 缓存，再生成会触发监控的 STRM。
+            if fid and pick_code:
+                P115CacheManager.save_file_cache(
+                    fid=fid,
+                    parent_id=parent_id,
+                    name=original_name,
+                    sha1=sha1,
+                    pick_code=pick_code,
+                    local_path=file_local_path,
+                    size=file_size,
+                    preid=file_item.get('preid')
+                )
+
             # 1. 处理视频 (STRM + Mediainfo)
             if is_video and pick_code:
                 # 生成 STRM
@@ -9174,26 +9194,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except Exception as e:
                     logger.error(f"  ➜ [MP直出] 下载字幕失败: {e}")
 
-            # 3. 写入数据库缓存 (保持 Emby 扫库和后续删除的闭环)
-            try:
-                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
-            except Exception:
-                file_size = 0
-
-            file_local_path = os.path.join(parent_rel_path, original_name).replace("\\", "/") if parent_rel_path else original_name
-
+            # 3. 写入整理记录（文件缓存已在 STRM 生成前提交）
             if fid and pick_code:
-                P115CacheManager.save_file_cache(
-                    fid=fid,
-                    parent_id=parent_id,
-                    name=original_name,
-                    sha1=sha1,
-                    pick_code=pick_code,
-                    local_path=file_local_path,
-                    size=file_size,
-                    preid=file_item.get('preid')
-                )
-
                 P115RecordManager.add_or_update_record(
                     file_id=fid,
                     pick_code=pick_code,

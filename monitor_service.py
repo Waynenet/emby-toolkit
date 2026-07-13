@@ -47,6 +47,10 @@ EMBY_BIND_MAX_RETRIES = 2
 EMBY_BIND_RETRY_DELAY_SECONDS = 10
 NFO_WRITE_LOCK = threading.Lock()
 AUDIO_EXTENSIONS = {'.flac', '.m4a', '.mp3', '.aac', '.wav', '.ape', '.ogg', '.opus'}
+MEDIA_PREP_LOCK = threading.Lock()
+MEDIA_PREP_INFLIGHT = set()
+MEDIA_PREP_RECENT = {}
+MEDIA_PREP_DEDUPE_SECONDS = 30
 
 # --- 全局队列抑制标志 ---
 IS_PROCESSING_PAUSED = False
@@ -334,7 +338,7 @@ def _write_minimal_tmdb_nfo(file_path: str, tmdb_id: str, media_type: str, title
                 tree = ET.parse(nfo_path)
                 root = tree.getroot()
                 if root.tag.lower() != root_tag:
-                    logger.warning("  ➜ [实体入库] NFO 根节点不符合媒体类型，已保留原文件: %s", nfo_path)
+                    logger.warning("  ➜ [入库预备] NFO 根节点不符合媒体类型，已保留原文件: %s", nfo_path)
                     return False
             else:
                 root = ET.Element(root_tag)
@@ -373,10 +377,10 @@ def _write_minimal_tmdb_nfo(file_path: str, tmdb_id: str, media_type: str, title
                 temp_path = nfo_path + '.etk-tmp'
                 tree.write(temp_path, encoding='utf-8', xml_declaration=True)
                 os.replace(temp_path, nfo_path)
-                logger.info("  ➜ [实体入库] 已写入 Emby 识别 NFO: %s (TMDb: %s)", nfo_path, tmdb_id)
+                logger.info("  ➜ [入库预备] 已写入 Emby 识别 NFO: %s (TMDb: %s)", nfo_path, tmdb_id)
         return True
     except Exception as e:
-        logger.warning("  ➜ [实体入库] 写入简化 NFO 失败: %s -> %s", file_path, e)
+        logger.warning("  ➜ [入库预备] 写入简化 NFO 失败: %s -> %s", file_path, e)
         return False
 
 
@@ -391,29 +395,32 @@ def _identify_physical_media(file_path: str, processor):
         main_dir_name = parent_name if is_season_dir else folder_name
         forced_type = 'tv' if is_season_dir or (season_num is not None and episode_num is not None) else None
 
-        nfo_candidates = [os.path.splitext(file_path)[0] + '.nfo']
-        if forced_type == 'tv':
-            series_dir = os.path.dirname(media_dir) if is_season_dir else media_dir
-            nfo_candidates.insert(0, os.path.join(series_dir, 'tvshow.nfo'))
-        for nfo_path in nfo_candidates:
-            if not os.path.exists(nfo_path):
-                continue
-            try:
-                root = ET.parse(nfo_path).getroot()
-                root_type = 'tv' if root.tag.lower() == 'tvshow' else 'movie' if root.tag.lower() == 'movie' else None
-                unique_node = next(
-                    (node for node in root.findall('uniqueid') if str(node.get('type') or '').lower() == 'tmdb'),
-                    None,
-                )
-                existing_id = str((unique_node.text if unique_node is not None else '') or root.findtext('tmdbid') or '').strip()
-                if root_type and existing_id.isdigit() and int(existing_id) > 0:
-                    existing_title = root.findtext('title') or os.path.splitext(filename)[0]
-                    logger.info("  ➜ [实体入库] 命中现有 NFO 身份: %s (TMDb: %s)", existing_title, existing_id)
-                    return existing_id, root_type, existing_title
-            except Exception as e:
-                logger.debug("  ➜ [实体入库] 读取现有 NFO 失败: %s -> %s", nfo_path, e)
+        def _existing_nfo_identity():
+            nfo_candidates = [os.path.splitext(file_path)[0] + '.nfo']
+            if forced_type == 'tv':
+                series_dir = os.path.dirname(media_dir) if is_season_dir else media_dir
+                nfo_candidates.insert(0, os.path.join(series_dir, 'tvshow.nfo'))
+            for nfo_path in nfo_candidates:
+                if not os.path.exists(nfo_path):
+                    continue
+                try:
+                    root = ET.parse(nfo_path).getroot()
+                    root_type = 'tv' if root.tag.lower() == 'tvshow' else 'movie' if root.tag.lower() == 'movie' else None
+                    unique_node = next(
+                        (node for node in root.findall('uniqueid') if str(node.get('type') or '').lower() == 'tmdb'),
+                        None,
+                    )
+                    existing_id = str((unique_node.text if unique_node is not None else '') or root.findtext('tmdbid') or '').strip()
+                    if root_type and existing_id.isdigit() and int(existing_id) > 0:
+                        existing_title = root.findtext('title') or os.path.splitext(filename)[0]
+                        logger.info("  ➜ [入库预备] RAW 未命中，回退现有 NFO 身份: %s (TMDb: %s)", existing_title, existing_id)
+                        return existing_id, root_type, existing_title
+                except Exception as e:
+                    logger.debug("  ➜ [入库预备] 读取现有 NFO 失败: %s -> %s", nfo_path, e)
+            return None
 
         from handler.p115_service import _identify_media_enhanced
+        _pick_code, sha1 = processor._extract_115_fingerprints(file_path, allow_api_fallback=False)
 
         tmdb_id, media_type, title = _identify_media_enhanced(
             filename,
@@ -423,17 +430,18 @@ def _identify_physical_media(file_path: str, processor):
             ai_translator=processor.ai_translator,
             use_ai=bool(processor.ai_translator and processor.config.get(constants.CONFIG_OPTION_AI_RECOGNITION, False)),
             is_folder=False,
+            sha1=sha1,
         )
         tmdb_id = str(tmdb_id or '').strip()
         if not tmdb_id.isdigit() or int(tmdb_id) <= 0 or media_type not in {'movie', 'tv'}:
-            return None
+            return _existing_nfo_identity()
         logger.info(
-            "  ➜ [实体入库] 增强识别命中《%s》，TMDb: %s，类型: %s。",
+            "  ➜ [入库预备] 增强识别命中《%s》，TMDb: %s，类型: %s。",
             title or filename, tmdb_id, media_type,
         )
         return tmdb_id, media_type, title or os.path.splitext(filename)[0]
     except Exception as e:
-        logger.warning("  ➜ [实体入库] 增强识别失败: %s -> %s", file_path, e)
+        logger.warning("  ➜ [入库预备] 增强识别失败: %s -> %s", file_path, e)
         return None
 
 
@@ -442,7 +450,7 @@ def _generate_local_mediainfo(file_path: str) -> bool:
     if os.path.exists(mediainfo_path) and os.path.getsize(mediainfo_path) > 0:
         return True
     if not shutil.which('ffprobe'):
-        logger.error("  ➜ [实体入库] 容器内未找到 ffprobe，无法生成媒体信息。")
+        logger.error("  ➜ [入库预备] 容器内未找到 ffprobe，无法生成媒体信息。")
         return False
 
     try:
@@ -453,7 +461,7 @@ def _generate_local_mediainfo(file_path: str) -> bool:
         result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
         if result.returncode != 0:
             logger.warning(
-                "  ➜ [实体入库] ffprobe 失败: %s -> %s",
+                "  ➜ [入库预备] ffprobe 失败: %s -> %s",
                 os.path.basename(file_path), (result.stderr or '').strip()[:300],
             )
             return False
@@ -465,20 +473,20 @@ def _generate_local_mediainfo(file_path: str) -> bool:
             {'file_name': os.path.basename(file_path), 'size': os.path.getsize(file_path)},
         )
         if not formatted:
-            logger.warning("  ➜ [实体入库] ffprobe 未解析出有效媒体流: %s", file_path)
+            logger.warning("  ➜ [入库预备] ffprobe 未解析出有效媒体流: %s", file_path)
             return False
 
         temp_path = mediainfo_path + '.etk-tmp'
         with open(temp_path, 'w', encoding='utf-8') as file_obj:
             json.dump(formatted, file_obj, ensure_ascii=False, indent=2)
         os.replace(temp_path, mediainfo_path)
-        logger.info("  ➜ [实体入库] ffprobe 已生成媒体信息: %s", mediainfo_path)
+        logger.info("  ➜ [入库预备] ffprobe 已生成媒体信息: %s", mediainfo_path)
         return True
     except subprocess.TimeoutExpired:
-        logger.warning("  ➜ [实体入库] ffprobe 超时: %s", file_path)
+        logger.warning("  ➜ [入库预备] ffprobe 超时: %s", file_path)
         return False
     except Exception as e:
-        logger.warning("  ➜ [实体入库] 生成媒体信息失败: %s -> %s", file_path, e)
+        logger.warning("  ➜ [入库预备] 生成媒体信息失败: %s -> %s", file_path, e)
         return False
 
 
@@ -487,7 +495,7 @@ def prepare_physical_files_for_binding(processor, file_paths: List[str]) -> List
     for file_path in file_paths or []:
         identity = _identify_physical_media(file_path, processor)
         if not identity:
-            logger.warning("  ➜ [实体入库] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
+            logger.warning("  ➜ [入库预备] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
             continue
         tmdb_id, media_type, title = identity
         if not _write_minimal_tmdb_nfo(file_path, tmdb_id, media_type, title, processor):
@@ -499,6 +507,43 @@ def prepare_physical_files_for_binding(processor, file_paths: List[str]) -> List
     for file_path in ready_paths:
         enqueue_emby_binding(file_path)
     return ready_paths
+
+
+def _prepare_strm_for_binding(processor, file_path: str):
+    normalized_path = os.path.normpath(file_path)
+    prepared = False
+    try:
+        identity = _identify_physical_media(file_path, processor)
+        if not identity:
+            logger.warning("  ➜ [STRM入库] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
+            return
+        tmdb_id, media_type, title = identity
+        if not _write_minimal_tmdb_nfo(file_path, tmdb_id, media_type, title, processor):
+            return
+        enqueue_emby_binding(file_path)
+        prepared = True
+    finally:
+        with MEDIA_PREP_LOCK:
+            MEDIA_PREP_INFLIGHT.discard(normalized_path)
+            if prepared:
+                MEDIA_PREP_RECENT[normalized_path] = time.time()
+            else:
+                MEDIA_PREP_RECENT.pop(normalized_path, None)
+
+
+def _enqueue_strm_preparation(processor, file_path: str) -> bool:
+    normalized_path = os.path.normpath(file_path)
+    now = time.time()
+    with MEDIA_PREP_LOCK:
+        if normalized_path in MEDIA_PREP_INFLIGHT:
+            return False
+        if now - MEDIA_PREP_RECENT.get(normalized_path, 0) <= MEDIA_PREP_DEDUPE_SECONDS:
+            return False
+        MEDIA_PREP_INFLIGHT.add(normalized_path)
+
+    worker = threading.Thread(target=_prepare_strm_for_binding, args=(processor, file_path), daemon=True)
+    worker.start()
+    return True
 
 
 def enqueue_emby_binding(file_path: str):
@@ -622,8 +667,12 @@ def enqueue_file_actively(file_path: str):
         return
 
     if str(file_path or "").lower().endswith(".strm"):
-        logger.info("  ➜ [主动入库] STRM 加入 Item ID 绑定队列: %s", os.path.basename(file_path))
-        enqueue_emby_binding(file_path)
+        processor = MonitorService.processor_instance
+        if not processor:
+            logger.warning("  ➜ [STRM入库] 核心处理器未就绪，已跳过: %s", os.path.basename(file_path))
+            return
+        if _enqueue_strm_preparation(processor, file_path):
+            logger.info("  ➜ [STRM入库] 加入识别/NFO 预备队列: %s", os.path.basename(file_path))
         return
 
     with QUEUE_LOCK:
