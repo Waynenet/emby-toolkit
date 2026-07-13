@@ -1684,21 +1684,41 @@ def task_scan_monitor_folders(processor):
     monitor_paths = processor.config.get(constants.CONFIG_OPTION_MONITOR_PATHS, [])
     monitor_extensions = processor.config.get(constants.CONFIG_OPTION_MONITOR_EXTENSIONS, constants.DEFAULT_MONITOR_EXTENSIONS)
     lookback_days = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_LOOKBACK_DAYS, constants.DEFAULT_MONITOR_SCAN_LOOKBACK_DAYS)
+    scan_max_tasks = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_MAX_TASKS, constants.DEFAULT_MONITOR_SCAN_MAX_TASKS)
+    scan_batch_size = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_BATCH_SIZE, constants.DEFAULT_MONITOR_SCAN_BATCH_SIZE)
+
+    try:
+        scan_max_tasks = max(1, int(scan_max_tasks))
+    except (TypeError, ValueError):
+        scan_max_tasks = constants.DEFAULT_MONITOR_SCAN_MAX_TASKS
+
+    try:
+        scan_batch_size = max(1, int(scan_batch_size))
+    except (TypeError, ValueError):
+        scan_batch_size = constants.DEFAULT_MONITOR_SCAN_BATCH_SIZE
     
     # 获取排除路径配置并规范化
     monitor_exclude_dirs = processor.config.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, constants.DEFAULT_MONITOR_EXCLUDE_DIRS)
     exclude_paths = [os.path.normpath(d).lower() for d in (monitor_exclude_dirs or [])]
 
-    logger.info(f"  ➜ 开始执行监控目录查漏扫描 (回溯 {lookback_days} 天)")
+    logger.info(
+        f"  ➜ 开始执行监控目录查漏扫描 "
+        f"(回溯 {lookback_days} 天，单次最多处理 {scan_max_tasks} 个目录，批量 {scan_batch_size})"
+    )
 
     if not monitor_enabled or not monitor_paths:
         logger.info("  ➜ 实时监控未启用或未配置路径，跳过扫描。")
         return
 
+    task_manager.update_status_from_thread(1, "正在加载已入库文件名索引...")
+    known_filenames = media_db.get_all_asset_filenames()
+    logger.info(f"  ➜ 已加载 {len(known_filenames)} 个已入库文件名用于扫描去重。")
+
     valid_exts = set(ext.lower() for ext in monitor_extensions)
 
     processed_dirs = set()
-    filename_exists_cache = {}
+    files_to_process = []
+    limit_reached = False
 
     scan_count = 0
     trigger_count = 0
@@ -1709,6 +1729,9 @@ def task_scan_monitor_folders(processor):
     cutoff_time = now - (lookback_days * 24 * 3600)
 
     for root_path in monitor_paths:
+        if processor.is_stop_requested() or limit_reached:
+            break
+
         if not os.path.exists(root_path):
             logger.warning(f"  ➜ 监控路径不存在: {root_path}")
             continue
@@ -1716,6 +1739,9 @@ def task_scan_monitor_folders(processor):
         logger.info(f"  ➜ 正在扫描目录: {root_path}")
         
         for dirpath, dirnames, filenames in os.walk(root_path):
+            if processor.is_stop_requested() or limit_reached:
+                break
+
             # ★★★ 修正：排除路径检查逻辑 ★★★
             norm_dirpath = os.path.normpath(dirpath).lower()
             hit_exclude = False
@@ -1736,6 +1762,9 @@ def task_scan_monitor_folders(processor):
                 continue 
 
             for filename in filenames:
+                if processor.is_stop_requested():
+                    break
+
                 if filename.startswith('.'): continue
                 _, ext = os.path.splitext(filename)
                 if ext.lower() not in valid_exts: continue
@@ -1763,10 +1792,7 @@ def task_scan_monitor_folders(processor):
                     )
                 
                 # --- 判定逻辑 ---
-                if filename not in filename_exists_cache:
-                    filename_exists_cache[filename] = bool(media_db.get_media_info_by_filename(filename))
-
-                if filename_exists_cache[filename]:
+                if filename.lower() in known_filenames:
                     skipped_exists_count += 1
                     continue
 
@@ -1774,17 +1800,55 @@ def task_scan_monitor_folders(processor):
                 if dir_key in processed_dirs:
                     continue
 
-                logger.info(f"  ➜ 发现未入库文件: {filename}，按目录触发主动处理...")
-                try:
-                    processor.process_file_actively(file_path)
-                    processed_dirs.add(dir_key)
-                    trigger_count += 1
-                    time.sleep(1)
-                except Exception as e:
-                    logger.error(f"  ➜ 处理文件失败: {e}")
+                logger.info(f"  ➜ 发现未入库文件: {filename}，加入本轮扫描处理队列...")
+                files_to_process.append(file_path)
+                processed_dirs.add(dir_key)
+                trigger_count += 1
 
-    logger.info(f"  ➜ 监控目录扫描完成。扫描: {scan_count}, 触发处理: {trigger_count}")
-    task_manager.update_status_from_thread(100, f"扫描完成，处理了 {trigger_count} 个新项目")
+                if trigger_count >= scan_max_tasks:
+                    limit_reached = True
+                    logger.warning(
+                        f"  ➜ 本轮监控目录扫描已达到处理上限 {scan_max_tasks}，"
+                        "剩余积压将留到后续扫描继续处理。"
+                    )
+                    break
+
+    total_to_process = len(files_to_process)
+    processed_count = 0
+
+    if total_to_process:
+        logger.info(f"  ➜ 扫描完成，准备分批处理 {total_to_process} 个漏网目录。")
+        for start in range(0, total_to_process, scan_batch_size):
+            if processor.is_stop_requested():
+                logger.warning("  ➜ 收到停止信号，监控目录扫描处理提前结束。")
+                break
+
+            batch = files_to_process[start:start + scan_batch_size]
+            end = start + len(batch)
+            progress = 80 + int((start / total_to_process) * 15)
+            task_manager.update_status_from_thread(
+                progress,
+                f"正在分批处理漏网项目 {start + 1}-{end}/{total_to_process}"
+            )
+
+            try:
+                processor.process_file_actively_batch(batch)
+                processed_count += len(batch)
+            except Exception as e:
+                logger.error(f"  ➜ 批量处理漏网文件失败: {e}", exc_info=True)
+
+            if end < total_to_process:
+                time.sleep(2)
+
+    suffix = f"，达到本轮上限 {scan_max_tasks}" if limit_reached else ""
+    logger.info(
+        f"  ➜ 监控目录扫描完成。扫描: {scan_count}, "
+        f"加入处理: {trigger_count}, 已处理批次项: {processed_count}{suffix}"
+    )
+    task_manager.update_status_from_thread(
+        100,
+        f"扫描完成，处理了 {processed_count} 个新项目{suffix}"
+    )
 
 # --- 从数据库恢复本地覆盖缓存 ---
 def task_restore_local_cache_from_db(processor):
