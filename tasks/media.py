@@ -2208,7 +2208,8 @@ def task_scan_monitor_folders(processor):
                         enqueue_file_actively(file_path)
 
                 if physical_files:
-                    processor.process_file_actively_batch(physical_files)
+                    from monitor_service import prepare_physical_files_for_binding
+                    prepare_physical_files_for_binding(processor, physical_files)
                 processed_count += len(batch)
             except Exception as e:
                 logger.error(f"  ➜ 批量处理漏网文件失败: {e}", exc_info=True)

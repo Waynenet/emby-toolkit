@@ -5,7 +5,7 @@ Webhook 用于接收 Emby 和 MoviePilot 事件并触发对应处理。
 ## 配置地址
 
 ```
-http://<服务器IP>:5257/webhook/emby
+http://ETK-IP:5257/webhook/emby
 请求内容类型：application/json
 ```
 
@@ -15,20 +15,13 @@ MoviePilot Webhook 也使用同一个地址。ETK 会根据 payload 里的 `type
 
 ### Emby
 
-- 媒体：已添加新媒体
 - 播放：开始、停止
 - 用户：添加到收藏、移出收藏、标记已播放、标记未播放、用户政策已更新
 - 神医助手：媒体深度删除、元数据更新、图像更新
 
 ### MoviePilot
 
-- `download.added`
-- `subscribe.added`
-- `subscribe.modified`
-- `subscribe.deleted`
-- `subscribe.complete`
-- `transfer.complete`
-- `transfer.subtitle.complete`
+- MP安装webhook插件，请求方式：POST，URL：http://ETK-IP:5257/webhook/emby
 
 ## 行为说明
 
