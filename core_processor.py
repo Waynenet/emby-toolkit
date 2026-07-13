@@ -2101,11 +2101,32 @@ class MediaProcessor:
                 
                 emby_episode_versions = []
                 if not is_pending:
-                    emby_episode_versions = emby.get_all_library_versions(
-                        base_url=self.emby_url, api_key=self.emby_api_key, user_id=self.emby_user_id,
-                        media_type_filter="Episode", parent_id=item_details_from_emby.get('Id'),
-                        fields="Id,Type,ParentIndexNumber,IndexNumber,MediaStreams,Container,Size,Path,ProviderIds,RunTimeTicks,DateCreated,_SourceLibraryId"
-                    ) or []
+                    episode_fields = "Id,Type,ParentIndexNumber,IndexNumber,MediaStreams,MediaSources,Container,Size,Path,ProviderIds,RunTimeTicks,DateCreated"
+                    if specific_episode_ids:
+                        target_episode_ids = list(dict.fromkeys(
+                            str(episode_id).strip()
+                            for episode_id in specific_episode_ids
+                            if str(episode_id).strip()
+                        ))
+                        specific_episode_ids = target_episode_ids
+                        for episode_id in target_episode_ids:
+                            episode_details = emby.get_emby_item_details(
+                                episode_id, self.emby_url, self.emby_api_key,
+                                self.emby_user_id, fields=episode_fields
+                            )
+                            if episode_details and episode_details.get("Type") == "Episode":
+                                episode_details['_SourceLibraryId'] = source_lib_id
+                                emby_episode_versions.append(episode_details)
+                        logger.info(
+                            "  ➜ [精确入库] 已按 Item ID 获取 %s/%s 个目标分集。",
+                            len(emby_episode_versions), len(target_episode_ids)
+                        )
+                    else:
+                        emby_episode_versions = emby.get_all_library_versions(
+                            base_url=self.emby_url, api_key=self.emby_api_key, user_id=self.emby_user_id,
+                            media_type_filter="Episode", parent_id=item_details_from_emby.get('Id'),
+                            fields=episode_fields
+                        ) or []
                 
                 episodes_grouped_by_number = defaultdict(list)
                 for ep_version in emby_episode_versions:
