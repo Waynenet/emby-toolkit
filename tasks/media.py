@@ -76,15 +76,6 @@ def _safe_json_list(value) -> List[Any]:
             return []
     return []
 
-def _first_video_stream(item: Dict[str, Any]) -> Dict[str, Any]:
-    streams = item.get("MediaStreams")
-    if not isinstance(streams, list):
-        streams = []
-    for stream in streams:
-        if isinstance(stream, dict) and stream.get("Type") == "Video":
-            return stream
-    return {}
-
 def _normalize_asset_path(path: Any) -> str:
     return str(path or '').replace('\\', '/').strip().lower()
 
@@ -129,20 +120,11 @@ def _asset_changed_since_sync(item: Dict[str, Any], db_state: Dict[str, Any]) ->
     try:
         item_size = int(item.get('Size') or 0)
         db_size = int(matched_asset.get('size_bytes') or 0)
-        if item_size > 0 and db_size > 0 and item_size != db_size:
+        size_tolerance = max(64 * 1024 * 1024, int(max(item_size, db_size) * 0.01))
+        if item_size > 0 and db_size > 0 and abs(item_size - db_size) > size_tolerance:
             return True
     except Exception:
         pass
-
-    video_stream = _first_video_stream(item)
-    for item_key, asset_key in (('Width', 'width'), ('Height', 'height'), ('BitDepth', 'bit_depth')):
-        try:
-            item_value = int(video_stream.get(item_key) or item.get(item_key) or 0)
-            asset_value = int(matched_asset.get(asset_key) or 0)
-            if item_value > 0 and asset_value > 0 and item_value != asset_value:
-                return True
-        except Exception:
-            continue
 
     return False
 
