@@ -614,14 +614,11 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         item_name_for_log = item_details.get("Name", f"ID:{item_id}")
         year = item_details.get("ProductionYear", "")
         title = f"{item_name_for_log} ({year})" if year else item_name_for_log
-        overview = item_details.get("Overview", "暂无剧情简介。")
-        if len(overview) > 200:
-            overview = overview[:200] + "..."
+        overview = str(item_details.get("Overview") or "").strip()
             
         item_type = item_details.get("Type")
 
         escaped_title = escape_markdown(title)
-        escaped_overview = escape_markdown(overview)
 
         # --- 2. 准备剧集信息 + 媒体参数 ---
         # 媒体参数不再临时查 Emby MediaSources，直接读取 process_single_item 已写入的
@@ -653,6 +650,8 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         try:
             db_info = media_db.get_notification_media_info_by_emby_id(item_id)
             if db_info:
+                if not overview:
+                    overview = str(db_info.get('overview') or '').strip()
                 # 优先横幅，其次竖图，如果是分集没图，找它爹(剧集)要横幅
                 path = db_info.get('backdrop_path') or db_info.get('poster_path')
                 if not path and db_info.get('item_type') == 'Episode':
@@ -661,6 +660,11 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
                     photo_url = f"https://image.tmdb.org/t/p/w780{path}"
         except Exception as e:
             logger.error(f"  ➜ [通知] 从本地数据库获取图片信息时出错: {e}", exc_info=True)
+
+        overview = overview or "暂无剧情简介。"
+        if len(overview) > 200:
+            overview = overview[:200] + "..."
+        escaped_overview = escape_markdown(overview)
 
         # =================================================================
         # ★★★ 查询该项目是否被标记为【待复核】 ★★★
