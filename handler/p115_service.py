@@ -8358,7 +8358,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     logger.info(f"  ➜ [洗版特权] 共享来源不使用 active_washing 强制替换，改走洗版优先级比较: {new_name}")
                     is_ep_active_washing = False
                  
-                effective_conflict_mode = 'replace' if (is_ep_active_washing or getattr(self, 'is_shared_transfer_context', False)) else conflict_mode
+                effective_conflict_mode = 'replace' if (
+                    is_ep_active_washing
+                    or getattr(self, 'is_shared_transfer_context', False)
+                    or getattr(self, 'is_manual_correct', False)
+                ) else conflict_mode
 
                 # ★ 判断是否享有外挂字幕豁免权
                 has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
