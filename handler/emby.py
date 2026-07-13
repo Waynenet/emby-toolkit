@@ -3011,36 +3011,6 @@ def remove_tags_from_item(item_id: str, tags_to_remove: List[str], emby_server_u
         logger.error(f"移除标签失败 (ID: {item_id}): {e}")
         return False
 
-# --- 触发 神医 重新提取媒体信息 ---
-def trigger_media_info_refresh(item_id: str, base_url: str, api_key: str, user_id: str) -> bool:
-    """
-    通过伪造 PlaybackInfo 请求，触发 Emby (及神医插件) 重新提取媒体信息。
-    接口: POST /Items/{Id}/PlaybackInfo?AutoOpenLiveStream=true&IsPlayback=true
-    """
-    if not item_id: return False
-    
-    url = f"{base_url}/Items/{item_id}/PlaybackInfo"
-    params = {
-        "AutoOpenLiveStream": "true",
-        "IsPlayback": "true",
-        "api_key": api_key,
-        "UserId": user_id
-    }
-    # wait_for_server_idle(base_url, api_key)
-    try:
-        # 这是一个伪造的播放请求，不需要 body，或者传个空的
-        response = emby_client.post(url, params=params, json={})
-        
-        if response.status_code == 200:
-            logger.info(f"  ➜ 已对 ID:{item_id} 触发媒体信息提取请求。")
-            return True
-        else:
-            logger.warning(f"  ➜ 触发失败 ID:{item_id}, HTTP {response.status_code}: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"  ➜ 请求异常 ID:{item_id}: {e}")
-        return False
-    
 # --- Playback Reporting 插件集成 ---
 def get_playback_reporting_data(base_url: str, api_key: str, user_id: str, days: int = 30) -> dict:
     """

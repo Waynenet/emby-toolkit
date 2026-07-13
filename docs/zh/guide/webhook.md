@@ -25,7 +25,7 @@ MoviePilot Webhook 也使用同一个地址。ETK 会根据 payload 里的 `type
 
 ## 行为说明
 
-- Webhook回流，补全实时监控预处理缺失的Emby_id和视频流数据。
+- Emby 的 `item.add`、`library.new` 事件会被忽略；新媒体入库由实时监控主动扫描 Emby 并获取 Item ID，不再等待 Webhook 回流。
 - 用户事件：实时同步用户权限、播放记录。
 - 元数据/图像更新：同步更新Emby修改图像、元数据到覆盖缓存和数据库。
 - MoviePilot 订阅事件：订阅助手实时接管新增、修改、删除、完成事件，维护下载状态和完成快照。
@@ -34,4 +34,4 @@ MoviePilot Webhook 也使用同一个地址。ETK 会根据 payload 里的 `type
 
 ## 速率控制
 
-Webhook 内置去抖与批处理逻辑，可减少高频事件对 Emby 的压力。
+元数据更新等高频事件内置去抖逻辑，可减少对 Emby 的压力。
