@@ -65,8 +65,91 @@ def _parse_timestamp(value) -> Optional[datetime]:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
+def _safe_json_list(value) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+def _first_video_stream(item: Dict[str, Any]) -> Dict[str, Any]:
+    streams = item.get("MediaStreams")
+    if not isinstance(streams, list):
+        streams = []
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("Type") == "Video":
+            return stream
+    return {}
+
+def _normalize_asset_path(path: Any) -> str:
+    return str(path or '').replace('\\', '/').strip().lower()
+
+def _asset_changed_since_sync(item: Dict[str, Any], db_state: Dict[str, Any]) -> bool:
+    """
+    Emby 有时替换媒体源后不会更新 DateModified。
+    这里用轻量资产特征兜底识别 ISO -> MKV、路径/体积/分辨率变化等情况。
+    """
+    if item.get("Type") not in ("Movie", "Episode"):
+        return False
+
+    item_id = str(item.get("Id") or '')
+    assets = _safe_json_list(db_state.get('asset_details_json'))
+    if not assets:
+        return True
+
+    matched_asset = None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get('emby_item_id') or '')
+        if asset_id and asset_id == item_id:
+            matched_asset = asset
+            break
+
+    if matched_asset is None:
+        if len(assets) == 1 and isinstance(assets[0], dict):
+            matched_asset = assets[0]
+        else:
+            return True
+
+    item_path = _normalize_asset_path(item.get('Path'))
+    db_path = _normalize_asset_path(matched_asset.get('path'))
+    if item_path and db_path and item_path != db_path:
+        return True
+
+    item_container = str(item.get('Container') or '').strip().lower()
+    db_container = str(matched_asset.get('container') or '').strip().lower()
+    if item_container and db_container and item_container != db_container:
+        return True
+
+    try:
+        item_size = int(item.get('Size') or 0)
+        db_size = int(matched_asset.get('size_bytes') or 0)
+        if item_size > 0 and db_size > 0 and item_size != db_size:
+            return True
+    except Exception:
+        pass
+
+    video_stream = _first_video_stream(item)
+    for item_key, asset_key in (('Width', 'width'), ('Height', 'height'), ('BitDepth', 'bit_depth')):
+        try:
+            item_value = int(video_stream.get(item_key) or item.get(item_key) or 0)
+            asset_value = int(matched_asset.get(asset_key) or 0)
+            if item_value > 0 and asset_value > 0 and item_value != asset_value:
+                return True
+        except Exception:
+            continue
+
+    return False
+
 def _emby_item_changed_since_sync(item: Dict[str, Any], db_state: Optional[Dict[str, Any]]) -> bool:
     if not db_state:
+        return True
+    if _asset_changed_since_sync(item, db_state):
         return True
     emby_modified = _parse_timestamp(item.get("DateModified"))
     last_synced = _parse_timestamp(db_state.get("last_synced_at"))
@@ -552,7 +635,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             
             # A. 预加载映射
             cursor.execute("""
-                SELECT tmdb_id, item_type, last_synced_at, jsonb_array_elements_text(emby_item_ids_json) as eid
+                SELECT tmdb_id, item_type, last_synced_at, asset_details_json,
+                       jsonb_array_elements_text(emby_item_ids_json) as eid
                 FROM media_metadata 
                 WHERE item_type IN ('Movie', 'Series')
             """)
@@ -565,12 +649,13 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     top_level_sync_state[e_id] = {
                         'tmdb_id': t_id,
                         'item_type': i_type,
-                        'last_synced_at': row.get('last_synced_at')
+                        'last_synced_at': row.get('last_synced_at'),
+                        'asset_details_json': row.get('asset_details_json')
                     }
 
             # B. 获取在线状态 (★ 修复：无论是否全量更新，都必须获取在线状态，否则无法检测离线)
             cursor.execute("""
-                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at,
+                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at, asset_details_json,
                        jsonb_array_elements_text(emby_item_ids_json) AS emby_id
                 FROM media_metadata 
                 WHERE in_library = TRUE
@@ -582,7 +667,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     'tmdb_id': row.get('tmdb_id'),
                     'item_type': row.get('item_type'),
                     'parent_series_tmdb_id': row.get('parent_series_tmdb_id'),
-                    'last_synced_at': row.get('last_synced_at')
+                    'last_synced_at': row.get('last_synced_at'),
+                    'asset_details_json': row.get('asset_details_json')
                 }
             
             cursor.execute("""
