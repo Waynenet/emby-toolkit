@@ -2137,7 +2137,8 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
             }
         except Exception as e:
             err_text = str(e)
-            no_retry = 'no rapid sign holder available' in err_text or '无可用 holder' in err_text
+            retry_after_match = re.search(r"['\"]retry_after['\"]\s*:\s*(\d+)", err_text)
+            retry_after = int(retry_after_match.group(1)) if retry_after_match else 0
             logger.warning(f"  ➜ [负载均衡签名] 中心 holder 签名闭环失败：{e}")
             return {
                 'ok': False,
@@ -2146,8 +2147,9 @@ def rapid_save_file(file_info: Dict[str, Any], *, target_cid: str = '') -> Dict[
                 'file_name': file_name,
                 'target_cid': target_cid,
                 'message': err_text,
-                'no_retry': bool(no_retry),
-                'abort_transfer': bool(no_retry),
+                'no_retry': False,
+                'abort_transfer': False,
+                'retry_after': retry_after,
             }
 
     return {'ok': False, 'response': resp, 'sha1': sha1, 'file_name': file_name, 'target_cid': target_cid}
@@ -4326,7 +4328,7 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
     transfer_token = f"rapid:{event_id or source_id}:{int(time.time() * 1000)}"
     abort_event = threading.Event()
 
-    def _rapid_transfer_one(raw_file: Dict[str, Any]) -> Dict[str, Any]:
+    def _rapid_transfer_one(raw_file: Dict[str, Any], attempt: int = 1) -> Dict[str, Any]:
         f = dict(raw_file or {})
         f.setdefault('source_kind', source_kind)
         f.setdefault('source_id', source_id)
@@ -4345,13 +4347,13 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
         try:
             result = rapid_save_file(f, target_cid=target_cid)
             if result.get('ok'):
-                result['attempt'] = 1
+                result['attempt'] = attempt
                 return {'ok': True, 'kind': file_source_kind, 'id': file_source_id, 'file': f, 'result': result}
             error = {
                 'file': file_label,
                 'response': result.get('response'),
                 'result': result,
-                'attempt': 1,
+                'attempt': attempt,
                 'abort_transfer': bool(result.get('abort_transfer')),
             }
             if result.get('no_retry') or result.get('abort_transfer'):
@@ -4363,13 +4365,24 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                 )
             return {'ok': False, 'file': f, 'error': error}
         except Exception as e:
-            return {'ok': False, 'file': f, 'error': {'file': file_label, 'error': str(e), 'attempt': 1}}
+            return {'ok': False, 'file': f, 'error': {'file': file_label, 'error': str(e), 'attempt': attempt}}
 
-    # 完结季/公共季包并发发起签名请求；失败后的重派只由中心端在同一个 sign_job 内完成。
+    def _retry_after_seconds(item: Dict[str, Any], default: int = 3) -> int:
+        error = item.get('error') if isinstance(item.get('error'), dict) else {}
+        result = error.get('result') if isinstance(error.get('result'), dict) else {}
+        value = _safe_int(result.get('retry_after'), 0)
+        if not value:
+            message = str(result.get('message') or error.get('error') or '')
+            match = re.search(r"['\"]retry_after['\"]\s*:\s*(\d+)", message)
+            value = int(match.group(1)) if match else default
+        return max(2, min(value, 30))
+
+    # 季包首轮并发保持吞吐；中心背压造成的失败项再串行补传。
     parallel_transfer = is_package_transfer
     if parallel_transfer:
         max_workers = max(1, min(len(files), 8))
-        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}, local_retries=0")
+        logger.info(f"  ➜ [共享资源] 季包秒传启用并发签名调度：files={len(files)}, workers={max_workers}, local_retries=2")
+        retry_items = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='shared-rapid-transfer') as executor:
             future_map = {executor.submit(_rapid_transfer_one, f): f for f in files}
             for future in concurrent.futures.as_completed(future_map):
@@ -4381,12 +4394,44 @@ def consume_device_event(event: Dict[str, Any], *, ack: bool = True) -> Dict[str
                     ok_count += 1
                     success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
                 else:
-                    errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'})
-                    if source_kind != 'logical_season' and (item.get('error') or {}).get('abort_transfer'):
+                    error = item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'}
+                    result = error.get('result') if isinstance(error.get('result'), dict) else {}
+                    if not error.get('abort_transfer') and not result.get('no_retry'):
+                        retry_items.append(item)
+                    else:
+                        errors.append(error)
+                    if source_kind != 'logical_season' and error.get('abort_transfer'):
                         abort_event.set()
                         for other in future_map:
                             if other is not future:
                                 other.cancel()
+
+        for attempt in (2, 3):
+            if not retry_items or abort_event.is_set():
+                break
+            wait_seconds = max(_retry_after_seconds(item) for item in retry_items)
+            logger.warning(
+                f"  ➜ [共享资源] 首轮秒传有 {len(retry_items)} 个可恢复失败，"
+                f"按中心背压等待 {wait_seconds}s 后串行补传（第 {attempt}/3 次）。"
+            )
+            time.sleep(wait_seconds)
+            pending_retry = []
+            for previous in retry_items:
+                item = _rapid_transfer_one(previous.get('file') or {}, attempt=attempt)
+                if item.get('ok'):
+                    ok_count += 1
+                    success_sources.append((item.get('kind'), item.get('id'), item.get('file') or {}))
+                    continue
+                error = item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'unknown'}
+                result = error.get('result') if isinstance(error.get('result'), dict) else {}
+                if attempt < 3 and not error.get('abort_transfer') and not result.get('no_retry'):
+                    pending_retry.append(item)
+                else:
+                    errors.append(error)
+            retry_items = pending_retry
+
+        for item in retry_items:
+            errors.append(item.get('error') or {'file': (item.get('file') or {}).get('sha1'), 'error': 'retry_aborted'})
     else:
         for f in files:
             if abort_event.is_set():

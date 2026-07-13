@@ -2305,10 +2305,6 @@ def _report_share_sync_heartbeat(summary: Dict[str, Any] = None, *, status: str 
     if not _enabled():
         return {'ok': False, 'skipped': True, 'message': '共享资源未启用'}
     summary_payload = dict(summary or {}) if isinstance(summary, dict) else {}
-    try:
-        summary_payload["emby_webhook_status"] = extensions.get_emby_webhook_status()
-    except Exception as e:
-        summary_payload["emby_webhook_status"] = {"ok": False, "error": str(e)[:200]}
     payload = {
         'task_name': 'shared_share_status_sync_high_freq',
         'task_interval_seconds': 600,
@@ -6596,7 +6592,9 @@ def _sign_listener_loop():
             if not _enabled():
                 _LISTENER_STOP.wait(5)
                 continue
-            poll_and_process_rapid_sign_jobs_once(timeout=3, limit=10)
+            # 每个 job 都可能包含一次取链和 Range 读取。限制单次 claim 数量，
+            # 避免后排任务尚未开始处理就耗尽中心端 claimed 超时窗口。
+            poll_and_process_rapid_sign_jobs_once(timeout=3, limit=3)
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1

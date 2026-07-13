@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from typing import Optional, List
-from gevent import spawn_later, spawn, sleep
+from gevent import spawn_later, spawn
 from gevent.event import Event
 
 import task_manager
@@ -45,10 +45,6 @@ logger = logging.getLogger(__name__)
 webhook_bp = Blueprint('webhook_bp', __name__)
 
 # --- 模块级变量 ---
-WEBHOOK_BATCH_QUEUE = collections.deque()
-WEBHOOK_BATCH_LOCK = threading.Lock()
-WEBHOOK_BATCH_DEBOUNCE_TIME = 30
-WEBHOOK_BATCH_DEBOUNCER = None
 WEBHOOK_REQUEUE_DELAY = 5
 WEBHOOK_PENDING_TASKS = collections.deque()
 WEBHOOK_PENDING_TASKS_LOCK = threading.Lock()
@@ -60,6 +56,68 @@ UPDATE_DEBOUNCE_TIME = 15
 # --- MP 单文件上传智能合并缓冲池 ---
 MP_BATCH_QUEUE = {}
 MP_BATCH_LOCK = threading.Lock()
+ACTIVE_SERIES_NOTIFICATION_QUEUE = {}
+ACTIVE_SERIES_NOTIFICATION_TIMERS = {}
+ACTIVE_SERIES_NOTIFICATION_LOCK = threading.Lock()
+ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME = 30
+
+
+def _flush_active_series_notification(series_key: str):
+    with ACTIVE_SERIES_NOTIFICATION_LOCK:
+        pending = ACTIVE_SERIES_NOTIFICATION_QUEUE.pop(series_key, None)
+        ACTIVE_SERIES_NOTIFICATION_TIMERS.pop(series_key, None)
+    if not pending:
+        return
+    try:
+        telegram.send_media_notification(
+            item_details=pending["item_details"],
+            notification_type=pending["notification_type"],
+            new_episode_ids=pending["new_episode_ids"] or None,
+        )
+    except Exception as e:
+        logger.error(f"触发主动入库聚合通知失败: {e}")
+
+
+def _enqueue_active_series_notification(item_details: dict, notification_type: str, new_episode_ids: List[str]):
+    provider_ids = item_details.get("ProviderIds") if isinstance(item_details.get("ProviderIds"), dict) else {}
+    series_key = str(item_details.get("Id") or provider_ids.get("Tmdb") or item_details.get("Name") or "").strip()
+    if not series_key:
+        telegram.send_media_notification(
+            item_details=item_details,
+            notification_type=notification_type,
+            new_episode_ids=new_episode_ids or None,
+        )
+        return
+
+    with ACTIVE_SERIES_NOTIFICATION_LOCK:
+        pending = ACTIVE_SERIES_NOTIFICATION_QUEUE.setdefault(series_key, {
+            "item_details": dict(item_details),
+            "notification_type": notification_type,
+            "new_episode_ids": [],
+        })
+        pending["item_details"] = dict(item_details)
+        if notification_type == "new":
+            pending["notification_type"] = "new"
+        for episode_id in new_episode_ids or []:
+            episode_id = str(episode_id or "").strip()
+            if episode_id and episode_id not in pending["new_episode_ids"]:
+                pending["new_episode_ids"].append(episode_id)
+
+        old_timer = ACTIVE_SERIES_NOTIFICATION_TIMERS.get(series_key)
+        if old_timer is not None:
+            old_timer.kill()
+        ACTIVE_SERIES_NOTIFICATION_TIMERS[series_key] = spawn_later(
+            ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME,
+            _flush_active_series_notification,
+            series_key,
+        )
+
+    logger.info(
+        "  ➜ [主动入库通知] 《%s》已聚合 %s 个单集通知，%s 秒内有新集将继续合并。",
+        item_details.get("Name") or series_key,
+        len(pending["new_episode_ids"]),
+        ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME,
+    )
 
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
@@ -893,6 +951,7 @@ def _get_processor_local_strm_root(processor) -> str:
 
     return ''
 
+
 def _repair_webhook_p115_fingerprints_for_emby_ids(
     processor,
     item_name_for_log: str,
@@ -984,7 +1043,7 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
         logger.warning(f"  ➜ [指纹补齐] 执行失败: {e}", exc_info=True)
         return 0
 
-def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True):
+def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True, aggregate_notification: bool = False):
     """
     【Webhook 统一入口】
     统一处理 新入库(New) 和 追更(Update) 两种情况。
@@ -1149,11 +1208,14 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         # 如果 is_new_item 为 True，说明是新入库通知
         notif_type = 'update' if (precise_new_episode_ids and not is_new_item) else 'new'
         
-        telegram.send_media_notification(
-            item_details=item_details, 
-            notification_type=notif_type, 
-            new_episode_ids=precise_new_episode_ids or None
-        )
+        if aggregate_notification and item_type == "Series" and len(precise_new_episode_ids) == 1:
+            _enqueue_active_series_notification(item_details, notif_type, precise_new_episode_ids)
+        else:
+            telegram.send_media_notification(
+                item_details=item_details,
+                notification_type=notif_type,
+                new_episode_ids=precise_new_episode_ids or None
+            )
     except Exception as e:
         logger.error(f"触发通知失败: {e}")
 
@@ -1304,92 +1366,58 @@ def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, kno
         logger.error(f"  ➜ [自动打标] 失败: {e}")
 
 # --- 辅助函数 ---
-def _process_batch_webhook_events():
-    global WEBHOOK_BATCH_DEBOUNCER
-    with WEBHOOK_BATCH_LOCK:
-        items_in_batch = list(set(WEBHOOK_BATCH_QUEUE))
-        WEBHOOK_BATCH_QUEUE.clear()
-        WEBHOOK_BATCH_DEBOUNCER = None
-
-    if not items_in_batch:
+def dispatch_active_emby_items(items):
+    """Dispatch actively discovered Movie/Episode IDs through the existing flow."""
+    parent_items = collections.defaultdict(lambda: {"name": "", "episode_ids": set()})
+    processor = extensions.media_processor_instance
+    if not processor:
         return
 
-    logger.info(f"  ➜ 防抖计时器到期，开始批量处理 {len(items_in_batch)} 个 Emby Webhook 新增/入库事件。")
-
-    parent_items = collections.defaultdict(lambda: {
-        "name": "", "type": "", "episode_ids": set()
-    })
-    
-    for item_id, item_name, item_type in items_in_batch:
-        parent_id = item_id
-        parent_name = item_name
-        parent_type = item_type
-        
-        if item_type == "Episode":
-            series_id = emby.get_series_id_from_child_id(
-                item_id, extensions.media_processor_instance.emby_url,
-                extensions.media_processor_instance.emby_api_key, extensions.media_processor_instance.emby_user_id, item_name=item_name
-            )
+    for item in items or []:
+        item_id = str(item.get("Id") or "").strip()
+        item_type = item.get("Type")
+        item_name = item.get("Name") or f"ID:{item_id}"
+        if not item_id:
+            continue
+        if item_type == "Movie":
+            parent_items[item_id]["name"] = item_name
+        elif item_type == "Episode":
+            series_id = str(item.get("SeriesId") or "").strip()
             if not series_id:
-                logger.warning(f"  ➜ 批量处理中，分集 '{item_name}' 未找到所属剧集，跳过。")
+                series_id = emby.get_series_id_from_child_id(
+                    item_id, processor.emby_url, processor.emby_api_key,
+                    processor.emby_user_id, item_name=item_name
+                )
+            if not series_id:
+                logger.warning("  ➜ [主动入库] 分集 '%s' 未取到 SeriesId，已跳过。", item_name)
                 continue
-            
-            parent_id = series_id
-            parent_type = "Series"
-            
-            # 将具体的分集ID添加到记录中
-            parent_items[parent_id]["episode_ids"].add(item_id)
-            
-            # 更新父项的名字（只需一次）
-            if not parent_items[parent_id]["name"]:
-                series_details = emby.get_emby_item_details(parent_id, extensions.media_processor_instance.emby_url, extensions.media_processor_instance.emby_api_key, extensions.media_processor_instance.emby_user_id, fields="Name")
-                parent_items[parent_id]["name"] = series_details.get("Name", item_name) if series_details else item_name
-        else:
-            # 如果事件是电影或剧集容器本身，也记录下来
-            parent_items[parent_id]["name"] = parent_name
-        
-        # 更新父项的类型
-        parent_items[parent_id]["type"] = parent_type
+            parent_items[series_id]["episode_ids"].add(item_id)
+            if not parent_items[series_id]["name"]:
+                series = emby.get_emby_item_details(
+                    series_id, processor.emby_url, processor.emby_api_key,
+                    processor.emby_user_id, fields="Name"
+                )
+                parent_items[series_id]["name"] = (series or {}).get("Name") or item_name
 
-    logger.info(f"  ➜ 批量事件去重后，将为 {len(parent_items)} 个独立媒体项分派任务。")
-
-    for parent_id, item_info in parent_items.items():
-        parent_name = item_info['name']
-        parent_type = item_info['type']
-        episode_ids = list(item_info["episode_ids"])
-        
-        # 1. 检查是否已处理
-        is_already_processed = parent_id in extensions.media_processor_instance.processed_items_cache
-
-        # 2. 检查数据库是否在线 (处理“僵尸数据”)
-        if is_already_processed:
-            # 这一步很快，只是查一下 media_metadata 表的 in_library 字段
-            is_online_in_db = media_db.is_emby_id_in_library(parent_id)
-            
-            # ★★★ 优化核心：如果不在线，直接踢出缓存，视为新项目重跑 ★★★
-            if not is_online_in_db:
-                logger.info(f"  ➜ 缓存命中 '{parent_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
-                
-                # 从内存缓存中移除
-                if parent_id in extensions.media_processor_instance.processed_items_cache:
-                    del extensions.media_processor_instance.processed_items_cache[parent_id]
-                
-                # 标记为未处理，后续逻辑会把它当作“新入库”来执行完整的数据库修复
-                is_already_processed = False
-        # 3. 统一分派任务
-        task_name_prefix = "Webhook追更" if is_already_processed and episode_ids else "Webhook入库"
-        
-        logger.info(f"  ➜ 为 '{parent_name}' 分派任务: {task_name_prefix} (分集数: {len(episode_ids)})")
-        
+    for parent_id, info in parent_items.items():
+        episode_ids = sorted(info["episode_ids"])
+        already_processed = (
+            parent_id in processor.processed_items_cache
+            and media_db.is_emby_id_in_library(parent_id)
+        )
+        task_prefix = "主动追更" if already_processed and episode_ids else "主动入库"
+        logger.info(
+            "  ➜ [主动入库] 已获取 Emby ID，分派 %s: %s (分集数: %s)",
+            task_prefix, info["name"], len(episode_ids)
+        )
         _submit_webhook_media_task(
-            f"{task_name_prefix}: {parent_name}",
+            f"{task_prefix}: {info['name']}",
             item_id=parent_id,
             force_full_update=False,
-            new_episode_ids=episode_ids if episode_ids else None,
-            is_new_item=not is_already_processed
+            new_episode_ids=episode_ids or None,
+            is_new_item=not already_processed,
+            aggregate_notification=len(episode_ids) == 1,
         )
-
-    logger.info("  ➜ 所有 Webhook 批量任务已完成分派或进入待提交队列。")
 
 def _trigger_metadata_update_task(item_id, item_name):
     """触发元数据同步任务"""
@@ -1402,102 +1430,6 @@ def _trigger_metadata_update_task(item_id, item_name):
         item_id=item_id,
         item_name=item_name
     )
-
-def _enqueue_webhook_event(item_id, item_name, item_type):
-    """
-    将事件加入批量处理队列，并管理防抖计时器 (滑动窗口防抖)。
-    """
-    global WEBHOOK_BATCH_DEBOUNCER
-    with WEBHOOK_BATCH_LOCK:
-        WEBHOOK_BATCH_QUEUE.append((item_id, item_name, item_type))
-        logger.debug(f"  ➜ [队列] 项目 '{item_name}' ({item_type}) 已加入处理队列。当前积压: {len(WEBHOOK_BATCH_QUEUE)}")
-        
-        # ★★★ 核心修复：滑动窗口防抖 ★★★
-        # 只要有新文件进来，就无情地杀掉旧的计时器，重新开始 30 秒倒计时！
-        if WEBHOOK_BATCH_DEBOUNCER is not None:
-            WEBHOOK_BATCH_DEBOUNCER.kill()
-            logger.debug("  ➜ [队列] 检测到连续入库，已重置批量处理计时器。")
-            
-        logger.info(f"  ➜ [队列] 启动批量处理计时器，将在 {WEBHOOK_BATCH_DEBOUNCE_TIME} 秒后执行。")
-        WEBHOOK_BATCH_DEBOUNCER = spawn_later(WEBHOOK_BATCH_DEBOUNCE_TIME, _process_batch_webhook_events)
-
-def _dispatch_item(item_id, item_name, item_type):
-    """
-    智能分发媒体项：
-    - 电影 (Movie)：直接交由核心处理器处理，跳过队列，加快入库速度。
-    - 剧集/分集 (Series/Episode)：进入防抖队列，合并处理，避免整剧入库时 TG 通知轰炸。
-    """
-    if item_type == 'Movie':
-        logger.info(f"  ➜ [分发] 电影 '{item_name}' 跳过防抖队列，直接分派处理任务。")
-        
-        # 1. 检查是否已处理
-        is_already_processed = item_id in extensions.media_processor_instance.processed_items_cache
-
-        # 2. 检查数据库是否在线 (处理“僵尸数据”)
-        if is_already_processed:
-            is_online_in_db = media_db.is_emby_id_in_library(item_id)
-            if not is_online_in_db:
-                logger.info(f"  ➜ 缓存命中 '{item_name}'，但数据库标记为离线/缺失。清除缓存，触发重新入库流程。")
-                if item_id in extensions.media_processor_instance.processed_items_cache:
-                    del extensions.media_processor_instance.processed_items_cache[item_id]
-                is_already_processed = False
-        
-        task_name_prefix = "Webhook追更" if is_already_processed else "Webhook入库"
-        
-        # 直接提交给任务管理器，不经过 WEBHOOK_BATCH_QUEUE
-        _submit_webhook_media_task(
-            f"{task_name_prefix}: {item_name}",
-            item_id=item_id,
-            force_full_update=False,
-            new_episode_ids=None,
-            is_new_item=not is_already_processed
-        )
-    else:
-        # 剧集、分集等进入防抖队列，等待合并
-        _enqueue_webhook_event(item_id, item_name, item_type)
-
-def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=None):
-    """
-    预检本地 -mediainfo.json，确认 ETK 已完成媒体信息提取后分发入库处理。
-    """
-    if item_type not in ['Movie', 'Episode']:
-        _dispatch_item(item_id, item_name, item_type)
-        return
-
-    logger.info(f"  ➜ [预检] 开始检查《{item_name}》的媒体信息。")
-    logger.debug(f"  ➜ [预检] 媒体信息检查对象：item_id={item_id}")
-
-    app_config = config_manager.APP_CONFIG
-    emby_url = app_config.get("emby_server_url")
-    emby_key = app_config.get("emby_api_key")
-    processor = extensions.media_processor_instance
-    emby_user_id = processor.emby_user_id
-
-    # =========================================================
-    # 1. 获取物理路径
-    # =========================================================
-    # 如果 Webhook 没有传过来路径，才去主动请求 Emby API 兜底
-    if not file_path:
-        try:
-            item_details = emby.get_emby_item_details(item_id, emby_url, emby_key, emby_user_id, fields="Path,MediaSources")
-            if item_details:
-                file_path = item_details.get("Path")
-                if not file_path and item_details.get("MediaSources"):
-                    file_path = item_details["MediaSources"][0].get("Path")
-        except Exception as e:
-            logger.warning(f"  ➜ [预检] 获取路径失败: {e}")
-
-    if not file_path:
-        logger.warning(f"  ➜ [预检] 拒绝入库：'{item_name}' 未取得媒体路径，无法确认 -mediainfo.json。")
-        return
-
-    mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-    if os.path.exists(mediainfo_path):
-        logger.info(f"  ➜ [预检] 已检测到 -mediainfo.json，准备分发：{item_name}")
-        _dispatch_item(item_id, item_name, item_type)
-        return
-
-    logger.warning(f"  ➜ [预检] 拒绝入库：未检测到 -mediainfo.json -> {mediainfo_path}")
 
 # --- Webhook 路由 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])
@@ -1520,17 +1452,6 @@ def emby_webhook():
     # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
-    item_for_webhook_status = data.get("Item", {}) if isinstance(data, dict) else {}
-    try:
-        extensions.mark_emby_webhook_seen(
-            event_type=event_type,
-            item_type=item_for_webhook_status.get("Type"),
-            item_id=item_for_webhook_status.get("Id"),
-            item_name=item_for_webhook_status.get("Name"),
-            remote_addr=request.remote_addr or "",
-        )
-    except Exception:
-        pass
     # ======================================================================
     # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
     # ======================================================================
@@ -1829,7 +1750,7 @@ def emby_webhook():
             logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
-    trigger_events = ["item.add", "library.new", "metadata.update", "image.update", "collection.items.removed", "deep.delete", "None"]
+    trigger_events = ["metadata.update", "image.update", "collection.items.removed", "deep.delete", "None"]
     if event_type not in trigger_events:
         logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
@@ -1849,7 +1770,7 @@ def emby_webhook():
     else:
         original_item_name = raw_name
     
-    trigger_types = ["Movie", "Series", "Season", "Episode", "BoxSet", "Audio"]
+    trigger_types = ["Movie", "Series", "Season", "Episode", "BoxSet"]
     if not (original_item_id and original_item_type in trigger_types):
         logger.debug(f"  ➜ Webhook事件 '{event_type}' (项目: {original_item_name}, 类型: {original_item_type}) 被忽略。")
         return jsonify({"status": "event_ignored_no_id_or_wrong_type"}), 200
@@ -1894,7 +1815,7 @@ def emby_webhook():
             return jsonify({"status": "collection_removal_check_started"}), 202
 
     # 过滤不在处理范围的媒体库
-    if event_type in ["item.add", "library.new", "metadata.update", "image.update"]:
+    if event_type in ["metadata.update", "image.update"]:
         processor = extensions.media_processor_instance
         
         # --- 【拦截 1】如果是系统正在生成的封面，直接拦截，不查库，不报错 ---
@@ -1924,42 +1845,12 @@ def emby_webhook():
             allowed_libs = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS) or []
 
             # 【关键拦截点】
-            if lib_id not in allowed_libs and original_item_type != "Audio":
+            if lib_id not in allowed_libs:
                 logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
                 return jsonify({"status": "ignored_library"}), 200
 
         if _should_skip_non_etk_strm_webhook(original_item_type, original_item_name, original_item_path):
             return jsonify({"status": "ignored_non_etk_strm"}), 200
-
-    # ======================================================================
-    # ★★★ 处理音乐 (Audio) 入库事件 ★★★
-    # ======================================================================
-    if event_type in ["item.add", "library.new"] and original_item_type == "Audio":
-        logger.info(f"  ➜ [音乐入库] 检测到音频文件 '{original_item_name}'，直接触发神医提取媒体信息...")
-        processor = extensions.media_processor_instance
-        
-        def _trigger_audio_info():
-            # 稍微等 2 秒，确保 Emby 数据库已经把这个条目完全落盘
-            sleep(2)
-            emby.trigger_media_info_refresh(
-                original_item_id, 
-                processor.emby_url, 
-                processor.emby_api_key, 
-                processor.emby_user_id
-            )
-            
-        # 异步触发，绝不阻塞 Webhook 主线程
-        spawn(_trigger_audio_info)
-        return jsonify({"status": "audio_media_info_triggered", "item_id": original_item_id}), 202
-    
-    # ======================================================================
-    # ★★★ 处理视频入库事件 (原有的逻辑保持不变) ★★★
-    # ======================================================================
-    if event_type in ["item.add", "library.new"]:
-        spawn(_wait_for_stream_data_and_enqueue, original_item_id, original_item_name, original_item_type, original_item_path)
-        
-        logger.info(f"  ➜ Webhook: 收到入库事件 '{original_item_name}'，已分派预检任务。")
-        return jsonify({"status": "processing_started_with_stream_check", "item_id": original_item_id}), 202
 
     # --- 为 元数据更新 事件准备变量 ---
     id_to_process = original_item_id

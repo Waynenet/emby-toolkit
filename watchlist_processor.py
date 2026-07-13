@@ -1926,6 +1926,7 @@ class WatchlistProcessor:
         locked_washing_level: Optional[int] = None,
         locked_release_group_alias: str = '',
         include_regex: str = '',
+        locked_mp_priority: Optional[int] = None,
     ) -> Dict[str, Any]:
         locked_group = helpers.normalize_release_group_name(locked_release_group)
         include_regex = str(include_regex or '').strip()
@@ -2058,17 +2059,18 @@ class WatchlistProcessor:
                 clear_levels = [episode_levels.get(ep) for ep in clear_episodes if episode_levels.get(ep)]
                 all_levels = [level for level in episode_levels.values() if level]
                 locked_level = min(clear_levels or all_levels or []) if (clear_levels or all_levels) else None
-            baseline_priority = max(101 - int(locked_level), 0) if locked_level else None
+            mp_baseline = _safe_int(locked_mp_priority, None)
+            baseline_priority = mp_baseline if mp_baseline is not None and mp_baseline >= 0 else None
+            if baseline_priority is None:
+                baseline_priority = max(101 - int(locked_level), 0) if locked_level else None
             if enable_episodes or clear_episodes:
                 priority_map: Dict[int, int] = {}
                 for ep in sorted(set(enable_episodes + clear_episodes)):
-                    level = episode_levels.get(ep)
-                    if level:
-                        priority = max(101 - int(level), 0)
-                    elif baseline_priority is not None:
+                    if baseline_priority is not None:
                         priority = baseline_priority
                     else:
-                        priority = 0
+                        level = episode_levels.get(ep)
+                        priority = max(101 - int(level), 0) if level else 0
                     if ep in enable_episodes:
                         locked_priority = baseline_priority if baseline_priority is not None else priority
                         priority = min(priority, max(int(locked_priority) - 1, 0))
@@ -2684,6 +2686,9 @@ class WatchlistProcessor:
                         }, series_name)
 
                 if consistency_check_enabled and include_regex:
+                    state_mp_priority = _safe_int(state.get('mp_episode_priority'), None)
+                    if state_mp_priority is None:
+                        state_mp_priority = _safe_int(state.get('mp_episode_priority_baseline'), None)
                     sync_state = self._sync_version_lock_release_group_washing(
                         tmdb_id,
                         season_number,
@@ -2692,6 +2697,7 @@ class WatchlistProcessor:
                         _safe_int(state.get('washing_level')) or None,
                         release_group_alias,
                         include_regex,
+                        locked_mp_priority=state_mp_priority,
                     )
                     baseline_priority = sync_state.get('baseline_priority') if isinstance(sync_state, dict) else None
                     if baseline_priority and baseline_priority != state.get('mp_episode_priority_baseline'):
@@ -2762,7 +2768,11 @@ class WatchlistProcessor:
             release_group_info = self._version_lock_release_group_info(row.get('source_name'))
             release_group = release_group_info.get('group') or ''
             release_group_alias = release_group_info.get('alias') or ''
-            baseline_priority = max(101 - int(washing_level), 0) if consistency_check_enabled and washing_level else None
+            baseline_priority = (
+                mp_episode_priority
+                if mp_episode_priority is not None
+                else (max(101 - int(washing_level), 0) if consistency_check_enabled and washing_level else None)
+            )
             ok = moviepilot.lock_series_subscription_version(
                 tmdb_id,
                 season_number,
@@ -2803,6 +2813,7 @@ class WatchlistProcessor:
                     washing_level,
                     release_group_alias,
                     include_regex,
+                    locked_mp_priority=mp_episode_priority,
                 )
                 if isinstance(sync_state, dict) and sync_state.get('baseline_priority') and sync_state.get('baseline_priority') != baseline_priority:
                     self._save_version_lock_wait_state(tmdb_id, season_number, {

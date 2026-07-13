@@ -2867,7 +2867,7 @@ class P115Service:
                                 resp['data'].setdefault('total', len(pairs))
                                 resp['data'].setdefault('success_count', len(pairs))
                                 resp['data'].setdefault('failed_count', 0)
-                            logger.info(f"  ➜ [批量重命名] 已通过 115 批量接口重命名 {len(pairs)} 个文件。")
+                            logger.debug(f"  ➜ [批量重命名] 已通过 115 批量接口重命名 {len(pairs)} 个文件。")
                             return resp
 
                         logger.warning(
@@ -6539,7 +6539,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if (raw_probe_season is not None or raw_probe_episode is not None) and not silent_log:
                 season_text = f"第 {int(raw_probe_season)} 季" if raw_probe_season is not None else "季号未知"
                 episode_text = f"第 {int(raw_probe_episode)} 集" if raw_probe_episode is not None else "集号未知"
-                logger.info(
+                logger.debug(
                     f"  ➜ [媒体信息辅助识别] 已从媒体信息识别到 {season_text}{episode_text}：{original_name}"
                 )
 
@@ -8358,7 +8358,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     logger.info(f"  ➜ [洗版特权] 共享来源不使用 active_washing 强制替换，改走洗版优先级比较: {new_name}")
                     is_ep_active_washing = False
                  
-                effective_conflict_mode = 'replace' if (is_ep_active_washing or getattr(self, 'is_shared_transfer_context', False)) else conflict_mode
+                effective_conflict_mode = 'replace' if (
+                    is_ep_active_washing
+                    or getattr(self, 'is_shared_transfer_context', False)
+                    or getattr(self, 'is_manual_correct', False)
+                ) else conflict_mode
 
                 # ★ 判断是否享有外挂字幕豁免权
                 has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
@@ -8812,6 +8816,34 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
 
                             if is_video:
+                                if not file_sha1 and fid:
+                                    try:
+                                        info_res = self.client.fs_get_info(fid)
+                                        if info_res.get('state') and info_res.get('data'):
+                                            file_sha1 = info_res['data'].get('sha1')
+                                    except Exception:
+                                        pass
+
+                                # STRM 一落盘就会触发监控，必须先提交 PC/SHA1 缓存。
+                                if self.media_type == 'tv' and season_num is not None and s_name:
+                                    file_local_path = os.path.join(relative_category_path, std_root_name, s_name, new_filename)
+                                else:
+                                    file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
+                                file_local_path = file_local_path.replace('\\', '/')
+                                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+                                washing_snapshot = file_item.get('_washing_snapshot') if isinstance(file_item, dict) else {}
+                                if not washing_snapshot:
+                                    washing_snapshot = _build_washing_snapshot(file_item, new_filename, '', file_size, False)
+
+                                if pick_code and fid:
+                                    P115CacheManager.save_file_cache(
+                                        fid, batch_target_cid, new_filename,
+                                        sha1=file_sha1, pick_code=pick_code,
+                                        local_path=file_local_path, size=file_size,
+                                        preid=file_item.get('preid'),
+                                        **(washing_snapshot or {})
+                                    )
+
                                 strm_filename = os.path.splitext(new_filename)[0] + ".strm"
                                 strm_filepath = os.path.join(local_dir, strm_filename)
                                 strm_content = f"{etk_url}/api/p115/play/{pick_code}"
@@ -8827,13 +8859,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     enqueue_file_actively(strm_filepath)
                                 except Exception: pass
 
-                                if not file_sha1 and fid:
-                                    try:
-                                        info_res = self.client.fs_get_info(fid)
-                                        if info_res.get('state') and info_res.get('data'):
-                                            file_sha1 = info_res['data'].get('sha1')
-                                    except Exception: pass
-
                                 if FORCE_GENERATE_MEDIAINFO:
                                     try:
                                         mediainfo_filename = os.path.splitext(new_filename)[0] + "-mediainfo.json"
@@ -8843,32 +8868,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                             with open(mediainfo_filepath, 'w', encoding='utf-8') as f:
                                                 f.write(mediainfo_text)
                                             logger.info(f"  ➜ 已生成媒体信息文件：{mediainfo_filename}")
+                                            try:
+                                                from monitor_service import enqueue_emby_binding
+                                                enqueue_emby_binding(strm_filepath)
+                                            except Exception:
+                                                pass
                                         else:
                                             logger.debug(f"  ➜ 跳过媒体信息文件生成，未命中本地缓存: {new_filename}")
                                     except Exception as e:
                                         logger.error(f"  ➜ 生成媒体信息文件失败: {e}")
 
-                                # ★ 保留原名只影响文件名，缓存路径仍走标准目录
-                                if self.media_type == 'tv' and season_num is not None and s_name:
-                                    file_local_path = os.path.join(relative_category_path, std_root_name, s_name, new_filename)
-                                else:
-                                    file_local_path = os.path.join(relative_category_path, std_root_name, new_filename)
-                                
-                                file_local_path = file_local_path.replace('\\', '/')
-                                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
-
-                                washing_snapshot = file_item.get('_washing_snapshot') if isinstance(file_item, dict) else {}
-                                if is_video and not washing_snapshot:
-                                    washing_snapshot = _build_washing_snapshot(file_item, new_filename, '', file_size, False)
-
                                 if pick_code and fid:
-                                    P115CacheManager.save_file_cache(
-                                        fid, batch_target_cid, new_filename, 
-                                        sha1=file_sha1, pick_code=pick_code, 
-                                        local_path=file_local_path, size=file_size,
-                                        preid=file_item.get('preid'),
-                                        **(washing_snapshot or {})
-                                    )
                                     # 负载均衡分享资产记录钩子：
                                     # 对影巢/TG 等外部分享导入后再整理的资源，只有这里拿到的
                                     # fid / pick_code / sha1 才是 STRM 实际播放文件身份。
@@ -9092,6 +9102,25 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except Exception:
                     pass
 
+            try:
+                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
+            except Exception:
+                file_size = 0
+            file_local_path = os.path.join(parent_rel_path, original_name).replace("\\", "/") if parent_rel_path else original_name
+
+            # 与标准整理一致：先落 PC/SHA1 缓存，再生成会触发监控的 STRM。
+            if fid and pick_code:
+                P115CacheManager.save_file_cache(
+                    fid=fid,
+                    parent_id=parent_id,
+                    name=original_name,
+                    sha1=sha1,
+                    pick_code=pick_code,
+                    local_path=file_local_path,
+                    size=file_size,
+                    preid=file_item.get('preid')
+                )
+
             # 1. 处理视频 (STRM + Mediainfo)
             if is_video and pick_code:
                 # 生成 STRM
@@ -9143,6 +9172,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             with open(mediainfo_filepath, "w", encoding="utf-8") as f:
                                 f.write(mediainfo_text)
                             logger.info(f"  ➜ [MP直出] 已生成媒体信息文件：{mediainfo_filename}")
+                            try:
+                                from monitor_service import enqueue_emby_binding
+                                enqueue_emby_binding(strm_filepath)
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.error(f"  ➜ [MP直出] 生成媒体信息失败: {e}")
 
@@ -9164,26 +9198,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 except Exception as e:
                     logger.error(f"  ➜ [MP直出] 下载字幕失败: {e}")
 
-            # 3. 写入数据库缓存 (保持 Emby 扫库和后续删除的闭环)
-            try:
-                file_size = _parse_115_size(file_item.get('fs') or file_item.get('size'))
-            except Exception:
-                file_size = 0
-
-            file_local_path = os.path.join(parent_rel_path, original_name).replace("\\", "/") if parent_rel_path else original_name
-
+            # 3. 写入整理记录（文件缓存已在 STRM 生成前提交）
             if fid and pick_code:
-                P115CacheManager.save_file_cache(
-                    fid=fid,
-                    parent_id=parent_id,
-                    name=original_name,
-                    sha1=sha1,
-                    pick_code=pick_code,
-                    local_path=file_local_path,
-                    size=file_size,
-                    preid=file_item.get('preid')
-                )
-
                 P115RecordManager.add_or_update_record(
                     file_id=fid,
                     pick_code=pick_code,
@@ -9686,7 +9702,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
                 if probe_identity.get('episode_number') not in (None, ''):
                     se_parts.append(f"第 {int(probe_identity.get('episode_number'))} 集")
                 se_text = "，" + "".join(se_parts) if se_parts else ""
-                logger.info(
+                logger.debug(
                     f"  ➜ [媒体信息辅助识别] 命中共享媒体信息缓存：TMDb {tmdb_id}，类型：{probe_type_text}{se_text}"
                 )
                 if probe_identity.get('original_language'):

@@ -122,15 +122,6 @@ def _safe_json_list(value) -> List[Any]:
             return []
     return []
 
-def _first_video_stream(item: Dict[str, Any]) -> Dict[str, Any]:
-    streams = item.get("MediaStreams")
-    if not isinstance(streams, list):
-        streams = []
-    for stream in streams:
-        if isinstance(stream, dict) and stream.get("Type") == "Video":
-            return stream
-    return {}
-
 def _normalize_asset_path(path: Any) -> str:
     return str(path or '').replace('\\', '/').strip().lower()
 
@@ -175,20 +166,11 @@ def _asset_changed_since_sync(item: Dict[str, Any], db_state: Dict[str, Any]) ->
     try:
         item_size = int(item.get('Size') or 0)
         db_size = int(matched_asset.get('size_bytes') or 0)
-        if item_size > 0 and db_size > 0 and item_size != db_size:
+        size_tolerance = max(64 * 1024 * 1024, int(max(item_size, db_size) * 0.01))
+        if item_size > 0 and db_size > 0 and abs(item_size - db_size) > size_tolerance:
             return True
     except Exception:
         pass
-
-    video_stream = _first_video_stream(item)
-    for item_key, asset_key in (('Width', 'width'), ('Height', 'height'), ('BitDepth', 'bit_depth')):
-        try:
-            item_value = int(video_stream.get(item_key) or item.get(item_key) or 0)
-            asset_value = int(matched_asset.get(asset_key) or 0)
-            if item_value > 0 and asset_value > 0 and item_value != asset_value:
-                return True
-        except Exception:
-            continue
 
     return False
 
@@ -2199,7 +2181,35 @@ def task_scan_monitor_folders(processor):
             )
 
             try:
-                processor.process_file_actively_batch(batch)
+                strm_files = []
+                physical_files = []
+                for file_path in batch:
+                    if not str(file_path or '').lower().endswith('.strm'):
+                        physical_files.append(file_path)
+                        continue
+
+                    directory = os.path.dirname(file_path)
+                    try:
+                        for name in os.listdir(directory):
+                            sibling = os.path.join(directory, name)
+                            if name.lower().endswith('.strm') and name.lower() not in known_filenames:
+                                strm_files.append(sibling)
+                    except Exception:
+                        strm_files.append(file_path)
+
+                if strm_files:
+                    from monitor_service import enqueue_file_actively
+                    unique_strm_files = list(dict.fromkeys(strm_files))
+                    logger.info(
+                        f"  ➜ 查漏扫描发现 {len(unique_strm_files)} 个 STRM，"
+                        "统一进入主动 Item ID 绑定队列。"
+                    )
+                    for file_path in unique_strm_files:
+                        enqueue_file_actively(file_path)
+
+                if physical_files:
+                    from monitor_service import prepare_physical_files_for_binding
+                    prepare_physical_files_for_binding(processor, physical_files)
                 processed_count += len(batch)
             except Exception as e:
                 logger.error(f"  ➜ 批量处理漏网文件失败: {e}", exc_info=True)
