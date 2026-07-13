@@ -413,7 +413,7 @@ def _identify_physical_media(file_path: str, processor):
                     existing_id = str((unique_node.text if unique_node is not None else '') or root.findtext('tmdbid') or '').strip()
                     if root_type and existing_id.isdigit() and int(existing_id) > 0:
                         existing_title = root.findtext('title') or os.path.splitext(filename)[0]
-                        logger.info("  ➜ [入库预备] RAW 未命中，回退现有 NFO 身份: %s (TMDb: %s)", existing_title, existing_id)
+                        logger.debug("  ➜ [入库预备] RAW 未命中，回退现有 NFO 身份: %s (TMDb: %s)", existing_title, existing_id)
                         return existing_id, root_type, existing_title
                 except Exception as e:
                     logger.debug("  ➜ [入库预备] 读取现有 NFO 失败: %s -> %s", nfo_path, e)
@@ -480,7 +480,7 @@ def _generate_local_mediainfo(file_path: str) -> bool:
         with open(temp_path, 'w', encoding='utf-8') as file_obj:
             json.dump(formatted, file_obj, ensure_ascii=False, indent=2)
         os.replace(temp_path, mediainfo_path)
-        logger.info("  ➜ [入库预备] ffprobe 已生成媒体信息: %s", mediainfo_path)
+        logger.debug("  ➜ [入库预备] ffprobe 已生成媒体信息: %s", mediainfo_path)
         return True
     except subprocess.TimeoutExpired:
         logger.warning("  ➜ [入库预备] ffprobe 超时: %s", file_path)

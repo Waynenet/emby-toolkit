@@ -6539,7 +6539,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if (raw_probe_season is not None or raw_probe_episode is not None) and not silent_log:
                 season_text = f"第 {int(raw_probe_season)} 季" if raw_probe_season is not None else "季号未知"
                 episode_text = f"第 {int(raw_probe_episode)} 集" if raw_probe_episode is not None else "集号未知"
-                logger.info(
+                logger.debug(
                     f"  ➜ [媒体信息辅助识别] 已从媒体信息识别到 {season_text}{episode_text}：{original_name}"
                 )
 
@@ -9698,7 +9698,7 @@ def _identify_media_enhanced(filename, main_dir_name=None, has_season_subdirs=Fa
                 if probe_identity.get('episode_number') not in (None, ''):
                     se_parts.append(f"第 {int(probe_identity.get('episode_number'))} 集")
                 se_text = "，" + "".join(se_parts) if se_parts else ""
-                logger.info(
+                logger.debug(
                     f"  ➜ [媒体信息辅助识别] 命中共享媒体信息缓存：TMDb {tmdb_id}，类型：{probe_type_text}{se_text}"
                 )
                 if probe_identity.get('original_language'):
