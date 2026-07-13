@@ -2867,7 +2867,7 @@ class P115Service:
                                 resp['data'].setdefault('total', len(pairs))
                                 resp['data'].setdefault('success_count', len(pairs))
                                 resp['data'].setdefault('failed_count', 0)
-                            logger.info(f"  ➜ [批量重命名] 已通过 115 批量接口重命名 {len(pairs)} 个文件。")
+                            logger.debug(f"  ➜ [批量重命名] 已通过 115 批量接口重命名 {len(pairs)} 个文件。")
                             return resp
 
                         logger.warning(

@@ -377,7 +377,7 @@ def _write_minimal_tmdb_nfo(file_path: str, tmdb_id: str, media_type: str, title
                 temp_path = nfo_path + '.etk-tmp'
                 tree.write(temp_path, encoding='utf-8', xml_declaration=True)
                 os.replace(temp_path, nfo_path)
-                logger.info("  ➜ [入库预备] 已写入 Emby 识别 NFO: %s (TMDb: %s)", nfo_path, tmdb_id)
+                logger.debug("  ➜ [入库预备] 已写入 Emby 识别 NFO: %s (TMDb: %s)", nfo_path, tmdb_id)
         return True
     except Exception as e:
         logger.warning("  ➜ [入库预备] 写入简化 NFO 失败: %s -> %s", file_path, e)
@@ -435,7 +435,7 @@ def _identify_physical_media(file_path: str, processor):
         tmdb_id = str(tmdb_id or '').strip()
         if not tmdb_id.isdigit() or int(tmdb_id) <= 0 or media_type not in {'movie', 'tv'}:
             return _existing_nfo_identity()
-        logger.info(
+        logger.debug(
             "  ➜ [入库预备] 增强识别命中《%s》，TMDb: %s，类型: %s。",
             title or filename, tmdb_id, media_type,
         )
@@ -672,7 +672,7 @@ def enqueue_file_actively(file_path: str):
             logger.warning("  ➜ [STRM入库] 核心处理器未就绪，已跳过: %s", os.path.basename(file_path))
             return
         if _enqueue_strm_preparation(processor, file_path):
-            logger.info("  ➜ [STRM入库] 加入识别/NFO 预备队列: %s", os.path.basename(file_path))
+            logger.debug("  ➜ [STRM入库] 加入识别/NFO 预备队列: %s", os.path.basename(file_path))
         return
 
     with QUEUE_LOCK:
