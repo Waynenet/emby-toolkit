@@ -8843,6 +8843,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                             with open(mediainfo_filepath, 'w', encoding='utf-8') as f:
                                                 f.write(mediainfo_text)
                                             logger.info(f"  ➜ 已生成媒体信息文件：{mediainfo_filename}")
+                                            try:
+                                                from monitor_service import enqueue_emby_binding
+                                                enqueue_emby_binding(strm_filepath)
+                                            except Exception:
+                                                pass
                                         else:
                                             logger.debug(f"  ➜ 跳过媒体信息文件生成，未命中本地缓存: {new_filename}")
                                     except Exception as e:
@@ -9143,6 +9148,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             with open(mediainfo_filepath, "w", encoding="utf-8") as f:
                                 f.write(mediainfo_text)
                             logger.info(f"  ➜ [MP直出] 已生成媒体信息文件：{mediainfo_filename}")
+                            try:
+                                from monitor_service import enqueue_emby_binding
+                                enqueue_emby_binding(strm_filepath)
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.error(f"  ➜ [MP直出] 生成媒体信息失败: {e}")
 

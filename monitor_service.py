@@ -34,6 +34,10 @@ MEDIAINFO_UPLOAD_INFLIGHT = set()
 MEDIAINFO_UPLOAD_DEDUPE_SECONDS = 300
 MEDIAINFO_UPLOAD_LOG_DEDUPE_SECONDS = 120
 DEBOUNCE_DELAY = 3 # 防抖延迟秒数
+EMBY_BIND_QUEUE = set()
+EMBY_BIND_LOCK = threading.Lock()
+EMBY_BIND_TIMER = None
+EMBY_BIND_DEBOUNCE_SECONDS = 3
 
 # --- 全局队列抑制标志 ---
 IS_PROCESSING_PAUSED = False
@@ -302,12 +306,85 @@ def _filter_etk_standard_files(file_paths: List[str]) -> List[str]:
             logger.warning(f"  ➜ [实时监控] 非 ETK 标准 STRM，已跳过：{os.path.basename(fp)}")
     return valid
 
+
+def enqueue_emby_binding(file_path: str):
+    """Batch ETK STRM paths for active Emby Item ID discovery."""
+    global EMBY_BIND_TIMER
+    if not str(file_path or "").lower().endswith(".strm"):
+        return
+
+    with EMBY_BIND_LOCK:
+        EMBY_BIND_QUEUE.add(os.path.normpath(file_path))
+        if EMBY_BIND_TIMER:
+            EMBY_BIND_TIMER.cancel()
+        EMBY_BIND_TIMER = threading.Timer(EMBY_BIND_DEBOUNCE_SECONDS, _process_emby_binding_queue)
+        EMBY_BIND_TIMER.daemon = True
+        EMBY_BIND_TIMER.start()
+
+
+def _wait_for_mediainfo_sidecars(file_paths: List[str], timeout_seconds: float = 15.0) -> List[str]:
+    pending = set(file_paths or [])
+    ready = []
+    deadline = time.time() + timeout_seconds
+    while pending and time.time() < deadline:
+        for path in list(pending):
+            mediainfo_path = os.path.splitext(path)[0] + "-mediainfo.json"
+            if os.path.exists(path) and os.path.exists(mediainfo_path):
+                ready.append(path)
+                pending.remove(path)
+        if pending:
+            time.sleep(0.25)
+
+    for path in pending:
+        logger.warning("  ➜ [主动入库] 未等到媒体信息侧车，跳过主动绑定: %s", path)
+    return ready
+
+
+def _process_emby_binding_queue():
+    global EMBY_BIND_TIMER
+    with EMBY_BIND_LOCK:
+        file_paths = list(EMBY_BIND_QUEUE)
+        EMBY_BIND_QUEUE.clear()
+        EMBY_BIND_TIMER = None
+
+    import extensions
+    processor = extensions.media_processor_instance
+    if not processor or not file_paths:
+        return
+
+    ready_paths = _wait_for_mediainfo_sidecars(file_paths)
+    if not ready_paths:
+        return
+
+    base_url = processor.emby_url
+    api_key = processor.emby_api_key
+    user_id = processor.emby_user_id
+    if not base_url or not api_key:
+        return
+
+    logger.info("  ➜ [主动入库] 通知 Emby 扫描 %s 个 STRM，随后主动获取 Item ID。", len(ready_paths))
+    emby.notify_emby_file_changes(ready_paths, base_url, api_key)
+    found = emby.wait_for_emby_items_by_path(ready_paths, base_url, api_key, user_id)
+
+    if found:
+        from routes.webhook import dispatch_active_emby_items
+        dispatch_active_emby_items(list(found.values()))
+
+    missing = [
+        path for path in ready_paths
+        if emby._normalize_emby_media_path(path) not in found
+    ]
+    if missing:
+        logger.error("  ➜ [主动入库] %s 个 STRM 在短轮询内未取到 Emby Item ID。", len(missing))
+
 def enqueue_file_actively(file_path: str):
     """主动将文件推入监控队列"""
     global DEBOUNCE_TIMER
     if not _is_etk_standard_strm(file_path):
         logger.warning(f"  ➜ [实时监控] 非 ETK 标准 STRM，已跳过：{os.path.basename(file_path)}")
         return
+
+    enqueue_emby_binding(file_path)
 
     with QUEUE_LOCK:
         if file_path not in FILE_EVENT_QUEUE:

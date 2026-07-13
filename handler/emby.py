@@ -831,6 +831,94 @@ def get_emby_library_items(
     
     return all_items_from_selected_libraries
 
+
+def _normalize_emby_media_path(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").rstrip("/")
+
+
+def get_emby_item_by_path(
+    file_path: str,
+    base_url: str,
+    api_key: str,
+    user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the Emby item whose physical path exactly matches file_path."""
+    expected_path = _normalize_emby_media_path(file_path)
+    if not expected_path or not base_url or not api_key:
+        return None
+
+    params = {
+        "api_key": api_key,
+        "Path": file_path,
+        "Recursive": "true",
+        "Fields": "Path,ProviderIds,SeriesId,SeasonId,ParentId,IndexNumber,ParentIndexNumber",
+        "EnableTotalRecordCount": "false",
+    }
+    if user_id:
+        params["UserId"] = user_id
+
+    try:
+        response = emby_client.get(f"{base_url.rstrip('/')}/Items", params=params, timeout=10)
+        response.raise_for_status()
+        items = response.json().get("Items", [])
+    except Exception as e:
+        logger.debug("  ➜ [主动入库] 按路径查询 Emby 失败: %s -> %s", file_path, e)
+        return None
+
+    for item in items:
+        if _normalize_emby_media_path(item.get("Path")) == expected_path:
+            return item
+
+    # Windows paths are case-insensitive. Keep this as a fallback so Linux paths
+    # still prefer an exact, case-sensitive match.
+    expected_folded = expected_path.casefold()
+    for item in items:
+        if _normalize_emby_media_path(item.get("Path")).casefold() == expected_folded:
+            return item
+    return None
+
+
+def wait_for_emby_items_by_path(
+    file_paths: List[str],
+    base_url: str,
+    api_key: str,
+    user_id: Optional[str] = None,
+    retry_delays: tuple = (0, 0.25, 0.5, 1, 2, 3),
+) -> Dict[str, Dict[str, Any]]:
+    """Briefly poll Emby until newly scanned paths have assigned item IDs."""
+    pending = {
+        _normalize_emby_media_path(path): path
+        for path in file_paths or []
+        if _normalize_emby_media_path(path)
+    }
+    found: Dict[str, Dict[str, Any]] = {}
+
+    for delay in retry_delays:
+        if not pending:
+            break
+        if delay:
+            time.sleep(delay)
+
+        paths = list(pending.values())
+        max_workers = min(10, len(paths))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {
+                executor.submit(get_emby_item_by_path, path, base_url, api_key, user_id): path
+                for path in paths
+            }
+            for future in as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    item = future.result()
+                except Exception:
+                    item = None
+                if item and item.get("Id") and item.get("Type") in {"Movie", "Episode"}:
+                    normalized = _normalize_emby_media_path(path)
+                    found[normalized] = item
+                    pending.pop(normalized, None)
+
+    return found
+
 def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
     """
     【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。

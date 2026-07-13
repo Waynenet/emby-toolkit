@@ -893,6 +893,14 @@ def _get_processor_local_strm_root(processor) -> str:
 
     return ''
 
+
+def _is_etk_managed_media_path(path: str, processor) -> bool:
+    root = _get_processor_local_strm_root(processor)
+    normalized = str(path or '').strip().replace('\\', '/').rstrip('/')
+    if not root or not normalized:
+        return False
+    return normalized == root or normalized.startswith(root + '/')
+
 def _repair_webhook_p115_fingerprints_for_emby_ids(
     processor,
     item_name_for_log: str,
@@ -1391,6 +1399,59 @@ def _process_batch_webhook_events():
 
     logger.info("  ➜ 所有 Webhook 批量任务已完成分派或进入待提交队列。")
 
+
+def dispatch_active_emby_items(items):
+    """Dispatch actively discovered Movie/Episode IDs through the existing flow."""
+    parent_items = collections.defaultdict(lambda: {"name": "", "episode_ids": set()})
+    processor = extensions.media_processor_instance
+    if not processor:
+        return
+
+    for item in items or []:
+        item_id = str(item.get("Id") or "").strip()
+        item_type = item.get("Type")
+        item_name = item.get("Name") or f"ID:{item_id}"
+        if not item_id:
+            continue
+        if item_type == "Movie":
+            parent_items[item_id]["name"] = item_name
+        elif item_type == "Episode":
+            series_id = str(item.get("SeriesId") or "").strip()
+            if not series_id:
+                series_id = emby.get_series_id_from_child_id(
+                    item_id, processor.emby_url, processor.emby_api_key,
+                    processor.emby_user_id, item_name=item_name
+                )
+            if not series_id:
+                logger.warning("  ➜ [主动入库] 分集 '%s' 未取到 SeriesId，已跳过。", item_name)
+                continue
+            parent_items[series_id]["episode_ids"].add(item_id)
+            if not parent_items[series_id]["name"]:
+                series = emby.get_emby_item_details(
+                    series_id, processor.emby_url, processor.emby_api_key,
+                    processor.emby_user_id, fields="Name"
+                )
+                parent_items[series_id]["name"] = (series or {}).get("Name") or item_name
+
+    for parent_id, info in parent_items.items():
+        episode_ids = sorted(info["episode_ids"])
+        already_processed = (
+            parent_id in processor.processed_items_cache
+            and media_db.is_emby_id_in_library(parent_id)
+        )
+        task_prefix = "主动追更" if already_processed and episode_ids else "主动入库"
+        logger.info(
+            "  ➜ [主动入库] 已获取 Emby ID，分派 %s: %s (分集数: %s)",
+            task_prefix, info["name"], len(episode_ids)
+        )
+        _submit_webhook_media_task(
+            f"{task_prefix}: {info['name']}",
+            item_id=parent_id,
+            force_full_update=False,
+            new_episode_ids=episode_ids or None,
+            is_new_item=not already_processed,
+        )
+
 def _trigger_metadata_update_task(item_id, item_name):
     """触发元数据同步任务"""
     logger.info(f"  ➜ 防抖计时器到期，开始同步《{item_name}》的元数据缓存。")
@@ -1520,17 +1581,6 @@ def emby_webhook():
     # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
-    item_for_webhook_status = data.get("Item", {}) if isinstance(data, dict) else {}
-    try:
-        extensions.mark_emby_webhook_seen(
-            event_type=event_type,
-            item_type=item_for_webhook_status.get("Type"),
-            item_id=item_for_webhook_status.get("Id"),
-            item_name=item_for_webhook_status.get("Name"),
-            remote_addr=request.remote_addr or "",
-        )
-    except Exception:
-        pass
     # ======================================================================
     # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
     # ======================================================================
@@ -1930,6 +1980,14 @@ def emby_webhook():
 
         if _should_skip_non_etk_strm_webhook(original_item_type, original_item_name, original_item_path):
             return jsonify({"status": "ignored_non_etk_strm"}), 200
+
+    if (
+        event_type in ["item.add", "library.new"]
+        and original_item_type in ["Movie", "Series", "Season", "Episode"]
+        and _is_etk_managed_media_path(original_item_path, extensions.media_processor_instance)
+    ):
+        logger.debug("  ➜ [主动入库] 忽略 ETK 路径的迟到新增 Webhook: %s", original_item_name)
+        return jsonify({"status": "ignored_active_ingest_webhook"}), 200
 
     # ======================================================================
     # ★★★ 处理音乐 (Audio) 入库事件 ★★★
