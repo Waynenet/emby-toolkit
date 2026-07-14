@@ -666,7 +666,8 @@ def enqueue_file_actively(file_path: str):
         logger.warning(f"  ➜ [实时监控] 非 ETK 标准 STRM，已跳过：{os.path.basename(file_path)}")
         return
 
-    if str(file_path or "").lower().endswith(".strm"):
+    exclude_paths = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, [])
+    if str(file_path or "").lower().endswith(".strm") and not _is_path_excluded(file_path, exclude_paths):
         processor = MonitorService.processor_instance
         if not processor:
             logger.warning("  ➜ [STRM入库] 核心处理器未就绪，已跳过: %s", os.path.basename(file_path))
