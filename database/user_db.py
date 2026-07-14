@@ -489,6 +489,7 @@ def get_user_account_details(emby_user_id: str) -> Optional[Dict[str, Any]]:
             t.name as template_name,
             t.description as template_description,
             t.allow_unrestricted_subscriptions,
+            COALESCE(t.personal_play_account_only, FALSE) AS personal_play_account_only,
             COALESCE(t.max_concurrent_streams, 0) AS max_concurrent_streams
         FROM emby_users u
         LEFT JOIN emby_users_extended e ON u.id = e.emby_user_id
@@ -530,6 +531,29 @@ def get_user_max_concurrent_streams(user_id: str) -> int:
     except Exception as e:
         logger.warning("获取用户 %s 并发上限失败: %s", user_id, e)
         return 0
+
+
+def is_personal_play_account_only(user_id: str) -> bool:
+    user_id = str(user_id or '').strip()
+    if not user_id:
+        return False
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(t.personal_play_account_only, FALSE) AS personal_play_account_only
+                    FROM emby_users_extended e
+                    JOIN user_templates t ON e.template_id = t.id
+                    WHERE e.emby_user_id = %s
+                    """,
+                    (user_id,)
+                )
+                row = cursor.fetchone()
+                return bool((row or {}).get('personal_play_account_only'))
+    except Exception as e:
+        logger.error("查询用户 %s 的自备小号播放限制失败: %s", user_id, e, exc_info=True)
+        return True
 
 
 def upsert_emby_users_extended_batch_sync(users_data: List[Dict[str, Any]]):
@@ -636,7 +660,9 @@ def get_all_user_templates() -> List[Dict]:
                 cursor.execute(
                     """
                     SELECT id, name, description, default_expiration_days, source_emby_user_id,
-                           allow_unrestricted_subscriptions, COALESCE(max_concurrent_streams, 0) AS max_concurrent_streams
+                           allow_unrestricted_subscriptions,
+                           COALESCE(personal_play_account_only, FALSE) AS personal_play_account_only,
+                           COALESCE(max_concurrent_streams, 0) AS max_concurrent_streams
                     FROM user_templates ORDER BY name
                     """
                 )
@@ -645,17 +671,17 @@ def get_all_user_templates() -> List[Dict]:
         logger.error(f"获取所有用户模板时出错: {e}", exc_info=True)
         raise
 
-def create_user_template(name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, max_concurrent_streams=0) -> int:
+def create_user_template(name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, personal_play_account_only=False, max_concurrent_streams=0) -> int:
     """创建一个新的用户模板。"""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO user_templates (name, description, emby_policy_json, default_expiration_days, source_emby_user_id, emby_configuration_json, allow_unrestricted_subscriptions, max_concurrent_streams)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                    INSERT INTO user_templates (name, description, emby_policy_json, default_expiration_days, source_emby_user_id, emby_configuration_json, allow_unrestricted_subscriptions, personal_play_account_only, max_concurrent_streams)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
-                    (name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, int(max_concurrent_streams or 0))
+                    (name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, bool(personal_play_account_only), int(max_concurrent_streams or 0))
                 )
                 new_row = cursor.fetchone()
                 conn.commit()
@@ -718,7 +744,7 @@ def delete_user_template(template_id: int) -> int:
         logger.error(f"删除模板 {template_id} 时出错: {e}", exc_info=True)
         raise
 
-def update_user_template_details(template_id, name, description, default_expiration_days, allow_unrestricted_subscriptions, max_concurrent_streams=0) -> int:
+def update_user_template_details(template_id, name, description, default_expiration_days, allow_unrestricted_subscriptions, personal_play_account_only=False, max_concurrent_streams=0) -> int:
     """更新用户模板的详细信息，返回受影响行数。"""
     try:
         with get_db_connection() as conn:
@@ -726,10 +752,10 @@ def update_user_template_details(template_id, name, description, default_expirat
                 cursor.execute(
                     """
                     UPDATE user_templates
-                    SET name = %s, description = %s, default_expiration_days = %s, allow_unrestricted_subscriptions = %s, max_concurrent_streams = %s
+                    SET name = %s, description = %s, default_expiration_days = %s, allow_unrestricted_subscriptions = %s, personal_play_account_only = %s, max_concurrent_streams = %s
                     WHERE id = %s
                     """,
-                    (name, description, default_expiration_days, allow_unrestricted_subscriptions, int(max_concurrent_streams or 0), template_id)
+                    (name, description, default_expiration_days, allow_unrestricted_subscriptions, bool(personal_play_account_only), int(max_concurrent_streams or 0), template_id)
                 )
                 conn.commit()
                 return cursor.rowcount

@@ -1883,7 +1883,11 @@ def proxy_all(path):
             # ====================================================================
             # ★ 核心逻辑 1：如果是 115 文件，进入“115”模式，彻底干掉中转！
             # ====================================================================
+            personal_play_account_only = user_db.is_personal_play_account_only(current_user_id)
             if virtual_play_info:
+                if personal_play_account_only:
+                    logger.info("  ➜ [播放权限] 仅限自备小号用户不可使用主号虚拟播放：user_id=%s", current_user_id or "-")
+                    return Response("Personal 115 account playback does not support virtual resources.", status=403)
                 player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
                 play_client_key = "|".join([
                     request.args.get('DeviceId') or request.args.get('X-Emby-Device-Id') or request.headers.get('X-Emby-Device-Id') or request.remote_addr or "",
@@ -1917,7 +1921,10 @@ def proxy_all(path):
                 ])
 
                 play_pool_enabled = p115_play_pool.is_pool_enabled()
-                play_pool_available = p115_play_pool.has_usable_pool_for_user(current_user_id)
+                play_pool_available = p115_play_pool.has_usable_pool_for_user(
+                    current_user_id,
+                    own_account_only=personal_play_account_only,
+                )
                 copy_play_kwargs = {
                     "file_name": display_name,
                     "item_id": item_id,
@@ -1940,6 +1947,7 @@ def proxy_all(path):
                             source='reverse_proxy',
                             client_key=play_client_key,
                             user_agent=player_ua,
+                            own_account_only=personal_play_account_only,
                         )
                         real_115_url = p115_play_pool.get_direct_url(play_result, user_agent=player_ua)
                         if real_115_url:
@@ -1951,6 +1959,9 @@ def proxy_all(path):
                     except Exception as e:
                         logger.warning(f"  ⚠️ [小号播放] 小号池播放失败，已按小号池优先规则中止本次播放: {e}")
                         return Response(f"Play pool failed: {e}", status=503)
+                elif personal_play_account_only:
+                    logger.info("  ➜ [播放权限] 用户未配置可用的自备小号，拒绝回退主号：user_id=%s", current_user_id or "-")
+                    return Response("Personal 115 OpenAPI or Cookie account required.", status=403)
                 elif play_pool_enabled:
                     logger.debug("  ➜ [小号播放] 小号池已开启但当前用户无可用小号，本次不触发复制播放：user_id=%s", current_user_id or "-")
 

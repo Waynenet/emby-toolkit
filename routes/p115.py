@@ -1943,11 +1943,8 @@ def play_115_video(pick_code, filename=None):
         fake_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         request_ua = fake_ua if is_emby_server else client_ua
         
-        client = P115Service.get_client()
-        if not client:
-            return "115 Client not initialized", 500
-
         current_user_id = _resolve_play_request_user_id()
+        personal_play_account_only = user_db.is_personal_play_account_only(current_user_id)
         copy_play_kwargs = {
             "file_name": filename or "",
             "item_id": request.args.get("ItemId") or request.args.get("item_id") or "",
@@ -1957,7 +1954,10 @@ def play_115_video(pick_code, filename=None):
             "client_key": _play_request_client_key(current_user_id),
             "client_name": request.headers.get("X-Emby-Client") or request.headers.get("User-Agent") or "",
         }
-        play_pool_available = p115_play_pool.has_usable_pool_for_user(current_user_id)
+        play_pool_available = p115_play_pool.has_usable_pool_for_user(
+            current_user_id,
+            own_account_only=personal_play_account_only,
+        )
         play_pool_configured = p115_play_pool.has_usable_pool()
         disable_copy_play_for_play_pool = False
         if play_pool_available:
@@ -1965,6 +1965,7 @@ def play_115_video(pick_code, filename=None):
                 play_result = p115_play_pool.prepare_play_pool_pick_code(
                     pick_code,
                     user_agent=request_ua,
+                    own_account_only=personal_play_account_only,
                     **{k: v for k, v in copy_play_kwargs.items() if k != "client_name"},
                 )
                 real_url = p115_play_pool.get_direct_url(play_result, user_agent=request_ua)
@@ -1989,9 +1990,16 @@ def play_115_video(pick_code, filename=None):
             except Exception as e:
                 logger.warning(f"  ⚠️ [小号播放] 路由层小号池播放失败，已按小号池优先规则中止本次播放: {e}")
                 return f"Play pool failed: {e}", 503
+        elif personal_play_account_only:
+            logger.info("  ➜ [播放权限] 路由层用户未配置可用的自备小号，拒绝回退主号：user_id=%s", current_user_id or "-")
+            return "Personal 115 OpenAPI or Cookie account required", 403
         elif play_pool_configured:
             disable_copy_play_for_play_pool = True
             logger.debug("  ➜ [小号播放] 路由层当前用户无可用小号，本次不触发复制播放：user_id=%s", current_user_id or "-")
+
+        client = P115Service.get_client()
+        if not client:
+            return "115 Client not initialized", 500
 
         use_copy_play = bool(
             not disable_copy_play_for_play_pool
@@ -2136,6 +2144,10 @@ def _delete_virtual_temp_file(client, item):
 @p115_bp.route('/virtual-play/<int:virtual_id>/<sha1>', methods=['GET', 'HEAD'])
 @p115_bp.route('/virtual-play/<int:virtual_id>/<sha1>/<path:filename>', methods=['GET', 'HEAD'])
 def play_virtual_115_video(virtual_id, sha1, filename=None):
+    current_user_id = _resolve_play_request_user_id()
+    if user_db.is_personal_play_account_only(current_user_id):
+        logger.info("  ➜ [播放权限] 仅限自备小号用户不可使用主号虚拟播放：user_id=%s", current_user_id or "-")
+        return "Personal 115 account playback does not support virtual resources", 403
     if request.method == 'HEAD':
         return '', 200
     sha1 = _norm_sha1(sha1)
