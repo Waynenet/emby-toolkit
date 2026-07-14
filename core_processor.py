@@ -2413,13 +2413,17 @@ class MediaProcessor:
                 seen_names[cleaned_name] = actor # 存整个字典对象
             else:
                 existing_actor = seen_names[cleaned_name]
-                role = actor.get("character", "未知角色")
-                existing_role = existing_actor.get("character", "")
+                # 使用 or 确保即使字段值为 None，也能安全地退回到默认字符串
+                role = actor.get("character") or "未知角色"
+                existing_role = existing_actor.get("character") or "未知角色"
                 
                 # 【优化】如果这个人既是导演又是演员，智能合并角色名
-                if role and existing_role and role not in existing_role:
+                if role != "未知角色" and existing_role != "未知角色" and role not in existing_role:
                     existing_actor["character"] = f"{existing_role} / {role}"
                     logger.info(f"  ➜ 发现身兼多职人员 '{cleaned_name}'，已合并身份: {existing_actor['character']}")
+                elif role != "未知角色" and existing_role == "未知角色":
+                    # 如果老数据是未知角色，新数据有具体角色，直接用具体的覆盖它
+                    existing_actor["character"] = role
                 else:
                     logger.info(f"  ➜ 为避免张冠李戴，删除同名异人演员: '{cleaned_name}' (角色: {role})")
 
@@ -2463,7 +2467,7 @@ class MediaProcessor:
                     merged_actor["name"] = emby_actor.get("Name")
                 else:
                     merged_actor["name"] = tmdb_match.get("name")
-                merged_actor["character"] = emby_actor.get("Role")
+                merged_actor["character"] = emby_actor.get("Role") or ""
                 final_cast_list.append(merged_actor)
                 used_tmdb_ids.add(tmdb_id_str)
 
@@ -2553,7 +2557,7 @@ class MediaProcessor:
                     is_douban_director = _is_actual_director(d_actor) or _is_actual_director(raw_actor)
                     
                     if valid_d_role:
-                        current_char = l_actor.get("character", "")
+                        current_char = l_actor.get("character") or ""
                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣普通角色覆盖而消失
                         # 必须同时具备 _is_crew 烙印，才能证明他是真导演，而不是角色名叫"xx导演"
                         is_tmdb_director = l_actor.get('_is_crew', False) and '导演' in current_char
@@ -2616,7 +2620,7 @@ class MediaProcessor:
                             existing_actor = final_cast_map[tmdb_id_from_map]
                             if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
                             if valid_d_role: 
-                                current_char = existing_actor.get("character", "")
+                                current_char = existing_actor.get("character") or ""
                                 is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                 # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
                                 if is_tmdb_director and '导演' not in valid_d_role:
@@ -2688,7 +2692,7 @@ class MediaProcessor:
                                     existing_actor = final_cast_map[tmdb_id_from_find]
                                     if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
                                     if valid_d_role: 
-                                        current_char = existing_actor.get("character", "")
+                                        current_char = existing_actor.get("character") or ""
                                         is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
                                         if is_tmdb_director and '导演' not in valid_d_role:
@@ -2726,7 +2730,7 @@ class MediaProcessor:
                                     if new_name and utils.contains_chinese(new_name):
                                         existing_actor["name"] = new_name
                                     if valid_d_role:
-                                        current_char = existing_actor.get("character", "")
+                                        current_char = existing_actor.get("character") or ""
                                         is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
                                         # ★★★ 核心修复：防止 TMDb 提取的 "导演" 被豆瓣覆盖
                                         if is_tmdb_director and '导演' not in valid_d_role:
