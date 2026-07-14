@@ -277,6 +277,12 @@
                   封禁理由：{{ centerConfigForcedOfflineReason }}
                 </n-alert>
                 <n-text v-else-if="centerDeviceStatusError" type="error">{{ centerDeviceStatusError }}</n-text>
+                <div v-if="needsCenterServerId" style="margin-top: 8px;">
+                  <n-button size="small" type="warning" ghost :loading="registeringDevice" @click="registerCenterDevice">
+                    <template #icon><n-icon :component="SyncIcon" /></template>
+                    {{ centerDeviceRegisterButtonText }}
+                  </n-button>
+                </div>
               </div>
             </n-spin>
           </n-form-item>
@@ -1093,9 +1099,13 @@ const metaLine = (row, parts = []) => h('div', { class: 'sub-title' }, [tmdbLink
 
 const centerDeviceId = computed(() => String((summary.value.credit || {}).device_id || '').trim());
 const hasCenterDevice = computed(() => Boolean(centerDeviceId.value));
-const needsCenterServerId = computed(() => !centerConfigServerIdHash.value && !hasCenterDevice.value);
-const centerDeviceRegisterButtonText = computed(() => centerDeviceId.value ? '重新连接' : '连接中心');
+const centerDeviceStatusUnauthorized = computed(() => /(?:\b401\b|invalid\s+serverid)/i.test(centerDeviceStatusError.value));
+const needsCenterServerId = computed(() => centerDeviceStatusUnauthorized.value || (!centerConfigServerIdHash.value && !hasCenterDevice.value));
+const centerDeviceRegisterButtonText = computed(() => centerDeviceStatusUnauthorized.value ? '连接中心' : (centerDeviceId.value ? '重新连接' : '连接中心'));
 const centerServerIdAlertText = computed(() => {
+  if (centerDeviceStatusUnauthorized.value) {
+    return '当前 Emby ServerID 尚未在共享中心注册。点击“连接中心”后会作为新设备注册。';
+  }
   if (hasCenterDevice.value) {
     return '共享资源中心设备记录还在，但本机 ServerID 状态未确认。点击“重新连接”会使用 Emby ServerID 取回同一中心身份。';
   }
@@ -4071,7 +4081,7 @@ const registerCenterDevice = async () => {
   try {
     const res = await axios.post('/api/shared/resources/center/device/register', {});
     message.success(res.data?.message || (centerDeviceId.value ? '共享资源中心已重新连接' : '共享资源中心已连接'));
-    await Promise.allSettled([loadSharedConfig(), loadSummary(), loadLedger(), loadCenterSources()]);
+    await Promise.allSettled([loadSharedConfig(), loadCenterDeviceStatus(), loadSummary(), loadLedger(), loadCenterSources()]);
   } catch (e) {
     message.error(e.response?.data?.message || '注册/恢复中心设备失败');
   } finally {
