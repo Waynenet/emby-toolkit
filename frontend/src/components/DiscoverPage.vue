@@ -1151,22 +1151,22 @@ onUnmounted(() => {
   cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  /* box-shadow: 0 2px 4px rgba(0,0,0,0.1); */
   overflow: hidden;
   height: 100%;
-  background-color: transparent;
   display: flex;
   flex-direction: column;
 }
 .media-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+  /* box-shadow: 0 8px 16px rgba(0,0,0,0.3); */
   z-index: 10;
 }
 
 .poster-wrapper {
   position: relative;
   width: 100%;
+  height: 100%;
   aspect-ratio: 2 / 3; 
   overflow: hidden;
 }

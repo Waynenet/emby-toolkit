@@ -119,7 +119,7 @@
 
           <n-divider style="margin: 12px 0; opacity: 0.1;" />
 
-          <n-scrollbar style="max-height: 240px;">
+          <n-scrollbar style="height: 100%;">
             <n-list hoverable clickable size="small" class="transparent-list">
               <n-list-item v-for="(item, index) in playbackData?.personal?.history_list" :key="index" style="padding: 8px;">
                 <n-thing :title="item.title" content-style="margin-top: 0;">
@@ -157,7 +157,7 @@
           </template>
           
           <n-spin :show="loading">
-            <n-scrollbar style="max-height: 300px; padding-right: 8px;">
+            <n-scrollbar style="height: 100%; padding-right: 8px;">
               <div v-if="subscriptionHistory.length > 0" class="custom-list">
                 <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
                   <div class="item-icon-block" :class="getStatusType(item.status)">
