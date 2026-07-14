@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 UPLOAD_MONITOR_CONFIG_KEY = "p115_upload_monitor_config"
 UPLOAD_MONITOR_STATE_KEY = "p115_upload_monitor_state"
 DEFAULT_PART_SIZE = 64 * 1024 * 1024
+DIRECT_UPLOAD_MAX_SIZE = DEFAULT_PART_SIZE
+SCAN_BATCH_SIZE = 100
+SCAN_MAX_QUEUED = 500
 MAX_COMPLETED_RECORDS = 10000
 UPLOAD_IGNORED_EXTENSIONS = {".strm"}
 UPLOAD_IGNORED_SUFFIXES = (
@@ -128,7 +131,7 @@ def _save_state(state: Dict[str, Any]) -> None:
             reverse=True,
         )[:MAX_COMPLETED_RECORDS]
         state["completed"] = dict(ordered)
-    settings_db.save_setting(UPLOAD_MONITOR_STATE_KEY, state)
+    settings_db.save_setting(UPLOAD_MONITOR_STATE_KEY, state, log_success=False)
 
 
 def get_upload_monitor_status() -> Dict[str, Any]:
@@ -273,55 +276,68 @@ class UploadMonitorRuntime:
     def enqueue_path(self, path: str, mappings: Optional[List[Dict[str, Any]]] = None) -> None:
         with self._lock:
             self._timers.pop(os.path.normpath(path), None)
-        if not os.path.isfile(path):
-            return
+        self._enqueue_paths([path], mappings)
+
+    def _enqueue_paths(self, paths: Iterable[str], mappings: Optional[List[Dict[str, Any]]] = None) -> int:
         config = get_upload_monitor_config()
         if not config["enabled"]:
-            return
-        mapping = _find_mapping(path, mappings or config["mappings"])
-        if not mapping:
-            return
-        try:
-            fingerprint = _file_fingerprint(path)
-        except OSError:
-            return
-        rel_path = os.path.relpath(path, mapping["local_dir"])
-        completed_key = f"{mapping['id']}:{os.path.normcase(os.path.abspath(path))}"
-        job_id = hashlib.sha1(
-            f"{completed_key}\0{fingerprint['size']}\0{fingerprint['mtime_ns']}".encode("utf-8", errors="ignore")
-        ).hexdigest()
+            return 0
+        active_mappings = mappings or config["mappings"]
+        job_ids = []
 
         with self._state_lock:
             state = _load_state()
-            if _same_fingerprint((state["completed"].get(completed_key) or {}).get("fingerprint"), fingerprint):
-                return
-            job = state["jobs"].get(job_id) or {}
-            job.update({
-                "id": job_id,
-                "status": "pending",
-                "path": path,
-                "relative_path": rel_path,
-                "mapping_id": mapping["id"],
-                "target_cid": mapping["target_cid"],
-                "target_name": mapping["target_name"],
-                "mode": mapping["mode"],
-                "fingerprint": fingerprint,
-                "updated_at": time.time(),
-            })
-            state["jobs"][job_id] = job
-            _save_state(state)
+            for path in paths:
+                if not os.path.isfile(path):
+                    continue
+                mapping = _find_mapping(path, active_mappings)
+                if not mapping:
+                    continue
+                try:
+                    fingerprint = _file_fingerprint(path)
+                except OSError:
+                    continue
+                rel_path = os.path.relpath(path, mapping["local_dir"])
+                completed_key = f"{mapping['id']}:{os.path.normcase(os.path.abspath(path))}"
+                job_id = hashlib.sha1(
+                    f"{completed_key}\0{fingerprint['size']}\0{fingerprint['mtime_ns']}".encode("utf-8", errors="ignore")
+                ).hexdigest()
+                if _same_fingerprint((state["completed"].get(completed_key) or {}).get("fingerprint"), fingerprint):
+                    continue
+                job = state["jobs"].get(job_id) or {}
+                job.update({
+                    "id": job_id,
+                    "status": "pending",
+                    "path": path,
+                    "relative_path": rel_path,
+                    "mapping_id": mapping["id"],
+                    "target_cid": mapping["target_cid"],
+                    "target_name": mapping["target_name"],
+                    "mode": mapping["mode"],
+                    "fingerprint": fingerprint,
+                    "updated_at": time.time(),
+                })
+                state["jobs"][job_id] = job
+                job_ids.append(job_id)
+            if job_ids:
+                _save_state(state)
 
+        if not job_ids:
+            return 0
         self.start()
         with self._lock:
-            if job_id in self._queued:
-                return
-            self._queued.add(job_id)
-            self._queue.put(job_id)
+            for job_id in job_ids:
+                if job_id not in self._queued:
+                    self._queued.add(job_id)
+                    self._queue.put(job_id)
+        return len(job_ids)
 
     def scan_existing(self, mappings: List[Dict[str, Any]], extensions: Iterable[str]) -> None:
         allowed = _normalize_extensions(extensions) - UPLOAD_IGNORED_EXTENSIONS
 
         def _scan():
+            batch = []
+            queued_count = 0
             for mapping in mappings:
                 root = mapping["local_dir"]
                 if not mapping.get("enabled") or not os.path.isdir(root):
@@ -330,7 +346,17 @@ class UploadMonitorRuntime:
                     for name in files:
                         path = os.path.join(current_root, name)
                         if not _is_ignored_upload_path(path) and os.path.splitext(name)[1].lower() in allowed:
-                            self.enqueue_path(path, mappings)
+                            batch.append(path)
+                            if len(batch) >= SCAN_BATCH_SIZE:
+                                while self._queue.qsize() >= SCAN_MAX_QUEUED:
+                                    time.sleep(1)
+                                queued_count += self._enqueue_paths(batch, mappings)
+                                batch.clear()
+            if batch:
+                while self._queue.qsize() >= SCAN_MAX_QUEUED:
+                    time.sleep(1)
+                queued_count += self._enqueue_paths(batch, mappings)
+            logger.info("  ➜ [115上传监控] 已有文件扫描完成，加入上传队列 %s 个。", queued_count)
 
         threading.Thread(target=_scan, name="P115UploadMonitorScan", daemon=True).start()
 
@@ -402,7 +428,7 @@ class UploadMonitorRuntime:
                 return
             percent = round((uploaded_bytes / total_bytes) * 100, 1) if total_bytes > 0 else 0
             now = time.monotonic()
-            if percent >= 100 or percent - last_saved_percent >= 1 or now - last_saved_at >= 1:
+            if (percent >= 100 and last_saved_percent < 100) or now - last_saved_at >= 1:
                 self._update_job(
                     job_id,
                     uploaded_bytes=uploaded_bytes,
@@ -887,7 +913,7 @@ class UploadMonitorRuntime:
     def _upload_file_resumable(self, path: str, target_cid: str, resume: Any, job_id: str = ""):
         from handler.p115_service import P115Service, get_115_api_priority, get_115_tokens
         try:
-            from p115oss import MultipartUploadAbort, oss_multipart_upload_init, upload_file, upload_file_init
+            from p115oss import MultipartUploadAbort, oss_multipart_upload_init, oss_upload, upload_file, upload_file_init
         except ImportError as exc:
             raise RuntimeError("当前 p115client 版本不支持持久化分片续传，请按 requirements.txt 更新依赖") from exc
 
@@ -932,10 +958,14 @@ class UploadMonitorRuntime:
                     job_id=job_id,
                     upload_file_init=upload_file_init,
                     oss_multipart_upload_init=oss_multipart_upload_init,
+                    oss_upload=oss_upload,
                     upload_file=upload_file,
                 )
-            except MultipartUploadAbort:
-                raise
+            except MultipartUploadAbort as exc:
+                if self._resume_from_exception(exc):
+                    raise
+                last_error = exc
+                logger.warning("  ➜ [115上传监控] %s 直传失败，尝试备用接口: %s", backend, exc)
             except Exception as exc:
                 last_error = exc
                 if resume.get("upload_id"):
@@ -959,6 +989,7 @@ class UploadMonitorRuntime:
         job_id: str,
         upload_file_init,
         oss_multipart_upload_init,
+        oss_upload,
         upload_file,
     ):
         if job_id:
@@ -988,6 +1019,18 @@ class UploadMonitorRuntime:
             bucket = data.get("bucket")
             if not callback or not object_key or not bucket:
                 raise RuntimeError(f"115 上传初始化缺少 OSS 参数: {init_result}")
+            if size <= DIRECT_UPLOAD_MAX_SIZE:
+                with open(path, "rb") as file_obj:
+                    result = oss_upload(
+                        object_key,
+                        file_obj,
+                        callback=callback,
+                        bucket=bucket,
+                        endpoint=endpoint,
+                        reporthook=progress_hook,
+                        **({"headers": api_kwargs["headers"]} if "headers" in api_kwargs else {}),
+                    )
+                return result, None, backend
             upload_id = oss_multipart_upload_init(
                 object_key,
                 None,
