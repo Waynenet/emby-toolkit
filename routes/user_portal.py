@@ -17,6 +17,7 @@ from handler.telegram import send_telegram_message
 from routes.discover import check_and_replenish_pool
 import task_manager
 import extensions
+from tasks.helpers import process_subscription_items_and_update_db
 from tasks.subscriptions import task_manual_subscribe_batch
 
 # 1. 创建一个新的蓝图
@@ -49,6 +50,8 @@ def request_subscription():
 
     config = config_manager.APP_CONFIG
     tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    mp_config = settings_db.get_setting('mp_config') or {}
+    mp_configured = bool(mp_config.get('moviepilot_url'))
     details = None
     
     db_tmdb_id = tmdb_id # 默认用于数据库操作的 ID
@@ -122,8 +125,13 @@ def request_subscription():
             media_info_list=[parent_media_info]
         )
 
-    if is_vip or is_emby_admin:
-        log_user_type = "管理员" if is_emby_admin else "VIP 用户"
+    if is_vip or is_emby_admin or not mp_configured:
+        if is_emby_admin:
+            log_user_type = "管理员"
+        elif is_vip:
+            log_user_type = "VIP 用户"
+        else:
+            log_user_type = "普通用户-无MP直标"
         
         # 发行日期检查
         is_released = True
@@ -137,24 +145,57 @@ def request_subscription():
             except (ValueError, TypeError):
                 logger.warning(f"无法解析媒体 {db_tmdb_id} 的发行日期 '{release_date_str}'，将按已发行处理。")
 
-        if not is_released:
+        subscription_source = {"type": "user_request", "user_id": emby_user_id, "user_type": log_user_type}
+
+        if item_type != 'Series' and not is_released:
             logger.info(f"  ➜ 【{log_user_type}-待发行通道】'{emby_username}' 请求的项目尚未发行，状态将设置为 PENDING_RELEASE...")
             request_db.set_media_status_pending_release(
                 tmdb_ids=[db_tmdb_id], item_type=item_type,
-                source={"type": "user_request", "user_id": emby_user_id, "user_type": log_user_type},
+                source=subscription_source,
                 media_info_list=[media_info]
             )
             message = "该项目尚未发行，已为您加入待发行监控队列。"
             new_status_for_frontend = 'pending' # 前端统一显示为处理中
         else:
             logger.info(f"  ➜ 【{log_user_type}-待订阅通道】'{emby_username}' 的订阅请求将直接加入待订阅队列...")
-            request_db.set_media_status_wanted(
-                tmdb_ids=[db_tmdb_id], item_type=item_type,
-                source={"type": "user_request", "user_id": emby_user_id, "user_type": log_user_type},
-                media_info_list=[media_info]
-            )
-            message = "订阅请求已提交，系统将自动处理！"
-            new_status_for_frontend = 'approved'
+            if item_type == 'Series':
+                season_items = []
+                for season in details.get('seasons') or []:
+                    try:
+                        s_num = int(season.get('season_number'))
+                    except (TypeError, ValueError):
+                        continue
+                    if s_num <= 0:
+                        continue
+                    season_items.append({
+                        'tmdb_id': tmdb_id,
+                        'media_type': 'Series',
+                        'title': series_name,
+                        'season': s_num
+                    })
+                if not season_items:
+                    logger.warning(f"  ➜ 【{log_user_type}-待订阅通道】'{emby_username}' 请求的剧集《{series_name}》没有可订阅季。")
+                    return jsonify({"status": "error", "message": "未找到可订阅的季。"}), 400
+
+                logger.info(f"  ➜ 【{log_user_type}-待订阅通道】剧集《{series_name}》将拆解为 {len(season_items)} 个季后加入通用订阅。")
+                process_subscription_items_and_update_db(
+                    tmdb_items=season_items,
+                    tmdb_to_emby_item_map={},
+                    subscription_source=subscription_source,
+                    tmdb_api_key=tmdb_api_key
+                )
+            else:
+                request_db.set_media_status_wanted(
+                    tmdb_ids=[db_tmdb_id], item_type=item_type,
+                    source=subscription_source,
+                    media_info_list=[media_info]
+                )
+            if mp_configured:
+                message = "订阅请求已提交，系统将自动处理！"
+                new_status_for_frontend = 'approved'
+            else:
+                message = "已标记为想看/待订阅。MoviePilot 未配置，已跳过自动订阅。"
+                new_status_for_frontend = 'WANTED'
 
     else:
         existing_status = request_db.get_global_request_status_by_tmdb_id(db_tmdb_id)
@@ -185,7 +226,8 @@ def request_subscription():
             logger.error(f"  ➜ 发送管理员审核通知时出错: {e}", exc_info=True)
 
     # 1. 【核心】后端直接触发“订阅直通车”
-    if new_status_for_frontend == 'approved':
+    # MoviePilot 未配置时只落库 WANTED，不触发 MP 订阅任务。
+    if new_status_for_frontend == 'approved' and mp_configured:
         logger.info(f"  ➜ [直通车] 为管理员/VIP '{emby_username}' 立即触发订阅任务: {media_info['title']}")
         
         # ★★★ 核心修复：强制传递父剧集名称给 MP ★★★
@@ -206,13 +248,13 @@ def request_subscription():
         )
 
     # 2. 推荐池处理
-    if new_status_for_frontend in ['approved', 'pending'] and item_type == 'Movie':
+    if new_status_for_frontend in ['approved', 'pending', 'WANTED'] and item_type == 'Movie':
         settings_db.remove_item_from_recommendation_pool(db_tmdb_id)
         threading.Thread(target=check_and_replenish_pool).start()
 
     try:
         user_chat_id = user_db.get_user_telegram_chat_id(emby_user_id)
-        if user_chat_id and not (is_vip or is_emby_admin):
+        if user_chat_id and not (is_vip or is_emby_admin) and new_status_for_frontend == 'pending':
             message_text = f"🔔 *您的订阅请求已提交*\n\n您想看的 *{media_info['title']}* 已进入待审队列，管理员处理后会通知您。"
             send_telegram_message(user_chat_id, message_text)
     except Exception as e:
