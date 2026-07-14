@@ -1233,15 +1233,31 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
 
     if poster_path:
         photo_url = f"https://image.tmdb.org/t/p/w780{poster_path}"
-        send_telegram_photo(chat_id, photo_url, caption, reply_markup=reply_markup)
+        _tg_send_plain(chat_id, photo_url, caption, reply_markup=reply_markup)
     else:
         send_telegram_message(chat_id, caption, reply_markup=reply_markup)
 
-def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
-    """处理用户点击订阅按钮"""
-    # 这里用 escape_markdown 包装纯文本，防止里面所有的标点符号报错
-    send_telegram_message(chat_id, escape_markdown("⏳ 正在提交订阅请求..."), disable_notification=True)
+def _tg_handle_subscribe(chat_id: str):
+    """处理 TG 搜索界面的订阅按钮点击"""
+    session = _tg_get_session(chat_id)
+    if not session:
+        _tg_send_plain(chat_id, "❌ 当前没有可订阅的项目，请重新搜索。")
+        return
+
+    media = session.get("media") or {}
+    tmdb_id = media.get("tmdb_id")
+    media_type = media.get("media_type")
+    title = media.get("title") or "未知标题"
+    year = media.get("year") or ""
+    display_title = f"{title} ({year})" if year else title
+
+    if not tmdb_id:
+        _tg_send_plain(chat_id, "❌ 缺少 TMDb ID，无法订阅。")
+        return
+
+    # 清理会话防止重复点击
     _tg_clear_session(chat_id)
+    _tg_send_plain(chat_id, f"⏳ 正在提交订阅：{display_title}...", disable_notification=True)
 
     def run():
         try:
