@@ -518,6 +518,28 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'p115_upload_records' 表 (115 上传任务与完成记录)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS p115_upload_records (
+                        record_key TEXT PRIMARY KEY,
+                        record_type TEXT NOT NULL,
+                        mapping_id TEXT,
+                        local_path TEXT,
+                        relative_path TEXT,
+                        target_cid TEXT,
+                        pick_code TEXT,
+                        status TEXT,
+                        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT chk_p115_upload_record_type CHECK (record_type IN ('job', 'completed'))
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_type_status ON p115_upload_records(record_type, status)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_pick_code ON p115_upload_records(pick_code) WHERE pick_code IS NOT NULL")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_mapping ON p115_upload_records(mapping_id, record_type)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_local_path ON p115_upload_records(local_path) WHERE record_type = 'completed'")
+
                 logger.trace("  ➜ 正在创建 'shared_credit_snapshot' 表 (共享资源贡献值快照)...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS shared_credit_snapshot (

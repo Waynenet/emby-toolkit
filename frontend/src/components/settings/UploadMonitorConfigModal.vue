@@ -67,7 +67,7 @@
 
             <n-form-item label="上传策略" label-placement="top" :show-feedback="false">
               <n-radio-group v-model:value="item.mode" size="small">
-                <n-radio-button value="keep">增量上传并保留</n-radio-button>
+                <n-radio-button value="keep">增量双向同步</n-radio-button>
                 <n-radio-button value="delete">上传成功后删除</n-radio-button>
               </n-radio-group>
             </n-form-item>

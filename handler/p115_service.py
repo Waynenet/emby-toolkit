@@ -10135,6 +10135,18 @@ def delete_115_files_by_webhook(pickcodes):
     【V6 终极缓冲版】接收神医 Webhook 传来的提取码，加入缓冲队列。
     """
     if not pickcodes: return
+    try:
+        from handler.p115_upload_monitor import delete_local_sources_by_pickcodes
+        local_result = delete_local_sources_by_pickcodes(pickcodes)
+        if local_result.get('matched'):
+            logger.info(
+                "  ➜ [深度删除] 上传监控本地联动结果: "
+                f"匹配 {local_result['matched']} 条, 删除 {local_result['deleted']} 个, "
+                f"已缺失 {local_result['missing']} 个, 已变更 {local_result['changed']} 个, "
+                f"失败 {local_result['failed']} 个。"
+            )
+    except Exception as e:
+        logger.error(f"  ➜ [深度删除] 上传监控本地联动失败: {e}", exc_info=True)
     WebhookDeleteBuffer.add(pickcodes)
 
 # ======================================================================
