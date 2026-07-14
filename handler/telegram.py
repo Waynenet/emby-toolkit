@@ -612,8 +612,8 @@ def send_telegram_message(chat_id: str, text: str, disable_notification: bool = 
         return False
 
 # --- 通用的 Telegram 图文消息发送函数 ---
-def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_notification: bool = False):
-    """通用的 Telegram 图文消息发送函数。"""
+def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_notification: bool = False, reply_markup: dict = None):
+    """通用的 Telegram 图文消息发送函数。支持传入 reply_markup 内联键盘。"""
     bot_token = APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_BOT_TOKEN)
     if not bot_token or not chat_id or not photo_url:
         return False
@@ -632,6 +632,11 @@ def send_telegram_photo(chat_id: str, photo_url: str, caption: str, disable_noti
         'parse_mode': 'MarkdownV2',
         'disable_notification': disable_notification,
     }
+    
+    # 注入对 inline 键盘的支持
+    if reply_markup:
+        payload['reply_markup'] = reply_markup
+
     try:
         proxies = get_proxies_for_requests()
         response = requests.post(api_url, json=payload, timeout=30, proxies=proxies)
@@ -1233,31 +1238,26 @@ def _tg_show_media_details(chat_id: str, selection_number: int):
 
     if poster_path:
         photo_url = f"https://image.tmdb.org/t/p/w780{poster_path}"
-        _tg_send_plain(chat_id, photo_url, caption, reply_markup=reply_markup)
+        send_telegram_photo(chat_id, photo_url, caption, reply_markup=reply_markup)
     else:
         send_telegram_message(chat_id, caption, reply_markup=reply_markup)
 
-def _tg_handle_subscribe(chat_id: str):
-    """处理 TG 搜索界面的订阅按钮点击"""
+def _tg_handle_subscribe(chat_id: str, media_type: str, tmdb_id: str):
+    """处理用户点击订阅按钮"""
+    # 从会话的 results 列表中匹配对应的项，以此安全地获取中文影片标题（同时解决 display_title 未定义的 bug）
     session = _tg_get_session(chat_id)
-    if not session:
-        _tg_send_plain(chat_id, "❌ 当前没有可订阅的项目，请重新搜索。")
-        return
+    display_title = f"TMDb ID: {tmdb_id}"
+    if session and session.get("results"):
+        for item in session["results"]:
+            if str(item.get("id")) == str(tmdb_id):
+                title = item.get("title") or item.get("name") or "未知"
+                date_text = item.get("release_date") or item.get("first_air_date") or ""
+                year = f" ({date_text[:4]})" if date_text else ""
+                display_title = f"{title}{year}"
+                break
 
-    media = session.get("media") or {}
-    tmdb_id = media.get("tmdb_id")
-    media_type = media.get("media_type")
-    title = media.get("title") or "未知标题"
-    year = media.get("year") or ""
-    display_title = f"{title} ({year})" if year else title
-
-    if not tmdb_id:
-        _tg_send_plain(chat_id, "❌ 缺少 TMDb ID，无法订阅。")
-        return
-
-    # 清理会话防止重复点击
-    _tg_clear_session(chat_id)
     _tg_send_plain(chat_id, f"⏳ 正在提交订阅：{display_title}...", disable_notification=True)
+    _tg_clear_session(chat_id)
 
     def run():
         try:
@@ -1298,7 +1298,7 @@ def _tg_handle_subscribe(chat_id: str):
                 _tg_send_plain(chat_id, f"❌ 无法解析订阅信息：{display_title}")
                 return
 
-            # --- 新增：查询 TG ID 绑定的 Emby 用户名 ---
+            # --- 查询 TG ID 绑定的 Emby 用户名 ---
             emby_username = 'TG 搜索'  # 默认兜底名称
             try:
                 with get_db_connection() as conn:
@@ -1311,7 +1311,6 @@ def _tg_handle_subscribe(chat_id: str):
                         """, (str(chat_id),))
                         row = cursor.fetchone()
                         if row and row.get('name'):
-                            # 如果查到了绑定的用户，使用该用户名 (可按需加上 TG 后缀以作区分)
                             emby_username = f"{row['name']}" 
             except Exception as e:
                 logger.error(f"  ➜ [TG交互] 查询 TG ID {chat_id} 绑定的 Emby 用户名失败: {e}")
@@ -1320,7 +1319,6 @@ def _tg_handle_subscribe(chat_id: str):
             subscription_source = {'type': 'telegram_search', 'user_id': chat_id, 'name': emby_username}
             
             # 调用 helpers 的通用订阅函数
-            # tmdb_to_emby_item_map 传空字典即可，内部会自动查库校验
             processed_ids = process_subscription_items_and_update_db(
                 tmdb_items=tmdb_items,
                 tmdb_to_emby_item_map={}, 
