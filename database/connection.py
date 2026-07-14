@@ -447,6 +447,7 @@ def init_db():
                         default_expiration_days INTEGER DEFAULT 30,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         allow_unrestricted_subscriptions BOOLEAN DEFAULT FALSE NOT NULL,
+                        personal_play_account_only BOOLEAN DEFAULT FALSE NOT NULL,
                         max_concurrent_streams INTEGER DEFAULT 0 NOT NULL
                     )
                 """)
@@ -768,6 +769,7 @@ def init_db():
                             "source_emby_user_id": "TEXT",
                             "emby_configuration_json": "JSONB",
                             "allow_unrestricted_subscriptions": "BOOLEAN DEFAULT FALSE NOT NULL",
+                            "personal_play_account_only": "BOOLEAN DEFAULT FALSE NOT NULL",
                             "max_concurrent_streams": "INTEGER DEFAULT 0 NOT NULL"
                         },
                         'emby_users_extended': {

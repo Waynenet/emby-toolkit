@@ -378,6 +378,15 @@ def _account_allowed_for_user(account, user_id):
     return bool(user_id and user_id in set(allowed))
 
 
+def _account_owned_by_user(account, user_id):
+    user_id = str(user_id or "").strip()
+    return bool(
+        user_id
+        and _normalize_owner_type((account or {}).get("owner_type")) == "user"
+        and str((account or {}).get("owner_user_id") or "").strip() == user_id
+    )
+
+
 def _load_config():
     data = settings_db.get_setting(PLAY_POOL_CONFIG_KEY) or {}
     if not isinstance(data, dict):
@@ -842,7 +851,7 @@ def _extract_clone_from_rapid_response(resp, client, temp_cid, file_name, sha1, 
     return {}
 
 
-def _select_account(config, user_id=""):
+def _select_account(config, user_id="", own_account_only=False):
     user_id = str(user_id or "").strip()
     sessions = _load_sessions()
     active_counts = {}
@@ -858,6 +867,8 @@ def _select_account(config, user_id=""):
     candidates = []
     for account in config.get("accounts") or []:
         if not account.get("enabled") or not _has_account_auth(account):
+            continue
+        if own_account_only and not _account_owned_by_user(account, user_id):
             continue
         if not _account_allowed_for_user(account, user_id):
             continue
@@ -886,9 +897,9 @@ def has_usable_pool():
     return bool(config.get("enabled") and _select_account(config))
 
 
-def has_usable_pool_for_user(user_id=""):
+def has_usable_pool_for_user(user_id="", own_account_only=False):
     config = _load_config()
-    return bool(config.get("enabled") and _select_account(config, user_id=user_id))
+    return bool(config.get("enabled") and _select_account(config, user_id=user_id, own_account_only=own_account_only))
 
 
 def _mark_account(account_id, patch):
@@ -1347,7 +1358,7 @@ def _get_source_row_from_mediainfo_cache(item_id, source_pick_code, file_name):
     return {}
 
 
-def prepare_play_pool_pick_code(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", user_agent=""):
+def prepare_play_pool_pick_code(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", user_agent="", own_account_only=False):
     lock_key = _prepare_lock_key(source_pick_code, item_id, play_session_id, user_id, client_key)
     lock = _get_prepare_lock(lock_key)
     with lock:
@@ -1360,14 +1371,15 @@ def prepare_play_pool_pick_code(source_pick_code, *, file_name="", item_id="", p
             source=source,
             client_key=client_key,
             user_agent=user_agent,
+            own_account_only=own_account_only,
         )
 
 
-def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", user_agent=""):
+def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_id="", play_session_id="", user_id="", source="", client_key="", user_agent="", own_account_only=False):
     config = _load_config()
     if not config.get("enabled"):
         return {}
-    account = _select_account(config, user_id=user_id)
+    account = _select_account(config, user_id=user_id, own_account_only=own_account_only)
     if not account:
         return {}
 
@@ -1400,6 +1412,7 @@ def _prepare_play_pool_pick_code_locked(source_pick_code, *, file_name="", item_
             and reusable_account.get("enabled")
             and _has_account_auth(reusable_account)
             and _account_allowed_for_user(reusable_account, user_id)
+            and (not own_account_only or _account_owned_by_user(reusable_account, user_id))
         )
         direct_url = str(reusable.get("direct_url") or "").strip()
         direct_url_usable = bool(direct_url and _same_user_agent(reusable.get("direct_url_user_agent"), user_agent))

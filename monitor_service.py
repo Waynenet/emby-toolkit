@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import threading
 import xml.etree.ElementTree as ET
-from typing import List, Optional, Any, Set
+from typing import List, Optional, Any, Set, Dict
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from gevent import spawn_later
@@ -445,9 +445,15 @@ def _identify_physical_media(file_path: str, processor):
         return None
 
 
-def _generate_local_mediainfo(file_path: str) -> bool:
-    mediainfo_path = os.path.splitext(file_path)[0] + '-mediainfo.json'
-    if os.path.exists(mediainfo_path) and os.path.getsize(mediainfo_path) > 0:
+def _generate_local_mediainfo(
+    file_path: str,
+    mediainfo_path: Optional[str] = None,
+    *,
+    cache_sha1: Optional[str] = None,
+    cache_file_info: Optional[Dict[str, Any]] = None,
+) -> bool:
+    mediainfo_path = mediainfo_path or (os.path.splitext(file_path)[0] + '-mediainfo.json')
+    if not cache_sha1 and os.path.exists(mediainfo_path) and os.path.getsize(mediainfo_path) > 0:
         return True
     if not shutil.which('ffprobe'):
         logger.error("  ➜ [入库预备] 容器内未找到 ffprobe，无法生成媒体信息。")
@@ -480,6 +486,20 @@ def _generate_local_mediainfo(file_path: str) -> bool:
         with open(temp_path, 'w', encoding='utf-8') as file_obj:
             json.dump(formatted, file_obj, ensure_ascii=False, indent=2)
         os.replace(temp_path, mediainfo_path)
+        if cache_sha1:
+            from handler.p115_service import P115CacheManager
+            file_info = dict(cache_file_info or {})
+            if not P115CacheManager.save_mediainfo_cache(
+                str(cache_sha1).upper(),
+                formatted,
+                raw_ffprobe_json=raw_probe,
+                file_info=file_info,
+                fid=file_info.get('fid') or file_info.get('file_id') or file_info.get('id'),
+                pick_code=file_info.get('pick_code') or file_info.get('pc') or file_info.get('pickcode'),
+                file_name=file_info.get('file_name') or file_info.get('fn') or os.path.basename(file_path),
+            ):
+                logger.warning("  ➜ [入库预备] 媒体信息写入 p115_mediainfo_cache 失败: %s", file_path)
+                return False
         logger.debug("  ➜ [入库预备] ffprobe 已生成媒体信息: %s", mediainfo_path)
         return True
     except subprocess.TimeoutExpired:
@@ -666,7 +686,8 @@ def enqueue_file_actively(file_path: str):
         logger.warning(f"  ➜ [实时监控] 非 ETK 标准 STRM，已跳过：{os.path.basename(file_path)}")
         return
 
-    if str(file_path or "").lower().endswith(".strm"):
+    exclude_paths = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, [])
+    if str(file_path or "").lower().endswith(".strm") and not _is_path_excluded(file_path, exclude_paths):
         processor = MonitorService.processor_instance
         if not processor:
             logger.warning("  ➜ [STRM入库] 核心处理器未就绪，已跳过: %s", os.path.basename(file_path))
@@ -799,48 +820,103 @@ def _wait_for_files_stability(file_paths: List[str]) -> List[str]:
 
 class MonitorService:
     processor_instance = None
+    active_instance = None
 
     def __init__(self, config: dict, processor: 'MediaProcessor'):
         self.config = config
         self.processor = processor
         MonitorService.processor_instance = processor 
+        MonitorService.active_instance = self
         
         self.observer: Optional[Any] = None
+        self._observer_lock = threading.RLock()
+        self._start_generation = 0
         self.enabled = self.config.get(constants.CONFIG_OPTION_MONITOR_ENABLED, False)
         self.paths = self.config.get(constants.CONFIG_OPTION_MONITOR_PATHS, [])
         self.extensions = self.config.get(constants.CONFIG_OPTION_MONITOR_EXTENSIONS, constants.DEFAULT_MONITOR_EXTENSIONS)
         self.exclude_dirs = self.config.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, constants.DEFAULT_MONITOR_EXCLUDE_DIRS)
 
     def start(self):
-        if not self.enabled:
+        try:
+            from handler.p115_upload_monitor import upload_monitor_enabled
+            has_upload_monitor = upload_monitor_enabled()
+        except Exception as e:
+            logger.warning(f"  ➜ [115上传监控] 读取配置失败，已跳过启动: {e}")
+            has_upload_monitor = False
+
+        if (not self.enabled or not self.paths) and not has_upload_monitor:
             return
 
-        if not self.paths:
-            return
+        with self._observer_lock:
+            self._start_generation += 1
+            generation = self._start_generation
 
         def _async_start():
-            self.observer = Observer()
-            event_handler = MediaFileHandler(self.extensions, self.exclude_dirs)
-
+            observer = Observer()
             started_paths = []
-            for path in self.paths:
-                if os.path.exists(path) and os.path.isdir(path):
-                    try:
-                        self.observer.schedule(event_handler, path, recursive=True)
-                        started_paths.append(path)
-                    except Exception as e:
-                        logger.error(f"  ➜ 无法监控目录 '{path}': {e}")
+            if self.enabled and self.paths:
+                event_handler = MediaFileHandler(self.extensions, self.exclude_dirs)
+                for path in self.paths:
+                    if os.path.exists(path) and os.path.isdir(path):
+                        try:
+                            observer.schedule(event_handler, path, recursive=True)
+                            started_paths.append(path)
+                        except Exception as e:
+                            logger.error(f"  ➜ 无法监控目录 '{path}': {e}")
 
-            if started_paths:
-                self.observer.start()
-                logger.info(f"  ➜ [实时监控] 服务已启动，正在监听 {len(started_paths)} 个目录。")
+            upload_paths = []
+            if has_upload_monitor:
+                try:
+                    from handler.p115_upload_monitor import schedule_upload_monitor
+                    upload_paths = schedule_upload_monitor(observer, self.extensions)
+                except Exception as e:
+                    logger.error(f"  ➜ [115上传监控] 启动失败: {e}", exc_info=True)
+
+            if started_paths or upload_paths:
+                with self._observer_lock:
+                    if generation != self._start_generation:
+                        return
+                    self.observer = observer
+                    observer.start()
+                logger.info(
+                    f"  ➜ [实时监控] 服务已启动，媒体目录 {len(started_paths)} 个，"
+                    f"115 上传目录 {len(upload_paths)} 个。"
+                )
 
         threading.Thread(target=_async_start, name="MonitorServiceStarter", daemon=True).start()
 
     def stop(self):
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
+        with self._observer_lock:
+            self._start_generation += 1
+            observer = self.observer
+            self.observer = None
+        if observer:
+            try:
+                observer.stop()
+                if observer.is_alive():
+                    observer.join()
+            except RuntimeError:
+                pass
+
+    @classmethod
+    def restart_active(cls):
+        instance = cls.active_instance
+        if not instance:
+            return False
+        instance.stop()
+        instance.config = config_manager.APP_CONFIG
+        instance.enabled = instance.config.get(constants.CONFIG_OPTION_MONITOR_ENABLED, False)
+        instance.paths = instance.config.get(constants.CONFIG_OPTION_MONITOR_PATHS, [])
+        instance.extensions = instance.config.get(
+            constants.CONFIG_OPTION_MONITOR_EXTENSIONS,
+            constants.DEFAULT_MONITOR_EXTENSIONS,
+        )
+        instance.exclude_dirs = instance.config.get(
+            constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS,
+            constants.DEFAULT_MONITOR_EXCLUDE_DIRS,
+        )
+        instance.start()
+        return True
 
 def pause_queue_processing():
     global IS_PROCESSING_PAUSED

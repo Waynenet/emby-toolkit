@@ -1943,11 +1943,8 @@ def play_115_video(pick_code, filename=None):
         fake_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         request_ua = fake_ua if is_emby_server else client_ua
         
-        client = P115Service.get_client()
-        if not client:
-            return "115 Client not initialized", 500
-
         current_user_id = _resolve_play_request_user_id()
+        personal_play_account_only = user_db.is_personal_play_account_only(current_user_id)
         copy_play_kwargs = {
             "file_name": filename or "",
             "item_id": request.args.get("ItemId") or request.args.get("item_id") or "",
@@ -1957,7 +1954,10 @@ def play_115_video(pick_code, filename=None):
             "client_key": _play_request_client_key(current_user_id),
             "client_name": request.headers.get("X-Emby-Client") or request.headers.get("User-Agent") or "",
         }
-        play_pool_available = p115_play_pool.has_usable_pool_for_user(current_user_id)
+        play_pool_available = p115_play_pool.has_usable_pool_for_user(
+            current_user_id,
+            own_account_only=personal_play_account_only,
+        )
         play_pool_configured = p115_play_pool.has_usable_pool()
         disable_copy_play_for_play_pool = False
         if play_pool_available:
@@ -1965,6 +1965,7 @@ def play_115_video(pick_code, filename=None):
                 play_result = p115_play_pool.prepare_play_pool_pick_code(
                     pick_code,
                     user_agent=request_ua,
+                    own_account_only=personal_play_account_only,
                     **{k: v for k, v in copy_play_kwargs.items() if k != "client_name"},
                 )
                 real_url = p115_play_pool.get_direct_url(play_result, user_agent=request_ua)
@@ -1989,9 +1990,16 @@ def play_115_video(pick_code, filename=None):
             except Exception as e:
                 logger.warning(f"  ⚠️ [小号播放] 路由层小号池播放失败，已按小号池优先规则中止本次播放: {e}")
                 return f"Play pool failed: {e}", 503
+        elif personal_play_account_only:
+            logger.info("  ➜ [播放权限] 路由层用户未配置可用的自备小号，拒绝回退主号：user_id=%s", current_user_id or "-")
+            return "Personal 115 OpenAPI or Cookie account required", 403
         elif play_pool_configured:
             disable_copy_play_for_play_pool = True
             logger.debug("  ➜ [小号播放] 路由层当前用户无可用小号，本次不触发复制播放：user_id=%s", current_user_id or "-")
+
+        client = P115Service.get_client()
+        if not client:
+            return "115 Client not initialized", 500
 
         use_copy_play = bool(
             not disable_copy_play_for_play_pool
@@ -2136,6 +2144,10 @@ def _delete_virtual_temp_file(client, item):
 @p115_bp.route('/virtual-play/<int:virtual_id>/<sha1>', methods=['GET', 'HEAD'])
 @p115_bp.route('/virtual-play/<int:virtual_id>/<sha1>/<path:filename>', methods=['GET', 'HEAD'])
 def play_virtual_115_video(virtual_id, sha1, filename=None):
+    current_user_id = _resolve_play_request_user_id()
+    if user_db.is_personal_play_account_only(current_user_id):
+        logger.info("  ➜ [播放权限] 仅限自备小号用户不可使用主号虚拟播放：user_id=%s", current_user_id or "-")
+        return "Personal 115 account playback does not support virtual resources", 403
     if request.method == 'HEAD':
         return '', 200
     sha1 = _norm_sha1(sha1)
@@ -2789,231 +2801,6 @@ def delete_organize_record(record_id):
         logger.error(f"  ➜ 删除整理记录及缓存失败: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500
 
-# ======================================================================
-# ★★★ 独立音乐库 API ★★★
-# ======================================================================
-
-@p115_bp.route('/music/config', methods=['GET', 'POST'])
-@admin_required
-def handle_music_config():
-    """获取/保存音乐库配置"""
-    if request.method == 'GET':
-        # ★ 修复：直接从数据库读取，避免 get_config() 缓存不同步
-        return jsonify({
-            "success": True,
-            "data": {
-                "p115_music_root_cid": settings_db.get_setting('p115_music_root_cid') or '0',
-                "p115_music_root_name": settings_db.get_setting('p115_music_root_name') or ''
-            }
-        })
-    
-    if request.method == 'POST':
-        data = request.json
-        settings_db.save_setting('p115_music_root_cid', data.get('p115_music_root_cid'))
-        settings_db.save_setting('p115_music_root_name', data.get('p115_music_root_name'))
-        return jsonify({"success": True, "message": "音乐库配置已保存"})
-
-@p115_bp.route('/music/sync', methods=['POST'])
-@admin_required
-def trigger_music_sync():
-    """触发音乐库全量同步"""
-    from tasks.p115 import task_sync_music_library
-    import task_manager # ★ 引入全局任务管理器
-    
-    # ★ 核心修复：使用 submit_task 提交任务，这样前端顶部才会弹出进度条！
-    task_manager.submit_task(
-        task_sync_music_library,
-        task_name="全量同步音乐库 STRM",
-        processor_type='media'
-    )
-    
-    return jsonify({"success": True, "message": "音乐库同步任务已在后台启动"})
-
-@p115_bp.route('/music/upload', methods=['POST'])
-@admin_required
-def upload_music_file():
-    """上传音乐文件并生成 STRM (附属文件直接存本地，不传网盘)"""
-    if 'file' not in request.files:
-        return jsonify({"success": False, "message": "没有文件"}), 400
-        
-    file = request.files['file']
-    target_cid = request.form.get('target_cid')
-    relative_path = request.form.get('relative_path', '') 
-    
-    if not target_cid or target_cid == '0':
-        return jsonify({"success": False, "message": "未选择上传目标目录"}), 400
-
-    from handler.p115_service import P115Service, P115CacheManager, get_config
-    from database import settings_db
-    import constants
-    import os
-    import time
-
-    try:
-        # ==========================================
-        # 步骤 1：提前判断文件类型与计算本地基础路径
-        # ==========================================
-        audio_exts = {'mp3', 'flac', 'wav', 'ape', 'm4a', 'aac', 'ogg', 'wma', 'alac'}
-        ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-        is_audio = ext in audio_exts
-
-        music_root_cid = settings_db.get_setting('p115_music_root_cid')
-        music_root_name = settings_db.get_setting('p115_music_root_name') or "音乐库"
-        music_root_name = music_root_name.strip('/')
-        target_rel_path = ""
-        
-        # 如果是音频文件，需要用到 client 来查路径；如果是附属文件，尽量不调 API
-        client = P115Service.get_client()
-        
-        if str(target_cid) != str(music_root_cid) and client:
-            # ★ 核心修复：并发上传时，115 接口返回 path 可能有延迟或截断，导致单首歌跑飞
-            # 优先 1：从本地 DB 缓存中推导相对路径，零延迟且百分百精准
-            cached_local_path = P115CacheManager.get_local_path(target_cid)
-            if cached_local_path and cached_local_path.replace('\\', '/').startswith(music_root_name):
-                rel = cached_local_path.replace('\\', '/')[len(music_root_name):].strip('/')
-                if rel: target_rel_path = rel
-            
-            # 优先 2：如果缓存没命中，再去 115 查，并增加重试机制对抗 115 目录树同步延迟
-            if not target_rel_path:
-                for retry in range(3):
-                    dir_info = client.fs_files({'cid': target_cid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
-                    path_nodes = dir_info.get('path', [])
-                    
-                    start_idx = -1
-                    for i, node in enumerate(path_nodes):
-                        if str(node.get('cid') or node.get('file_id')) == str(music_root_cid):
-                            start_idx = i + 1
-                            break
-                            
-                    if start_idx != -1:
-                        sub_folders = [str(p.get('name') or p.get('file_name')).strip() for p in path_nodes[start_idx:]]
-                        if sub_folders:
-                            target_rel_path = os.path.join(*sub_folders)
-                        break
-                    else:
-                        time.sleep(1) # 115 路径树存在延迟，暂停 1 秒后重查
-                        
-                # 终极兜底
-                if start_idx == -1:
-                    target_rel_path = "未分类上传"
-
-        base_local_path = os.path.join(music_root_name, target_rel_path).replace('\\', '/')
-
-        # 提前计算最终的本地绝对路径目录
-        config = get_config()
-        local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
-        local_dir = os.path.join(local_root, base_local_path) if local_root else ""
-        
-        if relative_path and '/' in relative_path and local_dir:
-            clean_path = relative_path.strip('/')
-            local_dir = os.path.join(local_dir, os.path.dirname(clean_path))
-
-        # ==========================================
-        # ★ 核心优化：如果是附属文件，直接存本地，不走 115
-        # ==========================================
-        if not is_audio:
-            if not local_root:
-                return jsonify({"success": False, "message": "未配置本地 STRM 根目录，无法保存附属文件"}), 400
-                
-            os.makedirs(local_dir, exist_ok=True)
-            local_file_path = os.path.join(local_dir, file.filename)
-            file.save(local_file_path) # Flask 原生方法直接保存文件
-            
-            logger.info(f"  ➜ [本地直存] 附属文件已直接保存到本地 STRM 目录: {local_file_path}")
-            return jsonify({"success": True, "message": f"{file.filename} 已直接保存到本地"})
-
-        # ==========================================
-        # 以下为音频文件的原有逻辑 (走 115 上传)
-        # ==========================================
-        if not client:
-            return jsonify({"success": False, "message": "115 客户端未初始化"}), 500
-
-        # 步骤 2：动态创建拖拽的文件夹并写入缓存
-        final_cid = target_cid
-        if relative_path and '/' in relative_path:
-            clean_path = relative_path.strip('/')
-            dir_parts = [p for p in clean_path.split('/')[:-1] if p]
-            
-            current_pid = target_cid
-            current_local_path = base_local_path
-            
-            for part in dir_parts:
-                current_local_path = os.path.join(current_local_path, part).replace('\\', '/')
-                
-                cached_cid = P115CacheManager.get_cid(current_pid, part)
-                if cached_cid:
-                    current_pid = cached_cid
-                    P115CacheManager.update_local_path(cached_cid, current_local_path)
-                    continue
-                
-                mk_res = client.fs_mkdir(part, current_pid)
-                if mk_res.get('state'):
-                    new_cid = mk_res.get('cid')
-                    P115CacheManager.save_cid(new_cid, current_pid, part)
-                    P115CacheManager.update_local_path(new_cid, current_local_path)
-                    current_pid = new_cid
-                else:
-                    found = False
-                    for attempt in range(3):
-                        search_res = client.fs_files({'cid': current_pid, 'search_value': part, 'limit': 100})
-                        for item in search_res.get('data', []):
-                            if item.get('fn') == part and str(item.get('fc')) == '0':
-                                new_cid = item.get('fid')
-                                P115CacheManager.save_cid(new_cid, current_pid, part)
-                                P115CacheManager.update_local_path(new_cid, current_local_path)
-                                current_pid = new_cid
-                                found = True
-                                break
-                        if found: break
-                        time.sleep(1.5)
-                        
-                    if not found: 
-                        raise Exception(f"无法创建或找到目录: {part} (115后端同步延迟)")
-            final_cid = current_pid
-
-        # 步骤 3：执行上传
-        file_data = file.read()
-        file_size = len(file_data)
-        file.seek(0) 
-        
-        upload_res = client.upload_file_stream(file, file.filename, final_cid)
-        pick_code = upload_res.get('pick_code')
-        file_id = upload_res.get('file_id')
-        file_sha1 = upload_res.get('sha1')
-
-        # 步骤 4：生成 STRM 并写入文件缓存
-        etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
-        
-        if local_root and etk_url and pick_code:
-            strm_name = os.path.splitext(file.filename)[0] + ".strm"
-            os.makedirs(local_dir, exist_ok=True)
-            strm_path = os.path.join(local_dir, strm_name)
-            
-            if not etk_url.startswith('http'):
-                return jsonify({'success': False, 'message': '请配置 http(s) 开头的 ETK 访问地址。'}), 400
-            content = f"{etk_url}/api/p115/play/{pick_code}/{file.filename}"
-                
-            with open(strm_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-                
-            if file_id:
-                rel_dir = os.path.relpath(local_dir, local_root)
-                file_local_path = os.path.join(rel_dir, file.filename).replace('\\', '/')
-                P115CacheManager.save_file_cache(
-                    fid=file_id, parent_id=final_cid, name=file.filename,
-                    sha1=file_sha1, pick_code=pick_code,
-                    local_path=file_local_path, size=file_size
-                )
-
-        return jsonify({"success": True, "message": f"{file.filename} 上传成功"})
-    except Exception as e:
-        logger.error(f"音乐上传失败: {e}", exc_info=True)
-        return jsonify({"success": False, "message": str(e)}), 500
-    
-# ======================================================================
-# ★★★ 全局清理与回收站 API ★★★
-# ======================================================================
-
 @p115_bp.route('/recycle_bin/empty', methods=['POST'])
 @admin_required
 def empty_recycle_bin():
@@ -3133,6 +2920,62 @@ def get_local_directories():
         return jsonify({'code': 403, 'message': '没有权限访问该目录，请检查 Docker 映射或系统权限'}), 403
     except Exception as e:
         return jsonify({'code': 500, 'message': str(e)}), 500
+
+
+@p115_bp.route('/upload_monitor/config', methods=['GET', 'POST'])
+@admin_required
+def handle_upload_monitor_config():
+    """独立管理本地目录到 115 的实时分片上传配置。"""
+    from handler.p115_upload_monitor import (
+        get_upload_monitor_config,
+        get_upload_monitor_status,
+        save_upload_monitor_config,
+    )
+
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'data': get_upload_monitor_config(),
+            'status': get_upload_monitor_status(),
+        })
+
+    payload = request.get_json(silent=True) or {}
+    raw_mappings = payload.get('mappings') if isinstance(payload.get('mappings'), list) else []
+    if len(raw_mappings) > 50:
+        return jsonify({'success': False, 'message': '上传监控目录最多配置 50 组'}), 400
+
+    seen_paths = set()
+    for index, item in enumerate(raw_mappings, start=1):
+        if not isinstance(item, dict):
+            return jsonify({'success': False, 'message': f'第 {index} 组目录映射格式无效'}), 400
+        local_dir = os.path.normpath(str(item.get('local_dir') or '').strip())
+        target_cid = str(item.get('target_cid') or '').strip()
+        if not local_dir or not os.path.isdir(local_dir):
+            return jsonify({'success': False, 'message': f'第 {index} 组本地目录不存在或不可访问'}), 400
+        if not target_cid or target_cid == '0':
+            return jsonify({'success': False, 'message': f'第 {index} 组未选择有效的 115 目录'}), 400
+        normalized_path = os.path.normcase(os.path.abspath(local_dir))
+        if normalized_path in seen_paths:
+            return jsonify({'success': False, 'message': f'本地目录重复配置: {local_dir}'}), 400
+        seen_paths.add(normalized_path)
+
+    if payload.get('enabled') and not raw_mappings:
+        return jsonify({'success': False, 'message': '启用上传监控前至少配置一组目录映射'}), 400
+
+    try:
+        config = save_upload_monitor_config(payload)
+        from monitor_service import MonitorService
+        restarted = MonitorService.restart_active()
+        return jsonify({
+            'success': True,
+            'message': '上传监控配置已保存并生效',
+            'data': config,
+            'status': get_upload_monitor_status(),
+            'monitor_restarted': restarted,
+        })
+    except Exception as e:
+        logger.error(f"  ➜ 保存 115 上传监控配置失败: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @p115_bp.route('/default_stream_config', methods=['GET', 'POST'])
 @admin_required

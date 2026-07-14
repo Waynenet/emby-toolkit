@@ -4677,7 +4677,10 @@ class P115CacheManager:
         return preid
 
     @staticmethod
-    def save_mediainfo_cache(sha1, mediainfo_json, raw_ffprobe_json=None, file_info=None, *, fid=None, pick_code=None, file_name=None):
+    def save_mediainfo_cache(
+        sha1, mediainfo_json, raw_ffprobe_json=None, file_info=None, *,
+        fid=None, pick_code=None, file_name=None,
+    ):
         """写入本地 p115_mediainfo_cache，结构保持 Emby MediaSourceInfo 标准格式"""
         if not sha1 or not mediainfo_json:
             return False

@@ -60,6 +60,11 @@
           <template #feedback>开启后，使用此模板的用户提交订阅请求时，将无需管理员审核，直接提交订阅。</template>
         </n-form-item>
 
+        <n-form-item label="仅限自备小号播放" path="personal_play_account_only">
+          <n-switch v-model:value="formModel.personal_play_account_only" />
+          <template #feedback>开启后，只允许用户使用自己扫码绑定的 115 OpenAPI 或 Cookie 播放，不使用管理员或共享小号，也不会回退主号。</template>
+        </n-form-item>
+
         <n-form-item label="播放并发" path="max_concurrent_streams">
           <n-input-number
             v-model:value="formModel.max_concurrent_streams"
@@ -120,6 +125,7 @@ const formModel = ref({
   source_emby_user_id: null,
   include_configuration: true,
   allow_unrestricted_subscriptions: false,
+  personal_play_account_only: false,
   max_concurrent_streams: 0,
 });
 
@@ -173,7 +179,8 @@ const handleCreate = () => {
     default_expiration_days: 30,
     source_emby_user_id: null,
     include_configuration: true,
-    allow_unrestricted_subscriptions: false, 
+    allow_unrestricted_subscriptions: false,
+    personal_play_account_only: false,
     max_concurrent_streams: 0,
   };
   isEditMode.value = false;
@@ -238,6 +245,11 @@ const columns = [
     title: '免审订阅', 
     key: 'allow_unrestricted_subscriptions',
     render: (row) => row.allow_unrestricted_subscriptions ? '是' : '否'
+  },
+  {
+    title: '播放账号',
+    key: 'personal_play_account_only',
+    render: (row) => row.personal_play_account_only ? '仅限自备小号' : '允许主号回退'
   },
   {
     title: '播放并发',

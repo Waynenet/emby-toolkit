@@ -37,6 +37,7 @@ def create_template():
     source_emby_user_id = data.get('source_emby_user_id')
     include_configuration = data.get('include_configuration', False)
     allow_unrestricted_subscriptions = data.get('allow_unrestricted_subscriptions', False)
+    personal_play_account_only = data.get('personal_play_account_only', False)
     max_concurrent_streams = max(0, int(data.get('max_concurrent_streams') or 0))
 
     if not name or not source_emby_user_id:
@@ -51,7 +52,7 @@ def create_template():
         policy_json = json.dumps(user_details['Policy'], ensure_ascii=False)
         configuration_json = json.dumps(user_details['Configuration'], ensure_ascii=False) if include_configuration and 'Configuration' in user_details else None
 
-        new_id = user_db.create_user_template(name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, max_concurrent_streams)
+        new_id = user_db.create_user_template(name, description, policy_json, default_expiration_days, source_emby_user_id, configuration_json, allow_unrestricted_subscriptions, personal_play_account_only, max_concurrent_streams)
         return jsonify({"status": "ok", "message": "模板创建成功", "id": new_id}), 201
 
     except psycopg2.IntegrityError:
@@ -82,13 +83,14 @@ def update_template(template_id):
     name, description = data.get('name'), data.get('description')
     default_expiration_days = data.get('default_expiration_days')
     allow_unrestricted_subscriptions = data.get('allow_unrestricted_subscriptions', False)
+    personal_play_account_only = data.get('personal_play_account_only', False)
     max_concurrent_streams = max(0, int(data.get('max_concurrent_streams') or 0))
 
     if not name:
         return jsonify({"status": "error", "message": "模板名称不能为空"}), 400
 
     try:
-        updated_count = user_db.update_user_template_details(template_id, name, description, default_expiration_days, allow_unrestricted_subscriptions, max_concurrent_streams)
+        updated_count = user_db.update_user_template_details(template_id, name, description, default_expiration_days, allow_unrestricted_subscriptions, personal_play_account_only, max_concurrent_streams)
         if updated_count == 0:
             return jsonify({"status": "error", "message": "模板不存在"}), 404
         return jsonify({"status": "ok", "message": "模板更新成功"}), 200

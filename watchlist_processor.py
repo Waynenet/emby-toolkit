@@ -1432,25 +1432,18 @@ class WatchlistProcessor:
         except Exception as e_img:
             logger.warning(f"  ➜ 追剧刷新时处理物理资产失败: {e_img}")
 
-        # 5. 通知 Emby 扫描剧集目录读取 NFO
+        # 5. NFO 在入库后生成，必须递归刷新整部剧才能让 Emby 重新读取全部 NFO。
         if item_id and current_item_details:
-            media_path = current_item_details.get("Path")
-
-            if media_path:
-                scan_target = media_path
-
-                # notify_emby_file_changes 是按“文件路径 -> 父目录”精准扫描的思路设计的。
-                # 如果直接传剧集目录，会向上扫到年份目录 2026。
-                if os.path.isdir(media_path):
-                    tvshow_nfo = os.path.join(media_path, "tvshow.nfo")
-                    if os.path.exists(tvshow_nfo):
-                        scan_target = tvshow_nfo
-                    else:
-                        # 兜底：给它一个目录内的虚拟文件路径，确保父目录仍然是剧集目录
-                        scan_target = os.path.join(media_path, ".refresh")
-
-                logger.debug(f"  ➜ 正在通知 Emby 扫描剧集目录: {os.path.dirname(scan_target)}")
-                emby.notify_emby_file_changes([scan_target], self.emby_url, self.emby_api_key)
+            logger.debug(f"  ➜ 正在通知 Emby 递归刷新《{item_name}》并重新读取全部 NFO...")
+            emby.refresh_emby_item_metadata(
+                item_emby_id=item_id,
+                emby_server_url=self.emby_url,
+                emby_api_key=self.emby_api_key,
+                user_id_for_ops=self.emby_user_id,
+                replace_all_metadata_param=True,
+                replace_all_images_param=False,
+                item_name_for_log=item_name,
+            )
 
         # 6. 同步季和集到数据库 
         emby_seasons_state = media_db.get_series_local_children_info(tmdb_id)

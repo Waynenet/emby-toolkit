@@ -44,7 +44,7 @@ def _save_setting_with_cursor(cursor, setting_key: str, value: Dict[str, Any]):
     value_as_json = json.dumps(value, ensure_ascii=False)
     cursor.execute(sql, (setting_key, value_as_json))
 
-def save_setting(setting_key: str, value: Dict[str, Any]):
+def save_setting(setting_key: str, value: Dict[str, Any], *, log_success: bool = True):
     """【V2 - 重构版】向 app_settings 表中保存或更新一个设置项。"""
     
     try:
@@ -52,7 +52,8 @@ def save_setting(setting_key: str, value: Dict[str, Any]):
             cursor = conn.cursor()
             _save_setting_with_cursor(cursor, setting_key, value)
             conn.commit()
-            logger.trace(f"  ➜ 成功保存设置 '{setting_key}'。")
+            if log_success:
+                logger.trace(f"  ➜ 成功保存设置 '{setting_key}'。")
     except Exception as e:
         logger.error(f"  ➜ 保存设置 '{setting_key}' 时失败: {e}", exc_info=True)
         raise

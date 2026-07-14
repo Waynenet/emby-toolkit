@@ -199,6 +199,81 @@ def _json_object(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _adult_rating_block_reason(candidate: Dict[str, Any]) -> str:
+    """只按本地媒体库已归一化的 XXX 分级拦截共享登记。"""
+    candidate = dict(candidate or {})
+    item_type = str(candidate.get('item_type') or '').strip()
+    if item_type not in ('Movie', 'Season', 'Episode'):
+        return ''
+
+    season = _safe_int_or_none(candidate.get('season_number'))
+    episode = _safe_int_or_none(candidate.get('episode_number'))
+    parent_tmdb_id = str(
+        candidate.get('parent_series_tmdb_id')
+        or candidate.get('series_tmdb_id')
+        or candidate.get('tmdb_id')
+        or ''
+    ).strip()
+    movie_tmdb_id = str(candidate.get('tmdb_id') or '').strip()
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT title, tmdb_id
+                    FROM media_metadata
+                    WHERE (
+                            (%s='Movie' AND item_type='Movie' AND tmdb_id=%s)
+                         OR (%s<>'Movie' AND (
+                                (item_type='Series' AND tmdb_id=%s)
+                             OR (item_type IN ('Season','Episode')
+                                 AND COALESCE(NULLIF(parent_series_tmdb_id, ''), tmdb_id)=%s
+                                 AND (%s IS NULL OR season_number=%s)
+                                 AND (%s IS NULL OR item_type<>'Episode' OR episode_number=%s))
+                            ))
+                    )
+                      AND (
+                            UPPER(COALESCE(NULLIF(custom_rating, ''), ''))='XXX'
+                         OR UPPER(COALESCE(official_rating_json->>'US', official_rating_json->>'us', ''))='XXX'
+                      )
+                    LIMIT 1
+                    """,
+                    (
+                        item_type, movie_tmdb_id, item_type, parent_tmdb_id,
+                        parent_tmdb_id, season, season, episode, episode,
+                    ),
+                )
+                row = dict(cur.fetchone() or {})
+                if row:
+                    title = row.get('title') or candidate.get('title') or row.get('tmdb_id') or parent_tmdb_id or movie_tmdb_id
+                    return f'adult rating XXX: {title}'.strip()
+    except Exception as e:
+        logger.warning(
+            "  ➜ [共享资源] 成人分级登记前检查失败，拒绝本次共享登记: %s -> %s",
+            candidate.get('title') or candidate.get('tmdb_id'),
+            e,
+        )
+        raise RuntimeError('读取本地成人分级失败，已拒绝共享登记') from e
+    return ''
+
+
+def _adult_block_result(candidate: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    title = (candidate or {}).get('title') or (candidate or {}).get('tmdb_id') or 'unknown'
+    return {
+        'ok': False,
+        'message': f'成人资源不参与共享登记：{title}',
+        'adult_blocked': True,
+        'reason': reason,
+        'registered_count': 0,
+        'raw_uploaded_count': 0,
+        'raw_ready_count': 0,
+        'raw_skipped_existing': 0,
+        'errors': [],
+        'fingerprint_repair': {},
+    }
+
+
 def _rapid_size_to_int(value, default=0) -> int:
     """把 size / file_size / 27.9 GB 这类值统一转成字节数。"""
     try:
@@ -5900,7 +5975,10 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
         _build_display_credits_bundle(series_row) if series_row else {'people_json': [], 'credits_json': []},
     )
 
-def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: str = 'manual_rapid', preuploaded_raw_state: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def register_candidate_to_center(
+    candidate: Dict[str, Any], *, source_provider: str = 'manual_rapid',
+    preuploaded_raw_state: Dict[str, Any] | None = None, _adult_gate_checked: bool = False,
+) -> Dict[str, Any]:
     """把本地电影/分集/季登记到 Rapid v2 中心。
 
     新口径：客户端只登记可秒传的电影/分集资产；Season 也拆成 episode_source
@@ -5913,6 +5991,16 @@ def register_candidate_to_center(candidate: Dict[str, Any], *, source_provider: 
     candidate = _normalize_series_candidate_identity(dict(candidate or {}))
     item_type = str(candidate.get('item_type') or '').strip()
     effective_provider = 'rapid_logical_season' if str(source_provider or '').strip().lower() == 'rapid_completed_season' else source_provider
+
+    if not _adult_gate_checked:
+        adult_reason = _adult_rating_block_reason(candidate)
+        if adult_reason:
+            logger.warning(
+                "  ➜ [共享资源] 跳过成人资源登记: %s，reason=%s",
+                candidate.get('title') or candidate.get('tmdb_id') or 'unknown',
+                adult_reason,
+            )
+            return _adult_block_result(candidate, adult_reason)
 
     files = shared_share_db.collect_files_for_candidate(candidate)
     if not files:
@@ -6134,6 +6222,14 @@ def trigger_shared_rapid_register_batch_for_library_items(processor=None, regist
     for raw_item in items:
         candidate = _library_register_candidate_from_kwargs(raw_item)
         candidate = _normalize_series_candidate_identity(dict(candidate or {}))
+        adult_reason = _adult_rating_block_reason(candidate)
+        if adult_reason:
+            prepared.append({
+                'item': raw_item,
+                'candidate': candidate,
+                'blocked_result': _adult_block_result(candidate, adult_reason),
+            })
+            continue
         files = shared_share_db.collect_files_for_candidate(candidate)
         files = _prime_candidate_files_for_registration(candidate, files)
         if files and _files_missing_pick_code(files):
@@ -6175,6 +6271,7 @@ def trigger_shared_rapid_register_batch_for_library_items(processor=None, regist
                 entry['candidate'],
                 source_provider='rapid_auto_library',
                 preuploaded_raw_state=raw_batch_result,
+                _adult_gate_checked=True,
             )
         except Exception as e:
             result = {'ok': False, 'message': f'登记异常: {e}', 'error': str(e)}
