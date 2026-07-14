@@ -341,8 +341,12 @@
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header>
-                      <div style="display: flex; align-items: center; gap: 8px;">
+                      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
                         <span class="card-title">实时监控</span>
+                        <n-button secondary type="primary" @click="uploadMonitorModalRef?.open()">
+                          <template #icon><n-icon :component="ImportIcon" /></template>
+                          上传配置
+                        </n-button>
                       </div>
                     </template>
                     
@@ -993,24 +997,6 @@
                       </template>
                       <n-alert type="warning" :show-icon="true">
                         动漫、番剧、字幕组资源命名过于混乱时，可由用户自己定义季集号提取规则。规则按顺序匹配，命中即返回，不再继续扩展硬编码识别。
-                      </n-alert>
-                    </n-card>
-
-                    <!-- ★ 卡片 7：独立音乐库管理 -->
-                    <n-card :bordered="false" class="dashboard-card" style="flex: 1;">
-                      <template #header>
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">音乐库管理</span>
-                          <n-button secondary type="primary" @click="musicModalRef?.open()">
-                            <template #icon>
-                              <n-icon :component="FolderIcon" />
-                            </template>
-                            打开音乐库
-                          </n-button>
-                        </div>
-                      </template>
-                      <n-alert type="success" :show-icon="true">
-                        简单音乐管理器，支持直接上传文件夹、自动创建 115 目录并同步生成本地 STRM 文件，全量生成音乐库STRM。
                       </n-alert>
                     </n-card>
 
@@ -1704,11 +1690,13 @@
     <!-- ★ 引入默认音轨与字幕配置模态框 -->
     <DefaultStreamConfigModal ref="defaultStreamModalRef" />
 
-    <!-- ★ 引入音乐库管理模态框 -->
-    <MusicManagerModal 
-      ref="musicModalRef" 
-      @open-folder-selector="(context, cid) => openFolderSelector(context, cid)" 
+    <UploadMonitorConfigModal
+      ref="uploadMonitorModalRef"
+      :extensions="configModel.monitor_extensions || []"
+      @select-local="id => openLocalFolderSelector(`upload_monitor_local:${id}`, false)"
+      @select-remote="(id, cid) => openFolderSelector(`upload_monitor_remote:${id}`, cid)"
     />
+
     <!-- ★ 引入规则管理模态框 -->
     <RuleManagerModal 
       ref="ruleManagerRef" 
@@ -2112,7 +2100,6 @@ import {
 import { useConfig } from '../../composables/useConfig.js';
 import RenameConfigModal from './RenameConfigModal.vue';
 import EpisodeRegexConfigModal from './EpisodeRegexConfigModal.vue';
-import MusicManagerModal from './MusicManagerModal.vue';
 import RuleManagerModal from './RuleManagerModal.vue'; 
 import WashingPriorityModal from './WashingPriorityModal.vue';
 import MappingManager from '../modals/MappingManager.vue';
@@ -2120,6 +2107,7 @@ import axios from 'axios';
 import MoviePilotConfigModal from './MoviePilotConfigModal.vue';
 import HDHiveConfigModal from './HDHiveConfigModal.vue';
 import DefaultStreamConfigModal from './DefaultStreamConfigModal.vue';
+import UploadMonitorConfigModal from './UploadMonitorConfigModal.vue';
 
 const mpModalRef = ref(null);
 const washingPriorityModalRef = ref(null);
@@ -2130,7 +2118,7 @@ const playPoolModalRef = ref(null);
 const renameModalRef = ref(null);
 const episodeRegexModalRef = ref(null);
 const defaultStreamModalRef = ref(null);
-const musicModalRef = ref(null);
+const uploadMonitorModalRef = ref(null);
 const ruleManagerRef = ref(null);
 const mappingManagerModalVisible = ref(false);
 const activeSettingsTab = ref('emby');
@@ -3119,6 +3107,13 @@ const selectLocalFolder = (folder) => {
 const confirmLocalFolder = () => {
     const field = currentLocalTargetField.value
     const path = currentLocalPath.value
+
+    if (field.startsWith('upload_monitor_local:')) {
+        uploadMonitorModalRef.value?.updateLocalFolder(field.split(':', 2)[1], path)
+        message.success(`已选择路径: ${path}`)
+        showLocalFolderModal.value = false
+        return
+    }
     
     if (isCurrentLocalTargetArray.value) {
         // 如果是多选数组 (如 monitor_paths)
@@ -3485,10 +3480,8 @@ const confirmFolderSelection = () => {
     ruleManagerRef.value?.updateFolder(cid, name);
   } else if (selectorContext.value === 'share_transfer') {
     shareMountModalRef.value?.updateTransferFolder(cid, name);
-  } else if (selectorContext.value === 'music_root') {
-    musicModalRef.value?.updateFolder(cid, name);
-  } else if (selectorContext.value === 'music_upload_target') { 
-    musicModalRef.value?.updateUploadTarget(cid, name);
+  } else if (selectorContext.value.startsWith('upload_monitor_remote:')) {
+    uploadMonitorModalRef.value?.updateTarget(selectorContext.value.split(':', 2)[1], cid, name);
   }
   
   message.success(`已选择: ${name}`);
