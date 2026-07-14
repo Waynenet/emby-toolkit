@@ -65,7 +65,7 @@
               size="small" 
               style="width: 120px;" 
             />
-            <n-button size="small" @click="showStrategyModal = true" type="warning" ghost>
+            <n-button size="small" @click="openStrategyModal" type="warning" ghost>
               <template #icon><n-icon :component="SettingsIcon" /></template>
               策略配置
             </n-button>
@@ -109,8 +109,13 @@
             :key="item.tmdb_id + item.item_type" 
             class="grid-item"
           >
-            <n-card class="dashboard-card series-card" :bordered="false" @click="toggleSelection(item, $event, i)">
-              <div class="card-type-badge">
+            <n-card class="dashboard-card series-card" :bordered="false">
+              <n-checkbox
+                :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
+                @update:checked="(checked, event) => toggleSelection(item, event, i)"
+                class="card-checkbox"
+              />
+              <div class="card-type-icon">
                 <n-tooltip trigger="hover">
                   <template #trigger>
                     <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
@@ -120,17 +125,9 @@
               </div>
 
               <div class="card-inner-layout">
-                <div class="card-poster-container">
-                  <!-- 绝对定位包裹 Checkbox -->
-                  <div class="poster-checkbox-wrap" @click.stop>
-                    <n-checkbox
-                      size="small"
-                      :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
-                      @update:checked="(checked, event) => toggleSelection(item, event, i)"
-                    />
-                  </div>
 
-                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover" @click.stop>
+                <div class="card-poster-container">
+                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover">
                     <template #placeholder><div class="poster-placeholder"><n-icon :component="TvIcon" size="32" /></div></template>
                   </n-image>
                 </div>
@@ -206,8 +203,6 @@
       </div>
       <div v-else class="center-container"><n-empty :description="emptyStateDescription" size="huge" /></div>
     </div>
-    
-    <!-- (下面的模态框等其他结构保持不变) -->
     <transition name="slide-up">
       <div v-if="selectedItems.length > 0" class="floating-action-bar">
         <div class="fab-content">
@@ -261,45 +256,32 @@
       </div>
     </transition>
     <!-- 订阅策略配置模态框 -->
-    <n-modal v-model:show="showStrategyModal" preset="card" title="自动订阅与清理策略" style="width: 500px;" :auto-focus="false">
-      <n-alert type="info" :show-icon="false" style="margin-bottom: 20px;">
-        提示：以下策略主要用于控制电影的间歇性搜索。剧集的连载追更由「智能追剧」模块独立管理。
-      </n-alert>
-
+    <n-modal v-model:show="showStrategyModal" preset="card" title="订阅策略配置" style="width: 600px;" :auto-focus="false" class="custom-modal glass-modal">
       <n-form label-placement="left" label-width="auto" require-mark-placement="right-hanging">
-        <n-form-item label="新片保护期 (天)">
-          <n-input-number v-model:value="strategyConfig.movie_protection_days" :min="0" style="width: 100%" />
-          <template #feedback>发布时间在此天数内的电影启用间歇性搜索机制。超过此天数则视为老片，不再暂停，直接取消订阅。</template>
-        </n-form-item>
         
-        <n-form-item label="搜索窗口期 (天)">
-          <n-input-number v-model:value="strategyConfig.movie_search_window_days" :min="1" style="width: 100%" />
-          <template #feedback>新增订阅以及每次复活后，连续搜索的天数 (建议 1 天)。</template>
-        </n-form-item>
-        
-        <n-form-item label="暂停周期 (天)">
-          <n-input-number v-model:value="strategyConfig.movie_pause_days" :min="1" style="width: 100%" />
-          <template #feedback>搜索无果后，暂停搜索的天数 (建议 7 天)。</template>
-        </n-form-item>
-
-        <n-form-item label="延迟订阅 (天)">
-          <n-input-number v-model:value="strategyConfig.delay_subscription_days" :min="0" style="width: 100%" />
-          <template #feedback>电影上映后 N 天才允许订阅 (0 表示不延迟)。</template>
-        </n-form-item>
-
-        <n-form-item label="超时复活 (天)">
-          <n-input-number v-model:value="strategyConfig.timeout_revive_days" :min="0" style="width: 100%" />
+        <n-divider title-placement="left">订阅源优先级</n-divider>
+        <n-form-item label="订阅源">
+          <div v-if="sourceList.length" class="source-list">
+            <div 
+              v-for="(source, index) in sourceList" 
+              :key="source.value"
+              class="source-item"
+              draggable="true"
+              @dragstart="onDragStart(index)"
+              @dragover.prevent
+              @drop="onDrop(index)"
+            >
+              <n-checkbox v-model:checked="source.enabled">
+                {{ source.label }}
+              </n-checkbox>
+              <n-icon class="drag-handle" :component="MenuIcon" />
+            </div>
+          </div>
+          <n-empty v-else description="当前没有可用订阅源" />
           <template #feedback>
-            因“订阅超时”被移除的项目，在 N 天后自动复活并重新尝试。<br/>
-            <b>0 表示不复活 (默认)</b>。适用于给老片第二次机会。
-          </template>
-        </n-form-item>
-
-        <n-form-item label="下载超时重订 (小时)">
-          <n-input-number v-model:value="strategyConfig.download_timeout_hours" :min="0" style="width: 100%" />
-          <template #feedback>
-            下载队列中超过 N 小时未完成的任务，将自动删除并重新订阅。<br/>
-            <b>同时会尝试排除原超时种子</b>。0 表示关闭此功能。
+            <b>拖动调整优先级，勾选启用。</b><br/>
+            系统会按列表顺序依次尝试当前可用订阅源。<br/>
+            <span style="color: var(--n-warning-color);">* 注：云资源搜索存在模糊匹配限制，剧集订阅仍需依赖本地季号过滤。</span>
           </template>
         </n-form-item>
       </n-form>
@@ -315,7 +297,6 @@
 </template>
 
 <script setup>
-// JS 逻辑保持不变
 import { ref, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NCheckboxGroup, NRadio, NForm, NFormItem, NInputNumber, NModal, NPopconfirm } from 'naive-ui';
@@ -350,97 +331,256 @@ const sortOrder = ref('desc');
 const showStrategyModal = ref(false);
 const savingStrategy = ref(false);
 const strategyConfig = ref({
-  movie_protection_days: 180, movie_search_window_days: 1, movie_pause_days: 7, delay_subscription_days: 0, timeout_revive_days: 0, download_timeout_hours: 0
+  subscription_sources: ['mp'],
 });
+
+const allSubscriptionSources = [
+  { label: 'MoviePilot', value: 'mp', enabled: true },
+];
+const sourceList = ref([...allSubscriptionSources]);
+
+const loadAvailableSubscriptionSources = async () => {
+  const { data } = await axios.get('/api/subscription/status');
+  if (!data?.success) return allSubscriptionSources.map(o => o.value);
+  const available = [];
+  if (data.shared_pool_configured) available.push('shared_pool');
+  if (data.hdhive_configured) available.push('hdhive');
+  if (data.tg_userbot_configured) available.push('tg_channel');
+  if (data.mp_configured) available.push('mp');
+  return available;
+};
+
+let draggedIndex = null;
+const onDragStart = (index) => {
+  draggedIndex = index;
+};
+const onDrop = (index) => {
+  if (draggedIndex !== null && draggedIndex !== index) {
+    const item = sourceList.value.splice(draggedIndex, 1)[0];
+    sourceList.value.splice(index, 0, item);
+  }
+  draggedIndex = null;
+};
 
 const loadStrategyConfig = async () => {
   try {
-    const res = await axios.get('/api/subscription/strategy');
-    strategyConfig.value = { ...strategyConfig.value, ...res.data };
-  } catch (e) { message.error('加载策略配置失败'); }
+    const [strategyRes, availableSources] = await Promise.all([
+      axios.get('/api/subscription/strategy'),
+      loadAvailableSubscriptionSources()
+    ]);
+    
+    let sources = Array.isArray(strategyRes.data.subscription_sources) ? strategyRes.data.subscription_sources : [];
+    sources = sources.filter(source => availableSources.includes(source));
+    
+    const newSourceList = [];
+    sources.forEach(val => {
+      const opt = allSubscriptionSources.find(o => o.value === val);
+      if (opt) {
+        newSourceList.push({ ...opt, enabled: true });
+      }
+    });
+    allSubscriptionSources.forEach(opt => {
+      if (availableSources.includes(opt.value) && !sources.includes(opt.value)) {
+        newSourceList.push({ ...opt, enabled: false });
+      }
+    });
+    sourceList.value = newSourceList;
+
+    strategyConfig.value = {
+      ...strategyRes.data,
+      subscription_sources: sources
+    };
+  } catch (e) {
+    message.error('加载策略配置失败');
+  }
+};
+
+const openStrategyModal = async () => {
+  showStrategyModal.value = true;
+  await loadStrategyConfig();
 };
 
 const saveStrategyConfig = async () => {
   savingStrategy.value = true;
   try {
-    await axios.post('/api/subscription/strategy', strategyConfig.value);
+    const payload = {
+      subscription_sources: sourceList.value.filter(o => o.enabled).map(o => o.value)
+    };
+    strategyConfig.value = payload;
+    await axios.post('/api/subscription/strategy', payload);
     message.success('策略配置已保存');
     showStrategyModal.value = false;
-  } catch (e) { message.error('保存失败'); } 
-  finally { savingStrategy.value = false; }
+  } catch (e) {
+    message.error('保存失败');
+  } finally {
+    savingStrategy.value = false;
+  }
 };
 
-const typeFilterOptions = [{ label: '所有类型', value: 'all' }, { label: '电影', value: 'Movie' }, { label: '剧集', value: 'Season' }];
-const sortKeyOptions = computed(() => [{ label: filterStatus.value === 'SUBSCRIBED' ? '按订阅时间' : '按请求时间', value: 'first_requested_at' }, { label: '按媒体名称', value: 'title' }, { label: '按发行日期', value: 'release_date' }]);
+const typeFilterOptions = [
+  { label: '所有类型', value: 'all' },
+  { label: '电影', value: 'Movie' },
+  { label: '剧集', value: 'Season' },
+];
+const sortKeyOptions = computed(() => [
+  { 
+    label: filterStatus.value === 'SUBSCRIBED' ? '按订阅时间' : '按请求时间', 
+    value: 'first_requested_at' 
+  },
+  { label: '按媒体名称', value: 'title' },
+  { label: '按发行日期', value: 'release_date' },
+]);
 
 const SOURCE_TYPE_MAP = {
-  'user_request': '用户请求', 'actor_subscription': '演员订阅', 'custom_collection': '自建合集', 'native_collection': '原生合集',
-  'manual_add': '手动添加', 'revive_from_timeout': '超时复活', 'watchlist': '智能追剧', 'resubscribe': '自动洗版',
-  'manual_ignore': '手动忽略', 'manual_subscribe': '手动订阅', 'manual_admin_op': '手动处理', 'auto_ignored': '自动忽略', 'gap_scan': '缺集的季', 'scan_old_seasons_backfill': '补全旧季'
+  'user_request': '用户请求',
+  'actor_subscription': '演员订阅',
+  'custom_collection': '自建合集',
+  'native_collection': '原生合集',
+  'manual_add': '手动添加',
+  'revive_from_timeout': '超时复活',
+  'watchlist': '智能追剧',
+  'resubscribe': '自动洗版',
+  'manual_ignore': '手动忽略',
+  'manual_subscribe': '手动订阅',
+  'manual_admin_op': '手动处理',
+  'auto_ignored': '自动忽略',
+  'gap_scan': '缺集的季',
+  'scan_old_seasons_backfill': '补全旧季',
+  'revived_season': '新季上线'
 };
 
 const sourceFilterOptions = computed(() => {
   const sources = new Set();
-  rawItems.value.forEach(item => { item.subscription_sources_json?.forEach(source => { if (source.type) sources.add(source.type); }); });
-  const options = Array.from(sources).map(type => ({ label: SOURCE_TYPE_MAP[type] || type, value: type }));
+  rawItems.value.forEach(item => {
+    item.subscription_sources_json?.forEach(source => {
+      if (source.type) {
+        sources.add(source.type);
+      }
+    });
+  });
+  const options = Array.from(sources).map(type => ({
+    label: SOURCE_TYPE_MAP[type] || type,
+    value: type
+  }));
   options.sort((a, b) => a.label.localeCompare(b.label));
   return options;
 });
 
 const batchActions = computed(() => {
   switch (filterStatus.value) {
-    case 'WANTED': return [{ label: '批量订阅', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
-    case 'REQUESTED': return [{ label: '批量批准', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
-    case 'SUBSCRIBED': case 'PENDING_RELEASE': return [{ label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
-    case 'PAUSED': return [{ label: '批量恢复', key: 'resume', icon: () => h(NIcon, { component: SubscribedIcon }) }, { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) }];
-    case 'IGNORED': return [{ label: '批量取消忽略', key: 'unignore', icon: () => h(NIcon, { component: WantedIcon }) }];
-    default: return [];
+    case 'WANTED':
+      return [
+        { label: '批量订阅', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) },
+        { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
+      ];
+    case 'REQUESTED': 
+      return [
+        { label: '批量批准', key: 'subscribe', icon: () => h(NIcon, { component: SubscribedIcon }) },
+        { label: '批量忽略', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
+      ];
+    case 'SUBSCRIBED':
+    case 'PENDING_RELEASE':
+      return [
+        { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
+      ];
+    case 'PAUSED':
+      return [
+        { label: '批量恢复', key: 'resume', icon: () => h(NIcon, { component: SubscribedIcon }) }, 
+        { label: '批量取消订阅 (忽略)', key: 'ignore', icon: () => h(NIcon, { component: IgnoredIcon }) },
+      ];
+    case 'IGNORED':
+      return [
+        { label: '批量取消忽略', key: 'unignore', icon: () => h(NIcon, { component: WantedIcon }) },
+      ];
+    default:
+      return [];
   }
 });
 
 const filteredItems = computed(() => {
   let list = rawItems.value.filter(item => item.subscription_status === filterStatus.value);
-  if (searchQuery.value) { const query = searchQuery.value.toLowerCase(); list = list.filter(item => item.title.toLowerCase().includes(query)); }
-  if (filterType.value !== 'all') list = list.filter(item => item.item_type === filterType.value);
-  if (filterSource.value) list = list.filter(item => item.subscription_sources_json?.some(source => source.type === filterSource.value));
+
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase();
+    list = list.filter(item => item.title.toLowerCase().includes(query));
+  }
+
+  if (filterType.value !== 'all') {
+    list = list.filter(item => item.item_type === filterType.value);
+  }
+
+  if (filterSource.value) {
+    list = list.filter(item => 
+      item.subscription_sources_json?.some(source => source.type === filterSource.value)
+    );
+  }
+
   list.sort((a, b) => {
     let valA, valB;
     switch (sortKey.value) {
-      case 'title': valA = a.title || ''; valB = b.title || ''; return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
-      case 'release_date': valA = a.release_date ? new Date(a.release_date).getTime() : 0; valB = b.release_date ? new Date(b.release_date).getTime() : 0; return sortOrder.value === 'asc' ? valA - valB : valB - valA;
-      case 'first_requested_at': default:
-        valA = (a.subscription_status === 'SUBSCRIBED' && a.last_subscribed_at) ? new Date(a.last_subscribed_at).getTime() : (a.first_requested_at ? new Date(a.first_requested_at).getTime() : 0);
-        valB = (b.subscription_status === 'SUBSCRIBED' && b.last_subscribed_at) ? new Date(b.last_subscribed_at).getTime() : (b.first_requested_at ? new Date(b.first_requested_at).getTime() : 0);
+      case 'title':
+        valA = a.title || '';
+        valB = b.title || '';
+        return sortOrder.value === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      
+      case 'release_date':
+        valA = a.release_date ? new Date(a.release_date).getTime() : 0;
+        valB = b.release_date ? new Date(b.release_date).getTime() : 0;
+        return sortOrder.value === 'asc' ? valA - valB : valB - valA;
+
+      case 'first_requested_at':
+      default:
+        valA = (a.subscription_status === 'SUBSCRIBED' && a.last_subscribed_at)
+          ? new Date(a.last_subscribed_at).getTime()
+          : (a.first_requested_at ? new Date(a.first_requested_at).getTime() : 0);
+        
+        valB = (b.subscription_status === 'SUBSCRIBED' && b.last_subscribed_at)
+          ? new Date(b.last_subscribed_at).getTime()
+          : (b.first_requested_at ? new Date(b.first_requested_at).getTime() : 0);
+          
         return sortOrder.value === 'asc' ? valA - valB : valB - valA;
     }
   });
+
   return list;
 });
 
 const renderedItems = computed(() => filteredItems.value.slice(0, displayCount.value));
 const hasMore = computed(() => displayCount.value < filteredItems.value.length);
 const emptyStateDescription = computed(() => {
-  if (rawItems.value.length > 0 && filteredItems.value.length === 0) return '没有匹配当前筛选条件的媒体项。';
+  if (rawItems.value.length > 0 && filteredItems.value.length === 0) {
+    return '没有匹配当前筛选条件的媒体项。';
+  }
   return '当前列表为空。';
 });
 
 const getTMDbLink = (item) => {
-  if (item.item_type === 'Movie') return `https://www.themoviedb.org/movie/${item.tmdb_id}`;
-  if (item.series_tmdb_id) return `https://www.themoviedb.org/tv/${item.series_tmdb_id}`;
+  if (item.item_type === 'Movie') {
+    return `https://www.themoviedb.org/movie/${item.tmdb_id}`;
+  }
+  if (item.series_tmdb_id) {
+    return `https://www.themoviedb.org/tv/${item.series_tmdb_id}`;
+  }
   return `https://www.themoviedb.org/`;
 };
 
 const toggleSelection = (item, event, index) => {
   if (!event) return;
   const key = { tmdb_id: item.tmdb_id, item_type: item.item_type };
+  
   if (event.shiftKey && lastSelectedIndex.value !== null) {
     const start = Math.min(lastSelectedIndex.value, index);
     const end = Math.max(lastSelectedIndex.value, index);
     const itemsInRange = renderedItems.value.slice(start, end + 1);
     const isCurrentlySelected = selectedItems.value.some(sel => sel.tmdb_id === key.tmdb_id && sel.item_type === key.item_type);
+    
     if (!isCurrentlySelected) {
       const newSelected = [...selectedItems.value];
-      itemsInRange.forEach(rangeItem => { if (!newSelected.some(sel => sel.tmdb_id === rangeItem.tmdb_id && sel.item_type === rangeItem.item_type)) newSelected.push({ tmdb_id: rangeItem.tmdb_id, item_type: rangeItem.item_type }); });
+      itemsInRange.forEach(rangeItem => {
+        if (!newSelected.some(sel => sel.tmdb_id === rangeItem.tmdb_id && sel.item_type === rangeItem.item_type)) {
+          newSelected.push({ tmdb_id: rangeItem.tmdb_id, item_type: rangeItem.item_type });
+        }
+      });
       selectedItems.value = newSelected;
     } else {
       const idsToRemove = new Set(itemsInRange.map(i => `${i.tmdb_id}-${i.item_type}`));
@@ -448,8 +588,11 @@ const toggleSelection = (item, event, index) => {
     }
   } else {
     const idx = selectedItems.value.findIndex(sel => sel.tmdb_id === key.tmdb_id && sel.item_type === key.item_type);
-    if (idx > -1) selectedItems.value.splice(idx, 1);
-    else selectedItems.value.push(key);
+    if (idx > -1) {
+      selectedItems.value.splice(idx, 1);
+    } else {
+      selectedItems.value.push(key);
+    }
   }
   lastSelectedIndex.value = index;
 };
@@ -457,84 +600,177 @@ const toggleSelection = (item, event, index) => {
 const handleBatchAction = (key) => {
   const actionMap = {
     'subscribe': { 
-      title: '批量订阅', content: `确定要将选中的 ${selectedItems.value.length} 个媒体项提交到后台订阅吗？`, task_name: 'manual_subscribe_batch',
-      getParams: () => ({ subscribe_requests: rawItems.value.filter(item => selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)) }), optimistic_status: 'SUBSCRIBED'
+      title: '批量订阅', 
+      content: `确定要将选中的 ${selectedItems.value.length} 个媒体项提交到后台订阅吗？`, 
+      task_name: 'manual_subscribe_batch',
+      getParams: () => {
+        const fullSelectedItems = rawItems.value.filter(item => 
+          selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)
+        );
+        return { subscribe_requests: fullSelectedItems };
+      },
+      optimistic_status: 'SUBSCRIBED'
     },
     'ignore': { 
-      title: '批量忽略', content: `确定要忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status', 
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'IGNORED', ignore_reason: '手动忽略'})) }), optimistic_status: 'IGNORED'
+      title: '批量忽略', 
+      content: `确定要忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, 
+      endpoint: '/api/subscription/status', 
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'IGNORED', ignore_reason: '手动忽略'})) }),
+      optimistic_status: 'IGNORED'
     },
     'cancel': { 
-      title: '批量取消', content: `确定要取消订阅选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'NONE'})) }), optimistic_status: 'NONE'
+      title: '批量取消', 
+      content: `确定要取消订阅选中的 ${selectedItems.value.length} 个媒体项吗？`, 
+      endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'NONE'})) }),
+      optimistic_status: 'NONE'
     },
     'resume': { 
-      title: '批量恢复', content: `确定要立即唤醒选中的 ${selectedItems.value.length} 个媒体项并重新开始搜索吗？`, endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'SUBSCRIBED'})) }), optimistic_status: 'SUBSCRIBED'
+      title: '批量恢复', 
+      content: `确定要立即唤醒选中的 ${selectedItems.value.length} 个媒体项并重新开始搜索吗？`, 
+      endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'SUBSCRIBED'})) }),
+      optimistic_status: 'SUBSCRIBED'
     },
     'unignore': { 
-      title: '批量取消忽略', content: `确定要取消忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, endpoint: '/api/subscription/status',
-      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'WANTED', force_unignore: true})) }), optimistic_status: 'WANTED'
+      title: '批量取消忽略', 
+      content: `确定要取消忽略选中的 ${selectedItems.value.length} 个媒体项吗？`, 
+      endpoint: '/api/subscription/status',
+      getParams: () => ({ requests: selectedItems.value.map(item => ({...item, new_status: 'WANTED', force_unignore: true})) }),
+      optimistic_status: 'WANTED'
     },
   };
+
   const action = actionMap[key];
   if (!action) return;
 
   dialog.warning({
-    title: action.title, content: action.content, positiveText: '确定', negativeText: '取消',
+    title: action.title,
+    content: action.content,
+    positiveText: '确定',
+    negativeText: '取消',
     onPositiveClick: async () => {
       try {
         let response;
-        if (action.task_name) response = await axios.post('/api/tasks/run', { task_name: action.task_name, ...action.getParams() });
-        else if (action.endpoint) response = await axios.post(action.endpoint, action.getParams());
-        else throw new Error("Action spec 未定义 task_name 或 endpoint");
+        if (action.task_name) {
+          response = await axios.post('/api/tasks/run', {
+            task_name: action.task_name,
+            ...action.getParams()
+          });
+        } else if (action.endpoint) {
+          response = await axios.post(action.endpoint, action.getParams());
+        } else {
+          throw new Error("Action spec 未定义 task_name 或 endpoint");
+        }
 
         message.success(response.data.message || '批量操作任务已提交！');
+        
         const selectedKeys = new Set(selectedItems.value.map(item => `${item.tmdb_id}-${item.item_type}`));
         
-        if (action.optimistic_status === 'NONE') rawItems.value = rawItems.value.filter(item => !selectedKeys.has(`${item.tmdb_id}-${item.item_type}`));
-        else {
+        if (action.optimistic_status === 'NONE') {
+          rawItems.value = rawItems.value.filter(item => !selectedKeys.has(`${item.tmdb_id}-${item.item_type}`));
+        } else {
           rawItems.value.forEach(item => {
             if (selectedKeys.has(`${item.tmdb_id}-${item.item_type}`)) {
               item.subscription_status = action.optimistic_status;
-              if (action.optimistic_status === 'IGNORED') item.ignore_reason = '手动忽略';
+              if (action.optimistic_status === 'IGNORED') {
+                item.ignore_reason = '手动忽略';
+              }
             }
           });
         }
+        
         selectedItems.value = [];
-      } catch (err) { message.error(err.response?.data?.error || '批量操作失败。'); }
+
+      } catch (err) {
+        message.error(err.response?.data?.error || '批量操作失败。');
+      }
     }
   });
 };
 
 const subscribeItem = async (item) => {
   try {
-    const request_item = { tmdb_id: item.tmdb_id, item_type: item.item_type, title: item.title };
-    if (item.item_type === 'Season' && item.season_number) request_item.season_number = item.season_number;
-    const response = await axios.post('/api/tasks/run', { task_name: 'manual_subscribe_batch', subscribe_requests: [request_item] });
+    const request_item = { 
+      tmdb_id: item.tmdb_id, 
+      item_type: item.item_type,
+      title: item.title
+    };
+    if (item.item_type === 'Season' && item.season_number) {
+      request_item.season_number = item.season_number;
+    }
+
+    const taskParams = {
+      subscribe_requests: [request_item]
+    };
+    
+    const response = await axios.post('/api/tasks/run', {
+      task_name: 'manual_subscribe_batch',
+      ...taskParams
+    });
     message.success(response.data.message || '订阅任务已提交到后台！');
+    
     const index = rawItems.value.findIndex(i => i.tmdb_id === item.tmdb_id && i.item_type === item.item_type);
-    if (index > -1) rawItems.value[index].subscription_status = 'SUBSCRIBED';
-  } catch (err) { message.error(err.response?.data?.error || '提交订阅任务失败。'); }
+    if (index > -1) {
+      rawItems.value[index].subscription_status = 'SUBSCRIBED';
+    }
+  } catch (err) {
+    message.error(err.response?.data?.error || '提交订阅任务失败。');
+  }
 };
 
 const updateItemStatus = async (item, newStatus, forceUnignore = false) => {
   try {
-    const requestItem = { tmdb_id: item.tmdb_id, item_type: item.item_type, new_status: newStatus, source: { type: 'manual_admin_op' }, force_unignore: forceUnignore };
-    if (newStatus === 'IGNORED') requestItem.ignore_reason = '手动忽略';
+    const requestItem = {
+      tmdb_id: item.tmdb_id,
+      item_type: item.item_type,
+      new_status: newStatus,
+      source: { type: 'manual_admin_op' },
+      force_unignore: forceUnignore
+    };
+    
+    if (newStatus === 'IGNORED') {
+      requestItem.ignore_reason = '手动忽略';
+    }
+
     await axios.post('/api/subscription/status', { requests: [requestItem] });
     message.success('状态更新成功！');
+
     const index = rawItems.value.findIndex(i => i.tmdb_id === item.tmdb_id && i.item_type === item.item_type);
     if (index > -1) {
-      if (newStatus === 'NONE') rawItems.value.splice(index, 1);
-      else { rawItems.value[index].subscription_status = newStatus; if (newStatus === 'IGNORED') rawItems.value[index].ignore_reason = '手动忽略'; }
+      if (newStatus === 'NONE') {
+        rawItems.value.splice(index, 1);
+      } else {
+        rawItems.value[index].subscription_status = newStatus;
+        if (newStatus === 'IGNORED') {
+          rawItems.value[index].ignore_reason = '手动忽略';
+        }
+      }
     }
-  } catch (err) { message.error(err.response?.data?.error || '更新状态失败。'); }
+  } catch (err) {
+    message.error(err.response?.data?.error || '更新状态失败。');
+  }
 };
 
-watch(filterStatus, () => { displayCount.value = 30; selectedItems.value = []; lastSelectedIndex.value = null; });
-const loadMore = () => { if (hasMore.value) displayCount.value = Math.min(displayCount.value + INCREMENT, filteredItems.value.length); };
-const formatTimestamp = (timestamp) => { if (!timestamp) return 'N/A'; try { return format(new Date(timestamp), 'yyyy-MM-dd'); } catch (e) { return 'N/A'; } };
+watch(filterStatus, () => {
+  displayCount.value = 30;
+  selectedItems.value = [];
+  lastSelectedIndex.value = null;
+});
+
+const loadMore = () => {
+  if (hasMore.value) {
+    displayCount.value = Math.min(displayCount.value + INCREMENT, filteredItems.value.length);
+  }
+};
+
+const formatTimestamp = (timestamp) => {
+  if (!timestamp) return 'N/A';
+  try {
+    return format(new Date(timestamp), 'yyyy-MM-dd');
+  } catch (e) { return 'N/A'; }
+};
+
 const formatSources = (sources) => {
   if (!sources || sources.length === 0) return '来源: 未知';
   const firstSource = sources[0];
@@ -544,79 +780,180 @@ const formatSources = (sources) => {
 };
 
 const handleClearAllIgnored = async () => {
-  const itemsToDelete = filteredItems.value.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type }));
+  const itemsToDelete = filteredItems.value.map(item => ({
+    tmdb_id: item.tmdb_id,
+    item_type: item.item_type
+  }));
+
   if (itemsToDelete.length === 0) return;
+
   try {
     isLoading.value = true; 
-    const response = await axios.post('/api/media/batch_delete', { items: itemsToDelete });
+    
+    const response = await axios.post('/api/media/batch_delete', {
+      items: itemsToDelete
+    });
+
     message.success(response.data.message || '删除成功');
+
     const deletedKeys = new Set(itemsToDelete.map(i => `${i.tmdb_id}-${i.item_type}`));
-    rawItems.value = rawItems.value.filter(item => !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`));
+    
+    rawItems.value = rawItems.value.filter(item => 
+      !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`)
+    );
+    
     selectedItems.value = [];
-  } catch (err) { message.error(err.response?.data?.error || '批量删除失败'); } finally { isLoading.value = false; }
+
+  } catch (err) {
+    message.error(err.response?.data?.error || '批量删除失败');
+  } finally {
+    isLoading.value = false;
+  }
 };
 
 const handleBatchDelete = async () => {
-  const itemsToDelete = rawItems.value.filter(item => selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type));
+  const itemsToDelete = rawItems.value.filter(item => 
+    selectedItems.value.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)
+  );
+  
   if (itemsToDelete.length === 0) return;
+
   try {
     isLoading.value = true; 
-    const response = await axios.post('/api/media/batch_delete', { items: itemsToDelete.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type })) });
+    
+    const response = await axios.post('/api/media/batch_delete', {
+      items: itemsToDelete.map(item => ({
+        tmdb_id: item.tmdb_id,
+        item_type: item.item_type
+      }))
+    });
+
     message.success(response.data.message || `成功删除 ${itemsToDelete.length} 条记录`);
+
     const deletedKeys = new Set(itemsToDelete.map(i => `${i.tmdb_id}-${i.item_type}`));
-    rawItems.value = rawItems.value.filter(item => !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`));
+    
+    rawItems.value = rawItems.value.filter(item => 
+      !deletedKeys.has(`${item.tmdb_id}-${item.item_type}`)
+    );
+    
     selectedItems.value = [];
-  } catch (err) { message.error(err.response?.data?.error || '批量删除失败'); } finally { isLoading.value = false; }
+
+  } catch (err) {
+    message.error(err.response?.data?.error || '批量删除失败');
+  } finally {
+    isLoading.value = false; 
+  }
 };
 
-const formatAirDate = (dateString) => { if (!dateString) return 'N/A'; try { return format(new Date(dateString), 'yyyy-MM-dd'); } catch (e) { return 'N/A'; } };
+const formatAirDate = (dateString) => {
+  if (!dateString) return 'N/A';
+  try {
+    return format(new Date(dateString), 'yyyy-MM-dd');
+  } catch (e) { return 'N/A'; }
+};
+
 const getPosterUrl = (posterPath) => posterPath ? `/api/image_proxy?url=https://image.tmdb.org/t/p/w500${posterPath}` : '/placeholder.png';
 
 const statusInfo = (status) => {
   const map = {
-    'WANTED': { type: 'success', text: '待订阅', icon: WantedIcon }, 'SUBSCRIBED': { type: 'primary', text: '已订阅', icon: SubscribedIcon },
-    'PENDING_RELEASE': { type: 'info', text: '未上映', icon: PendingIcon }, 'IGNORED': { type: 'error', text: '已忽略', icon: IgnoredIcon },
-    'PAUSED': { type: 'warning', text: '已暂停', icon: PausedIcon }, 'REQUESTED': { type: 'warning', text: '待审核', icon: AuditIcon },
+    'WANTED': { type: 'success', text: '待订阅', icon: WantedIcon },
+    'SUBSCRIBED': { type: 'primary', text: '已订阅', icon: SubscribedIcon },
+    'PENDING_RELEASE': { type: 'info', text: '未上映', icon: PendingIcon },
+    'IGNORED': { type: 'error', text: '已忽略', icon: IgnoredIcon },
+    'PAUSED': { type: 'warning', text: '已暂停', icon: PausedIcon },
+    'REQUESTED': { type: 'warning', text: '待审核', icon: AuditIcon },
   };
   return map[status] || { type: 'default', text: '未知', icon: TvIcon };
 };
 
+
 const TAB_PRIORITY = ['REQUESTED', 'WANTED', 'SUBSCRIBED', 'PAUSED', 'PENDING_RELEASE', 'IGNORED'];
 const fetchData = async (autoSwitchTab = false) => {
-  isLoading.value = true; error.value = null;
+  isLoading.value = true;
+  error.value = null;
   try {
     const response = await axios.get('/api/subscriptions/all');
     rawItems.value = response.data;
+
     if (autoSwitchTab) {
       for (const status of TAB_PRIORITY) {
         const hasItem = rawItems.value.some(item => item.subscription_status === status);
-        if (hasItem) { filterStatus.value = status; break; }
+        if (hasItem) {
+          filterStatus.value = status;
+          break; 
+        }
       }
     }
-  } catch (err) { error.value = err.response?.data?.error || '获取订阅列表失败。'; } finally { isLoading.value = false; }
+
+  } catch (err) {
+    error.value = err.response?.data?.error || '获取订阅列表失败。';
+  } finally {
+    isLoading.value = false;
+  }
 };
 
-const isAllSelected = computed(() => filteredItems.value.length > 0 && selectedItems.value.length === filteredItems.value.length);
-const isIndeterminate = computed(() => selectedItems.value.length > 0 && selectedItems.value.length < filteredItems.value.length);
+const isAllSelected = computed(() => {
+  return filteredItems.value.length > 0 && selectedItems.value.length === filteredItems.value.length;
+});
+
+const isIndeterminate = computed(() => {
+  return selectedItems.value.length > 0 && selectedItems.value.length < filteredItems.value.length;
+});
+
 const handleSelectAll = () => {
-  if (isAllSelected.value) selectedItems.value = [];
-  else { selectedItems.value = filteredItems.value.map(item => ({ tmdb_id: item.tmdb_id, item_type: item.item_type })); message.info(`已选中当前列表全部 ${filteredItems.value.length} 项`); }
+  if (isAllSelected.value) {
+    selectedItems.value = [];
+  } else {
+    selectedItems.value = filteredItems.value.map(item => ({
+      tmdb_id: item.tmdb_id,
+      item_type: item.item_type
+    }));
+    message.info(`已选中当前列表全部 ${filteredItems.value.length} 项`);
+  }
 };
-const clearSelection = () => { selectedItems.value = []; };
+
+const clearSelection = () => {
+  selectedItems.value = [];
+};
 
 const isMobile = ref(false);
-const checkMobile = () => { isMobile.value = window.innerWidth < 768; };
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768;
+};
 
 onMounted(() => {
-  checkMobile(); window.addEventListener('resize', checkMobile); fetchData(true); loadStrategyConfig();
-  observer = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { root: null, rootMargin: '0px', threshold: 0.1 });
+  checkMobile();
+  window.addEventListener('resize', checkMobile);
+  fetchData(true); 
+  
+  loadStrategyConfig();
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting) loadMore();
+    },
+    { root: null, rootMargin: '0px', threshold: 0.1 }
+  );
   if (loaderRef.value) observer.observe(loaderRef.value);
 });
 
-onBeforeUnmount(() => { window.removeEventListener('resize', checkMobile); if (observer) observer.disconnect(); });
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', checkMobile);
+  if (observer) observer.disconnect();
+});
 
-const statusOptions = [{ label: '待审核', value: 'REQUESTED' }, { label: '待订阅', value: 'WANTED' }, { label: '已订阅', value: 'SUBSCRIBED' }, { label: '已暂停', value: 'PAUSED' }, { label: '未上映', value: 'PENDING_RELEASE' }, { label: '已忽略', value: 'IGNORED' }];
-watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(oldEl); if (newEl && observer) observer.observe(newEl); });
+const statusOptions = [
+  { label: '待审核', value: 'REQUESTED' },
+  { label: '待订阅', value: 'WANTED' },
+  { label: '已订阅', value: 'SUBSCRIBED' },
+  { label: '已暂停', value: 'PAUSED' },
+  { label: '未上映', value: 'PENDING_RELEASE' },
+  { label: '已忽略', value: 'IGNORED' },
+];
+
+watch(loaderRef, (newEl, oldEl) => {
+  if (oldEl && observer) observer.unobserve(oldEl);
+  if (newEl && observer) observer.observe(newEl);
+});
 </script>
 
 <style scoped>
@@ -636,7 +973,10 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   }
 }
 
-.grid-item { height: 100%; min-width: 0; }
+.grid-item {
+  height: 100%;
+  min-width: 0;
+}
 
 /* ★★★ 毛玻璃卡片容器 ★★★ */
 .series-card {
@@ -647,17 +987,17 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   border-radius: 12px;
   overflow: hidden; 
   /* 继承全局毛玻璃属性 */
-  background: var(--glass-bg) !important;
+  /* background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
-  -webkit-backdrop-filter: var(--glass-blur) !important;
-  border: 1px solid var(--glass-border) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important; */
+  /* border: 1px solid var(--glass-border) !important; */
 }
 
 .series-card:hover {
   transform: translateY(-4px);
-  box-shadow: var(--glass-shadow) !important;
+  /* box-shadow: var(--glass-shadow) !important;
   background: var(--glass-bg-hover) !important;
-  border-color: var(--glass-border-light) !important;
+  border-color: var(--glass-border-light) !important; */
 }
 
 .series-card :deep(.n-card__content) {
@@ -690,12 +1030,27 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
-.card-poster { width: 100%; height: 100%; display: block; }
-.card-poster :deep(img) { width: 100%; height: 100%; object-fit: cover !important; display: block; }
+.card-poster {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.card-poster :deep(img) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover !important; 
+  display: block;
+}
 
 .poster-placeholder {
-  display: flex; align-items: center; justify-content: center;
-  width: 100%; height: 100%; background-color: rgba(255,255,255,0.05); color: rgba(255,255,255,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.3);
 }
 
 /* ★★★ 绝对定位：左上角选择框 ★★★ */
@@ -729,7 +1084,12 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 /* 内容区域 */
 .card-content-container {
-  flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; padding: 0;
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0;
 }
 
 .card-header {
@@ -742,12 +1102,30 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 }
 
 .card-title {
-  font-weight: 600; font-size: 1.1rem; line-height: 1.3; color: var(--text-primary);
-  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  font-weight: 600;
+  font-size: 1.1rem;
+  line-height: 1.3;
+  color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.card-status-area { flex-grow: 1; display: flex; flex-direction: column; gap: 6px; }
-.info-text, .info-line { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+.card-status-area {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.info-text, .info-line {
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* 底部操作按钮区域 */
 .card-actions {
@@ -768,14 +1146,38 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 /* 悬浮操作栏 (Watchlist/Unified) */
 .floating-action-bar {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 1000;
-  width: auto; min-width: 400px; max-width: 90%;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: auto;
+  min-width: 400px;
+  max-width: 90%;
 }
+
 .fab-content {
-  background: rgba(30, 35, 45, 0.85); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50px; padding: 12px 24px;
-  display: flex; justify-content: space-between; align-items: center; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); gap: 24px;
+  background: rgba(30, 35, 45, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 50px;
+  padding: 12px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  gap: 24px;
 }
-.fab-text { color: #fff; font-size: 14px; }
-.fab-text b { color: #8a2be2; font-size: 16px; margin: 0 4px; }
+
+.fab-text {
+  color: #fff;
+  font-size: 14px;
+}
+
+.fab-text b {
+  color: #8a2be2;
+  font-size: 16px;
+  margin: 0 4px;
+  }
 </style>

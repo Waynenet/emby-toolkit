@@ -752,13 +752,10 @@ def task_auto_subscribe(processor):
                         logger.info(f"  ➜ 正在向 MoviePilot 提交电影《{title}》的订阅...")
                         mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
                         success = moviepilot.subscribe_with_custom_payload(mp_payload, config, consume_quota=True)
-                        
                     elif item_type == 'Series':
                         success = _subscribe_full_series_with_logic(int(tmdb_id), title, config, tmdb_api_key, consume_quota=True)
-                        
                     elif item_type == 'Episode':
                         logger.info(f"  ➜ 已跳过 MP 兜底。")
-                        
                     elif item_type == 'Season' and parent_tmdb_id and season_number is not None:
                         mp_payload = {"name": title, "tmdbid": int(parent_tmdb_id), "type": "电视剧", "season": int(season_number)}
 
