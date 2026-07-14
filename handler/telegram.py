@@ -753,7 +753,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         if needs_review:
             escaped_reason = escape_markdown(review_reason)
             review_warning = (
-                f"\n\n⚠️ *系统提示*: 本次处理被标记为【待复核】\n"
+                f"⚠️ *系统提示*: 本次处理被标记为【待复核】\n"
                 f"🔍 *原因*: {escaped_reason}\n"
                 f"💡 _请前往 WebUI 手动介入处理_"
             )
@@ -767,15 +767,36 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         if raw_episodes:
             episode_info_text = _build_episode_notice_text(raw_episodes, label="🎞️ *集数*")
 
-        # ★★★ 修改：将 review_warning 追加到 caption 尾部 ★★★
-        default_caption = (
-            f"{media_icon} *{escaped_title}* {notification_title}\n\n"
-            f"{episode_info_text}"
-            f"{media_param_text}"
+        # 动态组装默认的通知文本，避免因集数、媒体参数等内容为空时出现多余的空行
+        caption_parts = []
+        
+        # 1. 标题行
+        caption_parts.append(f"{media_icon} *{escaped_title}* {notification_title}")
+        
+        # 2. 中间详情部分（集数、媒体画质参数等紧凑排列）
+        details_parts = []
+        if episode_info_text.strip():
+            details_parts.append(episode_info_text.strip())
+        if media_param_text.strip():
+            details_parts.append(media_param_text.strip())
+        
+        if details_parts:
+            caption_parts.append("\n".join(details_parts))
+        
+        # 3. 基础信息（时间、剧情）
+        base_info = (
             f"⏰ *时间*: `{current_time}`\n"
             f"📝 *剧情*: {escaped_overview}"
-            f"{review_warning}"
         )
+        caption_parts.append(base_info)
+        
+        # 4. 待复核警告
+        if review_warning.strip():
+            caption_parts.append(review_warning.strip())
+        
+        # 段落之间用双换行符隔开
+        default_caption = "\n\n".join(caption_parts)
+
         caption = _render_notification_template('library_new', {
             'media_icon': media_icon,
             'title': f"*{escaped_title}*",
@@ -789,6 +810,9 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
             'type': escape_markdown(item_type or ''),
             'tmdb_id': escape_markdown(tmdb_id or ''),
         }, default_caption)
+        
+        # 过滤掉连续 3 个及以上的换行符，防止自定义模板中由于变量为空而留出多余空行
+        caption = re.sub(r'\n{3,}', '\n\n', caption).strip()
         
         # --- 5. 查询订阅者 ---
         subscribers = request_db.get_subscribers_by_tmdb_id(tmdb_id, item_type) if tmdb_id else []
