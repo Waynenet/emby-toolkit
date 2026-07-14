@@ -1149,9 +1149,8 @@ onUnmounted(() => {
 
 .media-card {
   cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease;
   border-radius: 8px;
-  /* box-shadow: 0 2px 4px rgba(0,0,0,0.1); */
   overflow: hidden;
   height: 100%;
   display: flex;
@@ -1159,7 +1158,6 @@ onUnmounted(() => {
 }
 .media-card:hover {
   transform: translateY(-4px);
-  /* box-shadow: 0 8px 16px rgba(0,0,0,0.3); */
   z-index: 10;
 }
 
