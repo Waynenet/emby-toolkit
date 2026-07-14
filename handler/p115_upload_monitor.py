@@ -100,11 +100,13 @@ def get_upload_monitor_config() -> Dict[str, Any]:
 def save_upload_monitor_config(value: Any) -> Dict[str, Any]:
     config = normalize_upload_monitor_config(value)
     settings_db.save_setting(UPLOAD_MONITOR_CONFIG_KEY, config)
+    UploadMonitorRuntime.instance().prune_jobs(config)
     return config
 
 
 def upload_monitor_enabled() -> bool:
     config = get_upload_monitor_config()
+    UploadMonitorRuntime.instance().prune_jobs(config)
     return bool(config["enabled"] and any(item["enabled"] for item in config["mappings"]))
 
 
@@ -261,6 +263,39 @@ class UploadMonitorRuntime:
             self._worker_started = True
             worker = threading.Thread(target=self._worker_loop, name="P115UploadMonitor", daemon=True)
             worker.start()
+
+    def prune_jobs(self, config: Optional[Dict[str, Any]] = None) -> int:
+        config = config if isinstance(config, dict) else get_upload_monitor_config()
+        active_mappings = {
+            item["id"]: item
+            for item in config.get("mappings", [])
+            if config.get("enabled") and item.get("enabled")
+        }
+        removed_paths = []
+        with self._state_lock:
+            state = _load_state()
+            for job_id, job in list(state["jobs"].items()):
+                mapping = active_mappings.get(str((job or {}).get("mapping_id") or ""))
+                path = str((job or {}).get("path") or "")
+                if (
+                    not mapping
+                    or not _path_in_root(path, mapping["local_dir"])
+                    or str((job or {}).get("target_cid") or "") != str(mapping["target_cid"])
+                ):
+                    state["jobs"].pop(job_id, None)
+                    if path:
+                        removed_paths.append(os.path.normpath(path))
+            if removed_paths:
+                _save_state(state)
+
+        if removed_paths:
+            with self._lock:
+                for path in removed_paths:
+                    timer = self._timers.pop(path, None)
+                    if timer:
+                        timer.cancel()
+            logger.info("  ➜ [115上传监控] 已清理 %s 个失效目录映射的上传任务。", len(removed_paths))
+        return len(removed_paths)
 
     def schedule_path(self, path: str, mappings: List[Dict[str, Any]], delay: float = 3.0) -> None:
         norm_path = os.path.normpath(path)

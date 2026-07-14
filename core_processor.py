@@ -2376,9 +2376,8 @@ class MediaProcessor:
     def _process_item_core_logic(self, item_details_from_emby: Dict[str, Any], force_full_update: bool = False, specific_episode_ids: Optional[List[str]] = None, media_info_only: bool = False):
         """
         【V3 极简架构版】
-        彻底分离“预处理”和“Webhook回流”逻辑。
-        - 预处理/强制刷新：执行完整的 TMDb -> AI翻译 -> 演员处理 -> NFO生成。
-        - Webhook回流：秒级命中缓存，仅提取 Emby ID 和视频流信息更新数据库，拒绝一切冗余操作。
+        - 未命中缓存/强制刷新：执行完整的 TMDb -> AI翻译 -> 演员处理 -> NFO生成。
+        - 命中缓存：跳过 TMDb/AI/演员重算，但仍从缓存重建完整 NFO 和图片。
         - 媒体信息修复：强制绕过 processed_log，但复用数据库缓存，只刷新视频流/资产信息。
         """
         item_id = item_details_from_emby.get("Id")
@@ -2397,9 +2396,9 @@ class MediaProcessor:
 
         try:
             # ======================================================================
-            # ★★★ 核心重构：极速回流模式拦截 (Webhook Feedback) ★★★
+            # ★★★ 数据库缓存复用：跳过外部重算，但保留本地完整文件写入 ★★★
             # ======================================================================
-            is_webhook_feedback = False
+            using_cached_metadata = False
             formatted_metadata = None
             final_processed_cast = None
 
@@ -2409,7 +2408,7 @@ class MediaProcessor:
                 if payload and cast:
                     formatted_metadata = payload
                     final_processed_cast = cast
-                    is_webhook_feedback = True
+                    using_cached_metadata = True
                     logger.info(f"  ➜ [媒体信息修复] 命中数据库缓存，跳过 TMDb/AI/演员处理/NFO生成，仅刷新视频流资产信息。")
                 else:
                     logger.warning(f"  ➜ [媒体信息修复] 未命中可复用的数据库元数据/演员缓存，无法执行轻量修复，已跳过重型流程。")
@@ -2421,13 +2420,13 @@ class MediaProcessor:
                 if payload and cast:
                     formatted_metadata = payload
                     final_processed_cast = cast
-                    is_webhook_feedback = True
-                    logger.info(f"  ➜ [webhook回流] 跳过 TMDb/AI/演员处理/NFO生成！")
+                    using_cached_metadata = True
+                    logger.info(f"  ➜ [数据库缓存] 跳过 TMDb/AI/演员重算，后续重建完整 NFO 和图片。")
 
             # ======================================================================
             # 传统重型处理流程 (手动入库 / 强制刷新 / 预处理遗漏)
             # ======================================================================
-            if not is_webhook_feedback:
+            if not using_cached_metadata:
                 logger.info(f"  ➜ [完整模式] 未命中缓存或强制重处理，开始执行核心刮削流程...")
 
                 # 1. 获取 TMDb 数据
@@ -2685,6 +2684,28 @@ class MediaProcessor:
                     emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
                     time.sleep(3) # 等待 Emby 处理文件变更事件
 
+            elif not media_info_only:
+                # 主动入库先写简版识别 NFO；命中数据库缓存时也必须用完整缓存覆盖它。
+                self.sync_item_metadata(
+                    item_details=item_details_from_emby,
+                    tmdb_id=tmdb_id,
+                    final_cast_override=final_processed_cast,
+                    metadata_override=formatted_metadata,
+                    force_write=True
+                )
+                self.download_images_from_tmdb(
+                    tmdb_id=tmdb_id,
+                    item_type=item_type,
+                    aggregated_tmdb_data=formatted_metadata,
+                    item_details=item_details_from_emby
+                )
+
+                media_path = item_details_from_emby.get("Path")
+                if media_path:
+                    logger.info(f"  ➜ [数据库缓存] 正在通知 Emby 扫描本地目录以读取完整 NFO...")
+                    emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
+                    time.sleep(3)
+
             # 7. 正常处理/回流需要刷新 Emby 元数据以确保外挂字幕可以加载；
             #    媒体信息修复模式只写数据库，不再触发 Emby/NFO/图片/人物链路。
             if not media_info_only:
@@ -2700,8 +2721,8 @@ class MediaProcessor:
             else:
                 logger.info(f"  ➜ [媒体信息修复] 跳过 Emby 元数据刷新，仅准备写入数据库媒体信息。")
 
-            if is_webhook_feedback:
-                logger.debug(f"  ➜ [{'媒体信息修复' if media_info_only else 'webhook回流'}] 开始质检...")
+            if using_cached_metadata:
+                logger.debug(f"  ➜ [{'媒体信息修复' if media_info_only else '数据库缓存'}] 开始质检...")
 
             # ======================================================================
             # 统一收尾流程 (更新数据库、质检、合集、通知)
@@ -2792,8 +2813,8 @@ class MediaProcessor:
                         is_animation=is_animation
                     )
 
-                    if is_webhook_feedback:
-                        logger.info(f"  ➜ [webhook回流] 基于缓存数据的实时复核评分: {processing_score:.2f}")
+                    if using_cached_metadata:
+                        logger.info(f"  ➜ [数据库缓存] 基于缓存数据的实时复核评分: {processing_score:.2f}")
                 
                 target_log_id = item_id
                 target_log_name = item_name_for_log
@@ -2816,7 +2837,7 @@ class MediaProcessor:
                     self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=0.0)
                 elif processing_score < min_score_for_review:
                     reason = f"处理评分 ({processing_score:.2f}) 低于阈值 ({min_score_for_review})。"
-                    if is_webhook_feedback: logger.warning(f"  ➜ [质检]《{item_name_for_log}》本地缓存数据质量不佳 (评分: {processing_score:.2f})，已重新标记为【待复核】。")
+                    if using_cached_metadata: logger.warning(f"  ➜ [质检]《{item_name_for_log}》本地缓存数据质量不佳 (评分: {processing_score:.2f})，已重新标记为【待复核】。")
                     else: logger.warning(f"  ➜ [质检]《{item_name_for_log}》处理质量不佳，已标记为【待复核】。原因: {reason}")
                     self.log_db_manager.save_to_failed_log(cursor, target_log_id, target_log_name, reason, target_log_type, score=processing_score)
                     self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)

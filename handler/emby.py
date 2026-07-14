@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 _library_paths_cache = None
 _library_paths_cache_time = 0
 CACHE_TTL = 300
+PRECISE_SCAN_DEDUPE_SECONDS = 15
+_precise_scan_recent = {}
+_precise_scan_lock = threading.Lock()
 
 class EmbyAPIClient:
     """
@@ -924,9 +927,14 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
     【内部辅助】向上逐级查找 Emby 中已存在的父目录，并对其触发精准的局部刷新。
     """
     current_path = target_dir
+    now = time.monotonic()
+    request_key = ("path", base_url.rstrip('/'), _normalize_emby_media_path(target_dir))
+    with _precise_scan_lock:
+        if now - float(_precise_scan_recent.get(request_key) or 0) < PRECISE_SCAN_DEDUPE_SECONDS:
+            return True
     
-    # 最多向上找 4 级 (文件 -> 电影目录 -> 分类目录 -> 媒体库根目录)，防止扫到太顶层
-    for _ in range(4):
+    # 手机相册等目录层级较深，允许一直回退到媒体库根目录附近。
+    for _ in range(12):
         if not current_path or current_path == '/' or current_path == '\\':
             break
 
@@ -948,10 +956,25 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
             resp = emby_client.get(api_url, params=params)
             if resp.status_code == 200:
                 items = resp.json().get("Items", [])
-                if items:
+                normalized_current = _normalize_emby_media_path(current_path)
+                matched_item = next(
+                    (
+                        item for item in items
+                        if _normalize_emby_media_path(item.get("Path")) == normalized_current
+                    ),
+                    None,
+                )
+                if matched_item:
                     # 找到了 Emby 认识的父目录！
-                    target_id = items[0].get("Id")
-                    target_name = items[0].get("Name", current_path)
+                    target_id = matched_item.get("Id")
+                    target_name = matched_item.get("Name", current_path)
+
+                    dedupe_key = (base_url.rstrip('/'), str(target_id))
+                    with _precise_scan_lock:
+                        last_refresh = float(_precise_scan_recent.get(dedupe_key) or 0)
+                        if now - last_refresh < PRECISE_SCAN_DEDUPE_SECONDS:
+                            _precise_scan_recent[request_key] = now
+                            return True
                     
                     #logger.info(f"  ➜ [精准扫描] 找到已存在的父目录: '{target_name}'，准备扫描...")
                     
@@ -965,7 +988,13 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
                         "ReplaceAllImages": "false",
                         "ReplaceAllMetadata": "false"
                     }
-                    emby_client.post(refresh_url, params=refresh_params)
+                    refresh_response = emby_client.post(refresh_url, params=refresh_params)
+                    if refresh_response.status_code not in (200, 204):
+                        current_path = os.path.dirname(current_path)
+                        continue
+                    with _precise_scan_lock:
+                        _precise_scan_recent[dedupe_key] = now
+                        _precise_scan_recent[request_key] = now
                     logger.info(f"  ➜ [精准扫描] 已通知 Emby 对 '{target_name}' 立即扫描！")
                     return True
         except Exception as e:
@@ -974,7 +1003,12 @@ def _force_refresh_directory_tree(target_dir: str, base_url: str, api_key: str):
         # 向上退一级 (例如从 /strm/电影/超级英雄/奇异博士 退到 /strm/电影/超级英雄)
         current_path = os.path.dirname(current_path)
         
-    logger.warning(f"  ➜ [精准扫描] 未能在 Emby 中找到 {target_dir} 的有效父目录，将等待 90 秒后自动扫描。")
+    miss_key = ("miss", base_url.rstrip('/'), _normalize_emby_media_path(target_dir))
+    with _precise_scan_lock:
+        last_miss = float(_precise_scan_recent.get(miss_key) or 0)
+        _precise_scan_recent[miss_key] = now
+    if now - last_miss >= PRECISE_SCAN_DEDUPE_SECONDS:
+        logger.warning(f"  ➜ [精准扫描] 未能在 Emby 中找到 {target_dir} 的有效父目录，将等待 90 秒后自动扫描。")
     return False
 
 # --- 极速轻量级文件变更通知 ---
