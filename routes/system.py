@@ -74,7 +74,10 @@ def api_get_task_status():
     status_data['logs'] = list(frontend_log_queue)
     return jsonify(status_data)
 
-@system_bp.route('/status', methods=['GET'])
+# ==========================================
+# MoviePilot 配置接口
+# ==========================================
+@system_bp.route('/mp/status', methods=['GET'])
 def get_subscription_status():
     mp_config = settings_db.get_setting('mp_config') or {}
     mp_url = mp_config.get('moviepilot_url')
@@ -84,9 +87,6 @@ def get_subscription_status():
         "mp_configured": bool(mp_url)
     })
 
-# ==========================================
-# MoviePilot 配置接口
-# ==========================================
 @system_bp.route('/mp/config', methods=['GET'])
 @admin_required
 def get_mp_config():

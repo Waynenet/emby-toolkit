@@ -243,9 +243,9 @@
                           :loading="subscribingId === currentRecommendation.id"
                           style="margin-top: 24px;"
                         >
-                          <!-- ★ 修改：根据类型显示不同图标和文字 -->
-                          <template #icon><n-icon :component="isMpConfigured && currentRecommendation.media_type === 'tv' ? ListIcon : HeartOutline" /></template>
-                          {{ isMpConfigured && currentRecommendation.media_type === 'tv' ? '选择季' : '想看这个' }}
+                          <!-- ★ 根据类型显示不同图标和文字 -->
+                          <template #icon><n-icon :component="isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? ListIcon : HeartOutline" /></template>
+                          {{ isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? '选择季' : '想看这个' }}
                         </n-button>
                     </div>
                 </div>
@@ -312,16 +312,16 @@
                 </div>
 
                 <div class="actions-container">
-                  <!-- ★ 常规订阅/想看按钮：即使未配置 MP，也允许标记 WANTED -->
+                  <!-- 常规订阅/想看按钮：即使未配置 MP，也允许标记 WANTED -->
                   <div 
                     v-if="canShowSubscribeAction(media)"
                     class="action-btn"
                     @click.stop="handleSubscribe(media)"
-                    :title="!isMpConfigured ? '标记想看' : (media.media_type === 'tv' ? '选择季' : (isPrivilegedUser ? '订阅' : '想看'))"
+                    :title="!isMpConfigured ? '标记想看' : ((media.media_type === 'tv' || mediaType === 'tv') ? '选择季' : (isPrivilegedUser ? '订阅' : '想看'))"
                   >
                     <n-spin :show="subscribingId === media.id" size="small">
                       <n-icon size="18" color="#fff" class="shadow-icon">
-                        <ListIcon v-if="isMpConfigured && media.media_type === 'tv'" />
+                        <ListIcon v-if="isMpConfigured && (media.media_type === 'tv' || mediaType === 'tv')" />
                         <LightningIcon v-else-if="isMpConfigured && isPrivilegedUser && media.subscription_status === 'REQUESTED'" color="#f0a020" />
                         <HeartOutline v-else />
                       </n-icon>
@@ -383,6 +383,38 @@
         </n-space>
       </n-spin>
     </n-modal>
+
+    <!-- 订阅/想看确认模态框 (用于电影, 或未配置MP时的剧集) -->
+    <n-modal v-model:show="showConfirmModal" preset="card" :title="confirmModalTitle" style="width: 400px; max-width: 95%;">
+      <div v-if="confirmMedia" style="display: flex; flex-direction: column; gap: 16px; align-items: center; text-align: center; padding: 8px 0;">
+        <img 
+          :src="confirmMedia.poster_path ? `https://image.tmdb.org/t/p/w300${confirmMedia.poster_path}` : '/default-poster.png'" 
+          style="width: 120px; aspect-ratio: 2/3; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" 
+          @error="onImageError"
+        />
+        <div>
+          <div style="font-size: 16px; font-weight: bold; margin-bottom: 8px;">
+            {{ confirmMedia.title || confirmMedia.name }}
+          </div>
+          <p style="color: var(--n-text-color-child); font-size: 14px; margin: 0;">
+            {{ isMpConfigured ? '确定要向 MoviePilot 提交此订阅吗？' : '确定要将此作品标记为“想看”吗？' }}
+          </p>
+        </div>
+        <div style="display: flex; gap: 12px; width: 100%; margin-top: 12px;">
+          <n-button style="flex: 1;" @click="showConfirmModal = false">
+            取消
+          </n-button>
+          <n-button 
+            type="primary" 
+            style="flex: 1;" 
+            :loading="subscribingId === confirmMedia.id" 
+            @click="submitConfirmedSubscription"
+          >
+            确定
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
     
   </div>
   </div>
@@ -432,7 +464,7 @@ const isMpConfigured = ref(false);
 
 const fetchSubscriptionStatus = async () => {
   try {
-    const res = await axios.get('/api/status');
+    const res = await axios.get('/api/mp/status');
     if (res.data.success) {
       isMpConfigured.value = res.data.mp_configured;
     }
@@ -555,6 +587,14 @@ const seasonList = ref([]);
 const currentSeriesForSearch = ref(null);
 const subscribingSeasonId = ref(null);
 const subscribingAllSeasons = ref(false);
+
+// 订阅/想看确认模态框相关状态
+const showConfirmModal = ref(false);
+const confirmMedia = ref(null);
+const confirmModalTitle = computed(() => {
+  if (!confirmMedia.value) return '订阅确认';
+  return isMpConfigured.value ? '确认订阅' : '添加至想看列表';
+});
 
 // --- 新增：演员列表横向拖拽逻辑 ---
 const actorListRef = ref(null);
@@ -806,14 +846,12 @@ const updateMediaStatus = (mediaId, newStatus) => {
   }
 };
 
-// MoviePilot 已配置：电影直接提交、剧集弹出选季；未配置：直接标记 WANTED。
+// 核心订阅事件控制
 const handleSubscribe = async (media) => {
-  if (!isMpConfigured.value) {
-    await submitWantedOnly(media);
-    return;
-  }
+  const isTv = media.media_type === 'tv' || mediaType.value === 'tv';
 
-  if (media.media_type === 'tv' || mediaType.value === 'tv') {
+  // 场景 1: 若是剧集且配置了 MoviePilot，则弹出“选季模态框”
+  if (isTv && isMpConfigured.value) {
     currentSeriesForSearch.value = media;
     showSeasonModal.value = true;
     loadingSeasons.value = true;
@@ -834,7 +872,22 @@ const handleSubscribe = async (media) => {
     return;
   }
 
-  await submitMovieToMP(media);
+  // 场景 2: 对于电影、或者未配置 MoviePilot 的剧集，统一弹出“确认模态框”
+  confirmMedia.value = media;
+  showConfirmModal.value = true;
+};
+
+// 确认模态框的提交事件
+const submitConfirmedSubscription = async () => {
+  if (!confirmMedia.value) return;
+  const media = confirmMedia.value;
+  
+  if (!isMpConfigured.value) {
+    await submitWantedOnly(media);
+  } else {
+    await submitMovieToMP(media);
+  }
+  showConfirmModal.value = false;
 };
 
 const submitWantedOnly = async (media) => {
@@ -1019,7 +1072,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* ---------------- 新增：解决筛选表单宽度的 Flex 响应式布局 ---------------- */
+/* ---------------- 解决筛选表单宽度的 Flex 响应式布局 ---------------- */
 .filter-item {
   display: flex;
   align-items: flex-start;
@@ -1101,8 +1154,6 @@ onUnmounted(() => {
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
   overflow: hidden;
   height: 100%;
-  background-color: var(--card-bg-color);
-  backdrop-filter: blur(10px); 
   display: flex;
   flex-direction: column;
 }
@@ -1149,7 +1200,6 @@ onUnmounted(() => {
 }
 
 .media-title {
-  color: #fff;
   font-weight: bold;
   font-size: 0.95em;
   line-height: 1.2;
@@ -1182,10 +1232,6 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis; 
-}
-
-.media-title {
-  margin-bottom: 1px; 
 }
 
 .rating-badge {
@@ -1321,7 +1367,6 @@ onUnmounted(() => {
   border-radius: 8px;
   object-fit: cover;
   margin-bottom: 8px;
-  /* background-color: var(--n-action-color); */
   -webkit-user-drag: none;    /* 禁止图片的原生拖拽，防止干扰滑动 */
   pointer-events: none;       /* 让鼠标事件穿透图片直接作用于父容器 */
 }
