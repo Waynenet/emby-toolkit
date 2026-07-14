@@ -109,13 +109,8 @@
             :key="item.tmdb_id + item.item_type" 
             class="grid-item"
           >
-            <n-card class="dashboard-card series-card" :bordered="false">
-              <n-checkbox
-                :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
-                @update:checked="(checked, event) => toggleSelection(item, event, i)"
-                class="card-checkbox"
-              />
-              <div class="card-type-icon">
+            <n-card class="dashboard-card series-card" :bordered="false" @click="toggleSelection(item, $event, i)">
+              <div class="card-type-badge">
                 <n-tooltip trigger="hover">
                   <template #trigger>
                     <n-icon :component="item.item_type === 'Movie' ? FilmIcon : TvIcon" size="16" />
@@ -125,9 +120,17 @@
               </div>
 
               <div class="card-inner-layout">
-
                 <div class="card-poster-container">
-                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover">
+                  <!-- 绝对定位包裹 Checkbox -->
+                  <div class="poster-checkbox-wrap" @click.stop>
+                    <n-checkbox
+                      size="small"
+                      :checked="selectedItems.some(sel => sel.tmdb_id === item.tmdb_id && sel.item_type === item.item_type)"
+                      @update:checked="(checked, event) => toggleSelection(item, event, i)"
+                    />
+                  </div>
+
+                  <n-image lazy :src="getPosterUrl(item.poster_path)" class="card-poster" object-fit="cover" @click.stop>
                     <template #placeholder><div class="poster-placeholder"><n-icon :component="TvIcon" size="32" /></div></template>
                   </n-image>
                 </div>
