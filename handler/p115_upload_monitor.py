@@ -62,6 +62,15 @@ def _mapping_id(local_dir: str, target_cid: str) -> str:
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
+def _default_upload_extensions() -> set[str]:
+    return _normalize_extensions(
+        config_manager.APP_CONFIG.get(
+            constants.CONFIG_OPTION_MONITOR_EXTENSIONS,
+            constants.DEFAULT_MONITOR_EXTENSIONS,
+        )
+    ) - UPLOAD_IGNORED_EXTENSIONS
+
+
 def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     mappings = []
@@ -80,6 +89,12 @@ def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
         mode = str(item.get("mode") or "keep").strip().lower()
         if mode not in {"keep", "delete"}:
             mode = "keep"
+        extension_values = item.get("extensions")
+        extensions = (
+            _normalize_extensions(extension_values)
+            if isinstance(extension_values, list)
+            else _default_upload_extensions()
+        ) - UPLOAD_IGNORED_EXTENSIONS
         mappings.append({
             "id": str(item.get("id") or _mapping_id(local_dir, target_cid)).strip(),
             "enabled": _as_bool(item.get("enabled"), True),
@@ -87,6 +102,7 @@ def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
             "target_cid": target_cid,
             "target_name": str(item.get("target_name") or target_cid).strip(),
             "mode": mode,
+            "extensions": sorted(extensions),
         })
     return {"enabled": _as_bool(raw.get("enabled"), False), "mappings": mappings}
 
@@ -158,9 +174,8 @@ def _find_mapping(path: str, mappings: List[Dict[str, Any]]) -> Optional[Dict[st
 
 
 class UploadMonitorEventHandler(FileSystemEventHandler):
-    def __init__(self, mappings: List[Dict[str, Any]], extensions: Iterable[str]):
+    def __init__(self, mappings: List[Dict[str, Any]]):
         self.mappings = mappings
-        self.extensions = _normalize_extensions(extensions)
 
     def _accept(self, path: str) -> bool:
         if not path or os.path.basename(path).startswith("."):
@@ -168,10 +183,11 @@ class UploadMonitorEventHandler(FileSystemEventHandler):
         if _is_ignored_upload_path(path):
             return False
         extension = os.path.splitext(path)[1].lower()
+        mapping = _find_mapping(path, self.mappings)
         return (
             extension not in UPLOAD_IGNORED_EXTENSIONS
-            and extension in self.extensions
-            and _find_mapping(path, self.mappings) is not None
+            and mapping is not None
+            and extension in _normalize_extensions(mapping.get("extensions"))
         )
 
     def _schedule(self, path: str) -> None:
@@ -413,9 +429,7 @@ class UploadMonitorRuntime:
                     self._queue.put(job_id)
         return len(job_ids)
 
-    def scan_existing(self, mappings: List[Dict[str, Any]], extensions: Iterable[str]) -> None:
-        allowed = _normalize_extensions(extensions) - UPLOAD_IGNORED_EXTENSIONS
-
+    def scan_existing(self, mappings: List[Dict[str, Any]]) -> None:
         def _scan():
             batch = []
             queued_count = 0
@@ -423,6 +437,7 @@ class UploadMonitorRuntime:
                 root = mapping["local_dir"]
                 if not mapping.get("enabled") or not os.path.isdir(root):
                     continue
+                allowed = _normalize_extensions(mapping.get("extensions")) - UPLOAD_IGNORED_EXTENSIONS
                 for current_root, _, files in os.walk(root):
                     for name in files:
                         path = os.path.join(current_root, name)
@@ -1291,7 +1306,7 @@ def schedule_upload_monitor(observer, extensions: Iterable[str]) -> List[str]:
     mappings = [item for item in config["mappings"] if item.get("enabled")]
     if not config["enabled"] or not mappings:
         return []
-    handler = UploadMonitorEventHandler(mappings, extensions)
+    handler = UploadMonitorEventHandler(mappings)
     started = []
     for root in sorted({item["local_dir"] for item in mappings}):
         if not os.path.isdir(root):
@@ -1302,5 +1317,5 @@ def schedule_upload_monitor(observer, extensions: Iterable[str]) -> List[str]:
     if started:
         runtime = UploadMonitorRuntime.instance()
         runtime.start()
-        runtime.scan_existing(mappings, extensions)
+        runtime.scan_existing(mappings)
     return started
