@@ -260,6 +260,7 @@ const templateTargetOptions = [
 
 const templateBlocks = [
   { label: '中文片名', snippet: '{{title}}' },
+  { label: '首字母', snippet: '{{title_initial}}' },
   { label: '英文片名', snippet: '{{title_en}}' },
   { label: '原文片名', snippet: '{{title_orig}}' },
   { label: '原始文件名', snippet: '{{original_name}}' },
@@ -303,6 +304,7 @@ const templateBlocks = [
 
 const mockMovie = {
   title: '寄生虫',
+  title_initial: 'J',
   title_en: 'Parasite',
   en_title: 'Parasite',
   en_name: 'Parasite',
@@ -348,6 +350,7 @@ const mockMovie = {
 
 const mockTv = {
   title: '绝命毒师',
+  title_initial: 'J',
   title_en: 'Breaking Bad',
   en_title: 'Breaking Bad',
   en_name: 'Breaking Bad',
