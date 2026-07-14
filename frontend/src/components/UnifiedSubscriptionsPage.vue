@@ -262,8 +262,8 @@
     <n-modal v-model:show="showStrategyModal" preset="card" title="订阅策略配置" style="width: 600px;" :auto-focus="false" class="custom-modal glass-modal">
       <n-form label-placement="left" label-width="auto" require-mark-placement="right-hanging">
         
-        <n-divider title-placement="left">订阅源优先级</n-divider>
-        <n-form-item label="订阅源">
+        <n-divider title-placement="left">订阅源</n-divider>
+        <n-form-item>
           <div v-if="sourceList.length" class="source-list">
             <div 
               v-for="(source, index) in sourceList" 
@@ -282,9 +282,7 @@
           </div>
           <n-empty v-else description="当前没有可用订阅源" />
           <template #feedback>
-            <b>拖动调整优先级，勾选启用。</b><br/>
-            系统会按列表顺序依次尝试当前可用订阅源。<br/>
-            <span style="color: var(--n-warning-color);">* 注：云资源搜索存在模糊匹配限制，剧集订阅仍需依赖本地季号过滤。</span>
+            <b>勾选启用。</b>
           </template>
         </n-form-item>
       </n-form>
