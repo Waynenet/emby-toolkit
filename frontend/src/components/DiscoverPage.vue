@@ -243,9 +243,9 @@
                           :loading="subscribingId === currentRecommendation.id"
                           style="margin-top: 24px;"
                         >
-                          <!-- ★ 修改：根据类型显示不同图标和文字 -->
-                          <template #icon><n-icon :component="isMpConfigured && currentRecommendation.media_type === 'tv' ? ListIcon : HeartOutline" /></template>
-                          {{ isMpConfigured && currentRecommendation.media_type === 'tv' ? '选择季' : '想看这个' }}
+                          <!-- ★ 根据类型显示不同图标和文字 -->
+                          <template #icon><n-icon :component="isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? ListIcon : HeartOutline" /></template>
+                          {{ isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? '选择季' : '想看这个' }}
                         </n-button>
                     </div>
                 </div>
@@ -312,16 +312,16 @@
                 </div>
 
                 <div class="actions-container">
-                  <!-- ★ 常规订阅/想看按钮：即使未配置 MP，也允许标记 WANTED -->
+                  <!-- 常规订阅/想看按钮：即使未配置 MP，也允许标记 WANTED -->
                   <div 
                     v-if="canShowSubscribeAction(media)"
                     class="action-btn"
                     @click.stop="handleSubscribe(media)"
-                    :title="!isMpConfigured ? '标记想看' : (media.media_type === 'tv' ? '选择季' : (isPrivilegedUser ? '订阅' : '想看'))"
+                    :title="!isMpConfigured ? '标记想看' : ((media.media_type === 'tv' || mediaType === 'tv') ? '选择季' : (isPrivilegedUser ? '订阅' : '想看'))"
                   >
                     <n-spin :show="subscribingId === media.id" size="small">
                       <n-icon size="18" color="#fff" class="shadow-icon">
-                        <ListIcon v-if="isMpConfigured && media.media_type === 'tv'" />
+                        <ListIcon v-if="isMpConfigured && (media.media_type === 'tv' || mediaType === 'tv')" />
                         <LightningIcon v-else-if="isMpConfigured && isPrivilegedUser && media.subscription_status === 'REQUESTED'" color="#f0a020" />
                         <HeartOutline v-else />
                       </n-icon>
@@ -375,11 +375,22 @@
             </div>
           </n-card>
           <n-divider style="margin: 12px 0;" />
-          <n-space vertical>
-            <n-button v-if="isMpConfigured" block type="primary" @click="submitAllSeasonsSubscription" :loading="subscribingAllSeasons">
-              一键提交整剧到 MoviePilot
+          <div style="display: flex; gap: 12px; width: 100%;">
+            <!-- 新增的取消按钮 -->
+            <n-button style="flex: 1;" @click="showSeasonModal = false">
+              取消
             </n-button>
-          </n-space>
+            <!-- 调整为平分宽度的订阅整剧按钮 -->
+            <n-button 
+              v-if="isMpConfigured" 
+              type="primary" 
+              style="flex: 1;" 
+              @click="submitAllSeasonsSubscription" 
+              :loading="subscribingAllSeasons"
+            >
+              一键订阅整剧
+            </n-button>
+          </div>
         </n-space>
       </n-spin>
     </n-modal>
