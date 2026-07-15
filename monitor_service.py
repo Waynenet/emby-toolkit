@@ -193,6 +193,65 @@ def _write_minimal_tmdb_nfo(file_path: str, tmdb_id: str, media_type: str, title
         return False
 
 
+def _ensure_strm_metadata_snapshot(file_path: str, tmdb_id: str, media_type: str, title: str, processor) -> bool:
+    from database.metadata_provider_db import has_initial_tmdb_metadata, persist_initial_tmdb_metadata
+    from handler.p115_service import P115CacheManager
+    import handler.tmdb as tmdb
+
+    _pick_code, sha1 = processor._extract_115_fingerprints(file_path)
+    season_number, episode_number = processor._extract_season_episode_from_path(file_path)
+
+    def _patch_identity(original_language=None):
+        if not sha1:
+            return
+        P115CacheManager.patch_raw_ffprobe_etk_context(
+            sha1,
+            tmdb_id=tmdb_id,
+            media_type=media_type,
+            original_language=original_language,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+
+    if has_initial_tmdb_metadata(tmdb_id, media_type):
+        _patch_identity()
+        return True
+    api_key = getattr(processor, 'tmdb_api_key', None)
+    if not api_key:
+        logger.warning("  ➜ [STRM入库] 缺少 TMDb API Key，无法准备首次刮削元数据: %s", title)
+        return False
+    if media_type == 'tv':
+        details = tmdb.get_tv_details(
+            int(tmdb_id),
+            api_key,
+            append_to_response="keywords,content_ratings,networks,credits,alternative_titles,external_ids,images",
+        )
+    else:
+        details = tmdb.get_movie_details(
+            int(tmdb_id),
+            api_key,
+            append_to_response="keywords,release_dates,credits,alternative_titles,external_ids,images",
+        )
+    if not details:
+        return False
+    _patch_identity(details.get('original_language'))
+    ai_translator = getattr(processor, 'ai_translator', None)
+    if ai_translator:
+        from tasks import helpers
+        translation_config = dict(config_manager.APP_CONFIG)
+        translation_config[constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE] = False
+        helpers.translate_tmdb_metadata_recursively(
+            item_type='Series' if media_type == 'tv' else 'Movie',
+            tmdb_data=details,
+            ai_translator=ai_translator,
+            item_name=title,
+            tmdb_api_key=api_key,
+            config=translation_config,
+        )
+    snapshot_title = details.get('name') if media_type == 'tv' else details.get('title')
+    return persist_initial_tmdb_metadata(details, media_type, title=snapshot_title or title)
+
+
 def _identify_physical_media(file_path: str, processor):
     try:
         filename = os.path.basename(file_path)
@@ -339,7 +398,8 @@ def _prepare_strm_for_binding(processor, file_path: str):
             logger.warning("  ➜ [STRM入库] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
             return
         tmdb_id, media_type, title = identity
-        if not _write_minimal_tmdb_nfo(file_path, tmdb_id, media_type, title, processor):
+        if not _ensure_strm_metadata_snapshot(file_path, tmdb_id, media_type, title, processor):
+            logger.warning("  ➜ [STRM入库] 首次刮削元数据未就绪，已跳过 Emby 扫描: %s", file_path)
             return
         enqueue_emby_binding(file_path)
         prepared = True
@@ -621,7 +681,7 @@ def enqueue_file_actively(file_path: str):
             logger.warning("  ➜ [STRM入库] 核心处理器未就绪，已跳过: %s", os.path.basename(file_path))
             return
         if _enqueue_strm_preparation(processor, file_path):
-            logger.debug("  ➜ [STRM入库] 加入识别/NFO 预备队列: %s", os.path.basename(file_path))
+            logger.debug("  ➜ [STRM入库] 加入识别/数据库元数据预备队列: %s", os.path.basename(file_path))
         return
 
     with QUEUE_LOCK:

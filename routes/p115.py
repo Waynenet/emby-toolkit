@@ -1947,6 +1947,59 @@ def get_cached_mediainfo_by_sha1(sha1):
     return _cached_mediainfo_response(sha1)
 
 
+def _cached_metadata_response(sha1):
+    from database.metadata_provider_db import load_emby_metadata
+    from handler.p115_service import _extract_raw_ffprobe_identity
+
+    sha1 = str(sha1 or '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{40}', sha1):
+        return jsonify({"error": "invalid sha1"}), 400
+    identity = _extract_raw_ffprobe_identity(P115CacheManager.get_raw_ffprobe_cache(sha1)) or {}
+    tmdb_id = str(identity.get('tmdb_id') or '').strip()
+    media_type = str(identity.get('media_type') or '').strip().lower()
+    if not tmdb_id or media_type not in {'movie', 'tv'}:
+        return jsonify({"error": "metadata identity not found"}), 404
+
+    requested_type = str(request.args.get('item_type') or ('Movie' if media_type == 'movie' else 'Series')).title()
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+        return jsonify({"error": "invalid item_type"}), 400
+
+    def _number(name, fallback=None):
+        value = request.args.get(name)
+        if value in (None, ''):
+            value = fallback
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    payload = load_emby_metadata(
+        tmdb_id,
+        media_type,
+        requested_type,
+        season_number=_number('season_number', identity.get('season_number')),
+        episode_number=_number('episode_number', identity.get('episode_number')),
+    )
+    if not payload:
+        return jsonify({"error": "metadata cache not found"}), 404
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@p115_bp.route('/mediainfo/<pick_code>/metadata', methods=['GET'])
+def get_cached_metadata_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({"error": "metadata cache not found"}), 404
+    return _cached_metadata_response(row.get('sha1'))
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/metadata', methods=['GET'])
+def get_cached_metadata_by_sha1(sha1):
+    return _cached_metadata_response(sha1)
+
+
 def _sync_intro_snapshot_response(sha1, expected_pick_code=''):
     from handler.shared_intro_service import sync_intro_from_emby_item
 

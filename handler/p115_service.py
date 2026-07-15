@@ -5708,15 +5708,27 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             if self.media_type == 'tv':
                 raw_details = tmdb.get_tv_details(
                     self.tmdb_id, self.api_key,
-                    append_to_response="keywords,content_ratings,networks,credits,alternative_titles"
+                    append_to_response="keywords,content_ratings,networks,credits,alternative_titles,external_ids,images"
                 )
             else:
                 raw_details = tmdb.get_movie_details(
                     self.tmdb_id, self.api_key,
-                    append_to_response="keywords,release_dates,credits,alternative_titles"
+                    append_to_response="keywords,release_dates,credits,alternative_titles,external_ids,images"
                 )
 
             if not raw_details: return {}
+
+            if self.ai_translator:
+                translation_config = dict(config_manager.APP_CONFIG)
+                translation_config[constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE] = False
+                helpers.translate_tmdb_metadata_recursively(
+                    item_type="Series" if self.media_type == "tv" else "Movie",
+                    tmdb_data=raw_details,
+                    ai_translator=self.ai_translator,
+                    item_name=self.original_title,
+                    tmdb_api_key=self.api_key,
+                    config=translation_config,
+                )
 
             def _main_title_from(details):
                 if not isinstance(details, dict):
@@ -5897,6 +5909,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             # ★ 补充季集数据，供动漫绝对集数推算使用
             data['seasons'] = raw_details.get('seasons', [])
             data['last_episode_to_air'] = raw_details.get('last_episode_to_air', {})
+
+            try:
+                from database.metadata_provider_db import persist_initial_tmdb_metadata
+                persist_initial_tmdb_metadata(
+                    raw_details,
+                    self.media_type,
+                    title=data.get('title'),
+                    original_title=data.get('original_title'),
+                    rating_label=data.get('rating_label'),
+                )
+            except Exception as persist_error:
+                logger.warning(
+                    "  ➜ [115整理] 持久化首次刮削元数据失败: TMDb %s -> %s",
+                    self.tmdb_id,
+                    persist_error,
+                )
 
             _TMDB_METADATA_CACHE[cache_key] = data # 写入缓存
 

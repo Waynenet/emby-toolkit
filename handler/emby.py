@@ -1575,6 +1575,76 @@ def delete_item_image(
         logger.warning(f"删除 Item {item_id} 的 {image_type} 图片异常: {e}", exc_info=True)
         return False
 
+
+def download_remote_item_image(
+    base_url: str,
+    api_key: str,
+    item_id: str,
+    image_type: str = "Primary",
+    provider_name: str = "ETK Images",
+) -> bool:
+    """显式下载指定 Provider 的首张远程图片到 Emby 缓存。"""
+    if not all([base_url, api_key, item_id, image_type, provider_name]):
+        logger.error("download_remote_item_image: 参数不足。")
+        return False
+
+    base_url = base_url.rstrip('/')
+    headers = {
+        "X-Emby-Token": api_key,
+        "Accept": "application/json",
+    }
+    params = {
+        "api_key": api_key,
+        "Type": image_type,
+        "Limit": 20,
+    }
+    try:
+        response = emby_client.get(
+            f"{base_url}/Items/{item_id}/RemoteImages",
+            headers=headers,
+            params=params,
+            timeout=45,
+        )
+        response.raise_for_status()
+        image = next(
+            (
+                entry for entry in (response.json().get("Images") or [])
+                if entry.get("ProviderName") == provider_name and entry.get("Url")
+            ),
+            None,
+        )
+        if not image:
+            logger.debug(f"  ➜ Item {item_id} 没有 {provider_name} {image_type} 候选图片。")
+            return False
+
+        download_response = emby_client.post(
+            f"{base_url}/Items/{item_id}/RemoteImages/Download",
+            headers=headers,
+            params={
+                "api_key": api_key,
+                "Type": image_type,
+                "ProviderName": provider_name,
+                "ImageUrl": image.get("Url"),
+            },
+            timeout=90,
+        )
+        if download_response.status_code == 204:
+            logger.debug(f"  ➜ 已从 {provider_name} 恢复 Item {item_id} 的 {image_type} 图片。")
+            return True
+
+        logger.warning(
+            f"  ➜ 下载 Item {item_id} 的 {provider_name} {image_type} 图片失败: "
+            f"HTTP {download_response.status_code} - {download_response.text[:300]}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(
+            f"下载 Item {item_id} 的 {provider_name} {image_type} 图片异常: {e}",
+            exc_info=True,
+        )
+        return False
+
+
 # --- 给任意 Emby Item 上传图片 ---
 def upload_item_image(
     base_url: str,

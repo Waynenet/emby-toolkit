@@ -205,7 +205,9 @@ def init_db():
                         release_year INTEGER,
                         last_air_date DATE,
                         poster_path TEXT,
-                        backdrop_path TEXT, 
+                        backdrop_path TEXT,
+                        logo_path TEXT,
+                        thumb_path TEXT,
                         homepage TEXT,
                         runtime_minutes INTEGER,
                         rating REAL,
@@ -221,6 +223,8 @@ def init_db():
                         last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         ignore_reason TEXT,
                         tags_json JSONB,
+                        metadata_ready BOOLEAN NOT NULL DEFAULT FALSE,
+                        actors_ready BOOLEAN NOT NULL DEFAULT FALSE,
 
                         -- 剧集专属与层级数据
                         parent_series_tmdb_id TEXT,
@@ -770,6 +774,10 @@ def init_db():
                         'media_metadata': {
                             "imdb_id": "TEXT",
                             "tagline": "TEXT",
+                            "logo_path": "TEXT",
+                            "thumb_path": "TEXT",
+                            "metadata_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
+                            "actors_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "watchlist_version_lock_json": "JSONB DEFAULT '{}'::jsonb",
                             "washing_level": "INTEGER",
                             "washing_snapshot_json": "JSONB DEFAULT '{}'::jsonb"
@@ -817,6 +825,15 @@ def init_db():
                                     logger.trace(f"    ➜ 字段 '{table}.{col_name}' 已存在，跳过。")
                         else:
                             logger.warning(f"    ➜ [数据库升级] 检查表 '{table}' 时发现该表不存在，跳过升级。")
+
+                    cursor.execute("""
+                        UPDATE media_metadata
+                        SET metadata_ready = TRUE,
+                            actors_ready = TRUE
+                        WHERE (metadata_ready IS FALSE OR actors_ready IS FALSE)
+                          AND jsonb_typeof(actors_json) = 'array'
+                          AND jsonb_array_length(actors_json) > 0
+                    """)
 
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)

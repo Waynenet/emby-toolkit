@@ -1237,7 +1237,23 @@ class WatchlistProcessor:
                 ))
                 
         if force_download_eps:
-            logger.info(f"  ➜ 发现 {len(force_download_eps)} 个分集在 TMDb 上有了新图片，将强制覆盖本地临时截图。")
+            logger.info(f"  ➜ 发现 {len(force_download_eps)} 个分集在 TMDb 上有了新图片，将替换 Emby 缓存截图。")
+            try:
+                with connection.get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.executemany(
+                            """
+                            UPDATE media_metadata
+                            SET poster_path=%s, overview=%s, rating=%s, last_updated_at=NOW()
+                            WHERE parent_series_tmdb_id=%s AND item_type='Episode'
+                              AND season_number=%s AND episode_number=%s
+                            """,
+                            episodes_to_update_in_db,
+                        )
+                    conn.commit()
+                logger.debug(f"  ➜ 已在 Emby 图片刷新前写入 {len(episodes_to_update_in_db)} 个分集剧照。")
+            except Exception as e:
+                logger.warning(f"  ➜ 提前写入分集剧照失败: {e}")
         # ======================================================================
         # ★★★ 老六专属：无简介笑话占位功能 (追剧刷新) ★★★
         # ======================================================================
@@ -1389,7 +1405,8 @@ class WatchlistProcessor:
                     item_type='Series',
                     aggregated_tmdb_data=aggregated_data,
                     item_details=current_item_details,
-                    force_overwrite_episodes=force_download_eps # ★ 传入强制覆盖列表
+                    force_overwrite_episodes=force_download_eps, # ★ 传入强制覆盖列表
+                    allow_etk_episode_images=True,
                 )
 
                 # 2. ★★★ 核心修复：NFO 模式下，追剧刷新必须补全 NFO 文件 ★★★

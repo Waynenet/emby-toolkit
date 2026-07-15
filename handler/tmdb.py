@@ -363,7 +363,7 @@ def aggregate_full_series_data_from_tmdb(
     series_details = get_tv_details(
         tv_id,
         api_key,
-        append_to_response="credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations",
+        append_to_response="credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations,images",
         allow_english_fallback=allow_series_english_fallback
     )
     
