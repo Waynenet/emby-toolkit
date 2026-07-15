@@ -13,7 +13,7 @@ import task_manager
 from .actors import (task_enrich_aliases, task_persons_translation, 
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_backup_mediainfo, task_restore_mediainfo, task_repair_p115_fingerprints, task_restore_nfo_and_images, task_fill_studio_images
+from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_mediainfo, task_repair_p115_fingerprints, task_restore_nfo_and_images, task_fill_studio_images
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -52,9 +52,8 @@ TASK_HELP_TEXTS = {
     'scan-organize-115': '扫描 115 网盘待整理目录，并按规则识别、整理、生成记录，适合新增资源后手动触发。',
     'full-sync-strm': '全量重建 STRM 与字幕文件，保持网盘和本地一致，适合媒体库重建或迁移时使用。',
     'monitor-115-life-events': '按全量同步逻辑扫描家庭视频分类，同步 STRM、字幕、NFO 和图片元数据。',
-    'backup-mediainfo': '补齐媒体指纹，并把数据库中的格式化媒体信息注入对应 Emby Item。',
     'repair-p115-fingerprints': '扫描在库电影和分集，补齐共享资源必需的 115 PC 与 SHA1 以及缓存；优先从本地缓存恢复，必要时查询 115。',
-    'restore_mediainfo': '从 RAW 重建缺失缓存并注入全部在库 Emby Item，适合重建媒体库或迁移后执行。',
+    'restore_mediainfo': '增量模式检查 Emby 并仅恢复缺失媒体流的实际版本；全量模式重建并注入全部在库 Emby Item。',
     'hdhive-auto-checkin': '执行影巢自动签到，获取签到奖励或保持账号活跃。',
     'restore-nfo-and-images': '从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。',
     'shared-resource-maintenance': '维护共享资源池，包含登记缺口、自动分享、状态检查、清理失效分享和共享订阅消费等。',
@@ -303,7 +302,6 @@ def get_task_registry(context: str = 'all'):
         'full-sync-strm': (task_full_sync_strm_and_subs, "全量生成STRM", 'media', True),
         # 保留旧任务 key，兼容用户现有任务链配置。
         'monitor-115-life-events': (task_sync_home_video_strm, "同步家庭视频", 'media', True),
-        'backup-mediainfo': (task_backup_mediainfo, "同步媒体信息", 'media', True),
         'repair-p115-fingerprints': (task_repair_p115_fingerprints, "补齐缓存指纹", 'media', True),
         'restore_mediainfo': (task_restore_mediainfo, "重建媒体信息", 'media', True),
         'hdhive-auto-checkin': (task_hdhive_auto_checkin, "影巢自动签到", 'media', True),

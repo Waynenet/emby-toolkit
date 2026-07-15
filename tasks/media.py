@@ -2447,8 +2447,8 @@ def task_backup_mediainfo(processor):
 # --- 媒体信息缓存重建与 Emby 注入任务 ---
 def task_restore_mediainfo(processor, force_full_update: bool = False):
     """
-    从 p115_mediainfo_cache 注入所有在库版本；缺失时从 RAW 重建或在线提取。
-    force_full_update=True 时强制从 RAW 重新格式化缓存。
+    增量模式只检查并恢复 Emby 中缺失媒体流的实际版本。
+    force_full_update=True 时遍历全部在库版本并强制从 RAW 重新格式化缓存。
     """
     mode_str = "全量强制刷新" if force_full_update else "增量查漏补缺"
     logger.info(f"--- 开始执行媒体信息还原任务 ({mode_str}) ---")
@@ -2458,15 +2458,59 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
     from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer
     client = P115Service.get_client()
     items_to_restore = media_db.get_all_in_library_physical_paths()
+
+    if not force_full_update and items_to_restore:
+        task_manager.update_status_from_thread(2, "正在检查 Emby 中缺失媒体信息的实际版本...")
+        item_ids = list(dict.fromkeys(
+            str(item.get('emby_item_id') or '').strip()
+            for item in items_to_restore
+            if str(item.get('emby_item_id') or '').strip()
+        ))
+        emby_items = emby.get_emby_items_by_id(
+            processor.emby_url,
+            processor.emby_api_key,
+            processor.emby_user_id,
+            item_ids,
+            fields="MediaSources,MediaStreams",
+        )
+
+        returned_ids = set()
+        missing_ids = set()
+        for emby_item in emby_items:
+            item_id = str(emby_item.get('Id') or '').strip()
+            if not item_id:
+                continue
+            returned_ids.add(item_id)
+            streams = list(emby_item.get('MediaStreams') or [])
+            for source in emby_item.get('MediaSources') or []:
+                if isinstance(source, dict):
+                    streams.extend(source.get('MediaStreams') or [])
+            has_video_info = any(
+                isinstance(stream, dict)
+                and stream.get('Type') == 'Video'
+                and (stream.get('Width') or stream.get('Height'))
+                for stream in streams
+            )
+            if not has_video_info:
+                missing_ids.add(item_id)
+
+        unverified_count = len(set(item_ids) - returned_ids)
+        if unverified_count:
+            logger.warning(f"  ➜ Emby 未返回 {unverified_count} 个实际版本，增量任务将跳过这些项目以避免误判。")
+        items_to_restore = [
+            item for item in items_to_restore
+            if str(item.get('emby_item_id') or '').strip() in missing_ids
+        ]
                     
     total = len(items_to_restore)
     if total == 0:
-        logger.info("  ➜ 没有可注入媒体信息的在库项目。")
-        task_manager.update_status_from_thread(100, "没有可注入媒体信息的在库项目")
+        empty_message = "Emby 中没有缺失媒体信息的实际版本" if not force_full_update else "没有可注入媒体信息的在库项目"
+        logger.info(f"  ➜ {empty_message}。")
+        task_manager.update_status_from_thread(100, empty_message)
         time.sleep(1)  
         return
         
-    logger.info(f"  ➜ 发现 {total} 个媒体项，准备处理...")
+    logger.info(f"  ➜ 发现 {total} 个{'Emby 中缺失媒体信息的' if not force_full_update else ''}媒体项，准备处理...")
     
     restored_count = 0
     failed_count = 0

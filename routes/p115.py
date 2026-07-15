@@ -1917,26 +1917,10 @@ def handle_sorting_rules():
         settings_db.save_setting('p115_sorting_rules', rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
-def _cached_mediainfo_response(sha1, expected_pick_code=''):
+def _cached_mediainfo_response(sha1):
     sha1 = str(sha1 or '').strip().upper()
     if not re.fullmatch(r'[A-F0-9]{40}', sha1):
         return jsonify({"error": "invalid sha1"}), 400
-    emby_item_id = str(request.args.get('emby_item_id') or '').strip()
-    if emby_item_id:
-        try:
-            from handler.shared_intro_service import sync_intro_from_emby_item
-            sync_intro_from_emby_item(
-                sha1,
-                emby_item_id,
-                expected_pick_code=expected_pick_code,
-            )
-        except Exception as e:
-            logger.debug(
-                "  ➜ [共享片头] 从 Emby 回写片头失败: item=%s, sha1=%s -> %s",
-                emby_item_id,
-                sha1[:12],
-                e,
-            )
     text = P115CacheManager.get_mediainfo_cache_text(sha1)
     if not text:
         return jsonify({"error": "media info cache not found"}), 404
@@ -1955,12 +1939,36 @@ def get_cached_mediainfo_by_pick_code(pick_code):
     row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
     if not row.get('sha1'):
         return jsonify({"error": "media info cache not found"}), 404
-    return _cached_mediainfo_response(row.get('sha1'), expected_pick_code=pick_code)
+    return _cached_mediainfo_response(row.get('sha1'))
 
 
 @p115_bp.route('/mediainfo/sha1/<sha1>', methods=['GET'])
 def get_cached_mediainfo_by_sha1(sha1):
     return _cached_mediainfo_response(sha1)
+
+
+def _sync_intro_snapshot_response(sha1, expected_pick_code=''):
+    from handler.shared_intro_service import sync_intro_from_emby_item
+
+    result = sync_intro_from_emby_item(
+        sha1,
+        request.args.get('emby_item_id'),
+        expected_pick_code=expected_pick_code,
+    )
+    return jsonify(result)
+
+
+@p115_bp.route('/mediainfo/<pick_code>/intro-sync', methods=['POST'])
+def sync_intro_snapshot_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({"error": "media info cache not found"}), 404
+    return _sync_intro_snapshot_response(row.get('sha1'), expected_pick_code=pick_code)
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/intro-sync', methods=['POST'])
+def sync_intro_snapshot_by_sha1(sha1):
+    return _sync_intro_snapshot_response(sha1)
 
 
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) 
