@@ -1142,7 +1142,7 @@ def cleanup_offline_internal_ids() -> int:
 def get_bad_episode_emby_ids(parent_tmdb_id: str) -> List[str]:
     """
     【精准治疗】查询指定剧集下，所有资产数据不完整的分集的 Emby ID。
-    用于在重新处理剧集时，只对坏分集触发神医插件。
+    用于在重新处理剧集时，只对坏分集触发媒体信息修复。
     """
     if not parent_tmdb_id:
         return []
@@ -1659,7 +1659,10 @@ def get_all_in_library_physical_paths() -> List[Dict[str, Any]]:
     sql = """
         SELECT 
             m.emby_item_ids_json,
-            a.asset->>'path' AS path
+            a.asset->>'path' AS path,
+            COALESCE(m.emby_item_ids_json ->> ((a.idx - 1)::int), a.asset->>'emby_item_id') AS emby_item_id,
+            m.file_sha1_json ->> ((a.idx - 1)::int) AS sha1,
+            m.file_pickcode_json ->> ((a.idx - 1)::int) AS pc
         FROM media_metadata m
         JOIN LATERAL jsonb_array_elements(
             CASE WHEN jsonb_typeof(m.asset_details_json) = 'array' THEN m.asset_details_json ELSE '[]'::jsonb END
@@ -1738,7 +1741,8 @@ def get_physical_paths_and_sha1s_by_emby_id(emby_id: str, exact_match: bool = Fa
                         assets_list.append({
                             'path': path,
                             'sha1': sha1,
-                            'pc': pc
+                            'pc': pc,
+                            'emby_item_id': emby_ids[idx] if idx < len(emby_ids) else asset.get('emby_item_id')
                         })
                         
         return assets_list

@@ -633,7 +633,7 @@ def _flush_mp_batch(key):
         mp_classify_enabled = bool(config.get(constants.CONFIG_OPTION_115_MP_CLASSIFY, False))
 
         if mp_classify_enabled:
-            logger.info("  ➜ [MP直出] MP分类已开启：跳过整理/归类/重命名，直接生成 STRM 和 -mediainfo.json。")
+            logger.info("  ➜ [MP直出] MP分类已开启：跳过整理/归类/重命名，生成 STRM 并缓存媒体信息。")
             ok = organizer.execute_mp_passthrough(file_nodes)
             if not ok:
                 logger.warning("  ➜ [MP直出] 直出处理未完全成功。")

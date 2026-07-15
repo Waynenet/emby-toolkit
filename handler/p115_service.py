@@ -30,7 +30,7 @@ except ImportError:
     P115Client = None
 
 logger = logging.getLogger(__name__)
-FORCE_GENERATE_MEDIAINFO = True
+FORCE_CACHE_MEDIAINFO = True
 
 
 def _exclude_batch_conflict_rows(rows, batch_file_ids):
@@ -4771,7 +4771,7 @@ class P115CacheManager:
 
     @staticmethod
     def get_mediainfo_cache_text(sha1):
-        """从本地 p115_mediainfo_cache 读取 JSON 原文，用于直接生成 -mediainfo.json 文件"""
+        """从本地 p115_mediainfo_cache 读取格式化媒体信息 JSON 原文。"""
         if not sha1:
             return None
 
@@ -8521,12 +8521,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                         os.remove(old_strm_full_path)
                                         logger.debug(f"  ➜ 删除本地旧 STRM: {old_strm_full_path}")
                                         
-                                    # 2. 删除 mediainfo.json
-                                    old_mi_full_path = os.path.join(local_root, os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json")
-                                    if os.path.exists(old_mi_full_path):
-                                        os.remove(old_mi_full_path)
-                                        
-                                    # 3. 删除关联字幕和专属 NFO
+                                    # 2. 删除关联字幕和专属 NFO
                                     old_dir_full_path = os.path.dirname(old_strm_full_path)
                                     old_base_name = os.path.splitext(os.path.basename(old_file_rel_path))[0]
                                     if os.path.exists(old_dir_full_path):
@@ -8626,10 +8621,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         os.remove(old_strm_full_path)
                         local_replace_paths_for_emby.append(old_strm_full_path)
                         logger.info(f"  ➜ [版本控制] 已删除本地同名旧 STRM: {old_strm_full_path}")
-
-                        old_mi_full_path = os.path.join(local_root, os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json")
-                        if os.path.exists(old_mi_full_path):
-                            os.remove(old_mi_full_path)
 
                         old_dir_full_path = os.path.dirname(old_strm_full_path)
                         old_base_name = os.path.splitext(os.path.basename(old_file_rel_path))[0]
@@ -8862,25 +8853,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     enqueue_file_actively(strm_filepath)
                                 except Exception: pass
 
-                                if FORCE_GENERATE_MEDIAINFO:
-                                    try:
-                                        mediainfo_filename = os.path.splitext(new_filename)[0] + "-mediainfo.json"
-                                        mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
-                                        mediainfo_text = P115CacheManager.get_mediainfo_cache_text(file_sha1) if file_sha1 else None
-                                        if mediainfo_text:
-                                            with open(mediainfo_filepath, 'w', encoding='utf-8') as f:
-                                                f.write(mediainfo_text)
-                                            logger.info(f"  ➜ 已生成媒体信息文件：{mediainfo_filename}")
-                                            try:
-                                                from monitor_service import enqueue_emby_binding
-                                                enqueue_emby_binding(strm_filepath)
-                                            except Exception:
-                                                pass
-                                        else:
-                                            logger.debug(f"  ➜ 跳过媒体信息文件生成，未命中本地缓存: {new_filename}")
-                                    except Exception as e:
-                                        logger.error(f"  ➜ 生成媒体信息文件失败: {e}")
-
                                 if pick_code and fid:
                                     # 负载均衡分享资产记录钩子：
                                     # 对影巢/TG 等外部分享导入后再整理的资源，只有这里拿到的
@@ -9015,7 +8987,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         MP直出模式 (终极优化版)：
         完全信任 115 现有的目录结构和文件名 (直接从 Webhook 传来的 115_path 提取)。
         跳过整理、归类、移动、重命名。
-        直接在本地 1:1 映射生成 STRM 和 -mediainfo.json。
+        直接在本地 1:1 映射生成 STRM，媒体信息写入数据库缓存并注入 Emby。
         """
         config = get_config()
         local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
@@ -9136,15 +9108,8 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     f.write(strm_content)
                 logger.info(f"  ➜ [MP直出] 已生成 STRM：{strm_filename}")
 
-                # ★★★ 主动推送给实时监控队列，防止底层文件系统事件丢失 ★★★
-                try:
-                    from monitor_service import enqueue_file_actively
-                    enqueue_file_actively(strm_filepath)
-                except Exception: 
-                    pass
-
-                # 生成 Mediainfo
-                if FORCE_GENERATE_MEDIAINFO:
+                mediainfo_ready = False
+                if FORCE_CACHE_MEDIAINFO:
                     try:
                         mediainfo_text = None
                         if sha1:
@@ -9167,21 +9132,21 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     )
                                     sha1 = probe_sha1
                                     file_item['sha1'] = probe_sha1
-                                mediainfo_text = json.dumps(emby_obj, ensure_ascii=False, indent=2)
+                                mediainfo_text = "cached"
 
                         if mediainfo_text:
-                            mediainfo_filename = os.path.splitext(original_name)[0] + "-mediainfo.json"
-                            mediainfo_filepath = os.path.join(local_dir, mediainfo_filename)
-                            with open(mediainfo_filepath, "w", encoding="utf-8") as f:
-                                f.write(mediainfo_text)
-                            logger.info(f"  ➜ [MP直出] 已生成媒体信息文件：{mediainfo_filename}")
-                            try:
-                                from monitor_service import enqueue_emby_binding
-                                enqueue_emby_binding(strm_filepath)
-                            except Exception:
-                                pass
+                            mediainfo_ready = True
                     except Exception as e:
-                        logger.error(f"  ➜ [MP直出] 生成媒体信息失败: {e}")
+                        logger.error(f"  ➜ [MP直出] 生成媒体信息缓存失败: {e}")
+
+                if mediainfo_ready:
+                    try:
+                        from monitor_service import enqueue_file_actively
+                        enqueue_file_actively(strm_filepath)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(f"  ➜ [MP直出] 未生成媒体信息缓存，暂不推送 Emby：{original_name}")
 
             # 2. 处理字幕 (直接下载)
             elif is_sub and config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True) and pick_code:
@@ -10552,10 +10517,6 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
             if os.path.exists(old_strm_full_path):
                 os.remove(old_strm_full_path)
                 logger.debug(f"  ➜ 删除本地旧 STRM: {old_strm_full_path}")
-
-            old_mi_full_path = os.path.splitext(old_file_rel_path)[0] + "-mediainfo.json"
-            if os.path.exists(old_mi_full_path):
-                os.remove(old_mi_full_path)
 
             old_dir_full_path = os.path.dirname(old_strm_full_path)
             old_base_name = os.path.splitext(os.path.basename(old_file_rel_path))[0]

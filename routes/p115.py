@@ -15,7 +15,7 @@ from flask import Blueprint, jsonify, request, redirect, Response, stream_with_c
 from extensions import admin_required, emby_login_required
 from database import settings_db, shared_credit_db, shared_virtual_db
 from handler import moviepilot, emby
-from handler.p115_service import P115Service, get_config
+from handler.p115_service import P115Service, P115CacheManager, get_config
 from handler.p115_rename import P115RenameRenderer
 from handler.shared_center_client import SharedCenterClient
 from handler.shared_subscription_service import rapid_save_virtual_play_file
@@ -1917,6 +1917,36 @@ def handle_sorting_rules():
         settings_db.save_setting('p115_sorting_rules', rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
+def _cached_mediainfo_response(sha1):
+    sha1 = str(sha1 or '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{40}', sha1):
+        return jsonify({"error": "invalid sha1"}), 400
+    text = P115CacheManager.get_mediainfo_cache_text(sha1)
+    if not text:
+        return jsonify({"error": "media info cache not found"}), 404
+    try:
+        payload = emby.normalize_etk_mediainfo_payload(text)
+    except Exception as e:
+        logger.warning("  ➜ [媒体信息桥接] 缓存格式无效: %s -> %s", sha1[:12], e)
+        return jsonify({"error": "invalid media info cache"}), 422
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@p115_bp.route('/mediainfo/<pick_code>', methods=['GET'])
+def get_cached_mediainfo_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({"error": "media info cache not found"}), 404
+    return _cached_mediainfo_response(row.get('sha1'))
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>', methods=['GET'])
+def get_cached_mediainfo_by_sha1(sha1):
+    return _cached_mediainfo_response(sha1)
+
+
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) 
 @p115_bp.route('/play/<pick_code>/<path:filename>', methods=['GET', 'HEAD'])
 def play_115_video(pick_code, filename=None):

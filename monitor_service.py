@@ -27,18 +27,9 @@ logger = logging.getLogger(__name__)
 FILE_EVENT_QUEUE = set() 
 QUEUE_LOCK = threading.Lock()
 DEBOUNCE_TIMER = None
-MEDIAINFO_DIR_SCAN_LOCK = threading.Lock()
-MEDIAINFO_DIR_SCAN_TIMERS = {}
-MEDIAINFO_DIR_SCAN_WINDOW_SECONDS = 600
-MEDIAINFO_DIR_SCAN_LIMIT = 30
-MEDIAINFO_UPLOAD_LOCK = threading.Lock()
-MEDIAINFO_UPLOAD_TIMERS = {}
-MEDIAINFO_UPLOAD_RECENT = {}
-MEDIAINFO_UPLOAD_INFLIGHT = set()
-MEDIAINFO_UPLOAD_DEDUPE_SECONDS = 300
-MEDIAINFO_UPLOAD_LOG_DEDUPE_SECONDS = 120
 DEBOUNCE_DELAY = 3 # 防抖延迟秒数
 EMBY_BIND_QUEUE = set()
+EMBY_BIND_MEDIAINFO = {}
 EMBY_BIND_LOCK = threading.Lock()
 EMBY_BIND_TIMER = None
 EMBY_BIND_DEBOUNCE_SECONDS = 3
@@ -73,8 +64,6 @@ class MediaFileHandler(FileSystemEventHandler):
         logger.trace(f"  [实时监控] 已加载监控后缀: {self.extensions}")
 
     def _is_valid_media_file(self, file_path: str) -> bool:
-        if str(file_path or '').lower().endswith('-mediainfo.json'):
-            return True
         if os.path.exists(file_path) and os.path.isdir(file_path): 
             return False
         
@@ -89,113 +78,15 @@ class MediaFileHandler(FileSystemEventHandler):
         return True
 
     def on_created(self, event):
-        if event.is_directory:
-            self._handle_mediainfo_dir_update(event.src_path)
-            return
-        if not event.is_directory and str(event.src_path or '').lower().endswith('-mediainfo.json'):
-            self._handle_mediainfo_update(event.src_path)
-            return
         if not event.is_directory and self._is_valid_media_file(event.src_path):
             self._enqueue_file(event.src_path)
 
     def on_modified(self, event):
-        if event.is_directory:
-            self._handle_mediainfo_dir_update(event.src_path)
-            return
-        if not event.is_directory and str(event.src_path or '').lower().endswith('-mediainfo.json'):
-            self._handle_mediainfo_update(event.src_path)
+        return
 
     def on_moved(self, event):
-        if event.is_directory:
-            self._handle_mediainfo_dir_update(event.dest_path)
-            return
-        if not event.is_directory and str(event.dest_path or '').lower().endswith('-mediainfo.json'):
-            self._handle_mediainfo_update(event.dest_path)
-            return
         if not event.is_directory and self._is_valid_media_file(event.dest_path):
             self._enqueue_file(event.dest_path)
-
-    def _handle_mediainfo_update(self, file_path: str):
-        if not file_path or _is_path_excluded(file_path, self.exclude_dirs):
-            return
-        try:
-            from handler.shared_intro_service import shared_intro_enabled
-            if not shared_intro_enabled():
-                return
-        except Exception:
-            return
-        norm_path = os.path.normpath(file_path)
-
-        with MEDIAINFO_UPLOAD_LOCK:
-            old_timer = MEDIAINFO_UPLOAD_TIMERS.get(norm_path)
-            if old_timer:
-                try:
-                    old_timer.cancel()
-                except Exception:
-                    pass
-            timer_ref = {}
-            def _timer_runner():
-                with MEDIAINFO_UPLOAD_LOCK:
-                    if MEDIAINFO_UPLOAD_TIMERS.get(norm_path) is not timer_ref.get("timer"):
-                        return
-                    MEDIAINFO_UPLOAD_TIMERS.pop(norm_path, None)
-                _run_mediainfo_intro_upload(norm_path)
-            timer = threading.Timer(DEBOUNCE_DELAY, _timer_runner)
-            timer_ref["timer"] = timer
-            timer.daemon = True
-            MEDIAINFO_UPLOAD_TIMERS[norm_path] = timer
-            timer.start()
-
-    def _handle_mediainfo_dir_update(self, dir_path: str):
-        if not dir_path or _is_path_excluded(dir_path, self.exclude_dirs):
-            return
-        try:
-            from handler.shared_intro_service import shared_intro_enabled
-            if not shared_intro_enabled():
-                return
-        except Exception:
-            return
-        norm_dir = os.path.normpath(dir_path)
-
-        def _runner():
-            try:
-                now = time.time()
-                candidates = []
-                if not os.path.isdir(norm_dir):
-                    return
-                with os.scandir(norm_dir) as it:
-                    for entry in it:
-                        if not entry.is_file():
-                            continue
-                        if not entry.name.lower().endswith('-mediainfo.json'):
-                            continue
-                        try:
-                            mtime = entry.stat().st_mtime
-                        except Exception:
-                            continue
-                        if now - mtime <= MEDIAINFO_DIR_SCAN_WINDOW_SECONDS:
-                            candidates.append((mtime, entry.path))
-                if not candidates:
-                    return
-                candidates.sort(reverse=True)
-                logger.debug(f"  ➜ [共享片头] 目录变化，发现 {len(candidates)} 个最近更新的媒体信息文件。")
-                for _mtime, path in candidates[:MEDIAINFO_DIR_SCAN_LIMIT]:
-                    self._handle_mediainfo_update(path)
-            finally:
-                with MEDIAINFO_DIR_SCAN_LOCK:
-                    MEDIAINFO_DIR_SCAN_TIMERS.pop(norm_dir, None)
-
-        with MEDIAINFO_DIR_SCAN_LOCK:
-            old_timer = MEDIAINFO_DIR_SCAN_TIMERS.get(norm_dir)
-            if old_timer:
-                try:
-                    old_timer.cancel()
-                except Exception:
-                    pass
-            timer = threading.Timer(DEBOUNCE_DELAY, _runner)
-            timer.daemon = True
-            MEDIAINFO_DIR_SCAN_TIMERS[norm_dir] = timer
-            timer.start()
 
     def _enqueue_file(self, file_path: str):
         """新增/移动文件入队"""
@@ -210,92 +101,6 @@ def _is_path_excluded(file_path: str, exclude_paths: List[str]) -> bool:
         if norm_file == norm_exc or norm_file.startswith(norm_exc + os.sep):
             return True
     return False
-
-def _intro_chapters_key(chapters: Any) -> tuple:
-    key = []
-    for item in chapters or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            ticks = int(item.get("StartPositionTicks") or 0)
-        except Exception:
-            ticks = 0
-        key.append((str(item.get("MarkerType") or ""), ticks))
-    return tuple(sorted(key))
-
-def _shared_intro_skip_reason(reason: str) -> str:
-    return {
-        "no_intro_chapters": "未检测到片头章节",
-        "sha1_not_found": "未找到本地 SHA1 缓存",
-        "shared_center_disabled": "共享中心未启用",
-        "shared_intro_disabled": "共享片头未启用",
-    }.get(str(reason or ""), str(reason or "无需上传"))
-
-def _should_log_mediainfo_intro_state(file_path: str, state_key: tuple, seconds: int = MEDIAINFO_UPLOAD_LOG_DEDUPE_SECONDS) -> bool:
-    now = time.time()
-    with MEDIAINFO_UPLOAD_LOCK:
-        last_key, last_time = MEDIAINFO_UPLOAD_RECENT.get(file_path, (None, 0))
-        if last_key == state_key and now - last_time <= seconds:
-            return False
-        MEDIAINFO_UPLOAD_RECENT[file_path] = (state_key, now)
-        return True
-
-def _run_mediainfo_intro_upload(file_path: str):
-    basename = os.path.basename(file_path)
-    dedupe_key = None
-    try:
-        from handler.shared_intro_service import (
-            _load_json_file,
-            extract_intro_chapters,
-            sha1_for_mediainfo_path,
-            upload_intro_for_mediainfo_path,
-        )
-        data = _load_json_file(file_path)
-        chapters = extract_intro_chapters(data)
-        if not chapters:
-            if _should_log_mediainfo_intro_state(file_path, ("skip", "no_intro_chapters")):
-                logger.debug(f"  ➜ [共享片头] 跳过：{basename}（未检测到片头章节）")
-            return
-        sha1 = sha1_for_mediainfo_path(file_path)
-        if not sha1:
-            if _should_log_mediainfo_intro_state(file_path, ("skip", "sha1_not_found")):
-                logger.debug(f"  ➜ [共享片头] 跳过：{basename}（未找到本地 SHA1 缓存）")
-            return
-
-        chapter_key = _intro_chapters_key(chapters)
-        dedupe_key = (sha1, chapter_key)
-        now = time.time()
-        with MEDIAINFO_UPLOAD_LOCK:
-            last_key, last_time = MEDIAINFO_UPLOAD_RECENT.get(file_path, (None, 0))
-            if last_key == dedupe_key and now - last_time <= MEDIAINFO_UPLOAD_DEDUPE_SECONDS:
-                return
-            if dedupe_key in MEDIAINFO_UPLOAD_INFLIGHT:
-                return
-            MEDIAINFO_UPLOAD_INFLIGHT.add(dedupe_key)
-
-        res = upload_intro_for_mediainfo_path(file_path, reason='monitor_update')
-
-        if res.get("ok"):
-            with MEDIAINFO_UPLOAD_LOCK:
-                MEDIAINFO_UPLOAD_RECENT[file_path] = (dedupe_key, now)
-            logger.info(f"  ➜ [共享片头] 已上传：{basename}（SHA1 {sha1[:12]}，{len(chapters)} 个章节）")
-            return
-
-        if res.get("skipped"):
-            logger.debug(f"  ➜ [共享片头] 跳过：{basename}（{_shared_intro_skip_reason(res.get('reason'))}）")
-            return
-
-        message = res.get("message") or res.get("reason") or "未知错误"
-        center = res.get("center")
-        if isinstance(center, dict):
-            message = center.get("detail") or center.get("message") or message
-        logger.warning(f"  ➜ [共享片头] 上传失败：{basename}（{message}）")
-    except Exception as e:
-        logger.warning(f"  ➜ [共享片头] 上传失败：{basename}（{e}）")
-    finally:
-        with MEDIAINFO_UPLOAD_LOCK:
-            if dedupe_key:
-                MEDIAINFO_UPLOAD_INFLIGHT.discard(dedupe_key)
 
 def _is_etk_standard_strm(file_path: str) -> bool:
     if not str(file_path or '').lower().endswith('.strm'):
@@ -447,14 +252,10 @@ def _identify_physical_media(file_path: str, processor):
 
 def _generate_local_mediainfo(
     file_path: str,
-    mediainfo_path: Optional[str] = None,
     *,
     cache_sha1: Optional[str] = None,
     cache_file_info: Optional[Dict[str, Any]] = None,
-) -> bool:
-    mediainfo_path = mediainfo_path or (os.path.splitext(file_path)[0] + '-mediainfo.json')
-    if not cache_sha1 and os.path.exists(mediainfo_path) and os.path.getsize(mediainfo_path) > 0:
-        return True
+) -> Optional[Dict[str, Any]]:
     if not shutil.which('ffprobe'):
         logger.error("  ➜ [入库预备] 容器内未找到 ffprobe，无法生成媒体信息。")
         return False
@@ -482,10 +283,6 @@ def _generate_local_mediainfo(
             logger.warning("  ➜ [入库预备] ffprobe 未解析出有效媒体流: %s", file_path)
             return False
 
-        temp_path = mediainfo_path + '.etk-tmp'
-        with open(temp_path, 'w', encoding='utf-8') as file_obj:
-            json.dump(formatted, file_obj, ensure_ascii=False, indent=2)
-        os.replace(temp_path, mediainfo_path)
         if cache_sha1:
             from handler.p115_service import P115CacheManager
             file_info = dict(cache_file_info or {})
@@ -500,8 +297,8 @@ def _generate_local_mediainfo(
             ):
                 logger.warning("  ➜ [入库预备] 媒体信息写入 p115_mediainfo_cache 失败: %s", file_path)
                 return False
-        logger.debug("  ➜ [入库预备] ffprobe 已生成媒体信息: %s", mediainfo_path)
-        return True
+        logger.debug("  ➜ [入库预备] ffprobe 已生成内存媒体信息: %s", file_path)
+        return formatted
     except subprocess.TimeoutExpired:
         logger.warning("  ➜ [入库预备] ffprobe 超时: %s", file_path)
         return False
@@ -520,12 +317,12 @@ def prepare_physical_files_for_binding(processor, file_paths: List[str]) -> List
         tmdb_id, media_type, title = identity
         if not _write_minimal_tmdb_nfo(file_path, tmdb_id, media_type, title, processor):
             continue
-        if not _generate_local_mediainfo(file_path):
+        mediainfo = _generate_local_mediainfo(file_path)
+        if not mediainfo:
             continue
         ready_paths.append(file_path)
+        enqueue_emby_binding(file_path, mediainfo=mediainfo)
 
-    for file_path in ready_paths:
-        enqueue_emby_binding(file_path)
     return ready_paths
 
 
@@ -566,37 +363,22 @@ def _enqueue_strm_preparation(processor, file_path: str) -> bool:
     return True
 
 
-def enqueue_emby_binding(file_path: str):
+def enqueue_emby_binding(file_path: str, mediainfo: Optional[Dict[str, Any]] = None):
     """Batch media paths for active Emby Item ID discovery."""
     global EMBY_BIND_TIMER
     if not file_path or not os.path.isfile(file_path):
         return
 
     with EMBY_BIND_LOCK:
-        EMBY_BIND_QUEUE.add(os.path.normpath(file_path))
+        normalized_path = os.path.normpath(file_path)
+        EMBY_BIND_QUEUE.add(normalized_path)
+        if mediainfo:
+            EMBY_BIND_MEDIAINFO[normalized_path] = mediainfo
         if EMBY_BIND_TIMER:
             EMBY_BIND_TIMER.cancel()
         EMBY_BIND_TIMER = threading.Timer(EMBY_BIND_DEBOUNCE_SECONDS, _process_emby_binding_queue)
         EMBY_BIND_TIMER.daemon = True
         EMBY_BIND_TIMER.start()
-
-
-def _wait_for_mediainfo_sidecars(file_paths: List[str], timeout_seconds: float = 15.0) -> List[str]:
-    pending = set(file_paths or [])
-    ready = []
-    deadline = time.time() + timeout_seconds
-    while pending and time.time() < deadline:
-        for path in list(pending):
-            mediainfo_path = os.path.splitext(path)[0] + "-mediainfo.json"
-            if os.path.exists(path) and os.path.exists(mediainfo_path):
-                ready.append(path)
-                pending.remove(path)
-        if pending:
-            time.sleep(0.25)
-
-    for path in pending:
-        logger.warning("  ➜ [主动入库] 未等到媒体信息侧车，跳过主动绑定: %s", path)
-    return ready
 
 
 def _process_emby_binding_queue():
@@ -611,7 +393,7 @@ def _process_emby_binding_queue():
     if not processor or not file_paths:
         return
 
-    ready_paths = _wait_for_mediainfo_sidecars(file_paths)
+    ready_paths = [path for path in file_paths if os.path.exists(path)]
     if not ready_paths:
         return
 
@@ -631,19 +413,33 @@ def _process_emby_binding_queue():
         retry_delays=(0, 0.25, 0.5, 1, 2, 4, 8),
     )
 
-    if found:
+    injected = {}
+    for path, item in found.items():
+        item_id = item.get("Id")
+        normalized_path = os.path.normpath(path)
+        payload = EMBY_BIND_MEDIAINFO.get(normalized_path)
+        if payload:
+            result = emby.apply_etk_mediainfo(item_id, payload, base_url, api_key)
+        else:
+            _pick_code, sha1 = processor._extract_115_fingerprints(path)
+            result = emby.apply_cached_etk_mediainfo(item_id, sha1, base_url, api_key)
+        if result is not None:
+            injected[path] = item
+
+    if injected:
         from routes.webhook import dispatch_active_emby_items
-        dispatch_active_emby_items(list(found.values()))
+        dispatch_active_emby_items(list(injected.values()))
 
         with EMBY_BIND_LOCK:
             for path in ready_paths:
                 normalized = emby._normalize_emby_media_path(path)
-                if normalized in found:
+                if normalized in injected:
                     EMBY_BIND_RETRY_COUNTS.pop(os.path.normpath(path), None)
+                    EMBY_BIND_MEDIAINFO.pop(os.path.normpath(path), None)
 
     missing = [
         path for path in ready_paths
-        if emby._normalize_emby_media_path(path) not in found
+        if emby._normalize_emby_media_path(path) not in injected
     ]
     if missing:
         retrying = []
@@ -658,6 +454,7 @@ def _process_emby_binding_queue():
                     retrying.append(path)
                 else:
                     EMBY_BIND_RETRY_COUNTS.pop(normalized_path, None)
+                    EMBY_BIND_MEDIAINFO.pop(normalized_path, None)
                     exhausted.append(path)
 
             if retrying and EMBY_BIND_TIMER is None:

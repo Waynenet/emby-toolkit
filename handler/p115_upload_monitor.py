@@ -629,10 +629,8 @@ class UploadMonitorRuntime:
         return ""
 
     @staticmethod
-    def _poster_seek_seconds(mediainfo_path: str) -> float:
+    def _poster_seek_seconds(payload: Any) -> float:
         try:
-            with open(mediainfo_path, "r", encoding="utf-8") as file_obj:
-                payload = json.load(file_obj)
             while isinstance(payload, list):
                 payload = payload[0] if payload else {}
             media_source = payload.get("MediaSourceInfo") if isinstance(payload, dict) else {}
@@ -651,7 +649,7 @@ class UploadMonitorRuntime:
         job: Dict[str, Any],
         path: str,
         output_dir: str,
-        mediainfo_path: str,
+        mediainfo: Dict[str, Any],
     ) -> bool:
         if os.path.splitext(path)[1].lower() not in VIDEO_OUTPUT_EXTENSIONS:
             return False
@@ -663,7 +661,7 @@ class UploadMonitorRuntime:
             return False
 
         temp_path = poster_path + ".etk-tmp.jpg"
-        seek_seconds = self._poster_seek_seconds(mediainfo_path)
+        seek_seconds = self._poster_seek_seconds(mediainfo)
         try:
             result = subprocess.run(
                 [
@@ -855,13 +853,12 @@ class UploadMonitorRuntime:
         os.makedirs(output_dir, exist_ok=True)
         from monitor_service import _generate_local_mediainfo, enqueue_file_actively
         stem = os.path.splitext(os.path.basename(path))[0]
-        mediainfo_path = os.path.join(output_dir, stem + "-mediainfo.json")
-        if not _generate_local_mediainfo(
+        mediainfo = _generate_local_mediainfo(
             path,
-            mediainfo_path,
             cache_sha1=uploaded_file.get("sha1") or None,
             cache_file_info=uploaded_file,
-        ):
+        )
+        if not mediainfo:
             return False
 
         etk_url = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or "").strip().rstrip("/")
@@ -882,10 +879,9 @@ class UploadMonitorRuntime:
             logger.error("  ➜ [115上传监控] 写入 STRM 失败: %s -> %s", strm_path, exc)
             return False
 
-        self._ensure_local_poster(job, path, output_dir, mediainfo_path)
+        self._ensure_local_poster(job, path, output_dir, mediainfo)
         job["derived_paths"] = [
             strm_path,
-            mediainfo_path,
             os.path.join(output_dir, stem + "-poster.jpg"),
         ]
         enqueue_file_actively(strm_path)
@@ -917,7 +913,6 @@ class UploadMonitorRuntime:
                 stem = os.path.splitext(os.path.basename(source_path))[0]
                 derived_paths = [
                     os.path.join(output_dir, stem + ".strm"),
-                    os.path.join(output_dir, stem + "-mediainfo.json"),
                     os.path.join(output_dir, stem + "-poster.jpg"),
                 ]
             except Exception as exc:

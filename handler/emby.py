@@ -102,6 +102,85 @@ class EmbyAPIClient:
 # 初始化全局客户端实例
 emby_client = EmbyAPIClient()
 
+
+def normalize_etk_mediainfo_payload(raw: Any) -> Dict[str, Any]:
+    """Normalize cached ETK media info to the bridge plugin request body."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+
+    while isinstance(raw, list):
+        raw = next((item for item in raw if isinstance(item, (dict, list))), None)
+        if raw is None:
+            break
+    if not isinstance(raw, dict):
+        raise ValueError("ETK media information is not a JSON object")
+
+    source = raw.get("MediaSourceInfo")
+    while isinstance(source, list):
+        source = next((item for item in source if isinstance(item, dict)), None)
+    if source is None and isinstance(raw.get("MediaSources"), list):
+        source = next((item for item in raw["MediaSources"] if isinstance(item, dict)), None)
+    if source is None and isinstance(raw.get("MediaStreams"), list):
+        source = raw
+    if not isinstance(source, dict) or not isinstance(source.get("MediaStreams"), list):
+        raise ValueError("ETK media information contains no MediaSourceInfo.MediaStreams")
+
+    chapters = raw.get("Chapters")
+    if not isinstance(chapters, list):
+        chapters = []
+    return {"MediaSourceInfo": source, "Chapters": chapters}
+
+
+def apply_etk_mediainfo(
+    item_id: str,
+    raw: Any,
+    base_url: str,
+    api_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Persist ETK-formatted media information through the bridge plugin."""
+    if not all([item_id, base_url, api_key]):
+        return None
+    try:
+        payload = normalize_etk_mediainfo_payload(raw)
+        url = f"{base_url.rstrip('/')}/Items/{item_id}/ETKMediaInfo"
+        response = emby_client.post(
+            url,
+            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            json=payload,
+        )
+        response.raise_for_status()
+        result = response.json() if response.content else {}
+        logger.debug(
+            "  ➜ [媒体信息注入] Emby Item %s 已写入 %s 条媒体流，保留 %s 条外挂流。",
+            item_id,
+            result.get("StreamCount", len(payload["MediaSourceInfo"]["MediaStreams"])),
+            result.get("PreservedExternalStreamCount", 0),
+        )
+        return result
+    except Exception as e:
+        logger.error("  ➜ [媒体信息注入] Emby Item %s 写入失败: %s", item_id, e)
+        return None
+
+
+def apply_cached_etk_mediainfo(
+    item_id: str,
+    sha1: str,
+    base_url: str,
+    api_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Load formatted media info from p115_mediainfo_cache and inject it."""
+    if not sha1:
+        return None
+    from handler.p115_service import P115CacheManager
+
+    cached = P115CacheManager.get_mediainfo_cache_text(str(sha1).upper())
+    if not cached:
+        logger.warning("  ➜ [媒体信息注入] SHA1 %s 未命中格式化缓存。", str(sha1)[:12])
+        return None
+    return apply_etk_mediainfo(item_id, cached, base_url, api_key)
+
 def get_running_tasks(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     """
     获取当前正在运行的 Emby 后台任务
@@ -3151,31 +3230,3 @@ def get_playback_reporting_data(base_url: str, api_key: str, user_id: str, days:
     except Exception as e:
         logger.error(f"获取个人播放数据失败: {e}")
         return {"error": str(e)}
-
-# ✨✨✨ 神医插件: 清除媒体信息 (强制重新提取) ✨✨✨
-def clear_item_media_info(item_id: str, base_url: str, api_key: str) -> bool:
-    """
-    调用神医插件接口，彻底清除指定项目的媒体信息缓存 (清得毛都不剩)。
-    接口: POST /Items/{Id}/ClearMediaInfo
-    """
-    if not all([item_id, base_url, api_key]):
-        return False
-
-    api_url = f"{base_url.rstrip('/')}/Items/{item_id}/ClearMediaInfo"
-    params = {"api_key": api_key}
-
-    try:
-        # 这个接口是 POST 请求，不需要 body
-        response = emby_client.post(api_url, params=params)
-        response.raise_for_status()
-        logger.info(f"  ➜ [神医] 成功清除项目 (ID:{item_id}) 媒体信息缓存。")
-        return True
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            logger.warning(f"  ➜ [神医] 清除媒体信息失败 (404): 插件版本可能过低，不支持此接口。")
-        else:
-            logger.error(f"  ➜ [神医] 清除媒体信息报错: HTTP {e.response.status_code} - {e.response.text}")
-        return False
-    except Exception as e:
-        logger.error(f"  ➜ [神医] 调用清除媒体信息接口时发生网络异常: {e}")
-        return False

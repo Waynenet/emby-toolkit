@@ -708,10 +708,9 @@ def analyze_media_asset(item_details: dict) -> dict:
         "release_group_raw": release_group_list,
     }
 
-def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, library_guid: str = None, local_mediainfo_path: str = None) -> dict:
+def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, library_guid: str = None) -> dict:
     """
-    视频流分析主函数 (神医融合版)
-    优先读取神医插件生成的 -mediainfo.json，原文照搬并提取展示标签。
+    从 Emby 已持久化的 MediaSources/MediaStreams 提取资产详情。
     """
     # 提取并计算实际文件时长 (分钟)。
     # 这里写入 asset_details_json.runtime_minutes，只代表物理视频/Emby MediaSource 时长，
@@ -731,26 +730,6 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
     if id_to_parent_map and item_id:
         ancestors = calculate_ancestor_ids(item_id, id_to_parent_map, library_guid)
 
-    # ★★★ 核心修复 1：如果没有传入路径，主动去同级目录寻找 JSON ★★★
-    if not local_mediainfo_path:
-        file_path = item_details.get('Path', '')
-        if file_path and not file_path.startswith('http'):
-            guessed_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-            if os.path.exists(guessed_path):
-                local_mediainfo_path = guessed_path
-
-    raw_shenyi_data = None
-    if local_mediainfo_path and os.path.exists(local_mediainfo_path):
-        try:
-            with open(local_mediainfo_path, 'r', encoding='utf-8') as f:
-                raw_shenyi_data = json.load(f)
-        except Exception as e:
-            logger.error(f"读取神医媒体信息文件失败 {local_mediainfo_path}: {e}")
-
-    primary_source = None
-    media_streams = []
-
-    # ★★★ 提取 Emby 原生的流信息，用于兜底和融合外挂字幕 ★★★
     emby_media_sources = item_details.get("MediaSources", [])
     if not isinstance(emby_media_sources, list):
         emby_media_sources = []
@@ -759,102 +738,19 @@ def parse_full_asset_details(item_details: dict, id_to_parent_map: dict = None, 
     if not isinstance(emby_primary_source, dict):
         emby_primary_source = None
 
-    emby_streams = (
+    media_streams = (
         (emby_primary_source.get("MediaStreams") if emby_primary_source else None)
         or item_details.get("MediaStreams", [])
     )
-    if not isinstance(emby_streams, list):
-        emby_streams = []
+    if not isinstance(media_streams, list):
+        media_streams = []
 
-
-    def _pick_media_source_from_json(data):
-        """
-        兼容各种 -mediainfo.json 结构：
-        1. [{"MediaSourceInfo": {...}}]
-        2. [{"MediaSourceInfo": [{...}]}]
-        3. [{"MediaStreams": [...]}]
-        4. {"MediaSourceInfo": {...}}
-        5. {"MediaSourceInfo": [{...}]}
-        6. {"MediaSources": [{...}]}
-        7. [{...}]
-        """
-        if not data:
-            return None
-
-        # 外层 list：取第一个有效元素
-        if isinstance(data, list):
-            for item in data:
-                picked = _pick_media_source_from_json(item)
-                if picked:
-                    return picked
-            return None
-
-        if not isinstance(data, dict):
-            return None
-
-        # Emby 标准包裹：MediaSourceInfo
-        if "MediaSourceInfo" in data:
-            return _pick_media_source_from_json(data.get("MediaSourceInfo"))
-
-        # Emby 原始结构：MediaSources
-        if "MediaSources" in data:
-            return _pick_media_source_from_json(data.get("MediaSources"))
-
-        # 已经是 MediaSource 本体
-        if isinstance(data.get("MediaStreams"), list):
-            return data
-
-        return None
-
-
-    primary_source = _pick_media_source_from_json(raw_shenyi_data)
-
-    if isinstance(primary_source, dict):
-        media_streams = primary_source.get("MediaStreams", [])
-        if not isinstance(media_streams, list):
-            media_streams = []
-    else:
-        # 兜底：如果没有神医 JSON，或者 JSON 结构异常，完全使用 Emby 原始数据
-        primary_source = emby_primary_source
-        media_streams = emby_streams
-
-    # ★★★ 融合外挂字幕：只从 Emby 原始数据里补外挂字幕，避免重复塞内嵌字幕 ★★★
-    if emby_streams:
-        existing_sub_keys = set()
-        for s in media_streams:
-            if not isinstance(s, dict):
-                continue
-            if s.get("Type") == "Subtitle":
-                existing_sub_keys.add((
-                    str(s.get("Index", "")),
-                    str(s.get("Codec", "")),
-                    str(s.get("DisplayTitle", "")),
-                    str(s.get("Title", "")),
-                    bool(s.get("IsExternal")),
-                ))
-
-        for stream in emby_streams:
-            if not isinstance(stream, dict):
-                continue
-
-            if stream.get("Type") == "Subtitle" and stream.get("IsExternal"):
-                sub_key = (
-                    str(stream.get("Index", "")),
-                    str(stream.get("Codec", "")),
-                    str(stream.get("DisplayTitle", "")),
-                    str(stream.get("Title", "")),
-                    bool(stream.get("IsExternal")),
-                )
-
-                if sub_key not in existing_sub_keys:
-                    media_streams.append(stream)
-                    existing_sub_keys.add(sub_key)
+    primary_source = emby_primary_source
 
     container = (primary_source.get("Container") if primary_source else None) or item_details.get("Container")
     size_bytes = (primary_source.get("Size") if primary_source else None) or item_details.get("Size")
 
-    # 如果神医/ffprobe 生成的 MediaSourceInfo 里带 RunTimeTicks，优先使用它；
-    # 没有时再退回 Emby item/MediaSource 的 RunTimeTicks。
+    # 插件注入的 MediaSourceInfo 带 RunTimeTicks 时优先使用它。
     if isinstance(primary_source, dict):
         source_runtime_min = _runtime_minutes_from_ticks(primary_source.get("RunTimeTicks"))
         if source_runtime_min is not None:

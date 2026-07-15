@@ -395,6 +395,68 @@ class MediaProcessor:
 
         return pc, sha1
 
+    def restore_cached_mediainfo_for_emby_items(
+        self,
+        item_ids: List[str],
+        *,
+        log_context: str = "",
+    ) -> Dict[str, int]:
+        """Restore cached media info for exact Emby items after a refresh."""
+        restored_ids = set()
+        failed_ids = set()
+        for raw_item_id in item_ids or []:
+            item_id = str(raw_item_id or '').replace('mediasource_', '').strip()
+            if not item_id or item_id in restored_ids:
+                continue
+            details = emby.get_emby_item_details(
+                item_id,
+                self.emby_url,
+                self.emby_api_key,
+                self.emby_user_id,
+                fields="Path,MediaSources",
+                silent_404=True,
+            )
+            if not details:
+                failed_ids.add(item_id)
+                continue
+
+            sources = details.get('MediaSources') or []
+            if not sources:
+                sources = [{"Id": item_id, "Path": details.get('Path')}]
+            for source in sources:
+                source_item_id = str(source.get('Id') or item_id).replace('mediasource_', '').strip()
+                if not source_item_id or source_item_id in restored_ids:
+                    continue
+                source_path = source.get('Path') or details.get('Path')
+                if not source_path:
+                    failed_ids.add(source_item_id)
+                    continue
+                _file_pc, file_sha1 = self._extract_115_fingerprints(source_path)
+                if file_sha1 and emby.apply_cached_etk_mediainfo(
+                    source_item_id,
+                    file_sha1,
+                    self.emby_url,
+                    self.emby_api_key,
+                ) is not None:
+                    restored_ids.add(source_item_id)
+                    failed_ids.discard(source_item_id)
+                else:
+                    failed_ids.add(source_item_id)
+
+        if restored_ids:
+            logger.info(
+                "  ➜ [媒体信息注入] %s已恢复 %s 个实际版本。",
+                f"{log_context}：" if log_context else "",
+                len(restored_ids),
+            )
+        if failed_ids:
+            logger.warning(
+                "  ➜ [媒体信息注入] %s仍有 %s 个版本未能从缓存恢复。",
+                f"{log_context}：" if log_context else "",
+                len(failed_ids),
+            )
+        return {"restored": len(restored_ids), "failed": len(failed_ids)}
+
     # --- 通过 PC 码反查 SHA1 (自带 115 API 兜底) ---
     def _get_sha1_by_pickcode(self, pick_code: str, allow_api_fallback: bool = True) -> Optional[str]:
         if not self.config.get("monitor_sha1_pc_search", True):
@@ -1044,8 +1106,6 @@ class MediaProcessor:
                                         else:
                                             emby_path = ''
                                 
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            
                             # 构造临时 item 传递给 parse_full_asset_details，确保解析的是当前版本的属性
                             temp_item = item_details_from_emby.copy()
                             
@@ -1069,8 +1129,7 @@ class MediaProcessor:
                             asset_details = parse_full_asset_details(
                                 temp_item, 
                                 id_to_parent_map=id_to_parent_map, 
-                                library_guid=lib_guid,
-                                local_mediainfo_path=mediainfo_path 
+                                library_guid=lib_guid
                             )
                             asset_details['source_library_id'] = source_lib_id
 
@@ -1081,7 +1140,6 @@ class MediaProcessor:
                     else:
                         # 兜底逻辑：如果没有 MediaSources，使用主 Path
                         emby_path = item_details_from_emby.get('Path', '')
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                         
                         file_pc, file_sha1 = self._extract_115_fingerprints(emby_path)
                         if not file_sha1 and file_pc:
@@ -1090,8 +1148,7 @@ class MediaProcessor:
                         asset_details = parse_full_asset_details(
                             item_details_from_emby, 
                             id_to_parent_map=id_to_parent_map, 
-                            library_guid=lib_guid,
-                            local_mediainfo_path=mediainfo_path 
+                            library_guid=lib_guid
                         )
                         asset_details['source_library_id'] = source_lib_id
 
@@ -1474,15 +1531,10 @@ class MediaProcessor:
                                         else:
                                             emby_path = ''
                                 
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            
                             temp_version = version.copy()
                             temp_version['Path'] = emby_path
                             
-                            details = parse_full_asset_details(
-                                temp_version,
-                                local_mediainfo_path=mediainfo_path
-                            )
+                            details = parse_full_asset_details(temp_version)
                             details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                             all_assets.append(details)
@@ -1607,17 +1659,13 @@ class MediaProcessor:
                                     else:
                                         emby_path = ''
                             
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                         if not file_sha1 and file_pc:
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
                         temp_version = version.copy()
                         temp_version['Path'] = emby_path
                         
-                        details = parse_full_asset_details(
-                            temp_version,
-                            local_mediainfo_path=mediainfo_path
-                        )
+                        details = parse_full_asset_details(temp_version)
                         details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                         all_assets.append(details)
@@ -2718,6 +2766,21 @@ class MediaProcessor:
                     replace_all_images_param=False,
                     item_name_for_log=item_name_for_log
                 )
+
+                restore_target_ids = [item_id]
+                if item_type == 'Series':
+                    restore_target_ids = [str(x) for x in (specific_episode_ids or []) if x]
+                    if not restore_target_ids:
+                        restore_target_ids = [
+                            str(asset.get('emby_item_id'))
+                            for asset in media_db.get_physical_paths_and_sha1s_by_emby_id(item_id)
+                            if asset.get('emby_item_id')
+                            and str(asset.get('emby_item_id')) != str(item_id)
+                        ]
+                self.restore_cached_mediainfo_for_emby_items(
+                    restore_target_ids,
+                    log_context="Emby 刷新完成",
+                )
             else:
                 logger.info(f"  ➜ [媒体信息修复] 跳过 Emby 元数据刷新，仅准备写入数据库媒体信息。")
 
@@ -2747,18 +2810,14 @@ class MediaProcessor:
                 def _check_stream_validity(file_path, label_prefix="", emby_item=None, db_assets=None):
                     if not file_path: return False, f"{label_prefix} 缺失文件路径"
                     
-                    # 1. 检查物理文件
-                    mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                    if os.path.exists(mediainfo_path): return True, ""
-                    
-                    # 2. 检查 Emby 的 MediaSources (针对 Movie/Episode)
+                    # 1. 检查 Emby 的 MediaSources (针对 Movie/Episode)
                     if emby_item and emby_item.get("MediaSources"):
                         for source in emby_item["MediaSources"]:
                             for stream in source.get("MediaStreams", []):
                                 if stream.get("Type") == "Video" and stream.get("Width") and stream.get("Height"):
                                     return True, ""
                                     
-                    # 3. 检查数据库的 asset_details_json (针对 Series 中的 Episode)
+                    # 2. 检查数据库的 asset_details_json (针对 Series 中的 Episode)
                     if db_assets and isinstance(db_assets, list):
                         for asset in db_assets:
                             for stream in asset.get("video_streams", []):
