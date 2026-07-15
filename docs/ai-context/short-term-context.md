@@ -8,7 +8,7 @@
 - 项目名称：Emby ToolKit / ETK
 - 项目类型：面向 Emby 用户的媒体库增强工具，核心围绕 115 网盘整理、STRM 入库、元数据补全、追剧订阅、演员订阅、资源共享、合集维护、封面生成、清理和 Web 管理后台。
 - 技术栈：Python 3.12 + Flask 后端，PostgreSQL 持久化，Vue 3 + Vite 前端，Docker 镜像包含 Nginx、ffmpeg、前端构建产物与后端服务。
-- 媒体信息约定：`p115_mediainfo_cache.mediainfo_json` 是格式化数据源，通过独立的 [ETK MediaInfo Bridge](https://github.com/hbq0405/etk-mediainfo-bridge) 插件直接注入 Emby；不生成或读取 `*-mediainfo.json`，不使用 Emby 远程探测替代 ETK 格式化结果。Emby 手动或任务刷新后，插件通过 `/api/p115/mediainfo/...` 自动回补媒体流和章节；智能追剧递归刷新 Series 后，ETK 收尾阶段会批量回补全部 Episode 实际版本。
+- 媒体信息约定：`p115_mediainfo_cache.mediainfo_json` 是格式化数据源，通过独立的 [ETK MediaInfo Bridge](https://github.com/hbq0405/etk-mediainfo-bridge) 插件直接注入 Emby；不生成或读取 `*-mediainfo.json`，不使用 Emby 远程探测替代 ETK 格式化结果。Emby 手动或任务刷新后，插件通过 `/api/p115/mediainfo/...` 自动回补媒体流和章节；插件恢复前会携带 Emby ItemId，ETK 校验播放身份后把 Emby 新检测到的片头章节写回 `mediainfo_json.Chapters` 并上传共享中心，不写入 `raw_ffprobe_json`；智能追剧递归刷新 Series 后，ETK 收尾阶段会批量回补全部 Episode 实际版本。
 
 ## 本项目协作规则
 

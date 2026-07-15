@@ -2,7 +2,9 @@
 import json
 import logging
 import re
+import threading
 from typing import Any, Dict, List
+from urllib.parse import unquote
 
 from database import settings_db
 from database.connection import get_db_connection
@@ -93,6 +95,111 @@ def merge_intro_chapters(mediainfo: Any, chapters: List[Dict[str, Any]]) -> Any:
     kept = [x for x in existing if not (isinstance(x, dict) and str(x.get("MarkerType") or "") in INTRO_MARKER_TYPES)]
     target["Chapters"] = kept + [dict(x) for x in chapters if isinstance(x, dict)]
     return mediainfo
+
+
+def _emby_item_matches_cache(item: Any, sha1: str, expected_pick_code: str = "") -> bool:
+    if not isinstance(item, dict):
+        return False
+    values = [item.get("Path")]
+    values.extend(
+        source.get("Path")
+        for source in (item.get("MediaSources") or [])
+        if isinstance(source, dict)
+    )
+    sha1 = _norm_sha1(sha1)
+    expected_pick_code = str(expected_pick_code or "").strip().lower()
+    for value in values:
+        text = unquote(str(value or ""))
+        play_match = re.search(r"/api/p115/play/([^/?#]+)", text, flags=re.IGNORECASE)
+        if play_match and expected_pick_code and play_match.group(1).strip().lower() == expected_pick_code:
+            return True
+        virtual_match = re.search(
+            r"/api/p115/virtual-play/[^/?#]+/([A-Fa-f0-9]{40})(?:[/?#]|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if virtual_match and sha1 and virtual_match.group(1).upper() == sha1:
+            return True
+    return False
+
+
+def sync_intro_from_emby_item(sha1: str, item_id: str, *, expected_pick_code: str = "") -> Dict[str, Any]:
+    """Persist Emby's detected intro chapters before the bridge restores cached media info."""
+    if not shared_intro_enabled():
+        return {"ok": False, "skipped": True, "reason": "shared_intro_disabled"}
+    sha1 = _norm_sha1(sha1)
+    item_id = str(item_id or "").strip()
+    if not sha1 or not re.fullmatch(r"\d{1,20}", item_id):
+        return {"ok": False, "skipped": True, "reason": "invalid_identity"}
+
+    from handler import emby
+    import config_manager
+    import constants
+
+    item = emby.get_emby_item_details(
+        item_id,
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
+        fields="Path,MediaSources,Chapters",
+        silent_404=True,
+    )
+    if not _emby_item_matches_cache(item, sha1, expected_pick_code):
+        return {"ok": False, "skipped": True, "reason": "item_identity_mismatch"}
+
+    chapters = extract_intro_chapters({"Chapters": item.get("Chapters") or []})
+    if not chapters:
+        return {"ok": False, "skipped": True, "reason": "intro_not_detected"}
+
+    from psycopg2.extras import Json
+
+    changed = False
+    cache_missing = False
+    mediainfo = None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=%s FOR UPDATE",
+                (sha1,),
+            )
+            row = cur.fetchone()
+            mediainfo = row.get("mediainfo_json") if row else None
+            if isinstance(mediainfo, str):
+                mediainfo = json.loads(mediainfo)
+            if not mediainfo:
+                cache_missing = True
+            elif extract_intro_chapters(mediainfo) != chapters:
+                merge_intro_chapters(mediainfo, chapters)
+                cur.execute(
+                    "UPDATE p115_mediainfo_cache SET mediainfo_json=%s WHERE sha1=%s",
+                    (Json(mediainfo, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)), sha1),
+                )
+                changed = True
+        conn.commit()
+
+    if cache_missing:
+        return {"ok": False, "skipped": True, "reason": "media_info_cache_not_found"}
+
+    if changed:
+        file_name = str(item.get("Name") or "").strip()
+
+        def _upload():
+            try:
+                upload_intro_for_cache_sha1(
+                    sha1,
+                    mediainfo,
+                    file_name=file_name,
+                    reason="emby_item_updated",
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [共享片头] Emby 片头后台上传失败: {sha1[:12]}... -> {e}")
+
+        threading.Thread(target=_upload, name=f"intro-upload-{sha1[:8]}", daemon=True).start()
+        logger.info(
+            f"  ➜ [共享片头] 已从 Emby Item {item_id} 回写片头到媒体信息缓存: "
+            f"{sha1[:12]}...（{len(chapters)} 个章节）"
+        )
+    return {"ok": True, "updated": changed, "chapter_count": len(chapters)}
 
 
 def upload_intro_for_cache_sha1(sha1: str, mediainfo: Any, *, file_name: str = "", reason: str = "") -> Dict[str, Any]:
