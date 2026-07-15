@@ -27,7 +27,7 @@
                   </n-statistic>
                 </n-gi>
                 <n-gi>
-                  <n-statistic label="已备份媒体信息" class="centered-statistic">
+                  <n-statistic label="已缓存媒体信息" class="centered-statistic">
                     <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
                       <span class="stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
                       <n-tag 
@@ -292,7 +292,7 @@
         </n-gi>
         <n-gi>
           <n-card size="small" :bordered="false" class="mobile-stat-card">
-            <n-statistic label="已备份信息">
+            <n-statistic label="媒体信息缓存">
               <div style="display: flex; align-items: center; gap: 4px;">
                 <span class="mobile-stat-value">{{ stats.media_library.mediainfo_backed_up_total }}</span>
                 <n-tag 

@@ -2261,7 +2261,7 @@ const tableInfo = {
   'invitations': { cn: '邀请链接', isSharable: false },
   'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
   'p115_filesystem_cache': { cn: '115目录缓存', isSharable: false },
-  'p115_mediainfo_cache': {cn: '媒体信息备份', isSharable: true },
+  'p115_mediainfo_cache': {cn: '媒体信息缓存', isSharable: true },
   'p115_organize_records': {cn: '115整理记录', isSharable: false },
   'p115_upload_records': {cn: '115上传记录', isSharable: false },
   'shared_rapid_sources': { cn: '本机共享秒传源', isSharable: false },

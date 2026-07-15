@@ -801,9 +801,7 @@ const openMediaInfoEditor = async (targetId) => {
   try {
     const res = await axios.get(`/api/media_info/edit/${targetId}`);
     mediaInfoContext.value = {
-      sha1: res.data.sha1,
-      media_path: res.data.media_path,
-      mediainfo_path: res.data.mediainfo_path
+      sha1: res.data.sha1
     };
     mediaInfoData.value = res.data.mediainfo;
     
@@ -832,7 +830,7 @@ const openMediaInfoEditor = async (targetId) => {
 // 3. 保存修改 (修改为使用 currentEditMediaId)
 const saveMediaInfo = async () => {
   isSavingMediaInfo.value = true;
-  const loadingMsg = message.loading("正在覆盖指纹并通知 Emby 重新加载...", { duration: 0 });
+  const loadingMsg = message.loading("正在覆盖指纹并写入 Emby...", { duration: 0 });
   
   try {
     const payload = {
