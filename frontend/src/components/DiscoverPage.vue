@@ -243,9 +243,9 @@
                           :loading="subscribingId === currentRecommendation.id"
                           style="margin-top: 24px;"
                         >
-                          <!-- ★ 根据类型显示不同图标和文字 -->
-                          <template #icon><n-icon :component="isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? ListIcon : HeartOutline" /></template>
-                          {{ isMpConfigured && (currentRecommendation.media_type === 'tv' || mediaType === 'tv') ? '选择季' : '想看这个' }}
+                          <!-- ★ 修改：根据类型显示不同图标和文字 -->
+                          <template #icon><n-icon :component="isMpConfigured && currentRecommendation.media_type === 'tv' ? ListIcon : HeartOutline" /></template>
+                          {{ isMpConfigured && currentRecommendation.media_type === 'tv' ? '选择季' : '想看这个' }}
                         </n-button>
                     </div>
                 </div>

@@ -157,7 +157,7 @@
           </template>
           
           <n-spin :show="loading">
-            <n-scrollbar style="max-height: 360px; padding-right: 8px;">
+            <n-scrollbar style="max-height: 356px; padding-right: 8px;">
               <div v-if="subscriptionHistory.length > 0" class="custom-list">
                 <div v-for="item in subscriptionHistory" :key="item.id" class="custom-list-item">
                   <div class="item-icon-block" :class="getStatusType(item.status)">
