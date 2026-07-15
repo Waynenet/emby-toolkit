@@ -14,18 +14,16 @@ from watchdog.events import FileSystemEventHandler
 
 import config_manager
 import constants
-from database import settings_db
+from database import p115_upload_db, settings_db
 
 
 logger = logging.getLogger(__name__)
 
 UPLOAD_MONITOR_CONFIG_KEY = "p115_upload_monitor_config"
-UPLOAD_MONITOR_STATE_KEY = "p115_upload_monitor_state"
 DEFAULT_PART_SIZE = 64 * 1024 * 1024
 DIRECT_UPLOAD_MAX_SIZE = DEFAULT_PART_SIZE
 SCAN_BATCH_SIZE = 100
 SCAN_MAX_QUEUED = 500
-MAX_COMPLETED_RECORDS = 10000
 UPLOAD_IGNORED_EXTENSIONS = {".strm"}
 UPLOAD_IGNORED_SUFFIXES = (
     ".!qb", ".part", ".partial", ".filepart", ".crdownload", ".download", ".opdownload",
@@ -64,6 +62,15 @@ def _mapping_id(local_dir: str, target_cid: str) -> str:
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
+def _default_upload_extensions() -> set[str]:
+    return _normalize_extensions(
+        config_manager.APP_CONFIG.get(
+            constants.CONFIG_OPTION_MONITOR_EXTENSIONS,
+            constants.DEFAULT_MONITOR_EXTENSIONS,
+        )
+    ) - UPLOAD_IGNORED_EXTENSIONS
+
+
 def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     mappings = []
@@ -82,6 +89,12 @@ def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
         mode = str(item.get("mode") or "keep").strip().lower()
         if mode not in {"keep", "delete"}:
             mode = "keep"
+        extension_values = item.get("extensions")
+        extensions = (
+            _normalize_extensions(extension_values)
+            if isinstance(extension_values, list)
+            else _default_upload_extensions()
+        ) - UPLOAD_IGNORED_EXTENSIONS
         mappings.append({
             "id": str(item.get("id") or _mapping_id(local_dir, target_cid)).strip(),
             "enabled": _as_bool(item.get("enabled"), True),
@@ -89,6 +102,7 @@ def normalize_upload_monitor_config(value: Any) -> Dict[str, Any]:
             "target_cid": target_cid,
             "target_name": str(item.get("target_name") or target_cid).strip(),
             "mode": mode,
+            "extensions": sorted(extensions),
         })
     return {"enabled": _as_bool(raw.get("enabled"), False), "mappings": mappings}
 
@@ -110,60 +124,17 @@ def upload_monitor_enabled() -> bool:
     return bool(config["enabled"] and any(item["enabled"] for item in config["mappings"]))
 
 
-def _empty_state() -> Dict[str, Any]:
-    return {"jobs": {}, "completed": {}}
-
-
-def _load_state() -> Dict[str, Any]:
-    state = settings_db.get_setting(UPLOAD_MONITOR_STATE_KEY) or {}
-    if not isinstance(state, dict):
-        return _empty_state()
-    return {
-        "jobs": state.get("jobs") if isinstance(state.get("jobs"), dict) else {},
-        "completed": state.get("completed") if isinstance(state.get("completed"), dict) else {},
-    }
-
-
-def _save_state(state: Dict[str, Any]) -> None:
-    completed = state.get("completed") if isinstance(state.get("completed"), dict) else {}
-    if len(completed) > MAX_COMPLETED_RECORDS:
-        ordered = sorted(
-            completed.items(),
-            key=lambda pair: float((pair[1] or {}).get("completed_at") or 0),
-            reverse=True,
-        )[:MAX_COMPLETED_RECORDS]
-        state["completed"] = dict(ordered)
-    settings_db.save_setting(UPLOAD_MONITOR_STATE_KEY, state, log_success=False)
-
-
 def get_upload_monitor_status() -> Dict[str, Any]:
-    state = _load_state()
-    jobs = list(state["jobs"].values())
-    counts = {"pending": 0, "uploading": 0, "failed": 0}
-    for job in jobs:
-        status = str((job or {}).get("status") or "pending")
-        if status in counts:
-            counts[status] += 1
+    status = p115_upload_db.get_status()
     public_keys = {
         "id", "status", "path", "relative_path", "target_name", "mode", "fingerprint",
         "uploaded_bytes", "total_bytes", "progress", "upload_backend", "error", "attempts", "updated_at",
     }
     recent = [
         {key: item.get(key) for key in public_keys if key in item}
-        for item in sorted(jobs, key=lambda item: float(item.get("updated_at") or 0), reverse=True)[:20]
+        for item in status.get("recent", [])
     ]
-    completed_count = sum(
-        1 for item in state["completed"].values()
-        if (
-            not isinstance(item, dict)
-            or (
-                not item.get("derived")
-                and os.path.splitext(str(item.get("relative_path") or ""))[1].lower()
-                not in UPLOAD_IGNORED_EXTENSIONS
-            )
-        )
-    )
-    return {**counts, "completed": completed_count, "recent": recent}
+    return {**status, "recent": recent}
 
 
 def _file_fingerprint(path: str) -> Dict[str, int]:
@@ -203,9 +174,8 @@ def _find_mapping(path: str, mappings: List[Dict[str, Any]]) -> Optional[Dict[st
 
 
 class UploadMonitorEventHandler(FileSystemEventHandler):
-    def __init__(self, mappings: List[Dict[str, Any]], extensions: Iterable[str]):
+    def __init__(self, mappings: List[Dict[str, Any]]):
         self.mappings = mappings
-        self.extensions = _normalize_extensions(extensions)
 
     def _accept(self, path: str) -> bool:
         if not path or os.path.basename(path).startswith("."):
@@ -213,15 +183,21 @@ class UploadMonitorEventHandler(FileSystemEventHandler):
         if _is_ignored_upload_path(path):
             return False
         extension = os.path.splitext(path)[1].lower()
+        mapping = _find_mapping(path, self.mappings)
         return (
             extension not in UPLOAD_IGNORED_EXTENSIONS
-            and extension in self.extensions
-            and _find_mapping(path, self.mappings) is not None
+            and mapping is not None
+            and extension in _normalize_extensions(mapping.get("extensions"))
         )
 
     def _schedule(self, path: str) -> None:
         if self._accept(path):
             UploadMonitorRuntime.instance().schedule_path(path, self.mappings)
+
+    def _schedule_delete(self, path: str) -> None:
+        mapping = _find_mapping(path, self.mappings)
+        if self._accept(path) and mapping and mapping.get("mode") == "keep":
+            UploadMonitorRuntime.instance().schedule_deleted_path(path)
 
     def on_created(self, event):
         if not event.is_directory:
@@ -231,8 +207,13 @@ class UploadMonitorEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._schedule(event.src_path)
 
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self._schedule_delete(event.src_path)
+
     def on_moved(self, event):
         if not event.is_directory:
+            self._schedule_delete(event.src_path)
             self._schedule(event.dest_path)
 
 
@@ -244,6 +225,7 @@ class UploadMonitorRuntime:
         self._queue: queue.Queue[str] = queue.Queue()
         self._queued = set()
         self._timers: Dict[str, threading.Timer] = {}
+        self._suppressed_deletes: Dict[str, float] = {}
         self._lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._remote_dir_cache: Dict[tuple, str] = {}
@@ -273,8 +255,9 @@ class UploadMonitorRuntime:
         }
         removed_paths = []
         with self._state_lock:
-            state = _load_state()
-            for job_id, job in list(state["jobs"].items()):
+            jobs = p115_upload_db.list_jobs()
+            removed_job_ids = []
+            for job_id, job in jobs.items():
                 mapping = active_mappings.get(str((job or {}).get("mapping_id") or ""))
                 path = str((job or {}).get("path") or "")
                 if (
@@ -282,11 +265,10 @@ class UploadMonitorRuntime:
                     or not _path_in_root(path, mapping["local_dir"])
                     or str((job or {}).get("target_cid") or "") != str(mapping["target_cid"])
                 ):
-                    state["jobs"].pop(job_id, None)
+                    removed_job_ids.append(job_id)
                     if path:
                         removed_paths.append(os.path.normpath(path))
-            if removed_paths:
-                _save_state(state)
+            p115_upload_db.delete_jobs(removed_job_ids)
 
         if removed_paths:
             with self._lock:
@@ -308,6 +290,81 @@ class UploadMonitorRuntime:
             self._timers[norm_path] = timer
             timer.start()
 
+    def schedule_deleted_path(self, path: str, delay: float = 2.0) -> None:
+        norm_path = os.path.normpath(path)
+        with self._lock:
+            old = self._timers.pop(norm_path, None)
+            if old:
+                old.cancel()
+            timer = threading.Timer(delay, self._handle_deleted_path, args=(norm_path,))
+            timer.daemon = True
+            self._timers[norm_path] = timer
+            timer.start()
+
+    @staticmethod
+    def _delete_path_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+    def suppress_deleted_path(self, path: str, ttl: float = 15.0) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._suppressed_deletes = {
+                key: expires_at
+                for key, expires_at in self._suppressed_deletes.items()
+                if expires_at > now
+            }
+            self._suppressed_deletes[self._delete_path_key(path)] = now + ttl
+
+    def unsuppress_deleted_path(self, path: str) -> None:
+        with self._lock:
+            self._suppressed_deletes.pop(self._delete_path_key(path), None)
+
+    def _consume_suppressed_delete(self, path: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            expires_at = self._suppressed_deletes.pop(self._delete_path_key(path), 0)
+        return expires_at > now
+
+    def _handle_deleted_path(self, path: str) -> None:
+        with self._lock:
+            self._timers.pop(os.path.normpath(path), None)
+        if self._consume_suppressed_delete(path):
+            logger.debug("  ➜ [115上传监控] 已忽略 Emby 联动流程产生的本地删除事件: %s", path)
+            return
+        if os.path.exists(path):
+            return
+
+        config = get_upload_monitor_config()
+        mapping = _find_mapping(path, config.get("mappings", []))
+        if not config.get("enabled") or not mapping or mapping.get("mode") != "keep":
+            return
+
+        records = p115_upload_db.find_completed_by_local_paths([os.path.abspath(path)])
+        records = [row for row in records if str(row.get("mapping_id") or "") == str(mapping.get("id") or "")]
+        for record in records:
+            completed = record.get("payload_json") or {}
+            if not isinstance(completed, dict):
+                continue
+            strm_path = self._remove_local_outputs(mapping, completed, path)
+            if strm_path:
+                emby_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+                emby_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+                if emby_url and emby_api_key:
+                    try:
+                        from handler import emby
+                        emby.notify_emby_file_changes([strm_path], emby_url, emby_api_key, update_type="Deleted")
+                    except Exception as exc:
+                        logger.warning("  ➜ [115上传监控] 通知 Emby 删除本地镜像失败: %s -> %s", strm_path, exc)
+
+            pick_code = str(record.get("pick_code") or completed.get("pick_code") or "").strip()
+            if pick_code:
+                from handler.p115_service import delete_115_files_by_webhook
+                delete_115_files_by_webhook([pick_code])
+            else:
+                p115_upload_db.delete_completed_and_jobs([record.get("record_key")], [path])
+                logger.warning("  ➜ [115上传监控] 本地源文件已删除，但历史记录缺少 pick_code，无法联动删除 115: %s", path)
+            logger.info("  ➜ [115上传监控] 本地删除已触发双向同步: %s", path)
+
     def enqueue_path(self, path: str, mappings: Optional[List[Dict[str, Any]]] = None) -> None:
         with self._lock:
             self._timers.pop(os.path.normpath(path), None)
@@ -321,7 +378,7 @@ class UploadMonitorRuntime:
         job_ids = []
 
         with self._state_lock:
-            state = _load_state()
+            candidates = []
             for path in paths:
                 if not os.path.isfile(path):
                     continue
@@ -337,9 +394,15 @@ class UploadMonitorRuntime:
                 job_id = hashlib.sha1(
                     f"{completed_key}\0{fingerprint['size']}\0{fingerprint['mtime_ns']}".encode("utf-8", errors="ignore")
                 ).hexdigest()
-                if _same_fingerprint((state["completed"].get(completed_key) or {}).get("fingerprint"), fingerprint):
+                candidates.append((path, mapping, fingerprint, rel_path, completed_key, job_id))
+
+            completed_records = p115_upload_db.get_completed(item[4] for item in candidates)
+            existing_jobs = p115_upload_db.get_jobs(item[5] for item in candidates)
+            jobs_to_save = []
+            for path, mapping, fingerprint, rel_path, completed_key, job_id in candidates:
+                if _same_fingerprint((completed_records.get(completed_key) or {}).get("fingerprint"), fingerprint):
                     continue
-                job = state["jobs"].get(job_id) or {}
+                job = existing_jobs.get(job_id) or {}
                 job.update({
                     "id": job_id,
                     "status": "pending",
@@ -352,10 +415,9 @@ class UploadMonitorRuntime:
                     "fingerprint": fingerprint,
                     "updated_at": time.time(),
                 })
-                state["jobs"][job_id] = job
+                jobs_to_save.append(job)
                 job_ids.append(job_id)
-            if job_ids:
-                _save_state(state)
+            p115_upload_db.upsert_jobs(jobs_to_save)
 
         if not job_ids:
             return 0
@@ -367,9 +429,7 @@ class UploadMonitorRuntime:
                     self._queue.put(job_id)
         return len(job_ids)
 
-    def scan_existing(self, mappings: List[Dict[str, Any]], extensions: Iterable[str]) -> None:
-        allowed = _normalize_extensions(extensions) - UPLOAD_IGNORED_EXTENSIONS
-
+    def scan_existing(self, mappings: List[Dict[str, Any]]) -> None:
         def _scan():
             batch = []
             queued_count = 0
@@ -377,6 +437,7 @@ class UploadMonitorRuntime:
                 root = mapping["local_dir"]
                 if not mapping.get("enabled") or not os.path.isdir(root):
                     continue
+                allowed = _normalize_extensions(mapping.get("extensions")) - UPLOAD_IGNORED_EXTENSIONS
                 for current_root, _, files in os.walk(root):
                     for name in files:
                         path = os.path.join(current_root, name)
@@ -429,26 +490,24 @@ class UploadMonitorRuntime:
 
     def _update_job(self, job_id: str, **values) -> Optional[Dict[str, Any]]:
         with self._state_lock:
-            state = _load_state()
-            job = state["jobs"].get(job_id)
+            job = p115_upload_db.get_job(job_id)
             if not isinstance(job, dict):
                 return None
             job.update(values)
             job["updated_at"] = time.time()
-            _save_state(state)
+            p115_upload_db.upsert_jobs([job])
             return dict(job)
 
     def _merge_resume(self, job_id: str, resume: Dict[str, Any]) -> None:
         with self._state_lock:
-            state = _load_state()
-            job = state["jobs"].get(job_id)
+            job = p115_upload_db.get_job(job_id)
             if not isinstance(job, dict):
                 return
             merged = dict(job.get("resume") or {})
             merged.update(resume)
             job["resume"] = merged
             job["updated_at"] = time.time()
-            _save_state(state)
+            p115_upload_db.upsert_jobs([job])
 
     def _make_progress_hook(self, job_id: str, total_bytes: int):
         uploaded_bytes = 0
@@ -477,7 +536,7 @@ class UploadMonitorRuntime:
 
     def _process_job(self, job_id: str) -> None:
         with self._state_lock:
-            job = (_load_state()["jobs"].get(job_id) or {}).copy()
+            job = (p115_upload_db.get_job(job_id) or {}).copy()
         if _is_ignored_upload_path(job.get("path") or ""):
             self._remove_job(job_id)
             return
@@ -550,7 +609,7 @@ class UploadMonitorRuntime:
             except OSError as exc:
                 logger.warning("  ➜ [115上传监控] 上传成功，但删除本地文件失败: %s -> %s", path, exc)
 
-        self._complete_job(job_id, job, result)
+        self._complete_job(job_id, job, uploaded_file or result)
         if os.path.isfile(path):
             latest = _file_fingerprint(path)
             if not _same_fingerprint(latest, job.get("fingerprint")):
@@ -570,10 +629,8 @@ class UploadMonitorRuntime:
         return ""
 
     @staticmethod
-    def _poster_seek_seconds(mediainfo_path: str) -> float:
+    def _poster_seek_seconds(payload: Any) -> float:
         try:
-            with open(mediainfo_path, "r", encoding="utf-8") as file_obj:
-                payload = json.load(file_obj)
             while isinstance(payload, list):
                 payload = payload[0] if payload else {}
             media_source = payload.get("MediaSourceInfo") if isinstance(payload, dict) else {}
@@ -592,7 +649,7 @@ class UploadMonitorRuntime:
         job: Dict[str, Any],
         path: str,
         output_dir: str,
-        mediainfo_path: str,
+        mediainfo: Dict[str, Any],
     ) -> bool:
         if os.path.splitext(path)[1].lower() not in VIDEO_OUTPUT_EXTENSIONS:
             return False
@@ -604,7 +661,7 @@ class UploadMonitorRuntime:
             return False
 
         temp_path = poster_path + ".etk-tmp.jpg"
-        seek_seconds = self._poster_seek_seconds(mediainfo_path)
+        seek_seconds = self._poster_seek_seconds(mediainfo)
         try:
             result = subprocess.run(
                 [
@@ -796,13 +853,12 @@ class UploadMonitorRuntime:
         os.makedirs(output_dir, exist_ok=True)
         from monitor_service import _generate_local_mediainfo, enqueue_file_actively
         stem = os.path.splitext(os.path.basename(path))[0]
-        mediainfo_path = os.path.join(output_dir, stem + "-mediainfo.json")
-        if not _generate_local_mediainfo(
+        mediainfo = _generate_local_mediainfo(
             path,
-            mediainfo_path,
             cache_sha1=uploaded_file.get("sha1") or None,
             cache_file_info=uploaded_file,
-        ):
+        )
+        if not mediainfo:
             return False
 
         etk_url = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or "").strip().rstrip("/")
@@ -823,42 +879,93 @@ class UploadMonitorRuntime:
             logger.error("  ➜ [115上传监控] 写入 STRM 失败: %s -> %s", strm_path, exc)
             return False
 
-        self._ensure_local_poster(job, path, output_dir, mediainfo_path)
+        self._ensure_local_poster(job, path, output_dir, mediainfo)
+        job["derived_paths"] = [
+            strm_path,
+            os.path.join(output_dir, stem + "-poster.jpg"),
+        ]
         enqueue_file_actively(strm_path)
         logger.info("  ➜ [115上传监控] 已生成 STRM 与媒体信息: %s", strm_path)
         return True
 
+    def _remove_local_outputs(self, mapping: Dict[str, Any], completed: Dict[str, Any], source_path: str) -> str:
+        if os.path.splitext(source_path)[1].lower() not in MEDIA_OUTPUT_EXTENSIONS:
+            return ""
+        local_root = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) or "").strip()
+        if not local_root:
+            return ""
+        local_root = os.path.abspath(local_root)
+        derived_paths = completed.get("derived_paths") if isinstance(completed.get("derived_paths"), list) else []
+
+        if not derived_paths:
+            try:
+                category_root = self._resolve_local_output_directory(
+                    str(mapping.get("target_cid") or completed.get("target_cid") or ""),
+                    str(mapping.get("target_name") or ""),
+                )
+                from handler.p115_service import resolve_p115_sorting_target_by_local_path
+                if not resolve_p115_sorting_target_by_local_path(category_root, local_root=local_root):
+                    return ""
+                relative_dir = os.path.dirname(str(completed.get("relative_path") or ""))
+                output_dir = os.path.abspath(os.path.join(category_root, relative_dir))
+                if os.path.commonpath([category_root, output_dir]) != os.path.abspath(category_root):
+                    return ""
+                stem = os.path.splitext(os.path.basename(source_path))[0]
+                derived_paths = [
+                    os.path.join(output_dir, stem + ".strm"),
+                    os.path.join(output_dir, stem + "-poster.jpg"),
+                ]
+            except Exception as exc:
+                logger.warning("  ➜ [115上传监控] 回算本地镜像路径失败: %s -> %s", source_path, exc)
+                return ""
+
+        strm_path = ""
+        for value in derived_paths:
+            candidate_value = str(value or "").strip()
+            if not candidate_value:
+                continue
+            candidate = os.path.abspath(candidate_value)
+            if not _path_in_root(candidate, local_root):
+                continue
+            if candidate.lower().endswith(".strm"):
+                strm_path = candidate
+            if os.path.isfile(candidate):
+                try:
+                    os.remove(candidate)
+                    logger.info("  ➜ [115上传监控] 已删除本地镜像文件: %s", candidate)
+                except OSError as exc:
+                    logger.warning("  ➜ [115上传监控] 删除本地镜像文件失败: %s -> %s", candidate, exc)
+        return strm_path
+
     def _remove_job(self, job_id: str) -> None:
         with self._state_lock:
-            state = _load_state()
-            state["jobs"].pop(job_id, None)
-            _save_state(state)
+            p115_upload_db.delete_jobs([job_id])
 
     def _complete_job(self, job_id: str, job: Dict[str, Any], result: Dict[str, Any]) -> None:
         completed_key = f"{job['mapping_id']}:{os.path.normcase(os.path.abspath(job['path']))}"
         with self._state_lock:
-            state = _load_state()
-            state["jobs"].pop(job_id, None)
-            state["completed"][completed_key] = {
+            completed = {
+                "mapping_id": job["mapping_id"],
+                "local_path": os.path.abspath(job["path"]),
                 "fingerprint": job["fingerprint"],
                 "target_cid": job["target_cid"],
                 "relative_path": job["relative_path"],
                 "pick_code": str((result or {}).get("pick_code") or (result or {}).get("pickcode") or ""),
+                "derived_paths": list(job.get("derived_paths") or []),
                 "completed_at": time.time(),
             }
-            _save_state(state)
+            p115_upload_db.complete_job(job_id, completed_key, completed)
         logger.info("  ➜ [115上传监控] 上传完成: %s -> %s", job["path"], job.get("target_name") or job["target_cid"])
 
     def _fail_and_retry(self, job_id: str, error: str) -> None:
         with self._state_lock:
-            state = _load_state()
-            job = state["jobs"].get(job_id)
+            job = p115_upload_db.get_job(job_id)
             if not isinstance(job, dict):
                 return
             attempts = int(job.get("attempts") or 0) + 1
             delay = min(300, 15 * (2 ** min(attempts - 1, 4)))
             job.update(status="failed", error=error[:500], attempts=attempts, updated_at=time.time())
-            _save_state(state)
+            p115_upload_db.upsert_jobs([job])
         logger.warning("  ➜ [115上传监控] 上传失败，%s 秒后续传重试: %s -> %s", delay, job.get("path"), error)
         timer = threading.Timer(delay, self._requeue_job, args=(job_id,))
         timer.daemon = True
@@ -1106,12 +1213,95 @@ class UploadMonitorRuntime:
             raise
 
 
+def delete_local_sources_by_pickcodes(pickcodes: Iterable[str]) -> Dict[str, int]:
+    """Delete unchanged local sources tracked by active bidirectional mappings."""
+    values = [pickcodes] if isinstance(pickcodes, str) else (pickcodes or [])
+    normalized_pickcodes = {
+        str(value or "").strip()
+        for value in values
+        if str(value or "").strip()
+    }
+    result = {"matched": 0, "deleted": 0, "missing": 0, "changed": 0, "failed": 0}
+    if not normalized_pickcodes:
+        return result
+
+    config = get_upload_monitor_config()
+    active_mappings = {
+        item["id"]: item
+        for item in config.get("mappings", [])
+        if config.get("enabled") and item.get("enabled") and item.get("mode") == "keep"
+    }
+    if not active_mappings:
+        return result
+
+    runtime = UploadMonitorRuntime.instance()
+    removed_paths = []
+    removed_completed_keys = []
+    with runtime._state_lock:
+        records = p115_upload_db.find_completed_by_pickcodes(normalized_pickcodes)
+        for record in records:
+            completed_key = str(record.get("record_key") or "")
+            completed = record.get("payload_json") or {}
+            if not isinstance(completed, dict):
+                continue
+            mapping_id = str(record.get("mapping_id") or completed.get("mapping_id") or "")
+            mapping = active_mappings.get(mapping_id)
+            if not mapping:
+                continue
+
+            result["matched"] += 1
+            local_path = str(record.get("local_path") or completed.get("local_path") or "").strip()
+            if not local_path:
+                local_path = os.path.join(mapping["local_dir"], os.path.normpath(str(completed.get("relative_path") or "")))
+            local_path = os.path.abspath(local_path)
+            if not _path_in_root(local_path, mapping["local_dir"]):
+                result["failed"] += 1
+                logger.warning("  ➜ [115上传监控] 双向删除拒绝越界路径: %s", local_path)
+                continue
+
+            if os.path.exists(local_path):
+                try:
+                    current_fingerprint = _file_fingerprint(local_path)
+                except OSError as exc:
+                    result["failed"] += 1
+                    logger.warning("  ➜ [115上传监控] 双向删除读取源文件失败: %s -> %s", local_path, exc)
+                    continue
+                if not _same_fingerprint(completed.get("fingerprint"), current_fingerprint):
+                    result["changed"] += 1
+                    logger.warning("  ➜ [115上传监控] 源文件已变更，跳过 Emby 双向删除: %s", local_path)
+                    continue
+                try:
+                    runtime.suppress_deleted_path(local_path)
+                    os.remove(local_path)
+                    result["deleted"] += 1
+                    logger.info("  ➜ [115上传监控] Emby 联动删除本地源文件: %s", local_path)
+                except OSError as exc:
+                    runtime.unsuppress_deleted_path(local_path)
+                    result["failed"] += 1
+                    logger.warning("  ➜ [115上传监控] Emby 联动删除本地源文件失败: %s -> %s", local_path, exc)
+                    continue
+            else:
+                result["missing"] += 1
+
+            removed_completed_keys.append(completed_key)
+            removed_paths.append(local_path)
+        p115_upload_db.delete_completed_and_jobs(removed_completed_keys, removed_paths)
+
+    if removed_paths:
+        with runtime._lock:
+            for local_path in removed_paths:
+                timer = runtime._timers.pop(os.path.normpath(local_path), None)
+                if timer:
+                    timer.cancel()
+    return result
+
+
 def schedule_upload_monitor(observer, extensions: Iterable[str]) -> List[str]:
     config = get_upload_monitor_config()
     mappings = [item for item in config["mappings"] if item.get("enabled")]
     if not config["enabled"] or not mappings:
         return []
-    handler = UploadMonitorEventHandler(mappings, extensions)
+    handler = UploadMonitorEventHandler(mappings)
     started = []
     for root in sorted({item["local_dir"] for item in mappings}):
         if not os.path.isdir(root):
@@ -1122,5 +1312,5 @@ def schedule_upload_monitor(observer, extensions: Iterable[str]) -> List[str]:
     if started:
         runtime = UploadMonitorRuntime.instance()
         runtime.start()
-        runtime.scan_existing(mappings, extensions)
+        runtime.scan_existing(mappings)
     return started

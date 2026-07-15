@@ -277,8 +277,7 @@ def task_sync_all_metadata(processor, item_id: str, item_name: str):
 # --- 核心辅助函数：轮询等待媒体信息修复完成 ---
 def _wait_for_items_recovery(processor, item_ids: list, max_retries=6, interval=10) -> bool:
     """
-    轮询检查指定的一组 Emby ID 是否都已具备有效的媒体信息文件 (-mediainfo.json)。
-    用于等待神医插件处理网盘文件。
+    轮询检查指定的一组 Emby ID 是否都已具备有效的媒体流信息。
     """
     if not item_ids:
         return True
@@ -304,19 +303,8 @@ def _wait_for_items_recovery(processor, item_ids: list, max_retries=6, interval=
                 
                 is_healed = False
                 if item_details:
-                    # ★★★ 核心修改：直接查找物理文件 ★★★
-                    file_path = item_details.get("Path")
                     media_sources = item_details.get("MediaSources", [])
-                    if not file_path and media_sources:
-                        file_path = media_sources[0].get("Path")
-                    
-                    if file_path:
-                        mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                        if os.path.exists(mediainfo_path):
-                            is_healed = True
-                            
-                    # ★★★ 补充检查：如果没有检测到物理文件，检查 MediaSources 是否有分辨率数据 ★★★
-                    if not is_healed and media_sources:
+                    if media_sources:
                         for source in media_sources:
                             for stream in source.get("MediaStreams", []):
                                 if stream.get("Type") == "Video" and (stream.get("Width") or stream.get("Height")):
@@ -326,7 +314,7 @@ def _wait_for_items_recovery(processor, item_ids: list, max_retries=6, interval=
                                 break
                 
                 if is_healed:
-                    logger.debug(f"    ✔ 项目 {eid} 已检测到媒体信息文件，移除监控队列。")
+                    logger.debug(f"    ✔ 项目 {eid} 已检测到媒体流信息，移除监控队列。")
                     pending_ids.remove(eid)
                     
             except Exception:
@@ -337,7 +325,7 @@ def _wait_for_items_recovery(processor, item_ids: list, max_retries=6, interval=
             return True
             
         if i % 2 == 0: # 每20秒打印一次进度
-            logger.info(f"  ➜ 等待神医提取媒体信息中... 剩余 {len(pending_ids)}/{len(item_ids)} 个项目 (轮询 {i+1}/{max_retries})")
+            logger.info(f"  ➜ 等待媒体信息写入 Emby... 剩余 {len(pending_ids)}/{len(item_ids)} 个项目 (轮询 {i+1}/{max_retries})")
             
         time.sleep(interval)
 
@@ -350,8 +338,8 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
     重新处理单个项目的后台任务 (纯本地数据库定点极速版)。
     逻辑重构：
     1. 直接查本地数据库获取该项目的所有物理路径和 SHA1 (0 API 消耗)。
-    2. 如果是手动强制重扫，定点清空数据库媒体信息缓存，并调用神医接口清除 Emby 缓存(自动删本地JSON)。
-    3. 仅针对这些路径进行定点媒体信息恢复/提取，彻底杜绝全局扫描。
+    2. 如果是手动强制重扫，定点重新格式化数据库媒体信息缓存。
+    3. 仅针对这些路径进行定点媒体信息恢复/提取并注入 Emby。
     4. 执行标准的全量元数据刮削流程；如果失败原因是“缺失媒体信息”，则只刷新媒体信息资产缓存。
     """
     logger.trace(f"  ➜ 后台任务开始执行 ({item_name_for_ui})")
@@ -400,12 +388,6 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
                 except Exception as e:
                     logger.warning(f"  ➜ 处理数据库媒体信息缓存失败: {e}")
                     
-            # B. 调用神医接口清除 Emby 内部缓存 (神医插件会自动删除本地的 -mediainfo.json 文件)
-            try:
-                emby.clear_item_media_info(item_id, processor.emby_url, processor.emby_api_key)
-                logger.info(f"  ➜ 已通知 Emby 清除内部媒体信息缓存 (并自动删除本地 JSON)。")
-            except Exception as e:
-                logger.warning(f"  ➜ 通知 Emby 清除缓存失败: {e}")
         else:
             logger.info(f"  ➜ 失败原因为缺失媒体信息，保留现有缓存，准备查漏补缺。")
 
@@ -417,7 +399,6 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
         
         from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer
         client = P115Service.get_client()
-        local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, "")
         
         restored_count = 0
         
@@ -425,20 +406,16 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
             path = asset.get('path')
             sha1 = asset.get('sha1')
             pc = asset.get('pc')
+            target_emby_id = asset.get('emby_item_id') or item_id
             
             if not path: continue
             
-            local_path = path
             strm_content_path = path
             
             # 路径转换与 STRM 读取
             if path.startswith('http'):
                 if not pc:
                     pc, _ = processor._extract_115_fingerprints(path)
-                if pc:
-                    db_local_path = processor._get_local_path_by_pickcode(pc)
-                    if db_local_path:
-                        local_path = os.path.join(local_root, db_local_path.lstrip('/\\'))
             else:
                 if path.lower().endswith('.strm'):
                     try:
@@ -446,14 +423,6 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
                             strm_content_path = f.read().strip().replace('\\', '/')
                     except: pass
                     
-            # 纯本地文件(非115映射)无法生成 JSON，直接跳过
-            if not local_path or local_path.startswith('http'):
-                continue
-                
-            json_path = os.path.splitext(local_path)[0] + "-mediainfo.json"
-            if os.path.exists(json_path):
-                continue # 已存在，跳过
-                
             # 提取指纹
             if not pc or not sha1:
                 extracted_pc, extracted_sha1 = processor._extract_115_fingerprints(strm_content_path)
@@ -462,8 +431,8 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
                 if not sha1 and pc:
                     sha1 = processor._get_sha1_by_pickcode(pc)
                 
-            if not pc or not sha1:
-                continue # 非 115 资产，跳过
+            if not sha1:
+                continue
                 
             # 尝试获取或生成
             mediainfo = media_db.get_mediainfo_by_sha1(sha1)
@@ -476,35 +445,33 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
                 if raw_ffprobe:
                     try:
                         analyzer = SmartOrganizer.__new__(SmartOrganizer)
-                        dummy_node = {"fn": os.path.basename(local_path)}
+                        dummy_node = {"fn": os.path.basename(path)}
                         mediainfo = analyzer._build_emby_mediainfo_from_ffprobe(raw_ffprobe, dummy_node, sha1)
                         if mediainfo:
                             P115CacheManager.save_mediainfo_cache(sha1, mediainfo, raw_ffprobe)
                     except: pass
                     
-            if not mediainfo and client:
+            if not mediainfo and client and pc:
                 try:
                     probe_helper = SmartOrganizer.__new__(SmartOrganizer)
                     probe_helper.client = client
-                    file_node = {"pick_code": pc, "pc": pc, "file_name": os.path.basename(local_path), "fn": os.path.basename(local_path)}
+                    file_node = {"pick_code": pc, "pc": pc, "file_name": os.path.basename(path), "fn": os.path.basename(path)}
                     emby_json, raw_ffprobe = probe_helper._probe_mediainfo_with_ffprobe(file_node=file_node, sha1=sha1, silent_log=True) or (None, None)
                     if emby_json:
                         P115CacheManager.save_mediainfo_cache(sha1, emby_json, raw_ffprobe)
                         mediainfo = emby_json
                 except: pass
                 
-            # 写入文件
-            if mediainfo:
-                try:
-                    with open(json_path, 'w', encoding='utf-8') as f:
-                        json.dump(mediainfo, f, ensure_ascii=False)
-                    restored_count += 1
-                    logger.debug(f"    - 成功生成定点媒体信息: {os.path.basename(json_path)}")
-                except Exception as e:
-                    logger.warning(f"    - 写入 JSON 失败 {json_path}: {e}")
+            if mediainfo and emby.apply_etk_mediainfo(
+                target_emby_id,
+                mediainfo,
+                processor.emby_url,
+                processor.emby_api_key,
+            ) is not None:
+                restored_count += 1
 
         if restored_count > 0:
-            logger.info(f"  ➜ 成功定点恢复了 {restored_count} 个媒体信息文件。")
+            logger.info(f"  ➜ 成功向 Emby 注入了 {restored_count} 个版本的媒体信息。")
 
         # =================================================================
         # 步骤 4：验收成果 & 写入数据库
@@ -2295,36 +2262,29 @@ def task_repair_p115_fingerprints(processor):
     task_manager.update_status_from_thread(100, final_msg)
 
 
-# --- 终极媒体信息备份任务 ---
+# --- 媒体信息缓存检查与注入任务 ---
 def task_backup_mediainfo(processor):
     """
-    【终极媒体信息备份任务】(精准过滤版 + 待复核标记)
-    1. 通过高级 SQL 精准获取真正缺失 SHA1 或 缺失指纹缓存 的媒体项。
-    2. 检查 SHA1，缺失的通过解析 链接/STRM 提取 PC 码 -> 换取 FID -> 115 API 补齐并写入 media_metadata。
-    3. 检查本地 -mediainfo.json，如果缺失则将该项目标记为“待复核”。
-    4. 如果存在，则读取并写入指纹库 p115_mediainfo_cache。
+    补齐缺失的 SHA1，并将已有的格式化缓存注入对应 Emby Item。
     """
-    logger.info("--- 开始执行媒体信息备份任务 ---")
+    logger.info("--- 开始执行媒体信息同步任务 ---")
     
-    task_manager.update_status_from_thread(0, "正在扫描需要备份的媒体项，请稍候...")
+    task_manager.update_status_from_thread(0, "正在扫描需要同步的媒体项，请稍候...")
     time.sleep(1)  # 增加短暂停顿，确保前端能渲染出初始状态
     
     items = media_db.get_missing_mediainfo_assets()
     total = len(items)
     
     if total == 0:
-        logger.info("  ➜ 所有媒体信息均已备份，无需处理。")
-        task_manager.update_status_from_thread(100, "所有媒体信息均已备份，无需处理")
-        time.sleep(1)  # 增加短暂停顿，确保前端能渲染出完成状态
-        return
-
-    logger.info(f"  ➜ 共扫描到 {total} 个项目需要补充 SHA1 或备份媒体信息...")
+        logger.info("  ➜ 所有媒体信息缓存均已就绪，开始同步 Emby。")
+    else:
+        logger.info(f"  ➜ 共扫描到 {total} 个项目需要补充 SHA1 或同步媒体信息...")
     
     from handler.p115_service import P115Service, P115CacheManager
     client = P115Service.get_client()
     
     sha1_fixed_count = 0
-    mediainfo_backed_up_count = 0
+    mediainfo_injected_count = 0
     
     try:
         with connection.get_db_connection() as conn:
@@ -2449,56 +2409,11 @@ def task_backup_mediainfo(processor):
                             except Exception as e:
                                 logger.warning(f"  ➜ 获取 SHA1 失败: {e}")
                                 
-                    # 阶段 2: 备份媒体信息到指纹库 & 缺失检查
-                    if current_path and not current_path.startswith('http'):
-                        local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT, '')
-                        mediainfo_path = None
-                        
-                        # 通过 PC/SHA1 回到本地 STRM 目录查找 JSON。
-                        if current_sha1 or actual_pc:
-                            query_val = current_sha1 if current_sha1 else actual_pc
-                            query_col = "sha1" if current_sha1 else "pick_code"
-                            cursor.execute(f"SELECT local_path FROM p115_filesystem_cache WHERE {query_col} = %s AND local_path IS NOT NULL LIMIT 1", (query_val,))
-                            cache_row = cursor.fetchone()
-                            if cache_row and cache_row['local_path']:
-                                # 拼接出真实的本地 JSON 路径
-                                base_local = os.path.join(local_root, str(cache_row['local_path']).lstrip('\\/'))
-                                mediainfo_path = os.path.splitext(base_local)[0] + "-mediainfo.json"
-                        
-                        # 兜底：如果没查到，或者本来就是本地 STRM 路径，直接替换后缀
-                        if not mediainfo_path:
-                            mediainfo_path = os.path.splitext(current_path)[0] + "-mediainfo.json"
-                        
-                        if not os.path.exists(mediainfo_path):
-                            # ★★★ 缺失 mediainfo.json，标记待复核 (仅限电影和剧集) ★★★
-                            if target_emby_id and target_log_type in ['Movie', 'Series']:
-                                filename = os.path.basename(mediainfo_path)
-                                match = re.search(r'(S\d{1,2}E\d{1,3})', filename, re.IGNORECASE)
-                                reason = f"缺失媒体信息: {match.group(1).upper()}" if match else "缺失媒体信息"
-                                    
-                                processor.log_db_manager.save_to_failed_log(
-                                    cursor, target_emby_id, log_title, reason, target_log_type, score=0.0
-                                )
-                                logger.warning(f"  ➜ [{log_title}] 缺失本地 JSON，已标记为待复核: {reason}")
-                        else:
-                            # 文件存在，如果有 SHA1 且未缓存，则备份
-                            if current_sha1 and not media_db.is_mediainfo_cached(current_sha1):
-                                try:
-                                    with open(mediainfo_path, 'r', encoding='utf-8') as f:
-                                        raw_info = json.load(f)
-                                        
-                                    if raw_info and isinstance(raw_info, list):
-                                        cursor.execute("""
-                                            INSERT INTO p115_mediainfo_cache (sha1, mediainfo_json)
-                                            VALUES (%s, %s::jsonb)
-                                            ON CONFLICT (sha1) DO NOTHING
-                                        """, (current_sha1, json.dumps(raw_info, ensure_ascii=False)))
-                                        
-                                        if cursor.rowcount > 0:
-                                            mediainfo_backed_up_count += 1
-                                            logger.info(f"  ➜ [{log_title}] 媒体信息已成功备份至数据库。")
-                                except Exception as e:
-                                    logger.warning(f"  ➜ 读取本地 JSON 失败 {mediainfo_path}: {e}")
+                    if current_sha1 and not media_db.is_mediainfo_cached(current_sha1) and target_emby_id and target_log_type in ['Movie', 'Series']:
+                        reason = "缺失媒体信息缓存"
+                        processor.log_db_manager.save_to_failed_log(
+                            cursor, target_emby_id, log_title, reason, target_log_type, score=0.0
+                        )
                 
                 if needs_db_update:
                     media_db.update_media_sha1_and_pc_json(tmdb_id, item_type, sha1s, pcs)
@@ -2507,93 +2422,98 @@ def task_backup_mediainfo(processor):
                     conn.commit()
             
             conn.commit()
+
+        for asset in media_db.get_all_in_library_physical_paths():
+            if processor.is_stop_requested():
+                break
+            asset_sha1 = asset.get('sha1')
+            asset_emby_id = asset.get('emby_item_id')
+            if asset_sha1 and asset_emby_id and emby.apply_cached_etk_mediainfo(
+                asset_emby_id,
+                asset_sha1,
+                processor.emby_url,
+                processor.emby_api_key,
+            ) is not None:
+                mediainfo_injected_count += 1
             
-        msg = f"备份任务完成！补齐 SHA1: {sha1_fixed_count} 个，成功备份媒体信息: {mediainfo_backed_up_count} 个。"
+        msg = f"媒体信息任务完成！补齐 SHA1: {sha1_fixed_count} 个，成功注入 Emby: {mediainfo_injected_count} 个。"
         logger.info(f"  ➜ {msg}")
         task_manager.update_status_from_thread(100, msg)
         
     except Exception as e:
-        logger.error(f"执行备份任务失败: {e}", exc_info=True)
+        logger.error(f"执行媒体信息同步任务失败: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, "任务失败")
 
-# --- 终极媒体信息还原任务 ---
+# --- 媒体信息缓存重建与 Emby 注入任务 ---
 def task_restore_mediainfo(processor, force_full_update: bool = False):
     """
-    【恢复媒体信息任务】(万能指纹提取 + I/O 节流优化版)
-    force_full_update=False: 仅遍历本地查找缺失 -mediainfo.json 的 .strm 文件并补齐。
-    force_full_update=True: 全量模式。查库获取所有在库项，逐个清除 Emby 缓存、清空数据库缓存，并重新生成。
+    增量模式只检查并恢复 Emby 中缺失媒体流的实际版本。
+    force_full_update=True 时遍历全部在库版本并强制从 RAW 重新格式化缓存。
     """
     mode_str = "全量强制刷新" if force_full_update else "增量查漏补缺"
     logger.info(f"--- 开始执行媒体信息还原任务 ({mode_str}) ---")
     task_manager.update_status_from_thread(0, f"正在准备数据 ({mode_str})...")
     time.sleep(1)  # 增加短暂停顿，确保前端能渲染出初始状态
     
-    local_root = processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
-    if not local_root or not os.path.exists(local_root):
-        logger.warning("  ➜ 未配置本地媒体库目录或目录不存在。")
-        task_manager.update_status_from_thread(100, "未配置本地媒体库目录或目录不存在")
-        time.sleep(1)
-        return
-
     from handler.p115_service import P115Service, P115CacheManager, SmartOrganizer
     client = P115Service.get_client()
-        
-    # 1. 收集所有需要恢复的 strm 文件路径及对应的 Emby ID
-    items_to_restore = []
-    
-    if force_full_update:
-        logger.info("  ➜ [全量模式] 正在从数据库获取所有在库媒体项...")
-        rows = media_db.get_all_in_library_physical_paths()
-        for row in rows:
-            path = row.get('path')
-            if not path: continue
-            
-            # 提取 Emby ID 列表 (处理多版本情况)
-            emby_ids = row.get('emby_item_ids_json')
-            if isinstance(emby_ids, str):
-                try: emby_ids = json.loads(emby_ids)
-                except: emby_ids = []
-            if not isinstance(emby_ids, list):
-                emby_ids = []
+    items_to_restore = media_db.get_all_in_library_physical_paths()
 
-            # ETK HTTP PC 地址转换为本地 STRM 路径。
-            local_path = path
-            if path.startswith('http'):
-                pc, _ = processor._extract_115_fingerprints(path)
-                if pc:
-                    db_local_path = processor._get_local_path_by_pickcode(pc)
-                    if db_local_path:
-                        local_path = os.path.join(local_root, db_local_path.lstrip('/\\'))
+    if not force_full_update and items_to_restore:
+        task_manager.update_status_from_thread(2, "正在检查 Emby 中缺失媒体信息的实际版本...")
+        item_ids = list(dict.fromkeys(
+            str(item.get('emby_item_id') or '').strip()
+            for item in items_to_restore
+            if str(item.get('emby_item_id') or '').strip()
+        ))
+        emby_items = emby.get_emby_items_by_id(
+            processor.emby_url,
+            processor.emby_api_key,
+            processor.emby_user_id,
+            item_ids,
+            fields="MediaSources,MediaStreams",
+        )
 
-            if local_path and not local_path.startswith('http') and local_path.lower().endswith('.strm'):
-                items_to_restore.append({'path': local_path, 'emby_ids': emby_ids})
-    else:
-        logger.info("  ➜ [增量模式] 正在扫描本地媒体库目录查找缺失项...")
-        for root, _, files in os.walk(local_root):
-            if processor.is_stop_requested(): return
-            for file in files:
-                if file.lower().endswith('.strm'):
-                    strm_path = os.path.join(root, file)
-                    json_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
-                    # 增量模式只处理缺失的
-                    if not os.path.exists(json_path):
-                        items_to_restore.append({'path': strm_path, 'emby_ids': []})
+        returned_ids = set()
+        missing_ids = set()
+        for emby_item in emby_items:
+            item_id = str(emby_item.get('Id') or '').strip()
+            if not item_id:
+                continue
+            returned_ids.add(item_id)
+            streams = list(emby_item.get('MediaStreams') or [])
+            for source in emby_item.get('MediaSources') or []:
+                if isinstance(source, dict):
+                    streams.extend(source.get('MediaStreams') or [])
+            has_video_info = any(
+                isinstance(stream, dict)
+                and stream.get('Type') == 'Video'
+                and (stream.get('Width') or stream.get('Height'))
+                for stream in streams
+            )
+            if not has_video_info:
+                missing_ids.add(item_id)
+
+        unverified_count = len(set(item_ids) - returned_ids)
+        if unverified_count:
+            logger.warning(f"  ➜ Emby 未返回 {unverified_count} 个实际版本，增量任务将跳过这些项目以避免误判。")
+        items_to_restore = [
+            item for item in items_to_restore
+            if str(item.get('emby_item_id') or '').strip() in missing_ids
+        ]
                     
     total = len(items_to_restore)
     if total == 0:
-        logger.info("  ➜ 没有需要还原媒体信息的项目。")
-        task_manager.update_status_from_thread(100, "没有需要还原媒体信息的项目")
+        empty_message = "Emby 中没有缺失媒体信息的实际版本" if not force_full_update else "没有可注入媒体信息的在库项目"
+        logger.info(f"  ➜ {empty_message}。")
+        task_manager.update_status_from_thread(100, empty_message)
         time.sleep(1)  
         return
         
-    logger.info(f"  ➜ 发现 {total} 个媒体项，准备处理...")
+    logger.info(f"  ➜ 发现 {total} 个{'Emby 中缺失媒体信息的' if not force_full_update else ''}媒体项，准备处理...")
     
     restored_count = 0
     failed_count = 0
-    cleared_emby_count = 0
-    
-    # ★★★ 新增：用于收集成功生成的路径，最后统一通知 Emby 扫描 ★★★
-    successfully_restored_paths = []
 
     def _probe_and_cache_mediainfo_online(pc, sha1, filename):
         if not client or not pc or not sha1:
@@ -2624,8 +2544,11 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
     for i, item in enumerate(items_to_restore):
         if processor.is_stop_requested(): break
         
-        strm_path = item['path']
-        emby_ids = item['emby_ids']
+        media_path = item.get('path')
+        emby_item_id = item.get('emby_item_id')
+        if not media_path or not emby_item_id:
+            failed_count += 1
+            continue
         
         # ★ 优化 1：动态调整进度推送频率
         update_interval = 1 if total <= 50 else (10 if total <= 500 else 50)
@@ -2633,17 +2556,14 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
             task_manager.update_status_from_thread(int((i/total)*100), f"正在处理 ({i+1}/{total})...")
             time.sleep(0.1) # 强制让出 CPU 时间片，让前端喘口气
 
-        filename = os.path.basename(strm_path)
-        strm_content_path = None
-        
-        try:
-            with open(strm_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                strm_content_path = content.replace('\\', '/')
-        except Exception as e:
-            logger.warning(f"  ➜ 读取 STRM 失败 {strm_path}: {e}")
-            failed_count += 1
-            continue
+        filename = os.path.basename(media_path)
+        strm_content_path = media_path
+        if media_path.lower().endswith('.strm') and os.path.isfile(media_path):
+            try:
+                with open(media_path, 'r', encoding='utf-8') as f:
+                    strm_content_path = f.read().strip().replace('\\', '/')
+            except Exception as e:
+                logger.warning(f"  ➜ 读取 STRM 失败 {media_path}: {e}")
 
         # 从 STRM 内容中提取真实的视频扩展名
         real_ext = ".mkv" 
@@ -2657,26 +2577,18 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
             real_filename = os.path.splitext(filename)[0] + real_ext
 
         # 2. 调用核心处理器的万能指纹提取器
-        pc, sha1 = processor._extract_115_fingerprints(strm_content_path)
+        pc = item.get('pc')
+        sha1 = item.get('sha1')
+        if not pc or not sha1:
+            extracted_pc, extracted_sha1 = processor._extract_115_fingerprints(strm_content_path)
+            pc = pc or extracted_pc
+            sha1 = sha1 or extracted_sha1
         
         if not sha1 and pc:
             sha1 = processor._get_sha1_by_pickcode(pc)
 
-        # =================================================================
-        # ★ 全量模式特有逻辑：流水线式清除 Emby 缓存和数据库缓存
-        # =================================================================
-        if force_full_update:
-            # 1. 清除 Emby 内部缓存 (神医接口会自动删除本地 JSON)
-            for eid in emby_ids:
-                try:
-                    emby.clear_item_media_info(eid, processor.emby_url, processor.emby_api_key)
-                    cleared_emby_count += 1
-                except Exception:
-                    pass
-            
-            # 2. 清除数据库中的 mediainfo_json (保留 raw_ffprobe_json)
-            if sha1:
-                media_db.clear_mediainfo_json_by_sha1(sha1)
+        if force_full_update and sha1:
+            media_db.clear_mediainfo_json_by_sha1(sha1)
 
         # 3. 获取或生成媒体信息
         mediainfo = None
@@ -2689,7 +2601,7 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
                 P115CacheManager.get_raw_ffprobe_cache(sha1)
 
         # 如果没有获取到 (或者是强制全量被清空了)，则尝试重新生成或在线提取
-        if not mediainfo and sha1 and pc:
+        if not mediainfo and sha1:
             # 先看有没有 raw_ffprobe_json 可以用来极速重新格式化
             raw_ffprobe = P115CacheManager.get_raw_ffprobe_cache(sha1)
             # ★ 新增：前置探测
@@ -2710,70 +2622,20 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
             if not mediainfo:
                 mediainfo = _probe_and_cache_mediainfo_online(pc, sha1, real_filename)
         
-        # 4. 写入本地文件
-        if mediainfo:
-            json_path = os.path.splitext(strm_path)[0] + "-mediainfo.json"
-            try:
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(mediainfo, f, ensure_ascii=False)
-                restored_count += 1
-                successfully_restored_paths.append(strm_path) # ★★★ 收集成功生成的路径 ★★★
-            except Exception as e:
-                logger.error(f"  ➜ 写入 JSON 失败 {json_path}: {e}")
-                failed_count += 1
+        if mediainfo and emby.apply_etk_mediainfo(
+            emby_item_id,
+            mediainfo,
+            processor.emby_url,
+            processor.emby_api_key,
+        ) is not None:
+            restored_count += 1
         else:
             failed_count += 1
             
         # ★ 优化 2：每个文件处理完微小休眠，进行 I/O 节流
         time.sleep(0.005)
             
-    # =================================================================
-    # ★★★ 终极收尾：匹配受影响的媒体库并触发精准扫描 ★★★
-    # =================================================================
-    if successfully_restored_paths:
-        logger.info(f"  ➜ 成功生成了 {len(successfully_restored_paths)} 个文件，正在匹配受影响的媒体库...")
-        task_manager.update_status_from_thread(99, "正在通知 Emby 扫描受影响的媒体库...")
-        try:
-            # 1. 获取所有媒体库及其物理路径
-            all_libs = emby.get_all_libraries_with_paths(processor.emby_url, processor.emby_api_key)
-            
-            # 2. 找出受影响的媒体库 ID
-            affected_lib_ids = set()
-            for file_path in successfully_restored_paths:
-                # 规范化路径以便比较
-                norm_file_path = os.path.normpath(file_path).lower()
-                for lib in all_libs:
-                    for lib_path in lib['paths']:
-                        norm_lib_path = os.path.normpath(lib_path).lower()
-                        # 如果文件路径以媒体库路径开头，说明属于该库
-                        if norm_file_path.startswith(norm_lib_path):
-                            affected_lib_ids.add(lib['info']['Id'])
-                            break # 找到归属库即可跳出内层循环
-            
-            # 3. 对受影响的媒体库触发刷新
-            if affected_lib_ids:
-                logger.info(f"  ➜ 匹配到 {len(affected_lib_ids)} 个受影响的媒体库，正在触发扫描...")
-                for lib_id in affected_lib_ids:
-                    refresh_url = f"{processor.emby_url.rstrip('/')}/Items/{lib_id}/Refresh"
-                    params = {
-                        "api_key": processor.emby_api_key,
-                        "Recursive": "true",
-                        "MetadataRefreshMode": "Default",
-                        "ImageRefreshMode": "Default",
-                        "ReplaceAllImages": "false",
-                        "ReplaceAllMetadata": "false"
-                    }
-                    emby.emby_client.post(refresh_url, params=params)
-                logger.info("  ➜ 已成功触发受影响媒体库的扫描任务！")
-            else:
-                logger.warning("  ➜ 未能将生成的文件匹配到任何 Emby 媒体库，跳过扫描。")
-                
-        except Exception as e:
-            logger.error(f"  ➜ 触发 Emby 媒体库扫描失败: {e}")
-
-    msg = f"任务完成！成功生成: {restored_count} 个，失败: {failed_count} 个。"
-    if force_full_update:
-        msg += f" (共清除 Emby 缓存 {cleared_emby_count} 次)"
+    msg = f"任务完成！成功注入: {restored_count} 个，失败: {failed_count} 个。"
     logger.info(f"  ➜ {msg}")
     task_manager.update_status_from_thread(100, msg)
 

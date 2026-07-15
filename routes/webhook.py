@@ -60,6 +60,12 @@ ACTIVE_SERIES_NOTIFICATION_QUEUE = {}
 ACTIVE_SERIES_NOTIFICATION_TIMERS = {}
 ACTIVE_SERIES_NOTIFICATION_LOCK = threading.Lock()
 ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME = 30
+ACTIVE_EMBY_DISPATCH_QUEUE = {}
+ACTIVE_EMBY_DISPATCH_TIMERS = {}
+ACTIVE_EMBY_DISPATCH_SEEN = {}
+ACTIVE_EMBY_DISPATCH_LOCK = threading.Lock()
+ACTIVE_EMBY_DISPATCH_DEBOUNCE_TIME = 3
+ACTIVE_EMBY_DISPATCH_SEEN_TTL = 120
 
 
 def _flush_active_series_notification(series_key: str):
@@ -377,6 +383,41 @@ def _is_same_pending_webhook_task(existing_task, new_task):
     )
 
 
+def _merge_pending_webhook_task(existing_task, new_task):
+    if (
+        existing_task.get("processor_type") != new_task.get("processor_type")
+        or existing_task.get("task_function") != new_task.get("task_function")
+    ):
+        return False
+
+    existing_kwargs = existing_task.get("kwargs") or {}
+    new_kwargs = new_task.get("kwargs") or {}
+    if str(existing_kwargs.get("item_id") or "") != str(new_kwargs.get("item_id") or ""):
+        return False
+
+    existing_episode_ids = existing_kwargs.get("new_episode_ids")
+    new_episode_ids = new_kwargs.get("new_episode_ids")
+    if not existing_episode_ids or not new_episode_ids:
+        return False
+
+    merged_episode_ids = sorted({
+        str(episode_id)
+        for episode_id in list(existing_episode_ids) + list(new_episode_ids)
+        if str(episode_id or "").strip()
+    })
+    existing_kwargs["new_episode_ids"] = merged_episode_ids
+    existing_kwargs["is_new_item"] = bool(
+        existing_kwargs.get("is_new_item") or new_kwargs.get("is_new_item")
+    )
+    existing_kwargs["force_full_update"] = bool(
+        existing_kwargs.get("force_full_update") or new_kwargs.get("force_full_update")
+    )
+    existing_kwargs["aggregate_notification"] = len(merged_episode_ids) == 1
+    if existing_kwargs["is_new_item"] and existing_task.get("task_name", "").startswith("主动追更:"):
+        existing_task["task_name"] = existing_task["task_name"].replace("主动追更:", "主动入库:", 1)
+    return True
+
+
 def _schedule_pending_webhook_drain(delay=WEBHOOK_REQUEUE_DELAY):
     global WEBHOOK_PENDING_TASKS_DRAINER
     with WEBHOOK_PENDING_TASKS_LOCK:
@@ -388,6 +429,13 @@ def _schedule_pending_webhook_drain(delay=WEBHOOK_REQUEUE_DELAY):
 def _enqueue_pending_webhook_task(task_payload):
     with WEBHOOK_PENDING_TASKS_LOCK:
         for pending_task in WEBHOOK_PENDING_TASKS:
+            if _merge_pending_webhook_task(pending_task, task_payload):
+                logger.info(
+                    "  ➜ [Webhook队列] 已合并同剧任务 '%s'，当前包含 %s 个分集。",
+                    pending_task["task_name"],
+                    len(pending_task["kwargs"].get("new_episode_ids") or []),
+                )
+                break
             if _is_same_pending_webhook_task(pending_task, task_payload):
                 logger.debug(f"  ➜ [Webhook队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
                 break
@@ -633,7 +681,7 @@ def _flush_mp_batch(key):
         mp_classify_enabled = bool(config.get(constants.CONFIG_OPTION_115_MP_CLASSIFY, False))
 
         if mp_classify_enabled:
-            logger.info("  ➜ [MP直出] MP分类已开启：跳过整理/归类/重命名，直接生成 STRM 和 -mediainfo.json。")
+            logger.info("  ➜ [MP直出] MP分类已开启：跳过整理/归类/重命名，生成 STRM 并缓存媒体信息。")
             ok = organizer.execute_mp_passthrough(file_nodes)
             if not ok:
                 logger.warning("  ➜ [MP直出] 直出处理未完全成功。")
@@ -1365,10 +1413,99 @@ def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, kno
     except Exception as e:
         logger.error(f"  ➜ [自动打标] 失败: {e}")
 
+def _claim_active_emby_item(item_id: str) -> bool:
+    now = time.monotonic()
+    with ACTIVE_EMBY_DISPATCH_LOCK:
+        expired = [key for key, deadline in ACTIVE_EMBY_DISPATCH_SEEN.items() if deadline <= now]
+        for key in expired:
+            ACTIVE_EMBY_DISPATCH_SEEN.pop(key, None)
+        if ACTIVE_EMBY_DISPATCH_SEEN.get(item_id, 0) > now:
+            return False
+        ACTIVE_EMBY_DISPATCH_SEEN[item_id] = now + ACTIVE_EMBY_DISPATCH_SEEN_TTL
+        return True
+
+
+def _release_active_emby_item(item_id: str):
+    with ACTIVE_EMBY_DISPATCH_LOCK:
+        ACTIVE_EMBY_DISPATCH_SEEN.pop(item_id, None)
+
+
+def _flush_active_emby_series_dispatch(series_id: str):
+    with ACTIVE_EMBY_DISPATCH_LOCK:
+        pending = ACTIVE_EMBY_DISPATCH_QUEUE.pop(series_id, None)
+        ACTIVE_EMBY_DISPATCH_TIMERS.pop(series_id, None)
+    if not pending:
+        return
+
+    processor = extensions.media_processor_instance
+    if not processor:
+        return
+
+    episode_ids = sorted(pending["episode_ids"])
+    series_name = pending.get("name") or ""
+    if not series_name:
+        series = emby.get_emby_item_details(
+            series_id,
+            processor.emby_url,
+            processor.emby_api_key,
+            processor.emby_user_id,
+            fields="Name",
+        )
+        series_name = (series or {}).get("Name") or f"ID:{series_id}"
+
+    already_processed = (
+        series_id in processor.processed_items_cache
+        and media_db.is_emby_id_in_library(series_id)
+    )
+    task_prefix = "主动追更" if already_processed else "主动入库"
+    logger.info(
+        "  ➜ [主动入库] 剧集 ItemID 聚合完成，分派 %s: %s (分集数: %s)",
+        task_prefix,
+        series_name,
+        len(episode_ids),
+    )
+    _submit_webhook_media_task(
+        f"{task_prefix}: {series_name}",
+        item_id=series_id,
+        force_full_update=False,
+        new_episode_ids=episode_ids,
+        is_new_item=not already_processed,
+        aggregate_notification=len(episode_ids) == 1,
+    )
+
+
+def _enqueue_active_emby_series_dispatch(series_id: str, series_name: str, episode_ids):
+    with ACTIVE_EMBY_DISPATCH_LOCK:
+        pending = ACTIVE_EMBY_DISPATCH_QUEUE.setdefault(
+            series_id,
+            {"name": "", "episode_ids": set()},
+        )
+        if series_name:
+            pending["name"] = series_name
+        pending["episode_ids"].update(str(x) for x in episode_ids if str(x or "").strip())
+
+        old_timer = ACTIVE_EMBY_DISPATCH_TIMERS.get(series_id)
+        if old_timer is not None:
+            old_timer.kill()
+        ACTIVE_EMBY_DISPATCH_TIMERS[series_id] = spawn_later(
+            ACTIVE_EMBY_DISPATCH_DEBOUNCE_TIME,
+            _flush_active_emby_series_dispatch,
+            series_id,
+        )
+        pending_count = len(pending["episode_ids"])
+
+    logger.info(
+        "  ➜ [主动入库] 剧集 ItemID 等待聚合: SeriesId=%s，当前 %s 集。",
+        series_id,
+        pending_count,
+    )
+
+
 # --- 辅助函数 ---
 def dispatch_active_emby_items(items):
     """Dispatch actively discovered Movie/Episode IDs through the existing flow."""
-    parent_items = collections.defaultdict(lambda: {"name": "", "episode_ids": set()})
+    movie_items = []
+    series_items = collections.defaultdict(lambda: {"name": "", "episode_ids": set()})
     processor = extensions.media_processor_instance
     if not processor:
         return
@@ -1379,8 +1516,11 @@ def dispatch_active_emby_items(items):
         item_name = item.get("Name") or f"ID:{item_id}"
         if not item_id:
             continue
+        if not _claim_active_emby_item(item_id):
+            logger.debug("  ➜ [主动入库] Item %s 已进入分派流程，跳过重复回调。", item_id)
+            continue
         if item_type == "Movie":
-            parent_items[item_id]["name"] = item_name
+            movie_items.append((item_id, item_name))
         elif item_type == "Episode":
             series_id = str(item.get("SeriesId") or "").strip()
             if not series_id:
@@ -1390,33 +1530,40 @@ def dispatch_active_emby_items(items):
                 )
             if not series_id:
                 logger.warning("  ➜ [主动入库] 分集 '%s' 未取到 SeriesId，已跳过。", item_name)
+                _release_active_emby_item(item_id)
                 continue
-            parent_items[series_id]["episode_ids"].add(item_id)
-            if not parent_items[series_id]["name"]:
-                series = emby.get_emby_item_details(
-                    series_id, processor.emby_url, processor.emby_api_key,
-                    processor.emby_user_id, fields="Name"
-                )
-                parent_items[series_id]["name"] = (series or {}).get("Name") or item_name
+            series_items[series_id]["episode_ids"].add(item_id)
+            if item.get("SeriesName"):
+                series_items[series_id]["name"] = item.get("SeriesName")
+        else:
+            _release_active_emby_item(item_id)
 
-    for parent_id, info in parent_items.items():
-        episode_ids = sorted(info["episode_ids"])
+    for item_id, item_name in movie_items:
         already_processed = (
-            parent_id in processor.processed_items_cache
-            and media_db.is_emby_id_in_library(parent_id)
+            item_id in processor.processed_items_cache
+            and media_db.is_emby_id_in_library(item_id)
         )
-        task_prefix = "主动追更" if already_processed and episode_ids else "主动入库"
+        task_prefix = "主动入库"
         logger.info(
             "  ➜ [主动入库] 已获取 Emby ID，分派 %s: %s (分集数: %s)",
-            task_prefix, info["name"], len(episode_ids)
+            task_prefix,
+            item_name,
+            0,
         )
         _submit_webhook_media_task(
-            f"{task_prefix}: {info['name']}",
-            item_id=parent_id,
+            f"{task_prefix}: {item_name}",
+            item_id=item_id,
             force_full_update=False,
-            new_episode_ids=episode_ids or None,
+            new_episode_ids=None,
             is_new_item=not already_processed,
-            aggregate_notification=len(episode_ids) == 1,
+            aggregate_notification=False,
+        )
+
+    for series_id, info in series_items.items():
+        _enqueue_active_emby_series_dispatch(
+            series_id,
+            info["name"],
+            info["episode_ids"],
         )
 
 def _trigger_metadata_update_task(item_id, item_name):

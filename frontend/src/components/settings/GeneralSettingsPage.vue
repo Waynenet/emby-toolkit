@@ -279,10 +279,6 @@
                       <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5"/>
                     </n-form-item-grid-item>
                     
-                    <n-form-item-grid-item label="需手动处理的最低评分阈值" path="min_score_for_review">
-                      <n-input-number v-model:value="configModel.min_score_for_review" :min="0.0" :max="10" :step="0.1" placeholder="例如: 6.0"/>
-                      <template #feedback><n-text depth="3" style="font-size:0.8em;">处理质量评分低于此值的项目将进入待复核列表。</n-text></template>
-                    </n-form-item-grid-item>
                     <n-form-item-grid-item label="最大主要演员数" path="max_actors_to_process">
                       <n-input-number v-model:value="configModel.max_actors_to_process" :min="10" :step="10" placeholder="建议 30-100"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">处理后最终演员表数量，超过会截断，优先保留有头像演员。</n-text></template>
@@ -2261,8 +2257,9 @@ const tableInfo = {
   'invitations': { cn: '邀请链接', isSharable: false },
   'emby_users_extended': { cn: 'Emby用户扩展信息', isSharable: false },
   'p115_filesystem_cache': { cn: '115目录缓存', isSharable: false },
-  'p115_mediainfo_cache': {cn: '媒体信息备份', isSharable: true },
+  'p115_mediainfo_cache': {cn: '媒体信息缓存', isSharable: true },
   'p115_organize_records': {cn: '115整理记录', isSharable: false },
+  'p115_upload_records': {cn: '115上传记录', isSharable: false },
   'shared_rapid_sources': { cn: '本机共享秒传源', isSharable: false },
   'shared_rapid_source_files': { cn: '本机共享文件索引', isSharable: false },
   'shared_credit_snapshot': { cn: '贡献点快照', isSharable: false },

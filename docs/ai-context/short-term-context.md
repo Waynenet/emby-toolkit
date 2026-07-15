@@ -8,7 +8,7 @@
 - 项目名称：Emby ToolKit / ETK
 - 项目类型：面向 Emby 用户的媒体库增强工具，核心围绕 115 网盘整理、STRM 入库、元数据补全、追剧订阅、演员订阅、资源共享、合集维护、封面生成、清理和 Web 管理后台。
 - 技术栈：Python 3.12 + Flask 后端，PostgreSQL 持久化，Vue 3 + Vite 前端，Docker 镜像包含 Nginx、ffmpeg、前端构建产物与后端服务。
-- 本轮目标：为项目生成 AI 对话短期上下文和长期知识库，文档放在 `docs/ai-context/`。
+- 媒体信息约定：`p115_mediainfo_cache.mediainfo_json` 是格式化媒体流数据源，`media_metadata` 是媒体元数据持久化来源，通过独立的 [ETK MediaInfo Bridge](https://github.com/hbq0405/etk-mediainfo-bridge) 插件直接注入 Emby。ETK STRM 不再生成简版或完整 NFO；实体媒体仍保留 NFO 兜底。整理阶段先写入除人物表外的完整元数据，并保存海报、背景、Logo、横版缩略图和季海报路径；`metadata_ready` 表示首次刮削数据已就绪，`actors_ready` 表示翻译后人物表已完成。插件实现 Movie/Series/Season/Episode 元数据 Provider 和图片 Provider，首次扫描根据 STRM pick code/SHA1 返回确定的 TMDb 身份，最终刷新从数据库恢复完整元数据与图片。媒体流仍由插件从 `mediainfo_json` 注入；新 STRM 入库时插件从 Emby `ItemAdded/ItemUpdated` 事件取得 ItemID，注入前清空旧媒体流并删除抢占内嵌索引的外挂流，成功后调用 ETK `item-ready`；最终刷新重新识别外挂流，插件回补时将冲突外挂流移动到未占用索引。ETK 为插件保留 8 秒优先窗口，超时才按路径轮询兜底；物理媒体仍直接轮询。剧集 ItemID 按 SeriesId 等待 3 秒聚合后一次提交，同一 ItemID 在插件回调和路径兜底之间只分派一次，待提交队列也会合并同剧分集。Emby 手动或任务刷新后，插件通过 `/api/p115/mediainfo/...` 自动回补媒体流；插件启动及神医片头提取任务完成后全库扫描片头，通知 ETK 将新增或变化的章节写回 `mediainfo_json.Chapters` 并上传共享中心，刷新清空章节时从本地快照恢复。首次入库和秒传预检会从中心合并已有片头；智能追剧的缺图分集只在 ETK 临时目录截图并上传 Emby `Primary` 缓存，临时图随即删除，TMDb 后续出图时先更新数据库再替换 Emby 缓存；递归刷新 Series 后，ETK 收尾阶段会批量回补全部 Episode 实际版本。媒体信息维护只保留“重建媒体信息”任务：增量模式检查 Emby 并仅恢复缺失媒体流的实际版本，全量模式才处理全部在库版本。
 
 ## 本项目协作规则
 

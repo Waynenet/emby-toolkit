@@ -15,14 +15,6 @@
               <template #unchecked>关闭</template>
             </n-switch>
           </n-form-item>
-          <n-form-item label="共用扩展名">
-            <n-space :size="6">
-              <n-tag v-for="ext in normalizedExtensions" :key="ext" size="small" :bordered="false">
-                {{ ext }}
-              </n-tag>
-              <n-text v-if="!normalizedExtensions.length" depth="3">未配置</n-text>
-            </n-space>
-          </n-form-item>
         </n-form>
 
         <div class="mapping-list">
@@ -65,9 +57,20 @@
               </n-gi>
             </n-grid>
 
+            <n-form-item label="监控扩展名" label-placement="top" :show-feedback="false">
+              <n-select
+                v-model:value="item.extensions"
+                multiple
+                filterable
+                tag
+                :options="extensionOptions"
+                placeholder="选择或输入扩展名"
+              />
+            </n-form-item>
+
             <n-form-item label="上传策略" label-placement="top" :show-feedback="false">
               <n-radio-group v-model:value="item.mode" size="small">
-                <n-radio-button value="keep">增量上传并保留</n-radio-button>
+                <n-radio-button value="keep">增量双向同步</n-radio-button>
                 <n-radio-button value="delete">上传成功后删除</n-radio-button>
               </n-radio-group>
             </n-form-item>
@@ -126,7 +129,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import axios from 'axios';
 import {
   NButton, NForm, NFormItem, NGi, NGrid, NIcon, NInput, NInputGroup,
-  NModal, NProgress, NRadioButton, NRadioGroup, NSpace, NSpin, NSwitch, NTag,
+  NModal, NProgress, NRadioButton, NRadioGroup, NSelect, NSpace, NSpin, NSwitch, NTag,
   NText, NTooltip, useMessage
 } from 'naive-ui';
 import {
@@ -149,10 +152,17 @@ const status = ref(null);
 const config = ref({ enabled: false, mappings: [] });
 let statusTimer = null;
 
-const normalizedExtensions = computed(() => (props.extensions || []).map(value => {
-  const ext = String(value || '').trim();
+const normalizeExtensionList = values => [...new Set((values || []).map(value => {
+  const ext = String(value || '').trim().toLowerCase().replaceAll('*', '');
   return ext && !ext.startsWith('.') ? `.${ext}` : ext;
-}).filter(ext => ext && ext.toLowerCase() !== '.strm'));
+}).filter(ext => ext && ext !== '.strm'))];
+
+const normalizedExtensions = computed(() => normalizeExtensionList(props.extensions));
+const imageExtensions = ['.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp', '.gif', '.bmp', '.tif', '.tiff'];
+const extensionOptions = computed(() => normalizeExtensionList([
+  ...normalizedExtensions.value,
+  ...imageExtensions
+]).map(ext => ({ label: ext, value: ext })));
 
 const newMapping = () => ({
   id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -160,7 +170,8 @@ const newMapping = () => ({
   local_dir: '',
   target_cid: '',
   target_name: '',
-  mode: 'keep'
+  mode: 'keep',
+  extensions: [...normalizedExtensions.value]
 });
 
 const addMapping = () => config.value.mappings.push(newMapping());
@@ -235,6 +246,14 @@ const save = async () => {
   const incomplete = config.value.mappings.find(item => !item.local_dir || !item.target_cid);
   if (incomplete) {
     message.warning('请完整选择每组本地目录和 115 目录');
+    return;
+  }
+  config.value.mappings.forEach(item => {
+    item.extensions = normalizeExtensionList(item.extensions);
+  });
+  const missingExtensions = config.value.mappings.find(item => item.enabled && !item.extensions.length);
+  if (missingExtensions) {
+    message.warning('请为每个已启用目录至少配置一个监控扩展名');
     return;
   }
   saving.value = true;

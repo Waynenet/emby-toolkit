@@ -5030,13 +5030,6 @@ def create_virtual_strm_files(source: Dict[str, Any], files: List[Dict[str, Any]
         except Exception as e:
             logger.warning(f"  ➜ [虚拟入库] 写入洗版缓存失败: {safe_file} -> {e}")
         try:
-            mediainfo_text = P115CacheManager.get_mediainfo_cache_text(sha1)
-            if mediainfo_text:
-                with open(os.path.splitext(strm_path)[0] + '-mediainfo.json', 'w', encoding='utf-8') as f:
-                    f.write(mediainfo_text)
-        except Exception as e:
-            logger.debug(f"  ➜ [虚拟入库] 生成媒体信息文件失败：{safe_file} -> {e}")
-        try:
             from monitor_service import enqueue_file_actively
             enqueue_file_actively(strm_path)
         except Exception:

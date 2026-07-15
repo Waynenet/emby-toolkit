@@ -113,11 +113,21 @@ class P115RenameRenderer:
             cleaned = next_text
         return cleaned
 
+    @staticmethod
+    def get_title_initial(title):
+        for char in str(title or ''):
+            if not char.isalnum():
+                continue
+            initials = utils.get_pinyin_initials(char)
+            return str(initials or char)[0].upper()
+        return ""
+
     def build_template_context(self, is_tv=False, season_num=None, episode_num=None, original_title=None, original_name=None, video_info=None, safe_title=None, file_ext=""):
         video_info = video_info or {}
         date_text = str(self.details.get('date') or '')
         year = date_text[:4] if date_text else ''
         title_zh = self.sanitize_name_component(safe_title if safe_title else (self.details.get('title') or self.original_title))
+        title_initial = self.get_title_initial(title_zh)
         title_en = self.sanitize_name_component(self.details.get('title_en') or original_title or self.details.get('original_title') or self.original_title)
         title_orig = self.sanitize_name_component(self.details.get('title_orig') or original_title or self.details.get('original_title') or self.original_title)
         season_val = season_num if season_num is not None else (1 if is_tv else None)
@@ -174,6 +184,7 @@ class P115RenameRenderer:
             # ETK names
             'title': title_zh,
             'title_zh': title_zh,
+            'title_initial': title_initial,
             'title_en': title_en,
             'en_title': title_en,
             'en_name': title_en,

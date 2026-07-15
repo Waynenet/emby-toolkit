@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import subprocess
+import tempfile
 import re
 import copy
 from pathlib import Path
@@ -395,6 +396,68 @@ class MediaProcessor:
 
         return pc, sha1
 
+    def restore_cached_mediainfo_for_emby_items(
+        self,
+        item_ids: List[str],
+        *,
+        log_context: str = "",
+    ) -> Dict[str, int]:
+        """Restore cached media info for exact Emby items after a refresh."""
+        restored_ids = set()
+        failed_ids = set()
+        for raw_item_id in item_ids or []:
+            item_id = str(raw_item_id or '').replace('mediasource_', '').strip()
+            if not item_id or item_id in restored_ids:
+                continue
+            details = emby.get_emby_item_details(
+                item_id,
+                self.emby_url,
+                self.emby_api_key,
+                self.emby_user_id,
+                fields="Path,MediaSources",
+                silent_404=True,
+            )
+            if not details:
+                failed_ids.add(item_id)
+                continue
+
+            sources = details.get('MediaSources') or []
+            if not sources:
+                sources = [{"Id": item_id, "Path": details.get('Path')}]
+            for source in sources:
+                source_item_id = str(source.get('Id') or item_id).replace('mediasource_', '').strip()
+                if not source_item_id or source_item_id in restored_ids:
+                    continue
+                source_path = source.get('Path') or details.get('Path')
+                if not source_path:
+                    failed_ids.add(source_item_id)
+                    continue
+                _file_pc, file_sha1 = self._extract_115_fingerprints(source_path)
+                if file_sha1 and emby.apply_cached_etk_mediainfo(
+                    source_item_id,
+                    file_sha1,
+                    self.emby_url,
+                    self.emby_api_key,
+                ) is not None:
+                    restored_ids.add(source_item_id)
+                    failed_ids.discard(source_item_id)
+                else:
+                    failed_ids.add(source_item_id)
+
+        if restored_ids:
+            logger.info(
+                "  ➜ [媒体信息注入] %s已恢复 %s 个实际版本。",
+                f"{log_context}：" if log_context else "",
+                len(restored_ids),
+            )
+        if failed_ids:
+            logger.warning(
+                "  ➜ [媒体信息注入] %s仍有 %s 个版本未能从缓存恢复。",
+                f"{log_context}：" if log_context else "",
+                len(failed_ids),
+            )
+        return {"restored": len(restored_ids), "failed": len(failed_ids)}
+
     # --- 通过 PC 码反查 SHA1 (自带 115 API 兜底) ---
     def _get_sha1_by_pickcode(self, pick_code: str, allow_api_fallback: bool = True) -> Optional[str]:
         if not self.config.get("monitor_sha1_pc_search", True):
@@ -718,6 +781,14 @@ class MediaProcessor:
                 return minutes if minutes > 0 else None
             except Exception:
                 return None
+
+        def selected_image_path(details, image_type, fallback_key=None):
+            images = details.get('images') if isinstance(details, dict) else None
+            values = images.get(image_type) if isinstance(images, dict) else None
+            for value in values or []:
+                if isinstance(value, dict) and value.get('file_path'):
+                    return value.get('file_path')
+            return details.get(fallback_key) if fallback_key and isinstance(details, dict) else None
 
         # 从真理之源 p115_mediainfo_cache 提取绝对准确的物理时长
         # 注意：这个值只能进入 asset_details_json.runtime_minutes，不能覆盖 media_metadata.runtime_minutes。
@@ -1044,8 +1115,6 @@ class MediaProcessor:
                                         else:
                                             emby_path = ''
                                 
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            
                             # 构造临时 item 传递给 parse_full_asset_details，确保解析的是当前版本的属性
                             temp_item = item_details_from_emby.copy()
                             
@@ -1069,8 +1138,7 @@ class MediaProcessor:
                             asset_details = parse_full_asset_details(
                                 temp_item, 
                                 id_to_parent_map=id_to_parent_map, 
-                                library_guid=lib_guid,
-                                local_mediainfo_path=mediainfo_path 
+                                library_guid=lib_guid
                             )
                             asset_details['source_library_id'] = source_lib_id
 
@@ -1081,7 +1149,6 @@ class MediaProcessor:
                     else:
                         # 兜底逻辑：如果没有 MediaSources，使用主 Path
                         emby_path = item_details_from_emby.get('Path', '')
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json"
                         
                         file_pc, file_sha1 = self._extract_115_fingerprints(emby_path)
                         if not file_sha1 and file_pc:
@@ -1090,8 +1157,7 @@ class MediaProcessor:
                         asset_details = parse_full_asset_details(
                             item_details_from_emby, 
                             id_to_parent_map=id_to_parent_map, 
-                            library_guid=lib_guid,
-                            local_mediainfo_path=mediainfo_path 
+                            library_guid=lib_guid
                         )
                         asset_details['source_library_id'] = source_lib_id
 
@@ -1113,7 +1179,14 @@ class MediaProcessor:
                 # 实际文件时长已经由 parse_full_asset_details 写入 asset_details_json.runtime_minutes。
                 movie_record['runtime_minutes'] = normalize_tmdb_runtime(movie_record.get('runtime'))
 
+                movie_record['poster_path'] = selected_image_path(source_data_package, 'posters', 'poster_path')
+                movie_record['backdrop_path'] = selected_image_path(source_data_package, 'backdrops', 'backdrop_path')
+                movie_record['logo_path'] = selected_image_path(source_data_package, 'logos')
+                movie_record['thumb_path'] = selected_image_path(source_data_package, 'backdrops', 'backdrop_path')
+
                 movie_record['actors_json'] = json.dumps([{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")], ensure_ascii=False)
+                movie_record['metadata_ready'] = True
+                movie_record['actors_ready'] = True
                 movie_record['subscription_status'] = 'NONE'
                 movie_record['date_added'] = item_details_from_emby.get("DateCreated") or datetime.now(timezone.utc)
                 movie_record['overview_embedding'] = overview_embedding_json
@@ -1140,7 +1213,7 @@ class MediaProcessor:
                 
                 credits_data = source_data_package.get("credits") or source_data_package.get("casts") or {}
                 crew = credits_data.get('crew', [])
-                movie_record['directors_json'] = json.dumps([{'id': p.get('id'), 'name': p.get('name')} for p in crew if p.get('job') == 'Director'], ensure_ascii=False)
+                movie_record['directors_json'] = json.dumps([{'id': p.get('id'), 'name': p.get('name'), 'profile_path': p.get('profile_path')} for p in crew if p.get('job') == 'Director'], ensure_ascii=False)
 
                 records_to_upsert.append(movie_record)
 
@@ -1171,7 +1244,9 @@ class MediaProcessor:
                     "release_date": series_details.get('first_air_date'), 
                     "last_air_date": series_details.get('last_air_date'),
                     "poster_path": series_details.get('poster_path'),
-                    "backdrop_path": series_details.get('backdrop_path'), 
+                    "backdrop_path": series_details.get('backdrop_path'),
+                    "logo_path": selected_image_path(series_details, 'logos'),
+                    "thumb_path": selected_image_path(series_details, 'backdrops', 'backdrop_path'),
                     "homepage": series_details.get('homepage'),
                     "rating": series_details.get('vote_average'),
                     "total_episodes": series_details.get('number_of_episodes', 0),
@@ -1192,6 +1267,8 @@ class MediaProcessor:
 
                 actors_relation = [{"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order")} for p in final_processed_cast if p.get("id")]
                 series_record['actors_json'] = json.dumps(actors_relation, ensure_ascii=False)
+                series_record['metadata_ready'] = True
+                series_record['actors_ready'] = True
                 
                 # 分级处理
                 raw_ratings_map = source_data_package.get('_official_rating_map', {})
@@ -1207,7 +1284,7 @@ class MediaProcessor:
                 
                 # ★★★ 综合提取剧集导演 (created_by + crew) ★★★
                 top_directors = extract_top_directors(series_details, max_count=3)
-                series_record['directors_json'] = json.dumps([{'id': d['id'], 'name': d['name']} for d in top_directors], ensure_ascii=False)
+                series_record['directors_json'] = json.dumps([{'id': d['id'], 'name': d['name'], 'profile_path': d.get('profile_path')} for d in top_directors], ensure_ascii=False)
                 
                 languages_list = series_details.get('languages', [])
                 series_record['original_language'] = series_details.get('original_language') or (languages_list[0] if languages_list else None)
@@ -1264,7 +1341,9 @@ class MediaProcessor:
                         "total_episodes": season.get('episode_count', 0),
                         "in_library": bool(matched_emby_seasons) if not is_pending else False,
                         "emby_item_ids_json": json.dumps(season_ids),
-                        "file_sha1_json": '[]'
+                        "file_sha1_json": '[]',
+                        "metadata_ready": True,
+                        "actors_ready": True,
                     })
                 
                 # ★★★ 4. 处理分集 (Episode) ★★★
@@ -1416,7 +1495,9 @@ class MediaProcessor:
                         "poster_path": episode.get('still_path'),
                         "backdrop_path": episode.get('still_path'),
                         "directors_json": json.dumps(ep_directors, ensure_ascii=False),
-                        "actors_json": json.dumps(ep_actors_json_list, ensure_ascii=False)
+                        "actors_json": json.dumps(ep_actors_json_list, ensure_ascii=False),
+                        "metadata_ready": True,
+                        "actors_ready": True,
                     }
                     
                     # ★ 资产信息处理 (支持多版本)
@@ -1474,15 +1555,10 @@ class MediaProcessor:
                                         else:
                                             emby_path = ''
                                 
-                            mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
-                            
                             temp_version = version.copy()
                             temp_version['Path'] = emby_path
                             
-                            details = parse_full_asset_details(
-                                temp_version,
-                                local_mediainfo_path=mediainfo_path
-                            )
+                            details = parse_full_asset_details(temp_version)
                             details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                             all_assets.append(details)
@@ -1557,7 +1633,9 @@ class MediaProcessor:
                         "poster_path": None,
                         "backdrop_path": None,
                         "directors_json": json.dumps(fallback_directors, ensure_ascii=False),
-                        "actors_json": json.dumps(fallback_actors, ensure_ascii=False)
+                        "actors_json": json.dumps(fallback_actors, ensure_ascii=False),
+                        "metadata_ready": True,
+                        "actors_ready": True,
                     }
 
                     all_assets = []
@@ -1607,17 +1685,13 @@ class MediaProcessor:
                                     else:
                                         emby_path = ''
                             
-                        mediainfo_path = os.path.splitext(emby_path)[0] + "-mediainfo.json" if emby_path and not emby_path.startswith('http') else None
                         if not file_sha1 and file_pc:
                             file_sha1 = self._get_sha1_by_pickcode(file_pc)
                         
                         temp_version = version.copy()
                         temp_version['Path'] = emby_path
                         
-                        details = parse_full_asset_details(
-                            temp_version,
-                            local_mediainfo_path=mediainfo_path
-                        )
+                        details = parse_full_asset_details(temp_version)
                         details['source_library_id'] = item_details_from_emby.get('_SourceLibraryId')
 
                         all_assets.append(details)
@@ -1646,14 +1720,14 @@ class MediaProcessor:
             # ==================================================================
             all_possible_columns = [
                 "tmdb_id", "item_type", "title", "original_title", "overview", "release_date", "release_year",
-                "last_air_date", "backdrop_path", "homepage", "original_language", "poster_path", "rating", 
+                "last_air_date", "backdrop_path", "logo_path", "thumb_path", "homepage", "original_language", "poster_path", "rating",
                 "actors_json", "parent_series_tmdb_id", "season_number", "episode_number", "in_library", 
                 "subscription_status", "subscription_sources_json", "emby_item_ids_json", 
                 "file_sha1_json", "file_pickcode_json", 
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
-                "imdb_id", "tagline",
+                "imdb_id", "tagline", "metadata_ready", "actors_ready",
                 "washing_level", "washing_snapshot_json", "active_washing"
             ]
             data_for_batch = []
@@ -2384,11 +2458,10 @@ class MediaProcessor:
         item_name_for_log = item_details_from_emby.get("Name", f"未知项目(ID:{item_id})")
         tmdb_id = item_details_from_emby.get("ProviderIds", {}).get("Tmdb")
         item_type = item_details_from_emby.get("Type")
+        uses_etk_metadata_provider = self._is_etk_strm_item(item_details_from_emby)
+        metadata_persisted_before_refresh = False
 
         logger.trace(f"--- 开始处理 '{item_name_for_log}' (TMDb ID: {tmdb_id}) ---")
-
-        all_emby_people_for_count = item_details_from_emby.get("People", [])
-        original_emby_actor_count = len([p for p in all_emby_people_for_count if p.get("Type") == "Actor"])
 
         if not is_valid_tmdb_id(tmdb_id):
             logger.error(f"  ➜ '{item_name_for_log}' 缺少有效的 TMDb ID (当前值: {tmdb_id})，跳过处理。")
@@ -2661,50 +2734,62 @@ class MediaProcessor:
                         if d['id'] not in existing_crew_ids:
                             formatted_metadata['credits']['crew'].append(d)
 
-                # 5. 生成 NFO 和 图片
-                self.sync_item_metadata(
-                    item_details=item_details_from_emby,
-                    tmdb_id=tmdb_id,
-                    final_cast_override=final_processed_cast,
-                    metadata_override=formatted_metadata,
-                    force_write=True
-                )
-                self.download_images_from_tmdb(
-                    tmdb_id=tmdb_id,
-                    item_type=item_type,
-                    aggregated_tmdb_data=formatted_metadata, 
-                    item_details=item_details_from_emby
-                )
-
-                # 6. 更新 Emby 人物名(演员/导演)以及扫描目录
-                self._update_emby_person_names(final_cast=final_processed_cast, formatted_metadata=formatted_metadata, item_details_from_emby=item_details_from_emby, item_name_for_log=item_name_for_log)
-                media_path = item_details_from_emby.get("Path")
-                if media_path:
-                    logger.info(f"  ➜ 正在通知 Emby 扫描本地目录以读取最新 NFO...")
-                    emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
-                    time.sleep(3) # 等待 Emby 处理文件变更事件
+                if not uses_etk_metadata_provider:
+                    self.sync_item_metadata(
+                        item_details=item_details_from_emby,
+                        tmdb_id=tmdb_id,
+                        final_cast_override=final_processed_cast,
+                        metadata_override=formatted_metadata,
+                        force_write=True
+                    )
+                    self.download_images_from_tmdb(
+                        tmdb_id=tmdb_id,
+                        item_type=item_type,
+                        aggregated_tmdb_data=formatted_metadata,
+                        item_details=item_details_from_emby
+                    )
+                    self._update_emby_person_names(final_cast=final_processed_cast, formatted_metadata=formatted_metadata, item_details_from_emby=item_details_from_emby, item_name_for_log=item_name_for_log)
+                    media_path = item_details_from_emby.get("Path")
+                    if media_path:
+                        logger.info(f"  ➜ 正在通知 Emby 扫描本地目录以读取最新 NFO...")
+                        emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
+                        time.sleep(3)
+                else:
+                    logger.info("  ➜ [ETK元数据] 已跳过 STRM 的 NFO、目录图片和人物直写，改由插件从数据库恢复。")
 
             elif not media_info_only:
-                # 主动入库先写简版识别 NFO；命中数据库缓存时也必须用完整缓存覆盖它。
-                self.sync_item_metadata(
-                    item_details=item_details_from_emby,
-                    tmdb_id=tmdb_id,
-                    final_cast_override=final_processed_cast,
-                    metadata_override=formatted_metadata,
-                    force_write=True
-                )
-                self.download_images_from_tmdb(
-                    tmdb_id=tmdb_id,
-                    item_type=item_type,
-                    aggregated_tmdb_data=formatted_metadata,
-                    item_details=item_details_from_emby
-                )
+                if not uses_etk_metadata_provider:
+                    self.sync_item_metadata(
+                        item_details=item_details_from_emby,
+                        tmdb_id=tmdb_id,
+                        final_cast_override=final_processed_cast,
+                        metadata_override=formatted_metadata,
+                        force_write=True
+                    )
+                    self.download_images_from_tmdb(
+                        tmdb_id=tmdb_id,
+                        item_type=item_type,
+                        aggregated_tmdb_data=formatted_metadata,
+                        item_details=item_details_from_emby
+                    )
+                    media_path = item_details_from_emby.get("Path")
+                    if media_path:
+                        logger.info(f"  ➜ [数据库缓存] 正在通知 Emby 扫描本地目录以读取完整 NFO...")
+                        emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
+                        time.sleep(3)
 
-                media_path = item_details_from_emby.get("Path")
-                if media_path:
-                    logger.info(f"  ➜ [数据库缓存] 正在通知 Emby 扫描本地目录以读取完整 NFO...")
-                    emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
-                    time.sleep(3)
+            if uses_etk_metadata_provider and not media_info_only:
+                with get_central_db_connection() as conn:
+                    self._upsert_media_metadata(
+                        cursor=conn.cursor(),
+                        item_type=item_type,
+                        item_details_from_emby=item_details_from_emby,
+                        final_processed_cast=final_processed_cast,
+                        source_data_package=formatted_metadata,
+                        specific_episode_ids=specific_episode_ids,
+                    )
+                    conn.commit()
+                metadata_persisted_before_refresh = True
 
             # 7. 正常处理/回流需要刷新 Emby 元数据以确保外挂字幕可以加载；
             #    媒体信息修复模式只写数据库，不再触发 Emby/NFO/图片/人物链路。
@@ -2714,137 +2799,58 @@ class MediaProcessor:
                     emby_server_url=self.emby_url,
                     emby_api_key=self.emby_api_key,
                     user_id_for_ops=self.emby_user_id,
-                    replace_all_metadata_param=False, 
-                    replace_all_images_param=False,
+                    replace_all_metadata_param=uses_etk_metadata_provider,
+                    replace_all_images_param=uses_etk_metadata_provider,
                     item_name_for_log=item_name_for_log
+                )
+                if uses_etk_metadata_provider:
+                    self._restore_missing_etk_root_images(item_details_from_emby)
+
+                restore_target_ids = [item_id]
+                if item_type == 'Series':
+                    restore_target_ids = [str(x) for x in (specific_episode_ids or []) if x]
+                    if not restore_target_ids:
+                        restore_target_ids = [
+                            str(asset.get('emby_item_id'))
+                            for asset in media_db.get_physical_paths_and_sha1s_by_emby_id(item_id)
+                            if asset.get('emby_item_id')
+                            and str(asset.get('emby_item_id')) != str(item_id)
+                        ]
+                self.restore_cached_mediainfo_for_emby_items(
+                    restore_target_ids,
+                    log_context="Emby 刷新完成",
                 )
             else:
                 logger.info(f"  ➜ [媒体信息修复] 跳过 Emby 元数据刷新，仅准备写入数据库媒体信息。")
 
-            if using_cached_metadata:
-                logger.debug(f"  ➜ [{'媒体信息修复' if media_info_only else '数据库缓存'}] 开始质检...")
-
             # ======================================================================
-            # 统一收尾流程 (更新数据库、质检、合集、通知)
+            # 统一收尾流程 (更新数据库、合集、通知)
             # ======================================================================
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
 
                 # 1. 更新数据库缓存 (绑定 Emby ID, 提取视频流资产)
-                self._upsert_media_metadata(
-                    cursor=cursor,
-                    item_type=item_type,
-                    item_details_from_emby=item_details_from_emby,
-                    final_processed_cast=final_processed_cast,
-                    source_data_package=formatted_metadata,
-                    specific_episode_ids=specific_episode_ids
-                )
-                
-                # 2. 综合质检 (视频流检查 + 演员匹配度评分)
-                stream_check_passed = True
-                stream_fail_reason = ""
-                
-                def _check_stream_validity(file_path, label_prefix="", emby_item=None, db_assets=None):
-                    if not file_path: return False, f"{label_prefix} 缺失文件路径"
-                    
-                    # 1. 检查物理文件
-                    mediainfo_path = os.path.splitext(file_path)[0] + "-mediainfo.json"
-                    if os.path.exists(mediainfo_path): return True, ""
-                    
-                    # 2. 检查 Emby 的 MediaSources (针对 Movie/Episode)
-                    if emby_item and emby_item.get("MediaSources"):
-                        for source in emby_item["MediaSources"]:
-                            for stream in source.get("MediaStreams", []):
-                                if stream.get("Type") == "Video" and stream.get("Width") and stream.get("Height"):
-                                    return True, ""
-                                    
-                    # 3. 检查数据库的 asset_details_json (针对 Series 中的 Episode)
-                    if db_assets and isinstance(db_assets, list):
-                        for asset in db_assets:
-                            for stream in asset.get("video_streams", []):
-                                if stream.get("width") and stream.get("height"):
-                                    return True, ""
-                                    
-                    return False, f"缺失媒体信息: {label_prefix}"
-
-                if item_type in ['Movie', 'Episode']:
-                    emby_path = item_details_from_emby.get("Path")
-                    passed, reason = _check_stream_validity(emby_path, "", emby_item=item_details_from_emby)
-                    if not passed:
-                        stream_check_passed = False
-                        stream_fail_reason = reason
-                elif item_type == 'Series':
-                    try:
-                        cursor.execute("""
-                            SELECT season_number, episode_number, asset_details_json 
-                            FROM media_metadata 
-                            WHERE parent_series_tmdb_id = %s AND item_type = 'Episode' AND in_library = TRUE
-                            ORDER BY season_number ASC, episode_number ASC
-                        """, (tmdb_id,))
-                        for db_ep in cursor.fetchall():
-                            s_idx, e_idx = db_ep['season_number'], db_ep['episode_number']
-                            raw_assets = db_ep['asset_details_json']
-                            assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
-                            ep_path = assets[0].get('path') if assets and len(assets) > 0 else None
-                            passed, reason = _check_stream_validity(ep_path, f"[S{s_idx}E{e_idx}]", db_assets=assets)
-                            if not passed:
-                                stream_check_passed = False
-                                stream_fail_reason = reason
-                                logger.warning(f"  ➜ [质检] 剧集《{item_name_for_log}》检测到坏分集: {reason}")
-                                break 
-                    except Exception as e_db_check:
-                        logger.warning(f"  ➜ [质检] 数据库验证分集流信息时出错: {e_db_check}")
-
-                raw_genres = item_details_from_emby.get("Genres", [])
-                genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
-                is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
-                
-                raw_min_score = self.config.get("min_score_for_review", constants.DEFAULT_MIN_SCORE_FOR_REVIEW)
-                min_score_for_review = float(raw_min_score)
-
-                if media_info_only:
-                    processing_score = max(10.0, min_score_for_review)
-                    logger.info(f"  ➜ [媒体信息修复] 仅执行视频流质检，跳过演员评分。")
-                else:
-                    processing_score = actor_utils.evaluate_cast_processing_quality(
-                        final_cast=final_processed_cast, 
-                        original_cast_count=original_emby_actor_count,
-                        expected_final_count=len(final_processed_cast), 
-                        is_animation=is_animation
+                if not metadata_persisted_before_refresh:
+                    self._upsert_media_metadata(
+                        cursor=cursor,
+                        item_type=item_type,
+                        item_details_from_emby=item_details_from_emby,
+                        final_processed_cast=final_processed_cast,
+                        source_data_package=formatted_metadata,
+                        specific_episode_ids=specific_episode_ids
                     )
 
-                    if using_cached_metadata:
-                        logger.info(f"  ➜ [数据库缓存] 基于缓存数据的实时复核评分: {processing_score:.2f}")
-                
                 target_log_id = item_id
                 target_log_name = item_name_for_log
-                target_log_type = item_type
 
                 if item_type == 'Episode':
                     series_id = item_details_from_emby.get('SeriesId')
                     if series_id:
                         target_log_id = str(series_id)
                         target_log_name = item_details_from_emby.get('SeriesName') or f"剧集(ID:{series_id})"
-                        target_log_type = 'Series'
-                        if not stream_check_passed:
-                            s_idx, e_idx = item_details_from_emby.get('ParentIndexNumber'), item_details_from_emby.get('IndexNumber')
-                            stream_fail_reason = f"[S{s_idx}E{e_idx}] {stream_fail_reason}"
 
-                # 3. 最终判定与日志写入
-                if not stream_check_passed:
-                    logger.warning(f"  ➜ [质检]《{item_name_for_log}》因缺失视频流数据，需重新处理。")
-                    self.log_db_manager.save_to_failed_log(cursor, target_log_id, target_log_name, stream_fail_reason, target_log_type, score=0.0)
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=0.0)
-                elif processing_score < min_score_for_review:
-                    reason = f"处理评分 ({processing_score:.2f}) 低于阈值 ({min_score_for_review})。"
-                    if using_cached_metadata: logger.warning(f"  ➜ [质检]《{item_name_for_log}》本地缓存数据质量不佳 (评分: {processing_score:.2f})，已重新标记为【待复核】。")
-                    else: logger.warning(f"  ➜ [质检]《{item_name_for_log}》处理质量不佳，已标记为【待复核】。原因: {reason}")
-                    self.log_db_manager.save_to_failed_log(cursor, target_log_id, target_log_name, reason, target_log_type, score=processing_score)
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)
-                else:
-                    logger.info(f"  ➜ 《{item_name_for_log}》质检通过 (评分: {processing_score:.2f})，标记为已处理。")
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)
-                    self.log_db_manager.remove_from_failed_log(cursor, target_log_id)
+                self._mark_item_as_processed(cursor, target_log_id, target_log_name)
+                self.log_db_manager.remove_from_failed_log(cursor, target_log_id)
                 
                 conn.commit()
 
@@ -3911,6 +3917,8 @@ class MediaProcessor:
             duration_sec = 0
             is_hdr = False
             is_dovi_p5 = False
+            video_width = 0
+            video_height = 0
             
             if sha1:
                 try:
@@ -3941,6 +3949,12 @@ class MediaProcessor:
                                         
                                         streams = msi.get("MediaStreams", [])
                                         v_stream = next((s for s in streams if isinstance(s, dict) and s.get("Type") == "Video"), {})
+                                        try:
+                                            video_width = int(v_stream.get("Width") or 0)
+                                            video_height = int(v_stream.get("Height") or 0)
+                                        except (TypeError, ValueError):
+                                            video_width = 0
+                                            video_height = 0
                                         
                                         probe_text = str(v_stream).lower()
                                         
@@ -3970,31 +3984,45 @@ class MediaProcessor:
                 timestamp_sec = min(timestamp_sec, int(duration_sec - 10))
 
             logger.info(f"  ➜ [视频截图] 准备截取缩略图：{os.path.basename(thumb_save_path)}，时间点 {timestamp_sec} 秒。")
-            logger.debug(f"  ➜ [视频截图] 截图参数：HDR={'是' if is_hdr else '否'}, DV P5={'是' if is_dovi_p5 else '否'}")
+            is_portrait = video_width > 0 and video_height > video_width
+            logger.debug(
+                f"  ➜ [视频截图] 截图参数：HDR={'是' if is_hdr else '否'}, "
+                f"DV P5={'是' if is_dovi_p5 else '否'}, 画面={video_width or '?'}x{video_height or '?'}, "
+                f"布局={'竖屏完整画面+模糊边衬' if is_portrait else '横屏中心裁切'}"
+            )
 
             # =========================================================
             # ★ 5. 构建单次极速滤镜 (终极画质 + 极速版)
             # =========================================================
-            vf_filters = []
-            
-            # ★★★ 提速 100 倍的核心秘诀：先缩放，后映射！★★★
-            # 将 4K/1080p 的原图先缩小到 640x360。
-            # 这样后续的色调映射只需要计算 23 万个像素，而不是 4K 的 820 万个像素，耗时几乎为 0！
-            vf_filters.append("scale=640:360:force_original_aspect_ratio=increase,crop=640:360")
-            
+            color_filters = []
             if is_dovi_p5 or is_hdr:
                 # 既然图已经这么小了，我们完全可以用最高画质的 zscale 色调映射！
                 # 无论是 DV P5 还是普通 HDR，都能完美还原色彩，彻底告别灰蒙蒙！
-                vf_filters.append(
+                color_filters.append(
                     "zscale=t=linear:npl=100,format=gbrpf32le,"
                     "tonemap=tonemap=hable:desat=0,"
                     "zscale=p=bt709:t=bt709:m=bt709:r=tv"
                 )
 
             # 统一转换为标准 8-bit SDR 格式
-            vf_filters.append("format=yuv420p")
-            
-            vf_string = ",".join(vf_filters)
+            color_filters.append("format=yuv420p")
+            color_filter = ",".join(color_filters)
+
+            if is_portrait:
+                filter_complex = (
+                    "[0:v]split=2[bgsrc][fgsrc];"
+                    "[bgsrc]scale=640:360:force_original_aspect_ratio=increase,"
+                    "crop=640:360,eq=brightness=-0.12:saturation=0.8,boxblur=20:10[bg];"
+                    "[fgsrc]scale=640:360:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{color_filter}[vout]"
+                )
+                video_filter_args = ["-filter_complex", filter_complex, "-map", "[vout]"]
+            else:
+                vf_string = (
+                    "scale=640:360:force_original_aspect_ratio=increase,crop=640:360,"
+                    f"{color_filter}"
+                )
+                video_filter_args = ["-map", "0:v:0", "-vf", vf_string]
 
             # =========================================================
             # ★ 6. 执行 FFmpeg (一击脱离)
@@ -4014,10 +4042,8 @@ class MediaProcessor:
                 "-ss", str(timestamp_sec),
                 "-i", str(direct_url),
                 
-                "-map", "0:v:0",
                 "-an", "-sn", "-dn",
-                
-                "-vf", vf_string,
+                *video_filter_args,
                 "-frames:v", "1",
                 "-q:v", "5", # 适当降低质量参数，缩略图看不出区别，但编码更快
                 "-y",
@@ -4042,9 +4068,195 @@ class MediaProcessor:
             logger.warning(f"  ➜ [视频截图] 发生异常: {e}")
             return False
 
+    @staticmethod
+    def _emby_item_has_image(item: Dict[str, Any], image_type: str) -> bool:
+        if image_type == 'Backdrop':
+            return bool((item or {}).get('BackdropImageTags'))
+        return bool(((item or {}).get('ImageTags') or {}).get(image_type))
+
+    def _restore_missing_etk_root_images(self, item_details: Dict[str, Any]) -> bool:
+        item_id = str((item_details or {}).get('Id') or '').strip()
+        item_type = str((item_details or {}).get('Type') or '').strip()
+        if not item_id or item_type not in {'Movie', 'Series'}:
+            return True
+
+        current = emby.get_emby_item_details(
+            item_id,
+            self.emby_url,
+            self.emby_api_key,
+            self.emby_user_id,
+            fields='ImageTags,BackdropImageTags',
+        ) or item_details
+        restored_count = 0
+        failed_count = 0
+        for image_type in ('Primary', 'Backdrop', 'Logo', 'Thumb'):
+            if self._emby_item_has_image(current, image_type):
+                continue
+            if emby.download_remote_item_image(
+                self.emby_url,
+                self.emby_api_key,
+                item_id,
+                image_type,
+            ):
+                restored_count += 1
+            else:
+                failed_count += 1
+
+        if item_type == 'Series':
+            seasons = emby.get_series_children(
+                series_id=item_id,
+                base_url=self.emby_url,
+                api_key=self.emby_api_key,
+                user_id=self.emby_user_id,
+                include_item_types='Season',
+                fields='Id,Name,Path,IndexNumber,ImageTags',
+            ) or []
+            for season in seasons:
+                if self._emby_item_has_image(season, 'Primary'):
+                    continue
+                if emby.download_remote_item_image(
+                    self.emby_url,
+                    self.emby_api_key,
+                    str(season.get('Id') or ''),
+                    'Primary',
+                ):
+                    restored_count += 1
+                else:
+                    failed_count += 1
+
+        logger.info(
+            f"  ➜ [ETK图片] {item_type} 与季海报恢复完成："
+            f"成功 {restored_count}，失败 {failed_count}。"
+        )
+        return failed_count == 0
+
+    def _sync_etk_episode_images(self, aggregated_tmdb_data: Dict[str, Any], item_details: Dict[str, Any], force_overwrite_episodes: Optional[List[str]] = None) -> bool:
+        series_id = str((item_details or {}).get('Id') or '').strip()
+        series_path = str((item_details or {}).get('Path') or '').strip()
+        if not series_id or not series_path:
+            logger.warning("  ➜ [ETK分集图片] 缺少 Series ID 或路径，无法同步。")
+            return False
+
+        self._restore_missing_etk_root_images(item_details)
+
+        children = emby.get_series_children(
+            series_id=series_id,
+            base_url=self.emby_url,
+            api_key=self.emby_api_key,
+            user_id=self.emby_user_id,
+            include_item_types="Episode",
+            fields="Id,Name,Path,ParentIndexNumber,IndexNumber,ImageTags",
+        )
+        if children is None:
+            return False
+
+        episodes = (aggregated_tmdb_data or {}).get('episodes_details') or {}
+        episode_list = episodes.values() if isinstance(episodes, dict) else episodes
+        episode_map = {
+            (ep.get('season_number'), ep.get('episode_number')): ep
+            for ep in episode_list
+            if isinstance(ep, dict)
+        }
+        force_keys = set(force_overwrite_episodes or [])
+        uploaded_count = 0
+        refreshed_count = 0
+        removed_local_count = 0
+        failed_count = 0
+
+        def remove_local_thumb(video_path: str) -> bool:
+            if not str(video_path or '').lower().endswith('.strm'):
+                return False
+            thumb_path = os.path.splitext(video_path)[0] + "-thumb.jpg"
+            if not os.path.isfile(thumb_path):
+                return False
+            try:
+                os.remove(thumb_path)
+                return True
+            except OSError as e:
+                logger.warning(f"  ➜ [ETK分集图片] 清理旧截图失败: {thumb_path} -> {e}")
+                return False
+
+        with tempfile.TemporaryDirectory(prefix="etk-episode-thumb-") as temp_dir:
+            for child in children:
+                item_id = str(child.get('Id') or '').strip()
+                video_path = str(child.get('Path') or '').strip()
+                try:
+                    season_number = int(child.get('ParentIndexNumber'))
+                    episode_number = int(child.get('IndexNumber'))
+                except (TypeError, ValueError):
+                    continue
+                if not item_id or not video_path.lower().endswith('.strm'):
+                    continue
+
+                local_thumb_removed = remove_local_thumb(video_path)
+                removed_local_count += int(local_thumb_removed)
+                ep_key = f"S{season_number}E{episode_number}"
+                episode_data = episode_map.get((season_number, episode_number)) or {}
+                image_tags = child.get('ImageTags') or {}
+
+                if episode_data.get('still_path'):
+                    needs_refresh = ep_key in force_keys or local_thumb_removed or not image_tags.get('Primary')
+                    if needs_refresh:
+                        if emby.download_remote_item_image(
+                            self.emby_url,
+                            self.emby_api_key,
+                            item_id,
+                            'Primary',
+                        ):
+                            emby.delete_item_image(self.emby_url, self.emby_api_key, item_id, 'Thumb')
+                            refreshed_count += 1
+                        else:
+                            failed_count += 1
+                    continue
+
+                if image_tags.get('Primary'):
+                    continue
+
+                temp_path = os.path.join(temp_dir, f"{item_id}-{os.path.basename(os.path.splitext(video_path)[0])}.jpg")
+                if not self._extract_thumb_via_ffmpeg(video_path, temp_path, episode_data):
+                    failed_count += 1
+                    continue
+                try:
+                    with open(temp_path, 'rb') as image_file:
+                        image_data = image_file.read()
+                    if emby.upload_item_image(
+                        self.emby_url,
+                        self.emby_api_key,
+                        item_id,
+                        image_data,
+                        content_type='image/jpeg',
+                        image_type='Primary',
+                        delete_existing=True,
+                    ):
+                        uploaded_count += 1
+                    else:
+                        failed_count += 1
+                finally:
+                    try:
+                        os.remove(temp_path)
+                    except FileNotFoundError:
+                        pass
+
+        logger.info(
+            "  ➜ [ETK分集图片] Emby缓存同步完成："
+            f"截图上传 {uploaded_count}，TMDb正式剧照刷新 {refreshed_count}，"
+            f"清理媒体目录旧截图 {removed_local_count}，失败 {failed_count}。"
+        )
+        return failed_count == 0
+
     # --- 从 TMDb 直接下载图片 (用于实时监控/预处理/追剧刷新) ---
-    def download_images_from_tmdb(self, tmdb_id: str, item_type: str, aggregated_tmdb_data: Optional[Dict[str, Any]] = None, item_details: Optional[Dict[str, Any]] = None, force_overwrite_episodes: Optional[List[str]] = None) -> bool:
+    def download_images_from_tmdb(self, tmdb_id: str, item_type: str, aggregated_tmdb_data: Optional[Dict[str, Any]] = None, item_details: Optional[Dict[str, Any]] = None, force_overwrite_episodes: Optional[List[str]] = None, allow_etk_episode_images: bool = False) -> bool:
         if not tmdb_id: return False
+        is_etk_strm = bool(item_details and self._is_etk_strm_item(item_details))
+        if is_etk_strm:
+            if allow_etk_episode_images:
+                return self._sync_etk_episode_images(
+                    aggregated_tmdb_data or {},
+                    item_details,
+                    force_overwrite_episodes,
+                )
+            logger.debug("  ➜ [ETK元数据] STRM 图片由插件远程恢复，跳过目录图片下载。")
+            return True
 
         try:
             log_prefix = "[图片下载]"
@@ -4109,14 +4321,14 @@ class MediaProcessor:
             # --- A. 海报 (Poster) -> 根目录 ---
             if images_node.get("posters"):
                 downloads.append((images_node["posters"][0]["file_path"], os.path.join(series_root_dir, "poster.jpg"), False))
-            
+
             # --- B. 背景 (Backdrop) -> 根目录 ---
             backdrops_list = images_node.get("backdrops", [])
             selected_backdrop = backdrops_list[0]["file_path"] if backdrops_list else tmdb_data.get("backdrop_path")
-            
+
             landscape_path = os.path.join(series_root_dir, "landscape.jpg")
             fanart_path = os.path.join(series_root_dir, "fanart.jpg")
-            
+
             if selected_backdrop:
                 downloads.append((selected_backdrop, fanart_path, False))
                 downloads.append((selected_backdrop, landscape_path, False))
@@ -4344,6 +4556,24 @@ class MediaProcessor:
             mode='auto'
         )
     
+    @staticmethod
+    def _is_etk_strm_item(item_details: Dict[str, Any]) -> bool:
+        path = str((item_details or {}).get('Path') or '').strip()
+        if path.lower().endswith('.strm'):
+            return True
+        if path.startswith(('http://', 'https://')):
+            return '/api/p115/play/' in path or '/api/p115/virtual-play/' in path
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    if name.lower().endswith('.strm'):
+                        return True
+        except OSError:
+            return False
+        return False
+
     # --- 生成NFO元数据 ---
     def sync_item_metadata(self, item_details: Dict[str, Any], tmdb_id: str,
                        final_cast_override: Optional[List[Dict[str, Any]]] = None,
@@ -4353,6 +4583,9 @@ class MediaProcessor:
         """
         【纯净 NFO 模式】基于模板和现有数据构建元数据文件，生成 XML 写入物理目录。
         """
+        if self._is_etk_strm_item(item_details):
+            logger.debug("  ➜ [ETK元数据] STRM 元数据由插件恢复，跳过 NFO 生成。")
+            return True
         item_type = item_details.get("Type")
         log_prefix = "[元数据写入]"
 

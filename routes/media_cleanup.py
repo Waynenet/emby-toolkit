@@ -338,10 +338,6 @@ def delete_single_version():
                 base_dir = os.path.dirname(file_path)
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-                mi_path = os.path.join(base_dir, f"{base_name}-mediainfo.json")
-                if os.path.exists(mi_path):
-                    os.remove(mi_path)
-
                 for f in os.listdir(base_dir):
                     if f.startswith(base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo', 'jpg', 'png']:
                         try:

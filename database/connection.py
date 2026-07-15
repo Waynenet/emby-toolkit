@@ -205,7 +205,9 @@ def init_db():
                         release_year INTEGER,
                         last_air_date DATE,
                         poster_path TEXT,
-                        backdrop_path TEXT, 
+                        backdrop_path TEXT,
+                        logo_path TEXT,
+                        thumb_path TEXT,
                         homepage TEXT,
                         runtime_minutes INTEGER,
                         rating REAL,
@@ -221,6 +223,8 @@ def init_db():
                         last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         ignore_reason TEXT,
                         tags_json JSONB,
+                        metadata_ready BOOLEAN NOT NULL DEFAULT FALSE,
+                        actors_ready BOOLEAN NOT NULL DEFAULT FALSE,
 
                         -- 剧集专属与层级数据
                         parent_series_tmdb_id TEXT,
@@ -518,6 +522,28 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'p115_upload_records' 表 (115 上传任务与完成记录)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS p115_upload_records (
+                        record_key TEXT PRIMARY KEY,
+                        record_type TEXT NOT NULL,
+                        mapping_id TEXT,
+                        local_path TEXT,
+                        relative_path TEXT,
+                        target_cid TEXT,
+                        pick_code TEXT,
+                        status TEXT,
+                        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT chk_p115_upload_record_type CHECK (record_type IN ('job', 'completed'))
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_type_status ON p115_upload_records(record_type, status)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_pick_code ON p115_upload_records(pick_code) WHERE pick_code IS NOT NULL")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_mapping ON p115_upload_records(mapping_id, record_type)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_upload_records_local_path ON p115_upload_records(local_path) WHERE record_type = 'completed'")
+
                 logger.trace("  ➜ 正在创建 'shared_credit_snapshot' 表 (共享资源贡献值快照)...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS shared_credit_snapshot (
@@ -748,6 +774,10 @@ def init_db():
                         'media_metadata': {
                             "imdb_id": "TEXT",
                             "tagline": "TEXT",
+                            "logo_path": "TEXT",
+                            "thumb_path": "TEXT",
+                            "metadata_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
+                            "actors_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "watchlist_version_lock_json": "JSONB DEFAULT '{}'::jsonb",
                             "washing_level": "INTEGER",
                             "washing_snapshot_json": "JSONB DEFAULT '{}'::jsonb"
@@ -795,6 +825,15 @@ def init_db():
                                     logger.trace(f"    ➜ 字段 '{table}.{col_name}' 已存在，跳过。")
                         else:
                             logger.warning(f"    ➜ [数据库升级] 检查表 '{table}' 时发现该表不存在，跳过升级。")
+
+                    cursor.execute("""
+                        UPDATE media_metadata
+                        SET metadata_ready = TRUE,
+                            actors_ready = TRUE
+                        WHERE (metadata_ready IS FALSE OR actors_ready IS FALSE)
+                          AND jsonb_typeof(actors_json) = 'array'
+                          AND jsonb_array_length(actors_json) > 0
+                    """)
 
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)

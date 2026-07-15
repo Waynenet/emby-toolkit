@@ -1537,13 +1537,12 @@ def _delete_virtual_files(row: Dict[str, Any]) -> int:
         text = str(path or '').strip()
         if not text:
             continue
-        for candidate in (text, re.sub(r'\.strm$', '-mediainfo.json', text, flags=re.I)):
-            try:
-                if candidate and os.path.exists(candidate):
-                    os.remove(candidate)
-                    deleted += 1
-            except Exception as e:
-                logger.debug(f"  ➜ [虚拟入库] 删除本地文件失败：{candidate} -> {e}")
+        try:
+            if os.path.exists(text):
+                os.remove(text)
+                deleted += 1
+        except Exception as e:
+            logger.debug(f"  ➜ [虚拟入库] 删除本地文件失败：{text} -> {e}")
     return deleted
 
 

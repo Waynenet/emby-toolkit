@@ -1072,7 +1072,7 @@ def _execute_resubscribe(processor, task_name: str, target):
                 if pc:
                     all_pickcodes_to_delete.append(pc)
                     
-                # 2. 物理删除本地文件 (STRM, mediainfo, 字幕, NFO)
+                # 2. 物理删除本地文件（STRM、字幕、NFO）
                 if file_path and os.path.exists(file_path):
                     try:
                         os.remove(file_path)
@@ -1082,11 +1082,6 @@ def _execute_resubscribe(processor, task_name: str, target):
                         base_dir = os.path.dirname(file_path)
                         base_name = os.path.splitext(os.path.basename(file_path))[0]
                         
-                        # 删除 mediainfo.json
-                        mi_path = os.path.join(base_dir, f"{base_name}-mediainfo.json")
-                        if os.path.exists(mi_path):
-                            os.remove(mi_path)
-                            
                         # 删除同名字幕和 NFO
                         for f in os.listdir(base_dir):
                             if f.startswith(base_name) and f.split('.')[-1].lower() in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup', 'nfo']:
