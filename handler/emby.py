@@ -138,12 +138,15 @@ def apply_etk_mediainfo(
     raw: Any,
     base_url: str,
     api_key: str,
+    *,
+    drop_conflicting_external_streams: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Persist ETK-formatted media information through the bridge plugin."""
     if not all([item_id, base_url, api_key]):
         return None
     try:
         payload = normalize_etk_mediainfo_payload(raw)
+        payload["DropConflictingExternalStreams"] = bool(drop_conflicting_external_streams)
         url = f"{base_url.rstrip('/')}/Items/{item_id}/ETKMediaInfo"
         response = emby_client.post(
             url,
@@ -169,6 +172,8 @@ def apply_cached_etk_mediainfo(
     sha1: str,
     base_url: str,
     api_key: str,
+    *,
+    drop_conflicting_external_streams: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Load formatted media info from p115_mediainfo_cache and inject it."""
     if not sha1:
@@ -179,7 +184,13 @@ def apply_cached_etk_mediainfo(
     if not cached:
         logger.warning("  ➜ [媒体信息注入] SHA1 %s 未命中格式化缓存。", str(sha1)[:12])
         return None
-    return apply_etk_mediainfo(item_id, cached, base_url, api_key)
+    return apply_etk_mediainfo(
+        item_id,
+        cached,
+        base_url,
+        api_key,
+        drop_conflicting_external_streams=drop_conflicting_external_streams,
+    )
 
 def get_running_tasks(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     """

@@ -517,10 +517,22 @@ def _process_emby_binding_queue():
         normalized_path = os.path.normpath(path)
         payload = EMBY_BIND_MEDIAINFO.get(normalized_path)
         if payload:
-            result = emby.apply_etk_mediainfo(item_id, payload, base_url, api_key)
+            result = emby.apply_etk_mediainfo(
+                item_id,
+                payload,
+                base_url,
+                api_key,
+                drop_conflicting_external_streams=True,
+            )
         else:
             _pick_code, sha1 = processor._extract_115_fingerprints(path)
-            result = emby.apply_cached_etk_mediainfo(item_id, sha1, base_url, api_key)
+            result = emby.apply_cached_etk_mediainfo(
+                item_id,
+                sha1,
+                base_url,
+                api_key,
+                drop_conflicting_external_streams=True,
+            )
         if result is not None:
             injected[path] = item
 
@@ -548,6 +560,18 @@ def _process_emby_binding_queue():
         and emby._normalize_emby_media_path(path) not in plugin_completed
     ]
     if missing:
+        injection_failed = [path for path in missing if path in found]
+        item_not_found = [path for path in missing if path not in found]
+        if injection_failed:
+            logger.warning(
+                "  ➜ [主动入库] %s 个媒体文件已取得 Emby Item ID，但媒体信息注入失败。",
+                len(injection_failed),
+            )
+        if item_not_found:
+            logger.warning(
+                "  ➜ [主动入库] %s 个媒体文件暂未取得 Emby Item ID。",
+                len(item_not_found),
+            )
         retrying = []
         exhausted = []
         with EMBY_BIND_LOCK:
@@ -574,12 +598,12 @@ def _process_emby_binding_queue():
 
         if retrying:
             logger.warning(
-                "  ➜ [主动入库] %s 个媒体文件暂未取得 Emby Item ID，%s 秒后重扫重试。",
+                "  ➜ [主动入库] %s 个媒体文件将在 %s 秒后重扫重试。",
                 len(retrying), EMBY_BIND_RETRY_DELAY_SECONDS,
             )
         if exhausted:
             logger.error(
-                "  ➜ [主动入库] %s 个媒体文件连续 %s 轮未取得 Emby Item ID，已停止自动重试。",
+                "  ➜ [主动入库] %s 个媒体文件连续 %s 轮未完成入库绑定，已停止自动重试。",
                 len(exhausted), EMBY_BIND_MAX_RETRIES + 1,
             )
 
