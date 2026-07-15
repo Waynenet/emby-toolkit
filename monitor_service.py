@@ -36,6 +36,10 @@ EMBY_BIND_DEBOUNCE_SECONDS = 3
 EMBY_BIND_RETRY_COUNTS = {}
 EMBY_BIND_MAX_RETRIES = 2
 EMBY_BIND_RETRY_DELAY_SECONDS = 10
+EMBY_BIND_PLUGIN_WAIT_SECONDS = 8
+EMBY_BIND_PENDING_PATHS = set()
+EMBY_BIND_PLUGIN_COMPLETED = set()
+EMBY_BIND_CONDITION = threading.Condition(EMBY_BIND_LOCK)
 NFO_WRITE_LOCK = threading.Lock()
 AUDIO_EXTENSIONS = {'.flac', '.m4a', '.mp3', '.aac', '.wav', '.ape', '.ogg', '.opus'}
 MEDIA_PREP_LOCK = threading.Lock()
@@ -369,9 +373,10 @@ def enqueue_emby_binding(file_path: str, mediainfo: Optional[Dict[str, Any]] = N
     if not file_path or not os.path.isfile(file_path):
         return
 
-    with EMBY_BIND_LOCK:
+    with EMBY_BIND_CONDITION:
         normalized_path = os.path.normpath(file_path)
         EMBY_BIND_QUEUE.add(normalized_path)
+        EMBY_BIND_PENDING_PATHS.add(normalized_path)
         if mediainfo:
             EMBY_BIND_MEDIAINFO[normalized_path] = mediainfo
         if EMBY_BIND_TIMER:
@@ -379,6 +384,72 @@ def enqueue_emby_binding(file_path: str, mediainfo: Optional[Dict[str, Any]] = N
         EMBY_BIND_TIMER = threading.Timer(EMBY_BIND_DEBOUNCE_SECONDS, _process_emby_binding_queue)
         EMBY_BIND_TIMER.daemon = True
         EMBY_BIND_TIMER.start()
+
+
+def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pick_code: str = '') -> Dict[str, Any]:
+    """Accept a bridge-reported Item only while its local STRM is pending binding."""
+    import extensions
+
+    processor = extensions.media_processor_instance
+    item = item if isinstance(item, dict) else {}
+    item_id = str(item.get('Id') or '').strip()
+    if not processor or not item_id or item.get('Type') not in {'Movie', 'Episode'}:
+        return {'ok': False, 'skipped': True, 'reason': 'invalid_item'}
+
+    with EMBY_BIND_CONDITION:
+        pending_paths = list(EMBY_BIND_PENDING_PATHS)
+
+    item_path = emby._normalize_emby_media_path(item.get('Path'))
+    matched_path = next(
+        (
+            path for path in pending_paths
+            if emby._normalize_emby_media_path(path).casefold() == item_path.casefold()
+        ),
+        None,
+    )
+    if not matched_path:
+        wanted_sha1 = str(sha1 or '').strip().upper()
+        wanted_pick_code = str(expected_pick_code or '').strip().lower()
+        for path in pending_paths:
+            if not str(path).lower().endswith('.strm'):
+                continue
+            pick_code, path_sha1 = processor._extract_115_fingerprints(path)
+            if wanted_pick_code and str(pick_code or '').strip().lower() == wanted_pick_code:
+                matched_path = path
+                break
+            if wanted_sha1 and str(path_sha1 or '').strip().upper() == wanted_sha1:
+                matched_path = path
+                break
+    if not matched_path:
+        return {'ok': True, 'skipped': True, 'reason': 'not_pending'}
+
+    normalized = emby._normalize_emby_media_path(matched_path)
+    with EMBY_BIND_CONDITION:
+        if normalized in EMBY_BIND_PLUGIN_COMPLETED:
+            return {'ok': True, 'skipped': True, 'reason': 'already_completed'}
+        EMBY_BIND_PLUGIN_COMPLETED.add(normalized)
+        EMBY_BIND_CONDITION.notify_all()
+
+    try:
+        from routes.webhook import dispatch_active_emby_items
+        dispatch_active_emby_items([item])
+    except Exception:
+        with EMBY_BIND_CONDITION:
+            EMBY_BIND_PLUGIN_COMPLETED.discard(normalized)
+            EMBY_BIND_CONDITION.notify_all()
+        raise
+
+    with EMBY_BIND_CONDITION:
+        EMBY_BIND_QUEUE.discard(matched_path)
+        EMBY_BIND_PENDING_PATHS.discard(matched_path)
+        EMBY_BIND_RETRY_COUNTS.pop(os.path.normpath(matched_path), None)
+        EMBY_BIND_MEDIAINFO.pop(os.path.normpath(matched_path), None)
+    logger.info(
+        "  ➜ [主动入库] 插件已上报 Emby Item ID，跳过路径轮询: %s -> %s",
+        os.path.basename(matched_path),
+        item_id,
+    )
+    return {'ok': True, 'accepted': True, 'item_id': item_id}
 
 
 def _process_emby_binding_queue():
@@ -405,8 +476,35 @@ def _process_emby_binding_queue():
 
     logger.info("  ➜ [主动入库] 通知 Emby 扫描 %s 个媒体文件，随后主动获取 Item ID。", len(ready_paths))
     emby.notify_emby_file_changes(ready_paths, base_url, api_key)
+    plugin_wait_paths = [path for path in ready_paths if str(path).lower().endswith('.strm')]
+    if plugin_wait_paths:
+        deadline = time.monotonic() + EMBY_BIND_PLUGIN_WAIT_SECONDS
+        with EMBY_BIND_CONDITION:
+            while True:
+                waiting = [
+                    path for path in plugin_wait_paths
+                    if emby._normalize_emby_media_path(path) not in EMBY_BIND_PLUGIN_COMPLETED
+                ]
+                remaining = deadline - time.monotonic()
+                if not waiting or remaining <= 0:
+                    break
+                EMBY_BIND_CONDITION.wait(timeout=remaining)
+            plugin_completed = set(EMBY_BIND_PLUGIN_COMPLETED)
+    else:
+        plugin_completed = set()
+
+    poll_paths = [
+        path for path in ready_paths
+        if emby._normalize_emby_media_path(path) not in plugin_completed
+    ]
+    fallback_strm_paths = [path for path in poll_paths if str(path).lower().endswith('.strm')]
+    if fallback_strm_paths:
+        logger.info(
+            "  ➜ [主动入库] 插件优先窗口结束，%s 个 STRM 改用路径轮询兜底。",
+            len(fallback_strm_paths),
+        )
     found = emby.wait_for_emby_items_by_path(
-        ready_paths,
+        poll_paths,
         base_url,
         api_key,
         user_id,
@@ -434,12 +532,20 @@ def _process_emby_binding_queue():
             for path in ready_paths:
                 normalized = emby._normalize_emby_media_path(path)
                 if normalized in injected:
+                    EMBY_BIND_PENDING_PATHS.discard(path)
                     EMBY_BIND_RETRY_COUNTS.pop(os.path.normpath(path), None)
                     EMBY_BIND_MEDIAINFO.pop(os.path.normpath(path), None)
+
+    with EMBY_BIND_CONDITION:
+        for path in ready_paths:
+            normalized = emby._normalize_emby_media_path(path)
+            if normalized in plugin_completed:
+                EMBY_BIND_PLUGIN_COMPLETED.discard(normalized)
 
     missing = [
         path for path in ready_paths
         if emby._normalize_emby_media_path(path) not in injected
+        and emby._normalize_emby_media_path(path) not in plugin_completed
     ]
     if missing:
         retrying = []
@@ -453,6 +559,7 @@ def _process_emby_binding_queue():
                     EMBY_BIND_QUEUE.add(normalized_path)
                     retrying.append(path)
                 else:
+                    EMBY_BIND_PENDING_PATHS.discard(normalized_path)
                     EMBY_BIND_RETRY_COUNTS.pop(normalized_path, None)
                     EMBY_BIND_MEDIAINFO.pop(normalized_path, None)
                     exhausted.append(path)

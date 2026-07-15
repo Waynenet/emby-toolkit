@@ -123,14 +123,16 @@ def _emby_item_matches_cache(item: Any, sha1: str, expected_pick_code: str = "")
     return False
 
 
-def sync_intro_from_emby_item(sha1: str, item_id: str, *, expected_pick_code: str = "") -> Dict[str, Any]:
-    """Persist Emby's detected intro chapters before the bridge restores cached media info."""
-    if not shared_intro_enabled():
-        return {"ok": False, "skipped": True, "reason": "shared_intro_disabled"}
+def get_verified_emby_item_for_cache(
+    sha1: str,
+    item_id: str,
+    *,
+    expected_pick_code: str = "",
+) -> Dict[str, Any]:
     sha1 = _norm_sha1(sha1)
     item_id = str(item_id or "").strip()
     if not sha1 or not re.fullmatch(r"\d{1,20}", item_id):
-        return {"ok": False, "skipped": True, "reason": "invalid_identity"}
+        return {}
 
     from handler import emby
     import config_manager
@@ -141,10 +143,24 @@ def sync_intro_from_emby_item(sha1: str, item_id: str, *, expected_pick_code: st
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
-        fields="Path,MediaSources,Chapters",
+        fields="Path,MediaSources,Chapters,SeriesId,Type,Name",
         silent_404=True,
     )
-    if not _emby_item_matches_cache(item, sha1, expected_pick_code):
+    return item if _emby_item_matches_cache(item, sha1, expected_pick_code) else {}
+
+
+def sync_intro_from_emby_item(sha1: str, item_id: str, *, expected_pick_code: str = "") -> Dict[str, Any]:
+    """Persist Emby's detected intro chapters before the bridge restores cached media info."""
+    if not shared_intro_enabled():
+        return {"ok": False, "skipped": True, "reason": "shared_intro_disabled"}
+    sha1 = _norm_sha1(sha1)
+    item_id = str(item_id or "").strip()
+    item = get_verified_emby_item_for_cache(
+        sha1,
+        item_id,
+        expected_pick_code=expected_pick_code,
+    )
+    if not item:
         return {"ok": False, "skipped": True, "reason": "item_identity_mismatch"}
 
     chapters = extract_intro_chapters({"Chapters": item.get("Chapters") or []})

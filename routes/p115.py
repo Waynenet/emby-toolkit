@@ -1958,6 +1958,24 @@ def _sync_intro_snapshot_response(sha1, expected_pick_code=''):
     return jsonify(result)
 
 
+def _accept_emby_item_response(sha1, expected_pick_code=''):
+    from handler.shared_intro_service import get_verified_emby_item_for_cache
+    from monitor_service import accept_plugin_emby_binding
+
+    item = get_verified_emby_item_for_cache(
+        sha1,
+        request.args.get('emby_item_id'),
+        expected_pick_code=expected_pick_code,
+    )
+    if not item:
+        return jsonify({'ok': False, 'error': 'item identity mismatch'}), 409
+    return jsonify(accept_plugin_emby_binding(
+        item,
+        sha1=sha1,
+        expected_pick_code=expected_pick_code,
+    ))
+
+
 @p115_bp.route('/mediainfo/<pick_code>/intro-sync', methods=['POST'])
 def sync_intro_snapshot_by_pick_code(pick_code):
     row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
@@ -1969,6 +1987,19 @@ def sync_intro_snapshot_by_pick_code(pick_code):
 @p115_bp.route('/mediainfo/sha1/<sha1>/intro-sync', methods=['POST'])
 def sync_intro_snapshot_by_sha1(sha1):
     return _sync_intro_snapshot_response(sha1)
+
+
+@p115_bp.route('/mediainfo/<pick_code>/item-ready', methods=['POST'])
+def accept_emby_item_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({'error': 'media info cache not found'}), 404
+    return _accept_emby_item_response(row.get('sha1'), expected_pick_code=pick_code)
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/item-ready', methods=['POST'])
+def accept_emby_item_by_sha1(sha1):
+    return _accept_emby_item_response(sha1)
 
 
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) 
