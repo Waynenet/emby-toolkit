@@ -178,7 +178,7 @@ def evaluate_cast_processing_quality(
             logger.debug(f"  ➜ 惩罚: 数量正常，不进行惩罚。")
     
     final_score_rounded = round(avg_score, 1)
-    logger.info(f"  ➜ 最终评分: {final_score_rounded:.1f} ---")
+    logger.info(f"  ➜ 演员表质量评分：{final_score_rounded:.1f} 分。")
     return final_score_rounded
 
 # ✨✨✨从豆瓣API获取指定媒体的演员原始数据列表✨✨✨
@@ -261,6 +261,8 @@ def format_and_complete_cast_list(
     【V9 - 最终策略版】根据调用模式格式化并排序演员列表。
     - 'auto': 自动处理流程。严格按原始TMDb的 'order' 字段排序。
     - 'manual': 手动编辑流程。以传入列表的顺序为基准，并将通用角色排到末尾。
+    【新增英文兜底洗刷】：如果翻译全部结束后，角色名依然不含任何中文，
+    则强制退化清空，从而安全地触发下方“配音”或“演员”的媒体类型兜底。
     """
     processed_cast = []
     add_role_prefix = config.get(constants.CONFIG_OPTION_ACTOR_ROLE_ADD_PREFIX, False)
@@ -274,6 +276,15 @@ def format_and_complete_cast_list(
         # (角色名处理逻辑保持不变)
         character_name = new_actor.get("character")
         final_role = character_name.strip() if character_name else ""
+        
+        # =================================================================
+        # ★★★ 新增：英文兜底洗刷阀 ★★★
+        # 如果翻译全部结束后，角色名依然不含任何中文（例如翻译失败残留的 "Pilot"）
+        # 强制清空它，使其在下方安全地触发“配音”或“演员”的中文兜底！
+        # =================================================================
+        if final_role and not utils.contains_chinese(final_role):
+            final_role = ""
+
         if utils.contains_chinese(final_role):
             final_role = final_role.replace(" ", "").replace("　", "")
         if add_role_prefix:
