@@ -8,7 +8,7 @@
 - 项目名称：Emby ToolKit / ETK
 - 项目类型：面向 Emby 用户的媒体库增强工具，核心围绕 115 网盘整理、STRM 入库、元数据补全、追剧订阅、演员订阅、资源共享、合集维护、封面生成、清理和 Web 管理后台。
 - 技术栈：Python 3.12 + Flask 后端，PostgreSQL 持久化，Vue 3 + Vite 前端，Docker 镜像包含 Nginx、ffmpeg、前端构建产物与后端服务。
-- 媒体信息约定：`p115_mediainfo_cache.mediainfo_json` 是格式化数据源，通过独立的 [ETK MediaInfo Bridge](https://github.com/hbq0405/etk-mediainfo-bridge) 插件直接注入 Emby；不生成或读取 `*-mediainfo.json`，不使用 Emby 远程探测替代 ETK 格式化结果。新 STRM 入库时，插件从 Emby `ItemAdded/ItemUpdated` 事件取得 ItemID，注入成功后调用 ETK `item-ready`。ETK 为插件保留 8 秒优先窗口，超时才按路径轮询兜底；物理媒体仍直接轮询。Emby 手动或任务刷新后，插件通过 `/api/p115/mediainfo/...` 自动回补媒体流；插件启动及神医片头提取任务完成后全库扫描片头，通知 ETK 将新增或变化的章节写回 `mediainfo_json.Chapters` 并上传共享中心，刷新清空章节时从本地快照恢复。首次入库和秒传预检会从中心合并已有片头；智能追剧递归刷新 Series 后，ETK 收尾阶段会批量回补全部 Episode 实际版本。媒体信息维护只保留“重建媒体信息”任务：增量模式检查 Emby 并仅恢复缺失媒体流的实际版本，全量模式才处理全部在库版本。
+- 媒体信息约定：`p115_mediainfo_cache.mediainfo_json` 是格式化数据源，通过独立的 [ETK MediaInfo Bridge](https://github.com/hbq0405/etk-mediainfo-bridge) 插件直接注入 Emby；不生成或读取 `*-mediainfo.json`，不使用 Emby 远程探测替代 ETK 格式化结果。新 STRM 入库时，插件从 Emby `ItemAdded/ItemUpdated` 事件取得 ItemID，注入成功后调用 ETK `item-ready`。ETK 为插件保留 8 秒优先窗口，超时才按路径轮询兜底；物理媒体仍直接轮询。Emby 手动或任务刷新后，插件通过 `/api/p115/mediainfo/...` 自动回补媒体流；插件启动及神医片头提取任务完成后全库扫描片头，通知 ETK 将新增或变化的章节写回 `mediainfo_json.Chapters` 并上传共享中心，刷新清空章节时从本地快照恢复。首次入库和秒传预检会从中心合并已有片头；智能追剧递归刷新 Series 后，ETK 收尾阶段会批量回补全部 Episode 实际版本。115 整理阶段负责媒体信息完整性门槛，核心处理器不再二次检查视频流或按演员评分转入待复核。媒体信息维护只保留“重建媒体信息”任务：增量模式检查 Emby 并仅恢复缺失媒体流的实际版本，全量模式才处理全部在库版本。
 
 ## 本项目协作规则
 

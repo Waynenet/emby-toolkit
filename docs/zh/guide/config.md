@@ -88,7 +88,6 @@
 | Key | 说明 |
 | --- | --- |
 | `delay_between_items_sec` | 处理间隔 |
-| `min_score_for_review` | 低分阈值 |
 | `max_actors_to_process` | 单项目演员上限 |
 | `remove_actors_without_avatars` | 移除无头像演员 |
 

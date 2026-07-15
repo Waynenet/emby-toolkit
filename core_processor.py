@@ -2435,9 +2435,6 @@ class MediaProcessor:
 
         logger.trace(f"--- 开始处理 '{item_name_for_log}' (TMDb ID: {tmdb_id}) ---")
 
-        all_emby_people_for_count = item_details_from_emby.get("People", [])
-        original_emby_actor_count = len([p for p in all_emby_people_for_count if p.get("Type") == "Actor"])
-
         if not is_valid_tmdb_id(tmdb_id):
             logger.error(f"  ➜ '{item_name_for_log}' 缺少有效的 TMDb ID (当前值: {tmdb_id})，跳过处理。")
             return False
@@ -2784,11 +2781,8 @@ class MediaProcessor:
             else:
                 logger.info(f"  ➜ [媒体信息修复] 跳过 Emby 元数据刷新，仅准备写入数据库媒体信息。")
 
-            if using_cached_metadata:
-                logger.debug(f"  ➜ [{'媒体信息修复' if media_info_only else '数据库缓存'}] 开始质检...")
-
             # ======================================================================
-            # 统一收尾流程 (更新数据库、质检、合集、通知)
+            # 统一收尾流程 (更新数据库、合集、通知)
             # ======================================================================
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
@@ -2802,108 +2796,18 @@ class MediaProcessor:
                     source_data_package=formatted_metadata,
                     specific_episode_ids=specific_episode_ids
                 )
-                
-                # 2. 综合质检 (视频流检查 + 演员匹配度评分)
-                stream_check_passed = True
-                stream_fail_reason = ""
-                
-                def _check_stream_validity(file_path, label_prefix="", emby_item=None, db_assets=None):
-                    if not file_path: return False, f"{label_prefix} 缺失文件路径"
-                    
-                    # 1. 检查 Emby 的 MediaSources (针对 Movie/Episode)
-                    if emby_item and emby_item.get("MediaSources"):
-                        for source in emby_item["MediaSources"]:
-                            for stream in source.get("MediaStreams", []):
-                                if stream.get("Type") == "Video" and stream.get("Width") and stream.get("Height"):
-                                    return True, ""
-                                    
-                    # 2. 检查数据库的 asset_details_json (针对 Series 中的 Episode)
-                    if db_assets and isinstance(db_assets, list):
-                        for asset in db_assets:
-                            for stream in asset.get("video_streams", []):
-                                if stream.get("width") and stream.get("height"):
-                                    return True, ""
-                                    
-                    return False, f"缺失媒体信息: {label_prefix}"
 
-                if item_type in ['Movie', 'Episode']:
-                    emby_path = item_details_from_emby.get("Path")
-                    passed, reason = _check_stream_validity(emby_path, "", emby_item=item_details_from_emby)
-                    if not passed:
-                        stream_check_passed = False
-                        stream_fail_reason = reason
-                elif item_type == 'Series':
-                    try:
-                        cursor.execute("""
-                            SELECT season_number, episode_number, asset_details_json 
-                            FROM media_metadata 
-                            WHERE parent_series_tmdb_id = %s AND item_type = 'Episode' AND in_library = TRUE
-                            ORDER BY season_number ASC, episode_number ASC
-                        """, (tmdb_id,))
-                        for db_ep in cursor.fetchall():
-                            s_idx, e_idx = db_ep['season_number'], db_ep['episode_number']
-                            raw_assets = db_ep['asset_details_json']
-                            assets = json.loads(raw_assets) if isinstance(raw_assets, str) else (raw_assets if isinstance(raw_assets, list) else [])
-                            ep_path = assets[0].get('path') if assets and len(assets) > 0 else None
-                            passed, reason = _check_stream_validity(ep_path, f"[S{s_idx}E{e_idx}]", db_assets=assets)
-                            if not passed:
-                                stream_check_passed = False
-                                stream_fail_reason = reason
-                                logger.warning(f"  ➜ [质检] 剧集《{item_name_for_log}》检测到坏分集: {reason}")
-                                break 
-                    except Exception as e_db_check:
-                        logger.warning(f"  ➜ [质检] 数据库验证分集流信息时出错: {e_db_check}")
-
-                raw_genres = item_details_from_emby.get("Genres", [])
-                genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
-                is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
-                
-                raw_min_score = self.config.get("min_score_for_review", constants.DEFAULT_MIN_SCORE_FOR_REVIEW)
-                min_score_for_review = float(raw_min_score)
-
-                if media_info_only:
-                    processing_score = max(10.0, min_score_for_review)
-                    logger.info(f"  ➜ [媒体信息修复] 仅执行视频流质检，跳过演员评分。")
-                else:
-                    processing_score = actor_utils.evaluate_cast_processing_quality(
-                        final_cast=final_processed_cast, 
-                        original_cast_count=original_emby_actor_count,
-                        expected_final_count=len(final_processed_cast), 
-                        is_animation=is_animation
-                    )
-
-                    if using_cached_metadata:
-                        logger.info(f"  ➜ [数据库缓存] 基于缓存数据的实时复核评分: {processing_score:.2f}")
-                
                 target_log_id = item_id
                 target_log_name = item_name_for_log
-                target_log_type = item_type
 
                 if item_type == 'Episode':
                     series_id = item_details_from_emby.get('SeriesId')
                     if series_id:
                         target_log_id = str(series_id)
                         target_log_name = item_details_from_emby.get('SeriesName') or f"剧集(ID:{series_id})"
-                        target_log_type = 'Series'
-                        if not stream_check_passed:
-                            s_idx, e_idx = item_details_from_emby.get('ParentIndexNumber'), item_details_from_emby.get('IndexNumber')
-                            stream_fail_reason = f"[S{s_idx}E{e_idx}] {stream_fail_reason}"
 
-                # 3. 最终判定与日志写入
-                if not stream_check_passed:
-                    logger.warning(f"  ➜ [质检]《{item_name_for_log}》因缺失视频流数据，需重新处理。")
-                    self.log_db_manager.save_to_failed_log(cursor, target_log_id, target_log_name, stream_fail_reason, target_log_type, score=0.0)
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=0.0)
-                elif processing_score < min_score_for_review:
-                    reason = f"处理评分 ({processing_score:.2f}) 低于阈值 ({min_score_for_review})。"
-                    if using_cached_metadata: logger.warning(f"  ➜ [质检]《{item_name_for_log}》本地缓存数据质量不佳 (评分: {processing_score:.2f})，已重新标记为【待复核】。")
-                    else: logger.warning(f"  ➜ [质检]《{item_name_for_log}》处理质量不佳，已标记为【待复核】。原因: {reason}")
-                    self.log_db_manager.save_to_failed_log(cursor, target_log_id, target_log_name, reason, target_log_type, score=processing_score)
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)
-                else:
-                    logger.info(f"  ➜ 《{item_name_for_log}》质检通过 (评分: {processing_score:.2f})，标记为已处理。")
-                    self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)
-                    self.log_db_manager.remove_from_failed_log(cursor, target_log_id)
+                self._mark_item_as_processed(cursor, target_log_id, target_log_name)
+                self.log_db_manager.remove_from_failed_log(cursor, target_log_id)
                 
                 conn.commit()
 

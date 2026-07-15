@@ -208,7 +208,6 @@ DYNAMIC_CONFIG_DEF = {
 
     # [General]
     "delay_between_items_sec": ("General", 'float', 0.5),
-    constants.CONFIG_OPTION_MIN_SCORE_FOR_REVIEW: ("General", 'float', constants.DEFAULT_MIN_SCORE_FOR_REVIEW),
     constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS: ("General", 'int', constants.DEFAULT_MAX_ACTORS_TO_PROCESS),
     constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS: ("General", 'int', constants.DEFAULT_MAX_EPISODE_ACTORS_TO_PROCESS),
     constants.CONFIG_OPTION_EXTRACT_THUMB: ("General", 'boolean', False),
