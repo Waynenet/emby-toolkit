@@ -617,6 +617,14 @@ def _list_qb_torrents(conf: dict) -> list:
                 "size": t.get("size") or t.get("total_size"),
                 "save_path": t.get("save_path"),
                 "tracker": t.get("tracker"),
+                "progress": t.get("progress"),
+                "state": t.get("state"),
+                "tags": t.get("tags"),
+                "category": t.get("category"),
+                "added_on": t.get("added_on"),
+                "last_activity": t.get("last_activity"),
+                "dlspeed": t.get("dlspeed"),
+                "eta": t.get("eta"),
                 "downloader": downloader_name,
                 "_source": "qbittorrent"
             })
@@ -654,7 +662,10 @@ def _list_tr_torrents(conf: dict) -> list:
     try:
         payload = {
             "method": "torrent-get",
-            "arguments": {"fields": ["id", "hashString", "name", "totalSize", "downloadDir"]}
+            "arguments": {"fields": [
+                "id", "hashString", "name", "totalSize", "downloadDir",
+                "percentDone", "status", "labels", "addedDate", "activityDate", "rateDownload"
+            ]}
         }
         res, _ = _transmission_rpc(conf, payload)
         if not res or res.status_code != 200:
@@ -671,6 +682,12 @@ def _list_tr_torrents(conf: dict) -> list:
                 "name": t.get("name"),
                 "size": t.get("totalSize"),
                 "download_dir": t.get("downloadDir"),
+                "progress": t.get("percentDone"),
+                "state": t.get("status"),
+                "tags": t.get("labels"),
+                "added_on": t.get("addedDate"),
+                "last_activity": t.get("activityDate"),
+                "dlspeed": t.get("rateDownload"),
                 "downloader": downloader_name,
                 "_source": "transmission"
             })
@@ -1151,6 +1168,37 @@ def get_downloading_tasks(config: Dict[str, Any] = None) -> list:
     except Exception as e:
         logger.error(f"  ➜ 获取 MP 下载队列失败: {e}")
         return []
+
+
+def get_download_tasks_for_monitoring(config: Dict[str, Any] = None) -> list:
+    """获取巡检所需的下载器全量任务，并用 MP 活跃任务补齐字段。"""
+    active_tasks = get_downloading_tasks(config)
+    mp_config = settings_db.get_setting('mp_config') or {}
+    moviepilot_url = mp_config.get('moviepilot_url', '').rstrip('/')
+    access_token = _get_access_token(config)
+    all_tasks = get_all_torrents_from_downloaders(
+        config,
+        moviepilot_url,
+        {"Authorization": f"Bearer {access_token}"} if access_token else None,
+    )
+
+    merged = {}
+    for task in all_tasks or []:
+        if not isinstance(task, dict):
+            continue
+        task_hash = _normalize_hash(_extract_task_hash(task))
+        if not task_hash:
+            continue
+        merged[task_hash] = {**merged.get(task_hash, {}), **task}
+    for task in active_tasks or []:
+        if not isinstance(task, dict):
+            continue
+        task_hash = _normalize_hash(_extract_task_hash(task))
+        if not task_hash:
+            continue
+        merged[task_hash] = {**merged.get(task_hash, {}), **task, "_mp_active": True}
+    return list(merged.values())
+
 
 def get_subscription_by_tmdbid(tmdb_id: int, season: Optional[int], config: Dict[str, Any] = None) -> dict:
     """根据 TMDb ID 获取单条订阅详情 (通过遍历所有订阅实现，更可靠)"""

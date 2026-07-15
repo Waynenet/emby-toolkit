@@ -393,13 +393,19 @@ class SubscribeAssistantManager:
 
     def run_download_check(self) -> int:
         torrents = store.read_state(STATE_TORRENTS)
-        if not torrents:
-            return 0
-        live = moviepilot.get_downloading_tasks(self.app_config)
+        live = moviepilot.get_download_tasks_for_monitoring(self.app_config)
         live_by_hash = {
             str(task.get("hash") or task.get("hashString") or task.get("id") or "").lower(): task
             for task in live or []
         }
+        if not live_by_hash:
+            if torrents:
+                logger.warning("  ➜ [订阅助手] 未获取到下载器任务，保留下载监控记录，避免误判为手工删除。")
+            return 0
+        self._register_untracked_download_tasks(torrents, live)
+        torrents = store.read_state(STATE_TORRENTS)
+        if not torrents:
+            return 0
         changed = 0
         now = time.time()
 
@@ -455,6 +461,58 @@ class SubscribeAssistantManager:
 
         store.update_state(STATE_TORRENTS, updater)
         return changed
+
+    def _register_untracked_download_tasks(self, torrents: Dict[str, Any], live: List[Dict[str, Any]]) -> int:
+        known_hashes = {str(value).lower() for value in (torrents or {})}
+        candidates = []
+        for info in live or []:
+            torrent_hash = str(info.get("hash") or info.get("hashString") or info.get("id") or "").lower()
+            media = info.get("media") if isinstance(info.get("media"), dict) else {}
+            if info.get("_mp_active") and torrent_hash and torrent_hash not in known_hashes and media.get("tmdbid"):
+                candidates.append((torrent_hash, info, media))
+        if not candidates:
+            return 0
+
+        subscriptions = moviepilot.list_subscriptions(self.app_config) or []
+        registered = 0
+        for torrent_hash, info, media in candidates:
+            tmdb_id = str(media.get("tmdbid") or "")
+            season = _safe_int(media.get("season"))
+            matches = [
+                sub for sub in subscriptions
+                if str(sub.get("tmdbid") or sub.get("tmdb_id") or "") == tmdb_id
+                and (season <= 0 or _safe_int(sub.get("season")) == season)
+            ]
+            if len(matches) != 1:
+                logger.warning(
+                    "  ➜ [订阅助手] 未登记的 MP 下载任务 %s 无法唯一匹配订阅，跳过自动补登记。",
+                    torrent_hash[:8],
+                )
+                continue
+
+            episode = _safe_int(media.get("episode"))
+            added_on = _safe_int(info.get("added_on")) or int(time.time())
+            self.mark_download_started(
+                _safe_int(matches[0].get("id")),
+                torrent_hash,
+                tmdb_id=tmdb_id,
+                season=season or None,
+                episodes=[episode] if episode > 0 else [],
+                title=media.get("title") or info.get("title") or info.get("name") or "",
+                progress=_progress_value(info),
+                baseline_at=added_on,
+                time=added_on,
+                source="moviepilot_active_reconcile",
+            )
+            known_hashes.add(torrent_hash)
+            registered += 1
+            logger.info(
+                "  ➜ [订阅助手] 已补登记 MP 下载任务：订阅 %s，%s，hash=%s。",
+                matches[0].get("id"),
+                media.get("title") or info.get("name") or "-",
+                torrent_hash[:8],
+            )
+        return registered
 
     def run_moviepilot_subscription_sync(self) -> int:
         subscriptions = moviepilot.list_subscriptions(self.app_config) or []
@@ -1222,7 +1280,19 @@ class SubscribeAssistantManager:
             retention_hours=self.cfg.delete_record_retention_hours,
         )
         if self.cfg.auto_search_when_delete and task.get("subscribe_id"):
-            moviepilot.search_subscription(_safe_int(task.get("subscribe_id")), self.app_config)
+            if moviepilot.search_subscription(_safe_int(task.get("subscribe_id")), self.app_config):
+                repeated = any(
+                    str(info.get("hash") or info.get("hashString") or info.get("id") or "").lower()
+                    == str(torrent_hash).lower()
+                    for info in moviepilot.get_downloading_tasks(self.app_config) or []
+                )
+                if repeated:
+                    if not moviepilot.delete_download_tasks("", self.app_config, hashes=[torrent_hash]):
+                        return False
+                    logger.warning(
+                        "  ➜ [订阅助手] 自动重搜再次命中相同下载任务 %s，已二次删除并停止本轮重搜。",
+                        str(torrent_hash)[:8],
+                    )
         self._clear_download_pending(task.get("subscribe_id"), torrent_hash, reason)
         return True
 
