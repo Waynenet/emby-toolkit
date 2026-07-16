@@ -6559,6 +6559,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         if is_tv and real_info and is_p115_mediainfo_assisted_recognition_enabled():
             raw_probe_season = _se_int(real_info.get('season_number'))
             raw_probe_episode = _se_int(real_info.get('episode_number'))
+            explicit_season, explicit_episode = self._extract_season_episode_from_file_node(file_node)
+            season_conflict = explicit_season is not None and raw_probe_season not in (None, explicit_season)
+            episode_conflict = explicit_episode is not None and raw_probe_episode not in (None, explicit_episode)
+            if (season_conflict or episode_conflict) and not silent_log:
+                logger.warning(
+                    f"  ➜ [媒体信息缓存校验] 缓存 S{int(raw_probe_season or 0):02d}E{int(raw_probe_episode or 0):02d} "
+                    f"与文件名 S{int(explicit_season or 0):02d}E{int(explicit_episode or 0):02d} 冲突，已跳过冲突字段：{original_name}"
+                )
+            if season_conflict:
+                raw_probe_season = None
+            if episode_conflict:
+                raw_probe_episode = None
             if season_num is None:
                 season_num = raw_probe_season
                 if raw_probe_season is not None:
@@ -6821,34 +6833,25 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             )
             if not s_name: s_name = f"Season {season_num:02d}"
 
-        # raw_ffprobe_json 生成早于最终识别结果；此时 TMDb 身份与季集号已经落定，
-        # 反向补写本地 RAW。手动重组时强制覆盖 _etk.tmdb_id/type，避免旧错误身份继续污染共享 RAW。
+        # 这里只暂存身份；必须等 115 移动成功后才能提交永久缓存。
         if not is_sub and patch_raw_identity:
-            try:
-                raw_patch_sha1 = file_node.get('sha1') or file_node.get('sha')
-                force_identity = bool(getattr(self, 'is_manual_correct', False))
-                trusted_season = None
-                trusted_episode = None
+            force_identity = bool(getattr(self, 'is_manual_correct', False))
+            trusted_season = None
+            trusted_episode = None
 
-                if is_tv:
-                    trusted_season = season_num if (
-                        season_source not in (None, 'hint')
-                        and episode_source not in ('hint',)
-                    ) else None
-                    trusted_episode = episode_num if episode_source not in (None, 'hint') else None
+            if is_tv:
+                trusted_season = season_num if (
+                    season_source not in (None, 'hint')
+                    and episode_source not in ('hint',)
+                ) else None
+                trusted_episode = episode_num if episode_source not in (None, 'hint') else None
 
-                if raw_patch_sha1 and (force_identity or trusted_season is not None or trusted_episode is not None):
-                    P115CacheManager.patch_raw_ffprobe_etk_context(
-                        raw_patch_sha1,
-                        tmdb_id=self.tmdb_id,
-                        media_type=self.media_type,
-                        original_language=(self.raw_metadata or {}).get('lang_code'),
-                        season_number=trusted_season,
-                        episode_number=trusted_episode,
-                        force_identity=force_identity,
-                    )
-            except Exception:
-                pass
+            if force_identity or trusted_season is not None or trusted_episode is not None:
+                file_node['_etk_identity_patch'] = {
+                    'season_number': trusted_season,
+                    'episode_number': trusted_episode,
+                    'force_identity': force_identity,
+                }
 
         return new_name, season_num, episode_num, s_name, video_info, bool(real_info), part_num
 
@@ -8776,6 +8779,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     pick_code = file_item.get('pc') or file_item.get('pick_code') 
                     file_sha1 = file_item.get('sha1') or file_item.get('sha')
                     ext = new_filename.split('.')[-1].lower() if '.' in new_filename else ''
+
+                    identity_patch = file_item.get('_etk_identity_patch') or {}
+                    if file_sha1 and identity_patch:
+                        P115CacheManager.patch_raw_ffprobe_etk_context(
+                            file_sha1,
+                            tmdb_id=self.tmdb_id,
+                            media_type=self.media_type,
+                            original_language=(self.raw_metadata or {}).get('lang_code'),
+                            season_number=identity_patch.get('season_number'),
+                            episode_number=identity_patch.get('episode_number'),
+                            force_identity=bool(identity_patch.get('force_identity')),
+                        )
                     
                     # 整理日志
                     if ext in known_video_exts:
@@ -10409,6 +10424,12 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
 
     organizer = SmartOrganizer(client, tmdb_id, media_type, title, None, False)
     organizer.is_manual_correct = True
+    if not organizer.raw_metadata or not organizer.raw_metadata.get('title'):
+        logger.error(
+            f"  ➜ [批量重组] TMDb {tmdb_id} 元数据获取失败，"
+            "已中止重组，未修改文件或媒体信息缓存。"
+        )
+        return
     if season_num is not None and str(season_num).strip():
         organizer.forced_season = int(season_num)
         logger.info(f"  ➜ [批量重组] 已指定整理到第 {organizer.forced_season} 季。")
