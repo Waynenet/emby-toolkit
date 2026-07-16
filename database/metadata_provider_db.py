@@ -386,8 +386,12 @@ def load_emby_metadata(
             for item in _json_value(row.get("tags_json") or row.get("keywords_json"), [])
         ],
         "studios": studios,
-        "season_number": row.get("season_number") if row.get("season_number") is not None else season_number,
-        "episode_number": row.get("episode_number") if row.get("episode_number") is not None else episode_number,
+        "season_number": (
+            row.get("season_number") if row.get("season_number") is not None else season_number
+        ) if requested_type in {"Season", "Episode"} else None,
+        "episode_number": (
+            row.get("episode_number") if row.get("episode_number") is not None else episode_number
+        ) if requested_type == "Episode" else None,
         "actors_ready": bool(row.get("actors_ready")),
         "people": sorted(people, key=lambda item: item.get("order", 999)),
         "images": {

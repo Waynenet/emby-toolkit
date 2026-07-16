@@ -38,6 +38,8 @@ class _Cursor:
             self.current = self.rows.get('episode')
         elif "item_type='Movie'" in sql:
             self.current = self.rows.get('movie')
+        elif "item_type='Season'" in sql:
+            self.current = self.rows.get('season')
         elif "item_type='Series'" in sql:
             self.current = self.rows.get('series')
         elif 'FROM person_metadata' in sql:
@@ -154,6 +156,30 @@ class MetadataProviderDbTests(unittest.TestCase):
         self.assertEqual(2, payload['season_number'])
         self.assertEqual(3, payload['episode_number'])
         self.assertFalse(payload['actors_ready'])
+
+    def test_season_payload_never_inherits_episode_number(self):
+        rows = {
+            'season': {
+                'tmdb_id': '789',
+                'item_type': 'Season',
+                'title': '第 2 季',
+                'season_number': 2,
+                'episode_number': None,
+                'actors_ready': False,
+                'genres_json': [],
+                'tags_json': [],
+                'production_companies_json': [],
+                'networks_json': [],
+            },
+        }
+        with patch('database.metadata_provider_db.get_db_connection', _connection_factory(rows)):
+            payload = load_emby_metadata(
+                '456', 'tv', 'Season', season_number=2, episode_number=36,
+            )
+
+        self.assertEqual('Season', payload['item_type'])
+        self.assertEqual(2, payload['season_number'])
+        self.assertIsNone(payload['episode_number'])
 
 
 if __name__ == '__main__':

@@ -1985,12 +1985,20 @@ def _cached_metadata_response(sha1):
         except (TypeError, ValueError):
             return None
 
+    season_number = (
+        _number('season_number', identity.get('season_number'))
+        if requested_type in {'Season', 'Episode'} else None
+    )
+    episode_number = (
+        _number('episode_number', identity.get('episode_number'))
+        if requested_type == 'Episode' else None
+    )
     payload = load_emby_metadata(
         tmdb_id,
         media_type,
         requested_type,
-        season_number=_number('season_number', identity.get('season_number')),
-        episode_number=_number('episode_number', identity.get('episode_number')),
+        season_number=season_number,
+        episode_number=episode_number,
     )
     if not payload:
         return jsonify({"error": "metadata cache not found"}), 404
