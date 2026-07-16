@@ -1390,6 +1390,7 @@ class MediaProcessor:
                         except: pass
 
                 processed_emby_episodes = set() # 记录已处理的 Emby 分集
+                remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
                 # 构建已翻译角色的映射表 (tmdb_id -> 翻译后的 character) ★★★
                 translated_character_map = {}
                 if final_processed_cast:
@@ -1430,8 +1431,6 @@ class MediaProcessor:
                             continue # 不是本次入库的分集，直接跳过！
 
                     final_runtime = normalize_tmdb_runtime(episode.get('runtime'))
-                    # ★★★ 获取无头像过滤开关 ★★★
-                    remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
                     # ★★★ 提取季(Season)元数据作为第一兜底 ★★★
                     current_season_info = next((s for s in seasons_details if s.get('season_number') == s_num), {})
                     season_credits = current_season_info.get('credits') or current_season_info.get('aggregate_credits') or {}
@@ -4163,6 +4162,7 @@ class MediaProcessor:
             if isinstance(ep, dict)
         }
         force_keys = set(force_overwrite_episodes or [])
+        enable_ffmpeg_thumb = self.config.get(constants.CONFIG_OPTION_EXTRACT_THUMB, False)
         uploaded_count = 0
         refreshed_count = 0
         removed_local_count = 0
@@ -4215,6 +4215,8 @@ class MediaProcessor:
                     continue
 
                 if image_tags.get('Primary'):
+                    continue
+                if not enable_ffmpeg_thumb:
                     continue
 
                 temp_path = os.path.join(temp_dir, f"{item_id}-{os.path.basename(os.path.splitext(video_path)[0])}.jpg")
