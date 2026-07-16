@@ -80,12 +80,20 @@
             </n-form-item>
 
             <n-form-item label="转存方式" path="transfer_modes">
-              <n-checkbox-group v-model:value="config.transfer_modes">
-                <n-space>
-                  <n-checkbox value="subscribe" label="订阅转存" />
-                  <n-checkbox value="keyword" label="关键词转存" />
-                  <n-checkbox value="hdhive_push" label="影巢推送转存" />
-                  <n-checkbox value="brainless" label="无脑转存" />
+              <n-checkbox-group v-model:value="config.transfer_modes" style="width: 100%">
+                <n-space vertical :size="8" style="width: 100%">
+                  <div v-for="mode in transferModeOptions" :key="mode.value" class="transfer-mode-row">
+                    <n-checkbox :value="mode.value" :label="mode.label" />
+                    <n-select
+                      v-model:value="config.transfer_mode_channels[mode.value]"
+                      :options="specificChannelOptions"
+                      :disabled="!config.transfer_modes.includes(mode.value)"
+                      multiple
+                      clearable
+                      max-tag-count="responsive"
+                      placeholder="不指定则全局生效"
+                    />
+                  </div>
                 </n-space>
               </n-checkbox-group>
             </n-form-item>
@@ -254,7 +262,8 @@ const config = ref({
   password: '',
   channels: [],
   monitor_types: ['movie', 'tv'],
-  transfer_mode: 'subscribe',
+  transfer_modes: ['subscribe'],
+  transfer_mode_channels: {},
   transfer_keywords: [],
   block_keywords: [],
   custom_regex: {
@@ -272,6 +281,17 @@ const userBotCode = ref('');
 const isSendingCode = ref(false);
 const isSubmittingCode = ref(false);
 const isClearingSession = ref(false);
+
+const transferModeOptions = [
+  { label: '订阅转存', value: 'subscribe' },
+  { label: '关键词转存', value: 'keyword' },
+  { label: '影巢推送转存', value: 'hdhive_push' },
+  { label: '无脑转存', value: 'brainless' }
+];
+
+const specificChannelOptions = computed(() => {
+  return (config.value.channels || []).map(channel => ({ label: channel, value: channel }));
+});
 
 // 生成频道下拉选项
 const channelOptions = computed(() => {
@@ -328,6 +348,15 @@ const fetchConfig = async () => {
       if (!config.value.transfer_modes) {
         config.value.transfer_modes = ['subscribe'];
       }
+      if (!config.value.transfer_mode_channels || Array.isArray(config.value.transfer_mode_channels)) {
+        config.value.transfer_mode_channels = {};
+      }
+      transferModeOptions.forEach(({ value }) => {
+        const channels = config.value.transfer_mode_channels[value];
+        config.value.transfer_mode_channels[value] = Array.isArray(channels)
+          ? channels.filter(Boolean)
+          : (channels ? [channels] : []);
+      });
 
       if (!config.value.custom_regex) {
         config.value.custom_regex = { tmdb: [], title_year: [], season_episode: [], password: [] };
@@ -459,3 +488,13 @@ const confirmClearUserBotSession = () => {
 
 defineExpose({ open });
 </script>
+
+<style scoped>
+.transfer-mode-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+</style>
