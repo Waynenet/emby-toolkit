@@ -252,6 +252,83 @@ def _text_date(value):
     return str(value) if value else None
 
 
+def _source_names(values):
+    result = []
+    seen = set()
+    for value in values or []:
+        name = value.get("name") if isinstance(value, dict) else value
+        name = str(name or "").strip()
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
+
+
+def _mapped_labels(values, mapping, id_field):
+    id_map = {}
+    name_map = {}
+    for entry in mapping or []:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        if not label:
+            continue
+        for value in entry.get(id_field) or []:
+            id_map[str(value)] = label
+        for value in entry.get("en") or []:
+            name = str(value or "").strip()
+            if name:
+                name_map[name.casefold()] = label
+
+    result = []
+    seen = set()
+    for value in values or []:
+        item_id = value.get("id") if isinstance(value, dict) else None
+        item_name = value.get("name") if isinstance(value, dict) else value
+        label = id_map.get(str(item_id)) if item_id is not None else None
+        if not label and item_name:
+            label = name_map.get(str(item_name).strip().casefold())
+        if label and label not in seen:
+            seen.add(label)
+            result.append(label)
+    return result
+
+
+def _provider_tags_and_studios(row):
+    import config_manager
+    import constants
+    import utils
+    from database import settings_db
+
+    keywords = _json_value(row.get("keywords_json"), [])
+    companies = _json_value(row.get("production_companies_json"), [])
+    networks = _json_value(row.get("networks_json"), [])
+
+    if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_KEYWORD_TO_TAGS, False):
+        try:
+            keyword_mapping = settings_db.get_setting("keyword_mapping") or utils.DEFAULT_KEYWORD_MAPPING
+        except Exception:
+            keyword_mapping = utils.DEFAULT_KEYWORD_MAPPING
+        tags = _mapped_labels(keywords, keyword_mapping, "ids")
+    else:
+        tags = _source_names(keywords)
+
+    if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_STUDIO_TO_CHINESE, False):
+        try:
+            studio_mapping = settings_db.get_setting("studio_mapping") or utils.DEFAULT_STUDIO_MAPPING
+        except Exception:
+            studio_mapping = utils.DEFAULT_STUDIO_MAPPING
+        studios = _mapped_labels(networks, studio_mapping, "network_ids")
+        for label in _mapped_labels(companies, studio_mapping, "company_ids"):
+            if label not in studios:
+                studios.append(label)
+    else:
+        studios = _source_names(networks + companies)
+
+    return tags, studios
+
+
 def load_emby_metadata(
     tmdb_id: str,
     root_media_type: str,
@@ -361,10 +438,8 @@ def load_emby_metadata(
                         })
 
     official_ratings = _json_value(row.get("official_rating_json"), {})
-    rating = row.get("custom_rating") or official_ratings.get("US")
-    companies = _json_value(row.get("production_companies_json"), [])
-    networks = _json_value(row.get("networks_json"), [])
-    studios = [item.get("name") for item in networks + companies if item.get("name")]
+    rating = official_ratings.get("US")
+    tags, studios = _provider_tags_and_studios(row)
     return {
         "item_type": requested_type,
         "tmdb_id": str(row.get("tmdb_id") or ""),
@@ -381,10 +456,7 @@ def load_emby_metadata(
         "official_rating": rating,
         "runtime_minutes": row.get("runtime_minutes"),
         "genres": [item.get("name") if isinstance(item, dict) else item for item in _json_value(row.get("genres_json"), [])],
-        "tags": [
-            item.get("name") if isinstance(item, dict) else item
-            for item in _json_value(row.get("tags_json") or row.get("keywords_json"), [])
-        ],
+        "tags": tags,
         "studios": studios,
         "season_number": (
             row.get("season_number") if row.get("season_number") is not None else season_number
