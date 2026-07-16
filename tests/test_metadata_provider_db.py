@@ -8,13 +8,20 @@ connection_stub = types.ModuleType('database.connection')
 connection_stub.get_db_connection = None
 sys.modules['database.connection'] = connection_stub
 
-from database.metadata_provider_db import load_emby_metadata
+from database.metadata_provider_db import (
+    MEDIA_METADATA_SCHEMA_VERSION,
+    has_initial_tmdb_metadata,
+    load_emby_metadata,
+    needs_metadata_backfill,
+)
 
 
 class _Cursor:
     def __init__(self, rows):
         self.rows = rows
         self.current = None
+        self.last_sql = ''
+        self.last_params = None
 
     def __enter__(self):
         return self
@@ -23,7 +30,11 @@ class _Cursor:
         return False
 
     def execute(self, sql, params):
-        if "item_type='Episode'" in sql:
+        self.last_sql = sql
+        self.last_params = params
+        if 'SELECT 1 FROM media_metadata' in sql:
+            self.current = self.rows.get('initial')
+        elif "item_type='Episode'" in sql:
             self.current = self.rows.get('episode')
         elif "item_type='Movie'" in sql:
             self.current = self.rows.get('movie')
@@ -55,6 +66,33 @@ def _connection_factory(rows):
 
 
 class MetadataProviderDbTests(unittest.TestCase):
+    def test_initial_snapshot_requires_current_metadata_schema_version(self):
+        connection = _Connection({'initial': {'exists': 1}})
+
+        @contextmanager
+        def connection_factory():
+            yield connection
+
+        with patch('database.metadata_provider_db.get_db_connection', connection_factory):
+            self.assertTrue(has_initial_tmdb_metadata('123', 'movie'))
+
+        self.assertIn('metadata_schema_version >= %s', connection.cursor_value.last_sql)
+        self.assertEqual(MEDIA_METADATA_SCHEMA_VERSION, connection.cursor_value.last_params[-1])
+
+    def test_backfill_check_only_targets_in_library_old_schema_rows(self):
+        connection = _Connection({'initial': {'exists': 1}})
+
+        @contextmanager
+        def connection_factory():
+            yield connection
+
+        with patch('database.metadata_provider_db.get_db_connection', connection_factory):
+            self.assertTrue(needs_metadata_backfill('456', 'tv'))
+
+        self.assertIn('in_library IS TRUE', connection.cursor_value.last_sql)
+        self.assertIn('metadata_schema_version < %s', connection.cursor_value.last_sql)
+        self.assertEqual(('456', 'Series', MEDIA_METADATA_SCHEMA_VERSION), connection.cursor_value.last_params)
+
     def test_movie_payload_contains_translated_people_and_four_images(self):
         rows = {
             'movie': {

@@ -1948,7 +1948,7 @@ def get_cached_mediainfo_by_sha1(sha1):
 
 
 def _cached_metadata_response(sha1):
-    from database.metadata_provider_db import load_emby_metadata
+    from database.metadata_provider_db import load_emby_metadata, needs_metadata_backfill
     from handler.p115_service import _extract_raw_ffprobe_identity
 
     sha1 = str(sha1 or '').strip().upper()
@@ -1959,6 +1959,18 @@ def _cached_metadata_response(sha1):
     media_type = str(identity.get('media_type') or '').strip().lower()
     if not tmdb_id or media_type not in {'movie', 'tv'}:
         return jsonify({"error": "metadata identity not found"}), 404
+
+    if needs_metadata_backfill(tmdb_id, media_type):
+        import task_manager
+        from tasks.media import task_backfill_single_media_metadata
+        task_manager.submit_task(
+            task_function=task_backfill_single_media_metadata,
+            task_name=f"补齐单项元数据: {tmdb_id}",
+            processor_type='media',
+            silent=True,
+            tmdb_id=tmdb_id,
+            media_type=media_type,
+        )
 
     requested_type = str(request.args.get('item_type') or ('Movie' if media_type == 'movie' else 'Series')).title()
     if requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
@@ -1998,6 +2010,40 @@ def get_cached_metadata_by_pick_code(pick_code):
 @p115_bp.route('/mediainfo/sha1/<sha1>/metadata', methods=['GET'])
 def get_cached_metadata_by_sha1(sha1):
     return _cached_metadata_response(sha1)
+
+
+def _trigger_metadata_backfill_response():
+    import task_manager
+    from tasks.media import task_backfill_media_metadata
+
+    submitted = task_manager.submit_task(
+        task_function=task_backfill_media_metadata,
+        task_name='补齐媒体元数据',
+        processor_type='media',
+        silent=True,
+    )
+    if submitted:
+        return jsonify({'ok': True, 'submitted': True}), 202
+    status = task_manager.get_task_status()
+    if status.get('is_running') and status.get('current_action') == '补齐媒体元数据':
+        return jsonify({'ok': True, 'submitted': False, 'reason': 'task_already_running'}), 200
+    return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
+
+
+@p115_bp.route('/mediainfo/<pick_code>/metadata/backfill', methods=['POST'])
+def trigger_metadata_backfill_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({'error': 'metadata identity not found'}), 404
+    return _trigger_metadata_backfill_response()
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/metadata/backfill', methods=['POST'])
+def trigger_metadata_backfill_by_sha1(sha1):
+    sha1 = str(sha1 or '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{40}', sha1) or not P115CacheManager.get_mediainfo_cache_text(sha1):
+        return jsonify({'error': 'metadata identity not found'}), 404
+    return _trigger_metadata_backfill_response()
 
 
 def _sync_intro_snapshot_response(sha1, expected_pick_code=''):

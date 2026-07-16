@@ -13,7 +13,7 @@ import task_manager
 from .actors import (task_enrich_aliases, task_persons_translation, 
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_mediainfo, task_repair_p115_fingerprints, task_fill_missing_video_screenshots, task_fill_studio_images
+from .media import task_role_translation, task_populate_metadata_cache, task_backfill_media_metadata, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_mediainfo, task_repair_p115_fingerprints, task_fill_missing_video_screenshots, task_fill_studio_images
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -38,6 +38,7 @@ TASK_HELP_TEXTS = {
     'task-chain-high-freq': '按已配置的高频刷新任务链顺序执行多个子任务，适合白天定时刷新媒体数据、追剧和订阅等轻量任务。',
     'task-chain-low-freq': '按已配置的低频维护任务链顺序执行多个子任务，适合夜间处理耗时更长、资源占用更高的维护任务。',
     'populate-metadata': '同步 Emby 媒体库基础数据到本地缓存，用于后续追剧、订阅、整理、统计和共享匹配。',
+    'backfill-media-metadata': '扫描在库媒体，只对尚未达到当前字段结构版本的电影、剧集、季和分集重新获取 TMDb 元数据并回写。',
     'role-translation': '为影视条目中的角色名补充中文显示，让演员角色展示更友好。',
     'actor-translation': '为演员、导演等人物信息补充中文名。',
     'process-watchlist': '刷新智能追剧列表，检查连载剧更新、补充集图片和元数据。',
@@ -286,6 +287,7 @@ def get_task_registry(context: str = 'all'):
 
         # --- 适合任务链的常规任务 ---
         'populate-metadata': (task_populate_metadata_cache, "同步媒体数据", 'media', True),
+        'backfill-media-metadata': (task_backfill_media_metadata, "补齐媒体元数据", 'media', True),
         'enrich-aliases': (task_enrich_aliases, "演员数据补充", 'media', True),
         'role-translation': (task_role_translation, "中文化角色名", 'media', True),
         'actor-translation': (task_persons_translation, "中文化人物名", 'media', True),

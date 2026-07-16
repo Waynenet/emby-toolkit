@@ -19,6 +19,7 @@ from handler.custom_collection import RecommendationEngine
 import config_manager
 from database.connection import get_db_connection
 from database import media_db, settings_db
+from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
 import handler.emby as emby
 import handler.tmdb as tmdb
 from tasks.helpers import parse_full_asset_details, calculate_ancestor_ids, construct_metadata_payload, extract_top_directors, translate_tmdb_metadata_recursively
@@ -1714,6 +1715,10 @@ class MediaProcessor:
 
             if not records_to_upsert:
                 return
+
+            for record in records_to_upsert:
+                if record.get('metadata_ready'):
+                    record['metadata_schema_version'] = MEDIA_METADATA_SCHEMA_VERSION
             
             # ==================================================================
             # 批量写入数据库 (带指纹保护机制)
@@ -1727,7 +1732,7 @@ class MediaProcessor:
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
-                "imdb_id", "tagline", "metadata_ready", "actors_ready",
+                "imdb_id", "tagline", "metadata_ready", "actors_ready", "metadata_schema_version",
                 "washing_level", "washing_snapshot_json", "active_washing"
             ]
             data_for_batch = []

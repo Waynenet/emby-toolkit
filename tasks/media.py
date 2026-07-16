@@ -24,6 +24,7 @@ import handler.tmdb as tmdb
 import handler.emby as emby
 import handler.telegram as telegram
 from database import connection, settings_db, media_db, queries_db, maintenance_db
+from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
 from .helpers import parse_full_asset_details, translate_tmdb_metadata_recursively
 from extensions import UPDATING_METADATA
 
@@ -719,15 +720,24 @@ def prune_tmdb_payload_for_translation(item_type: str, tmdb_data):
     return data
 
 # --- 重量级的元数据缓存填充任务 ---
-def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_update: bool = False):
+def task_populate_metadata_cache(
+    processor,
+    batch_size: int = 10,
+    force_full_update: bool = False,
+    metadata_backfill_only: bool = False,
+):
     """
     - 重量级的元数据缓存填充任务 (类型安全版)。
     - 修复：彻底解决 TMDb ID 在电影和剧集间冲突的问题。
     - 修复：完善离线检测逻辑，确保消失的电影/剧集能被正确标记为离线。
     - 优化：移除无用的中间数据缓存，大幅降低内存占用。
     """
-    task_name = "同步媒体元数据"
-    sync_mode = "深度同步 (全量)" if force_full_update else "快速同步 (增量)"
+    task_name = "补齐媒体元数据" if metadata_backfill_only else "同步媒体元数据"
+    sync_mode = (
+        f"结构版本补齐 (v{MEDIA_METADATA_SCHEMA_VERSION})"
+        if metadata_backfill_only
+        else ("深度同步 (全量)" if force_full_update else "快速同步 (增量)")
+    )
     logger.info(f"--- 模式: {sync_mode} (分批大小: {batch_size}) ---")
     
     total_updated_count = 0
@@ -747,6 +757,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         tmdb_key_to_emby_ids = defaultdict(set) 
         top_level_sync_state = {}
         emby_sync_state = {}
+        metadata_backfill_keys = set()
         
         with connection.get_db_connection() as conn:
             cursor = conn.cursor()
@@ -788,6 +799,21 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     'last_synced_at': row.get('last_synced_at'),
                     'asset_details_json': row.get('asset_details_json')
                 }
+
+            if metadata_backfill_only:
+                cursor.execute("""
+                    SELECT tmdb_id, item_type, parent_series_tmdb_id
+                    FROM media_metadata
+                    WHERE in_library = TRUE
+                      AND metadata_schema_version < %s
+                """, (MEDIA_METADATA_SCHEMA_VERSION,))
+                for row in cursor.fetchall():
+                    if row['item_type'] == 'Movie' and is_valid_tmdb_id(row['tmdb_id']):
+                        metadata_backfill_keys.add((str(row['tmdb_id']), 'Movie'))
+                    elif row['item_type'] == 'Series' and is_valid_tmdb_id(row['tmdb_id']):
+                        metadata_backfill_keys.add((str(row['tmdb_id']), 'Series'))
+                    elif is_valid_tmdb_id(row.get('parent_series_tmdb_id')):
+                        metadata_backfill_keys.add((str(row['parent_series_tmdb_id']), 'Series'))
             
             cursor.execute("""
                 SELECT COUNT(*) as total, SUM(CASE WHEN in_library THEN 1 ELSE 0 END) as online 
@@ -798,6 +824,12 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             online_items = stat_row['online'] if stat_row and stat_row['online'] is not None else 0
             
             logger.info(f"  ➜ 本地数据库共存储 {total_items} 个媒体项 (其中在线: {online_items})。")
+
+        if metadata_backfill_only and not metadata_backfill_keys:
+            message = f"在库媒体元数据均已达到结构版本 v{MEDIA_METADATA_SCHEMA_VERSION}。"
+            logger.info(f"  ➜ {message}")
+            task_manager.update_status_from_thread(100, message)
+            return
 
         logger.info("  ➜ 正在预加载 Emby 文件夹路径映射...")
         folder_map = emby.get_all_folder_mappings(processor.emby_url, processor.emby_api_key)
@@ -837,7 +869,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         skipped_unchanged_deep = 0
         changed_existing = 0
 
-        req_fields = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId"
+        req_fields = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,CustomRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId"
 
         item_generator = emby.fetch_all_emby_items_generator(
             base_url=processor.emby_url, 
@@ -880,6 +912,14 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             
             if item_type in ["Movie", "Series"] and tmdb_id:
                 tmdb_key_to_emby_ids[(str(tmdb_id), item_type)].add(item_id)
+
+            if metadata_backfill_only:
+                composite_key = (str(tmdb_id), item_type) if tmdb_id else None
+                if item_type in {"Movie", "Series"} and composite_key in metadata_backfill_keys:
+                    dirty_keys.add(composite_key)
+                else:
+                    skipped_clean += 1
+                continue
 
             # 跳过判断 (已存在且在线)
             is_clean = False
@@ -945,7 +985,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
         gc.collect()
 
         # --- 3. 反向差异检测 (删除) ---
-        missing_emby_ids = known_online_emby_ids - current_scan_emby_ids
+        missing_emby_ids = set() if metadata_backfill_only else known_online_emby_ids - current_scan_emby_ids
         
         del known_online_emby_ids # 释放内存
         del current_scan_emby_ids
@@ -1294,6 +1334,7 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
 
             metadata_batch = []
             series_ids_processed_in_batch = set()
+            schema_ready_roots = set()
 
             for item_group in batch_item_groups:
                 if not item_group: continue
@@ -1319,6 +1360,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 else:
                     # Movie 或其他情况，保持原样
                     tmdb_details = full_aggregated_data
+                if full_aggregated_data:
+                    schema_ready_roots.add(tmdb_id_str)
                 
                 # --- 1. 构建顶层记录 ---
                 asset_details_list = []
@@ -1395,8 +1438,20 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 top_record = {
                     "tmdb_id": tmdb_id_str,
                     "item_type": item_type,
-                    "release_year": item.get('ProductionYear'),
-                    "imdb_id": item.get("ProviderIds", {}).get("Imdb") or (tmdb_details.get("imdb_id") if tmdb_details else None),
+                    "title": item.get('Name') or (
+                        (tmdb_details.get('name') or tmdb_details.get('title')) if tmdb_details else None
+                    ),
+                    "original_title": (
+                        tmdb_details.get('original_name') or tmdb_details.get('original_title')
+                        if tmdb_details else item.get('OriginalTitle')
+                    ),
+                    "release_year": item.get('ProductionYear') or (
+                        int(str(tmdb_date)[:4]) if tmdb_date and str(tmdb_date)[:4].isdigit() else None
+                    ),
+                    "imdb_id": item.get("ProviderIds", {}).get("Imdb") or (
+                        ((tmdb_details.get("external_ids") or {}).get("imdb_id") or tmdb_details.get("imdb_id"))
+                        if tmdb_details else None
+                    ),
                     "original_language": tmdb_details.get('original_language') if tmdb_details else None,
                     "watchlist_tmdb_status": tmdb_details.get('status') if tmdb_details else None,
                     "in_library": True,
@@ -1414,12 +1469,25 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     "official_rating_json": rating_json_str,
                     "custom_rating": item.get('CustomRating'),
                     # media_metadata.runtime_minutes 只保存 TMDb 官方片长；物理/Emby 时长在 asset_details_json.runtime_minutes。
-                    "runtime_minutes": tmdb_details.get('runtime') if (item_type == 'Movie' and tmdb_details) else None,
+                    "runtime_minutes": (
+                        tmdb_details.get('runtime')
+                        if item_type == 'Movie' and tmdb_details
+                        else next(iter(tmdb_details.get('episode_run_time') or []), None) if tmdb_details else None
+                    ),
                     "tagline": tmdb_details.get('tagline') if tmdb_details else None
                 }
                 if tmdb_details:
                     top_record['poster_path'] = tmdb_details.get('poster_path')
                     top_record['backdrop_path'] = tmdb_details.get('backdrop_path') 
+                    tmdb_images = tmdb_details.get('images') or {}
+                    top_record['logo_path'] = next((
+                        image.get('file_path') for image in tmdb_images.get('logos') or []
+                        if isinstance(image, dict) and image.get('file_path')
+                    ), None)
+                    top_record['thumb_path'] = next((
+                        image.get('file_path') for image in tmdb_images.get('backdrops') or []
+                        if isinstance(image, dict) and image.get('file_path')
+                    ), None) or top_record['backdrop_path']
                     top_record['homepage'] = tmdb_details.get('homepage')
                     top_record['overview'] = tmdb_details.get('overview')
                     if tmdb_details.get('vote_average') is not None:
@@ -1626,6 +1694,16 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                         
                         metadata_batch.append(child_record)
 
+            for metadata in metadata_batch:
+                root_tmdb_id = (
+                    str(metadata.get('tmdb_id'))
+                    if metadata.get('item_type') in {'Movie', 'Series'}
+                    else str(metadata.get('parent_series_tmdb_id') or '')
+                )
+                if root_tmdb_id in schema_ready_roots:
+                    metadata['metadata_ready'] = True
+                    metadata['metadata_schema_version'] = MEDIA_METADATA_SCHEMA_VERSION
+
             # 7. 写入数据库 & 子集离线对账
             if metadata_batch:
                 total_updated_count += len(metadata_batch)
@@ -1651,18 +1729,14 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                                 # 这些字段永远不更新
                                 exclude_cols = {'tmdb_id', 'item_type', 'subscription_sources_json', 'subscription_status'}
                                 
-                                # ★★★ 3. 动态判断是否排除标题 ★★★
-                                # 只有当类型是 电影(Movie) 或 剧集(Series) 时，才排除 title
-                                # 这样 季(Season) 和 集(Episode) 的标题依然可以正常同步更新
-                                if current_type in ['Movie', 'Series']:
-                                    exclude_cols.add('title')
-
                                 if col in exclude_cols: 
                                     continue
                                 
                                 # 针对 total_episodes 字段，检查锁定状态
                                 # 逻辑：如果 total_episodes_locked 为 TRUE，则保持原值；否则使用新值 (EXCLUDED.total_episodes)
-                                if col == 'total_episodes':
+                                if col == 'title' and current_type in {'Movie', 'Series'}:
+                                    update_clauses.append("title = COALESCE(media_metadata.title, EXCLUDED.title)")
+                                elif col == 'total_episodes':
                                     update_clauses.append(
                                         "total_episodes = CASE WHEN media_metadata.total_episodes_locked IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END"
                                     )
@@ -1732,18 +1806,75 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
             task_manager.update_status_from_thread(20 + int((processed_count / total_to_process) * 80), f"处理进度 {processed_count}/{total_to_process}...")
 
         # 8. 执行大扫除：物理删除废弃的内部 ID 条目
-        logger.info("  ➜ [自动维护] 正在清理废弃的内部ID兜底记录...")
-        cleaned_zombies = media_db.cleanup_offline_internal_ids()
-        if cleaned_zombies > 0:
-            logger.info(f"  ➜ [大扫除] 成功物理删除了 {cleaned_zombies} 条已废弃的内部ID记录 (如 xxx-S1E1)。")
-            
-        final_msg = f"同步完成！新增/更新: {total_updated_count} 个媒体项, 标记离线: {total_offline_count} 个媒体项。"
+        if not metadata_backfill_only:
+            logger.info("  ➜ [自动维护] 正在清理废弃的内部ID兜底记录...")
+            cleaned_zombies = media_db.cleanup_offline_internal_ids()
+            if cleaned_zombies > 0:
+                logger.info(f"  ➜ [大扫除] 成功物理删除了 {cleaned_zombies} 条已废弃的内部ID记录 (如 xxx-S1E1)。")
+
+        final_msg = (
+            f"元数据补齐完成！处理 {processed_count}/{total_to_process} 个顶层项目，"
+            f"写回 {total_updated_count} 个媒体项。"
+            if metadata_backfill_only
+            else f"同步完成！新增/更新: {total_updated_count} 个媒体项, 标记离线: {total_offline_count} 个媒体项。"
+        )
         logger.info(f"  ➜ {final_msg}")
         task_manager.update_status_from_thread(100, final_msg)
 
     except Exception as e:
         logger.error(f"执行 '{task_name}' 任务时发生严重错误: {e}", exc_info=True)
         task_manager.update_status_from_thread(-1, f"任务失败: {e}")
+
+
+def task_backfill_media_metadata(processor):
+    """补齐在库媒体的当前结构版本元数据，不执行离线清理。"""
+    return task_populate_metadata_cache(
+        processor,
+        batch_size=5,
+        force_full_update=True,
+        metadata_backfill_only=True,
+    )
+
+
+def task_backfill_single_media_metadata(processor, tmdb_id: str, media_type: str):
+    """由 Emby 单项刷新触发，只补齐对应 Movie 或 Series。"""
+    item_type = 'Series' if str(media_type).lower() == 'tv' else 'Movie'
+    task_manager.update_status_from_thread(5, f"正在定位 {item_type} TMDb:{tmdb_id}...")
+    try:
+        with connection.get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT emby_item_ids_json, metadata_schema_version
+                FROM media_metadata
+                WHERE tmdb_id=%s AND item_type=%s AND in_library IS TRUE
+                LIMIT 1
+                """,
+                (str(tmdb_id), item_type),
+            )
+            row = cursor.fetchone()
+        if not row:
+            task_manager.update_status_from_thread(100, "目标媒体已不在库，跳过补齐。")
+            return
+        if int(row.get('metadata_schema_version') or 0) >= MEDIA_METADATA_SCHEMA_VERSION:
+            task_manager.update_status_from_thread(100, "目标媒体元数据已是当前结构版本。")
+            return
+
+        item_ids = row.get('emby_item_ids_json') or []
+        if isinstance(item_ids, str):
+            item_ids = json.loads(item_ids)
+        emby_item_id = next((str(value) for value in item_ids if value), '')
+        if not emby_item_id:
+            raise ValueError("目标媒体缺少 Emby ItemID")
+
+        time.sleep(5)
+        task_manager.update_status_from_thread(20, f"正在补齐 {item_type} TMDb:{tmdb_id}...")
+        if not processor.process_single_item(emby_item_id, force_full_update=True):
+            raise RuntimeError("完整元数据处理失败")
+        task_manager.update_status_from_thread(100, f"已补齐 {item_type} TMDb:{tmdb_id}。")
+    except Exception as exc:
+        logger.error("单项媒体元数据补齐失败 %s/%s: %s", tmdb_id, item_type, exc, exc_info=True)
+        task_manager.update_status_from_thread(-1, f"单项元数据补齐失败: {exc}")
 
 # --- 辅助函数：检查分级是否匹配 (带日志调试版) ---
 def _is_rating_match(item_name: str, item_rating: str, rating_filters: List[str]) -> bool:
