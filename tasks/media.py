@@ -738,6 +738,10 @@ def task_populate_metadata_cache(
         if metadata_backfill_only
         else ("深度同步 (全量)" if force_full_update else "快速同步 (增量)")
     )
+    translation_config = processor.config
+    if metadata_backfill_only:
+        translation_config = dict(processor.config)
+        translation_config[constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE] = False
     logger.info(f"--- 模式: {sync_mode} (分批大小: {batch_size}) ---")
     
     total_updated_count = 0
@@ -1329,7 +1333,7 @@ def task_populate_metadata_cache(
                             ai_translator=processor.ai_translator,
                             item_name='' if i_type in ('Movie', 'Series') else item.get('Name', ''),
                             tmdb_api_key=processor.tmdb_api_key,
-                            config=processor.config
+                            config=translation_config
                         )
 
             metadata_batch = []
