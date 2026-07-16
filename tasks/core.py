@@ -310,6 +310,7 @@ def get_task_registry(context: str = 'all'):
         'shared-resource-maintenance': (task_shared_resource_maintenance, "共享资源维护", 'media', True),
         'sync-all-user-data': (task_sync_all_user_data, "同步用户数据", 'media', True),
         'generate_embeddings': (task_generate_embeddings, "生成媒体向量", 'media', True),
+        'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', True),
         'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
@@ -326,7 +327,6 @@ def get_task_registry(context: str = 'all'):
         'merge-duplicate-actors': (task_merge_duplicate_actors, "合并分身演员", 'media', False),
         'purge-ghost-actors': (task_purge_ghost_actors, "删除幽灵演员", 'media', False),
         'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', False),
-        'sync-115-directory-tree': (task_sync_115_directory_tree, "同步网盘目录", 'media', False),
         'fill-studio-images': (task_fill_studio_images, "补全工作室图标", 'media', False),
         'check-expired-users': (task_check_expired_users, "检查过期用户", 'media', False),
         'share-all-library': (share_all_library, "一键登记媒体库", 'media', False),
