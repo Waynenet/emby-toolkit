@@ -9,6 +9,7 @@ import os
 import re
 import logging
 import requests
+import tempfile
 from typing import List, Optional, Dict, Any, Tuple
 import concurrent.futures
 from collections import defaultdict
@@ -23,56 +24,12 @@ import handler.tmdb as tmdb
 import handler.emby as emby
 import handler.telegram as telegram
 from database import connection, settings_db, media_db, queries_db, maintenance_db
-from .helpers import parse_full_asset_details, reconstruct_metadata_from_db, translate_tmdb_metadata_recursively
+from .helpers import parse_full_asset_details, translate_tmdb_metadata_recursively
 from extensions import UPDATING_METADATA
 
 logger = logging.getLogger(__name__)
 
 SMART_DEEP_METADATA_REFRESH_DAYS = 30
-
-def _restore_resolve_writable_path(processor, raw_path: str, pickcodes: Optional[List[str]] = None) -> str:
-    """
-    恢复 NFO/图片时必须写到本地 STRM 目录。
-    只支持通过 115 提取码反查本地 STRM 路径。
-    """
-    raw_path = str(raw_path or '').strip()
-    if not raw_path:
-        return ''
-
-    local_root = str(processor.config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT) or '').strip()
-    if not local_root:
-        return raw_path
-
-    video_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.wmv', '.mov', '.m2ts', '.webm'}
-
-    def _to_strm_path(local_path: str) -> str:
-        full_path = os.path.join(local_root, str(local_path or '').lstrip('/\\'))
-        stem, ext = os.path.splitext(full_path)
-        if ext.lower() in video_exts:
-            return stem + '.strm'
-        return full_path
-
-    for pc in pickcodes or []:
-        pc = str(pc or '').strip()
-        if not pc:
-            continue
-        try:
-            db_local_path = processor._get_local_path_by_pickcode(pc)
-            if db_local_path:
-                return _to_strm_path(db_local_path)
-        except Exception as e:
-            logger.debug(f"  ➜ [NFO恢复] 通过提取码反查 STRM 路径失败: {e}")
-
-    try:
-        pc, _sha1 = processor._extract_115_fingerprints(raw_path)
-        if pc:
-            db_local_path = processor._get_local_path_by_pickcode(pc)
-            if db_local_path:
-                return _to_strm_path(db_local_path)
-    except Exception as e:
-        logger.debug(f"  ➜ [NFO恢复] 从资产路径反查 STRM 路径失败: {e}")
-
-    return ''
 
 # --- 辅助函数：严格校验 TMDb ID ---
 def is_valid_tmdb_id(tmdb_id) -> bool:
@@ -2639,175 +2596,141 @@ def task_restore_mediainfo(processor, force_full_update: bool = False):
     logger.info(f"  ➜ {msg}")
     task_manager.update_status_from_thread(100, msg)
 
-# --- 从数据库恢复物理 NFO 和图片 ---
-def task_restore_nfo_and_images(processor):
+# --- 扫描 Emby 缺图视频并补齐截图 ---
+def task_fill_missing_video_screenshots(processor):
     """
-    【灾难恢复】从数据库读取元数据，重新生成物理目录下的 NFO 文件并补齐图片。
-    用于 NFO 丢失、图片丢失或洗版后的数据恢复。
+    扫描 Emby 中缺少主图的视频项，从 115 直链截图并上传到 Emby 图片缓存。
+    任务注册保留旧 key，以兼容现有任务链配置。
     """
-    task_name = "恢复NFO与图片"
+    task_name = "补齐视频截图"
     logger.trace(f"--- 开始执行 '{task_name}' ---")
-    
-    try:
-        task_manager.update_status_from_thread(5, "正在读取数据库...")
-        
-        items_to_restore = []
-        with connection.get_db_connection() as conn:
-            cursor = conn.cursor()
-            # 只恢复当前在库的项目
-            cursor.execute("""
-                SELECT * FROM media_metadata 
-                WHERE item_type IN ('Movie', 'Series') 
-                  AND tmdb_id IS NOT NULL 
-                  AND tmdb_id NOT IN ('0', 'None', 'null', '')
-                  AND in_library = TRUE
-            """)
-            items_to_restore = [dict(row) for row in cursor.fetchall()]
 
-        total = len(items_to_restore)
-        if total == 0:
-            task_manager.update_status_from_thread(100, "数据库中没有可恢复的在线项目。")
+    try:
+        task_manager.update_status_from_thread(5, "正在扫描 Emby 缺图视频...")
+
+        libraries = emby.get_emby_libraries(
+            processor.emby_url,
+            processor.emby_api_key,
+            processor.emby_user_id,
+        ) or []
+        library_ids = [str(item.get('Id')) for item in libraries if item.get('Id')]
+        if not library_ids:
+            task_manager.update_status_from_thread(100, "Emby 中没有可扫描的媒体库。")
             return
 
-        logger.info(f"  ➜ 发现 {total} 个项目需要恢复 NFO 和图片。")
-        success_count = 0
-        
-        for i, item in enumerate(items_to_restore):
-            if processor.is_stop_requested():
-                logger.warning("  ➜ 任务被中止。")
-                break
+        items = emby.get_emby_library_items(
+            base_url=processor.emby_url,
+            api_key=processor.emby_api_key,
+            media_type_filter='Movie,Episode,Video',
+            user_id=processor.emby_user_id,
+            library_ids=library_ids,
+            fields='Path,ImageTags',
+        ) or []
+        missing_items = [
+            item for item in items
+            if not (item.get('ImageTags') or {}).get('Primary')
+        ]
+        candidates = [
+            item for item in missing_items
+            if str(item.get('Path') or '').lower().endswith('.strm')
+        ]
+        non_strm_count = len(missing_items) - len(candidates)
+        existing_count = len(items) - len(missing_items)
 
-            if i % 10 == 0: time.sleep(0.1)
+        if not candidates:
+            final_msg = (
+                f"扫描完成：已有图片 {existing_count} 个，"
+                f"缺图但非 STRM {non_strm_count} 个，没有需要截图的项目。"
+            )
+            logger.info(f"  ➜ {final_msg}")
+            task_manager.update_status_from_thread(100, final_msg)
+            return
 
-            tmdb_id = item['tmdb_id']
-            item_type = item['item_type']
-            title = item.get('title', tmdb_id)
-            
-            if i % 5 == 0:
-                progress = int((i / total) * 100)
-                task_manager.update_status_from_thread(progress, f"正在恢复 ({i+1}/{total}): {title}")
+        logger.info(f"  ➜ 发现 {len(candidates)} 个缺少主图的 STRM 视频，开始截图并上传 Emby 缓存。")
+        uploaded_count = 0
+        failed_count = 0
+        completed_count = 0
+        stopped = False
 
-            try:
-                # ★★★ 1. 获取真实的物理路径 (直接从数据库提取，免 API 请求) ★★★
-                asset_details_str = item.get('asset_details_json')
-                assets = []
-                if asset_details_str:
-                    assets = json.loads(asset_details_str) if isinstance(asset_details_str, str) else asset_details_str
-                
-                if not assets or not isinstance(assets, list) or not assets[0].get('path'):
-                    logger.warning(f"  ➜ 无法从数据库获取项目 '{title}' 的物理路径，跳过。")
-                    continue
-                
-                pickcodes = []
-                raw_pickcodes = item.get('file_pickcode_json')
-                if raw_pickcodes:
+        with tempfile.TemporaryDirectory(prefix='etk-missing-video-thumb-') as temp_dir:
+            def capture_and_upload(item):
+                item_id = str(item.get('Id') or '').strip()
+                video_path = str(item.get('Path') or '').strip()
+                if not item_id or not video_path:
+                    return False, item_id, video_path
+
+                temp_path = os.path.join(temp_dir, f'{item_id}.jpg')
+                if not processor._extract_thumb_via_ffmpeg(video_path, temp_path):
+                    return False, item_id, video_path
+                try:
+                    with open(temp_path, 'rb') as image_file:
+                        image_data = image_file.read()
+                    return emby.upload_item_image(
+                        processor.emby_url,
+                        processor.emby_api_key,
+                        item_id,
+                        image_data,
+                        content_type='image/jpeg',
+                        image_type='Primary',
+                        delete_existing=False,
+                    ), item_id, video_path
+                finally:
                     try:
-                        pickcodes = json.loads(raw_pickcodes) if isinstance(raw_pickcodes, str) else raw_pickcodes
-                    except Exception:
-                        pickcodes = []
-                if not isinstance(pickcodes, list):
-                    pickcodes = []
+                        os.remove(temp_path)
+                    except FileNotFoundError:
+                        pass
 
-                raw_asset_path = assets[0].get('path')
-                writable_path = _restore_resolve_writable_path(processor, raw_asset_path, pickcodes)
-                if not writable_path:
-                    logger.warning(f"  ➜ 无法解析项目 '{title}' 的可写入路径，跳过。")
-                    continue
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
+                pending = iter(candidates)
+                futures = set()
+                for _ in range(min(4, len(candidates))):
+                    futures.add(executor.submit(capture_and_upload, next(pending)))
 
-                if writable_path != raw_asset_path:
-                    logger.info(f"  ➜ [NFO恢复] 已定位本地 STRM 路径：{writable_path}")
+                while futures:
+                    done, futures = concurrent.futures.wait(
+                        futures,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        completed_count += 1
+                        try:
+                            success, item_id, video_path = future.result()
+                        except Exception as exc:
+                            logger.warning(f"  ➜ [视频截图] 截图任务异常: {exc}")
+                            success, item_id, video_path = False, '', ''
 
-                # 构造一个伪装的 item_details 供后续生成函数使用
-                item_details = {
-                    "Path": writable_path,
-                    "Type": item_type
-                }
+                        if success:
+                            uploaded_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(
+                                f"  ➜ [视频截图] 截图或上传失败: "
+                                f"{os.path.basename(video_path) or item_id or '未知项目'}"
+                            )
 
-                # --- A. 准备演员数据 ---
-                db_actors = []
-                if item.get('actors_json'):
-                    try:
-                        raw_actors = item['actors_json']
-                        actors_link = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
-                        actor_tmdb_ids = [a['tmdb_id'] for a in actors_link if 'tmdb_id' in a]
-                        if actor_tmdb_ids:
-                                with connection.get_db_connection() as conn:
-                                    cursor = conn.cursor()
-                                    placeholders = ','.join(['%s'] * len(actor_tmdb_ids))
-                                    sql = f"""
-                                        SELECT *, primary_name AS name, tmdb_person_id AS tmdb_id
-                                        FROM person_metadata
-                                        WHERE tmdb_person_id IN ({placeholders})
-                                    """
-                                    cursor.execute(sql, tuple(actor_tmdb_ids))
-                                    actor_rows = cursor.fetchall()
-                                actor_map = {r['tmdb_id']: dict(r) for r in actor_rows}
-                                for link in actors_link:
-                                    tid = link.get('tmdb_id')
-                                    if tid in actor_map:
-                                        full_actor = actor_map[tid].copy()
-                                        full_actor['character'] = link.get('character')
-                                        full_actor['order'] = link.get('order')
-                                        db_actors.append(full_actor)
-                                db_actors.sort(key=lambda x: x.get('order', 999))
-                    except Exception as e_actor:
-                        logger.warning(f"  ➜ 解析演员数据失败 ({title}): {e_actor}")
+                        progress = 10 + int(completed_count / len(candidates) * 85)
+                        task_manager.update_status_from_thread(
+                            progress,
+                            f"正在补齐视频截图 ({completed_count}/{len(candidates)})...",
+                        )
 
-                # --- B. 重建主 Payload ---
-                payload = reconstruct_metadata_from_db(item, db_actors)
+                        if processor.is_stop_requested():
+                            stopped = True
+                            continue
+                        try:
+                            futures.add(executor.submit(capture_and_upload, next(pending)))
+                        except StopIteration:
+                            pass
 
-                # --- C. 如果是剧集，注入分季/分集数据 ---
-                if item_type == "Series":
-                    with connection.get_db_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT * FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Season'", (tmdb_id,))
-                        seasons_data = []
-                        for s_row in cursor.fetchall():
-                            if not str(s_row['tmdb_id']).isdigit(): continue
-                            seasons_data.append({
-                                "id": int(s_row['tmdb_id']), "name": s_row['title'], "overview": s_row['overview'],
-                                "season_number": s_row['season_number'], "air_date": str(s_row['release_date']) if s_row['release_date'] else None,
-                                "poster_path": s_row['poster_path']
-                            })
-                        
-                        cursor.execute("SELECT * FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'", (tmdb_id,))
-                        episodes_data = {} 
-                        for e_row in cursor.fetchall():
-                            if not str(e_row['tmdb_id']).isdigit(): continue
-                            s_num, e_num = e_row['season_number'], e_row['episode_number']
-                            episodes_data[f"S{s_num}E{e_num}"] = {
-                                "id": int(e_row['tmdb_id']), "name": e_row['title'], "overview": e_row['overview'],
-                                "season_number": s_num, "episode_number": e_num,
-                                "air_date": str(e_row['release_date']) if e_row['release_date'] else None,
-                                "vote_average": e_row['rating'], "still_path": e_row['poster_path']
-                            }
-                        if seasons_data: payload['seasons_details'] = seasons_data
-                        if episodes_data: payload['episodes_details'] = episodes_data
+                    if stopped:
+                        for future in futures:
+                            future.cancel()
+                        break
 
-                # --- D. 写入 NFO ---
-                logger.info(f"  ➜ 正在为 '{title}' 生成物理 NFO 文件...")
-                processor.sync_item_metadata(
-                    item_details=item_details, # 传入真实的 item_details (包含 Path)
-                    tmdb_id=tmdb_id,
-                    final_cast_override=db_actors,
-                    metadata_override=payload
-                )
-                
-                # --- E. 下载图片 ---
-                logger.info(f"  ➜ 正在为 '{title}' 补齐缺失图片...")
-                processor.download_images_from_tmdb(
-                    tmdb_id=tmdb_id,
-                    item_type=item_type,
-                    aggregated_tmdb_data=payload,
-                    item_details=item_details
-                )
-                
-                success_count += 1
-                
-            except Exception as e_item:
-                logger.error(f"  ➜ 恢复项目 '{title}' 失败: {e_item}", exc_info=True)
-
-        final_msg = f"恢复完成！成功为 {success_count}/{total} 个项目生成了 NFO 和图片。"
+        final_msg = (
+            f"补图{'已中止' if stopped else '完成'}：上传 {uploaded_count} 个，失败 {failed_count} 个，"
+            f"已有图片 {existing_count} 个，缺图但非 STRM {non_strm_count} 个。"
+        )
         logger.info(f"  ➜ {final_msg}")
         task_manager.update_status_from_thread(100, final_msg)
 

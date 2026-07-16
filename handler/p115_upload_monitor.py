@@ -3,11 +3,11 @@ import json
 import logging
 import os
 import queue
-import shutil
-import subprocess
+import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterable, List, Optional
 
 from watchdog.events import FileSystemEventHandler
@@ -230,6 +230,7 @@ class UploadMonitorRuntime:
         self._state_lock = threading.RLock()
         self._remote_dir_cache: Dict[tuple, str] = {}
         self._worker_started = False
+        self._screenshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="P115UploadThumb")
 
     @classmethod
     def instance(cls):
@@ -629,69 +630,79 @@ class UploadMonitorRuntime:
         return ""
 
     @staticmethod
-    def _poster_seek_seconds(payload: Any) -> float:
-        try:
-            while isinstance(payload, list):
-                payload = payload[0] if payload else {}
-            media_source = payload.get("MediaSourceInfo") if isinstance(payload, dict) else {}
-            while isinstance(media_source, list):
-                media_source = media_source[0] if media_source else {}
-            ticks = float((media_source or {}).get("RunTimeTicks") or 0)
-            duration = ticks / 10_000_000
-            if duration > 0:
-                return max(1.0, min(duration * 0.1, max(1.0, duration - 1.0)))
-        except Exception:
-            pass
-        return 1.0
+    def _fill_emby_screenshot_after_ingest(strm_path: str) -> None:
+        if not _as_bool(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EXTRACT_THUMB), False):
+            return
 
-    def _ensure_local_poster(
-        self,
-        job: Dict[str, Any],
-        path: str,
-        output_dir: str,
-        mediainfo: Dict[str, Any],
-    ) -> bool:
-        if os.path.splitext(path)[1].lower() not in VIDEO_OUTPUT_EXTENSIONS:
-            return False
-        poster_path = os.path.join(output_dir, os.path.splitext(os.path.basename(path))[0] + "-poster.jpg")
-        if os.path.isfile(poster_path):
-            return True
-        if not shutil.which("ffmpeg"):
-            logger.warning("  ➜ [115上传监控] 未找到 ffmpeg，跳过生成海报: %s", path)
-            return False
+        import extensions
+        from handler import emby
 
-        temp_path = poster_path + ".etk-tmp.jpg"
-        seek_seconds = self._poster_seek_seconds(mediainfo)
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{seek_seconds:.3f}", "-i", path,
-                    "-map", "0:v:0", "-an", "-sn", "-dn",
-                    "-vf", "scale=640:-2:force_original_aspect_ratio=decrease",
-                    "-frames:v", "1", "-q:v", "3", "-y", temp_path,
-                ],
-                capture_output=True,
-                timeout=120,
-                check=False,
+        processor = extensions.media_processor_instance
+        if not processor:
+            logger.warning("  ➜ [115上传监控] 核心处理器未就绪，跳过 Emby 截图补齐: %s", strm_path)
+            return
+
+        item = None
+        for delay in (1, 2, 4, 8, 15, 30):
+            time.sleep(delay)
+            item = emby.get_emby_item_by_path(
+                strm_path,
+                processor.emby_url,
+                processor.emby_api_key,
+                processor.emby_user_id,
             )
-            if result.returncode != 0 or not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
-                error = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
-                logger.warning("  ➜ [115上传监控] ffmpeg 生成海报失败: %s -> %s", path, error[:300])
-                return False
-            os.replace(temp_path, poster_path)
-            logger.info("  ➜ [115上传监控] 已生成视频海报: %s", poster_path)
-            return True
-        except subprocess.TimeoutExpired:
-            logger.warning("  ➜ [115上传监控] ffmpeg 生成海报超时: %s", path)
-            return False
-        except Exception as exc:
-            logger.warning("  ➜ [115上传监控] 生成海报失败: %s -> %s", path, exc)
-            return False
-        finally:
-            if os.path.isfile(temp_path):
+            if item and item.get("Id"):
+                break
+        if not item or not item.get("Id"):
+            logger.warning("  ➜ [115上传监控] STRM 入库后仍未取得 Emby Item，跳过截图: %s", strm_path)
+            return
+
+        item_id = str(item["Id"])
+        details = emby.get_emby_item_details(
+            item_id,
+            processor.emby_url,
+            processor.emby_api_key,
+            processor.emby_user_id,
+            fields="Path,ImageTags",
+        ) or {}
+        if (details.get("ImageTags") or {}).get("Primary"):
+            logger.debug("  ➜ [115上传监控] Emby Item 已有主图，跳过截图: %s", strm_path)
+            return
+
+        with tempfile.TemporaryDirectory(prefix="etk-upload-monitor-thumb-") as temp_dir:
+            temp_path = os.path.join(temp_dir, f"{item_id}.jpg")
+            if not processor._extract_thumb_via_ffmpeg(strm_path, temp_path):
+                logger.warning("  ➜ [115上传监控] 从 115 直链截图失败: %s", strm_path)
+                return
+            try:
+                latest = emby.get_emby_item_details(
+                    item_id,
+                    processor.emby_url,
+                    processor.emby_api_key,
+                    processor.emby_user_id,
+                    fields="ImageTags",
+                ) or {}
+                if (latest.get("ImageTags") or {}).get("Primary"):
+                    logger.debug("  ➜ [115上传监控] 截图期间 Emby 已补入主图，跳过上传: %s", strm_path)
+                    return
+                with open(temp_path, "rb") as image_file:
+                    image_data = image_file.read()
+                if emby.upload_item_image(
+                    processor.emby_url,
+                    processor.emby_api_key,
+                    item_id,
+                    image_data,
+                    content_type="image/jpeg",
+                    image_type="Primary",
+                    delete_existing=False,
+                ):
+                    logger.info("  ➜ [115上传监控] 已补齐 Emby 缓存截图: %s", strm_path)
+                else:
+                    logger.warning("  ➜ [115上传监控] 上传 Emby 缓存截图失败: %s", strm_path)
+            finally:
                 try:
                     os.remove(temp_path)
-                except OSError:
+                except FileNotFoundError:
                     pass
 
     def _resolve_local_output_directory(self, target_cid: str, fallback_name: str = "") -> str:
@@ -879,12 +890,13 @@ class UploadMonitorRuntime:
             logger.error("  ➜ [115上传监控] 写入 STRM 失败: %s -> %s", strm_path, exc)
             return False
 
-        self._ensure_local_poster(job, path, output_dir, mediainfo)
-        job["derived_paths"] = [
-            strm_path,
-            os.path.join(output_dir, stem + "-poster.jpg"),
-        ]
+        job["derived_paths"] = [strm_path]
         enqueue_file_actively(strm_path)
+        if (
+            os.path.splitext(path)[1].lower() in VIDEO_OUTPUT_EXTENSIONS
+            and _as_bool(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EXTRACT_THUMB), False)
+        ):
+            self._screenshot_executor.submit(self._fill_emby_screenshot_after_ingest, strm_path)
         logger.info("  ➜ [115上传监控] 已生成 STRM 与媒体信息: %s", strm_path)
         return True
 
