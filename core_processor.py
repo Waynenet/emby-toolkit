@@ -19,6 +19,7 @@ from handler.custom_collection import RecommendationEngine
 import config_manager
 from database.connection import get_db_connection
 from database import media_db, settings_db
+from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
 import handler.emby as emby
 import handler.tmdb as tmdb
 from tasks.helpers import parse_full_asset_details, calculate_ancestor_ids, construct_metadata_payload, extract_top_directors, translate_tmdb_metadata_recursively
@@ -1389,6 +1390,7 @@ class MediaProcessor:
                         except: pass
 
                 processed_emby_episodes = set() # 记录已处理的 Emby 分集
+                remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
                 # 构建已翻译角色的映射表 (tmdb_id -> 翻译后的 character) ★★★
                 translated_character_map = {}
                 if final_processed_cast:
@@ -1429,8 +1431,6 @@ class MediaProcessor:
                             continue # 不是本次入库的分集，直接跳过！
 
                     final_runtime = normalize_tmdb_runtime(episode.get('runtime'))
-                    # ★★★ 获取无头像过滤开关 ★★★
-                    remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
                     # ★★★ 提取季(Season)元数据作为第一兜底 ★★★
                     current_season_info = next((s for s in seasons_details if s.get('season_number') == s_num), {})
                     season_credits = current_season_info.get('credits') or current_season_info.get('aggregate_credits') or {}
@@ -1714,6 +1714,10 @@ class MediaProcessor:
 
             if not records_to_upsert:
                 return
+
+            for record in records_to_upsert:
+                if record.get('metadata_ready'):
+                    record['metadata_schema_version'] = MEDIA_METADATA_SCHEMA_VERSION
             
             # ==================================================================
             # 批量写入数据库 (带指纹保护机制)
@@ -1727,7 +1731,7 @@ class MediaProcessor:
                 "date_added", "official_rating_json", "genres_json", "directors_json", "production_companies_json", 
                 "networks_json", "countries_json", "keywords_json", "ignore_reason", "asset_details_json",
                 "runtime_minutes", "overview_embedding", "total_episodes", "watchlist_tmdb_status",
-                "imdb_id", "tagline", "metadata_ready", "actors_ready",
+                "imdb_id", "tagline", "metadata_ready", "actors_ready", "metadata_schema_version",
                 "washing_level", "washing_snapshot_json", "active_washing"
             ]
             data_for_batch = []
@@ -4158,6 +4162,7 @@ class MediaProcessor:
             if isinstance(ep, dict)
         }
         force_keys = set(force_overwrite_episodes or [])
+        enable_ffmpeg_thumb = self.config.get(constants.CONFIG_OPTION_EXTRACT_THUMB, False)
         uploaded_count = 0
         refreshed_count = 0
         removed_local_count = 0
@@ -4210,6 +4215,8 @@ class MediaProcessor:
                     continue
 
                 if image_tags.get('Primary'):
+                    continue
+                if not enable_ffmpeg_thumb:
                     continue
 
                 temp_path = os.path.join(temp_dir, f"{item_id}-{os.path.basename(os.path.splitext(video_path)[0])}.jpg")

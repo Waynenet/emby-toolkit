@@ -225,6 +225,7 @@ def init_db():
                         tags_json JSONB,
                         metadata_ready BOOLEAN NOT NULL DEFAULT FALSE,
                         actors_ready BOOLEAN NOT NULL DEFAULT FALSE,
+                        metadata_schema_version INTEGER NOT NULL DEFAULT 0,
 
                         -- 剧集专属与层级数据
                         parent_series_tmdb_id TEXT,
@@ -778,6 +779,7 @@ def init_db():
                             "thumb_path": "TEXT",
                             "metadata_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "actors_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
+                            "metadata_schema_version": "INTEGER NOT NULL DEFAULT 0",
                             "watchlist_version_lock_json": "JSONB DEFAULT '{}'::jsonb",
                             "washing_level": "INTEGER",
                             "washing_snapshot_json": "JSONB DEFAULT '{}'::jsonb"

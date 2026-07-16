@@ -4,8 +4,9 @@ import os
 import re
 import json
 import time
+import tempfile
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config_manager
 import constants
@@ -31,6 +32,138 @@ from handler.tg_media_candidate import candidate_to_recognition_hints, lookup_ca
 
 logger = logging.getLogger(__name__)
 FORCE_CACHE_MEDIAINFO = True
+
+
+def _fill_home_video_screenshots(processor, config, strm_paths):
+    """Upload screenshots for synced home videos that are missing Emby Primary images."""
+    result = {'matched': 0, 'skipped': 0, 'uploaded': 0, 'failed': 0, 'unresolved': 0}
+    if not config.get(constants.CONFIG_OPTION_EXTRACT_THUMB, False):
+        logger.info("  ➜ [家庭视频截图] 截图开关未开启，跳过补图。")
+        return result
+    if not processor:
+        logger.warning("  ➜ [家庭视频截图] 核心处理器未就绪，跳过补图。")
+        return result
+
+    from handler import emby
+
+    base_url = str(config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or '').strip()
+    api_key = str(config.get(constants.CONFIG_OPTION_EMBY_API_KEY) or '').strip()
+    user_id = str(config.get(constants.CONFIG_OPTION_EMBY_USER_ID) or '').strip()
+    target_paths = {
+        emby._normalize_emby_media_path(path): path
+        for path in strm_paths or []
+        if emby._normalize_emby_media_path(path)
+    }
+    if not target_paths:
+        return result
+    if not base_url or not api_key or not user_id:
+        logger.warning("  ➜ [家庭视频截图] Emby 连接配置不完整，跳过补图。")
+        result['unresolved'] = len(target_paths)
+        return result
+
+    libraries = emby.get_emby_libraries(base_url, api_key, user_id) or []
+    library_ids = [
+        str(item.get('Id'))
+        for item in libraries
+        if item.get('Id') and item.get('CollectionType') == 'homevideos'
+    ]
+    if not library_ids:
+        logger.warning("  ➜ [家庭视频截图] Emby 中没有家庭视频媒体库，跳过补图。")
+        result['unresolved'] = len(target_paths)
+        return result
+
+    logger.info(f"  ➜ [家庭视频截图] 通知 Emby 扫描 {len(target_paths)} 个家庭视频 STRM...")
+    emby.notify_emby_file_changes(list(target_paths.values()), base_url, api_key)
+
+    matched = {}
+    for delay in (0, 1, 2, 4, 8):
+        if delay:
+            time.sleep(delay)
+        items = emby.get_emby_library_items(
+            base_url=base_url,
+            api_key=api_key,
+            media_type_filter='Video',
+            user_id=user_id,
+            library_ids=library_ids,
+            fields='Path,ImageTags',
+            limit=10000,
+        ) or []
+        matched = {
+            normalized: item
+            for item in items
+            if (normalized := emby._normalize_emby_media_path(item.get('Path'))) in target_paths
+        }
+        if len(matched) == len(target_paths):
+            break
+
+    result['matched'] = len(matched)
+    result['unresolved'] = len(target_paths) - len(matched)
+    candidates = [
+        item for item in matched.values()
+        if not (item.get('ImageTags') or {}).get('Primary')
+    ]
+    result['skipped'] = len(matched) - len(candidates)
+    if not candidates:
+        logger.info(
+            f"  ➜ [家庭视频截图] 无需补图：已有图片 {result['skipped']}，"
+            f"尚未入库 {result['unresolved']}。"
+        )
+        return result
+
+    logger.info(f"  ➜ [家庭视频截图] 发现 {len(candidates)} 个缺图项目，开始截图并上传 Emby 缓存...")
+    with tempfile.TemporaryDirectory(prefix='etk-home-video-thumb-') as temp_dir:
+        def capture_and_upload(item):
+            item_id = str(item.get('Id') or '').strip()
+            video_path = str(item.get('Path') or '').strip()
+            if not item_id or not video_path.lower().endswith('.strm'):
+                return False, item_id, video_path
+            temp_path = os.path.join(temp_dir, f'{item_id}.jpg')
+            if not processor._extract_thumb_via_ffmpeg(video_path, temp_path):
+                return False, item_id, video_path
+            try:
+                with open(temp_path, 'rb') as image_file:
+                    image_data = image_file.read()
+                success = emby.upload_item_image(
+                    base_url,
+                    api_key,
+                    item_id,
+                    image_data,
+                    content_type='image/jpeg',
+                    image_type='Primary',
+                    delete_existing=False,
+                )
+                return success, item_id, video_path
+            finally:
+                try:
+                    os.remove(temp_path)
+                except FileNotFoundError:
+                    pass
+
+        max_workers = min(4, len(candidates))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(capture_and_upload, item) for item in candidates]
+            for future in as_completed(futures):
+                try:
+                    success, item_id, video_path = future.result()
+                except Exception as exc:
+                    logger.warning(f"  ➜ [家庭视频截图] 截图任务异常: {exc}")
+                    result['failed'] += 1
+                    continue
+                if success:
+                    result['uploaded'] += 1
+                else:
+                    result['failed'] += 1
+                    logger.warning(
+                        f"  ➜ [家庭视频截图] 截图或上传失败: "
+                        f"{os.path.basename(video_path) or item_id}"
+                    )
+
+    logger.info(
+        "  ➜ [家庭视频截图] 补图完成："
+        f"上传 {result['uploaded']}，已有图片 {result['skipped']}，"
+        f"尚未入库 {result['unresolved']}，失败 {result['failed']}。"
+    )
+    return result
 
 TV_HINT_RE = re.compile(
     r'(?:^|[ \.\-\_\[\(])(?:s|S)\d{1,4}[ \.\-]*(?:e|E|p|P)\d{1,4}\b|'
@@ -1195,8 +1328,6 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
         known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
-        home_video_metadata_exts = {'nfo', 'jpg', 'jpeg', 'png', 'webp'}
-        
         allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
         if not allowed_exts:
             allowed_exts = known_video_exts | known_sub_exts
@@ -1479,13 +1610,13 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             return moved_count
 
         def process_full_sync_items(items, target_cid, category_name):
-            nonlocal files_generated, subs_downloaded, metadata_downloaded, root_anomaly_skipped
+            nonlocal files_generated, subs_downloaded, root_anomaly_skipped
             is_home_video_target = cid_to_media_type.get(str(target_cid)) == 'home_video'
             for item in items:
                 # 兼容 OpenAPI、Cookie 和 p115client 标准化字段
                 name = first_present(item.get('fn'), item.get('n'), item.get('file_name'), item.get('name')) or ''
                 ext = name.split('.')[-1].lower() if '.' in name else ''
-                if ext not in allowed_exts and not (is_home_video_target and ext in home_video_metadata_exts):
+                if ext not in allowed_exts:
                     continue
 
                 pc = first_present(item.get('pc'), item.get('pick_code'), item.get('pickcode'))
@@ -1556,6 +1687,8 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                         files_generated += 1
 
                     valid_local_files.add(os.path.abspath(strm_path))
+                    if is_home_video_target:
+                        home_video_strm_paths.add(os.path.abspath(strm_path))
 
                     sha1 = item.get('sha1') or item.get('sha')
 
@@ -1637,32 +1770,6 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
 
                     valid_local_files.add(os.path.abspath(sub_path))
 
-                # 家庭视频目录额外同步 NFO 与图片元数据
-                elif is_home_video_target and ext in home_video_metadata_exts:
-                    metadata_path = os.path.join(current_local_path, name)
-                    remote_size = _parse_115_size(item.get('fs') or item.get('size'))
-                    local_size = os.path.getsize(metadata_path) if os.path.exists(metadata_path) else -1
-                    should_download = not os.path.exists(metadata_path) or (remote_size > 0 and local_size != remote_size)
-
-                    if should_download:
-                        try:
-                            import requests
-                            url_obj = client.resolve_download_url(pc, user_agent="Mozilla/5.0")
-                            if url_obj:
-                                headers = {"User-Agent": "Mozilla/5.0", "Cookie": P115Service.get_cookies()}
-                                resp = requests.get(str(url_obj), stream=True, timeout=30, headers=headers)
-                                resp.raise_for_status()
-                                with open(metadata_path, 'wb') as f:
-                                    for chunk in resp.iter_content(8192):
-                                        f.write(chunk)
-                                metadata_downloaded += 1
-                                logger.info(f"  ⬇️ [家庭视频] 下载元数据: {name}")
-                        except Exception as e:
-                            logger.error(f"  ➜ 下载家庭视频元数据失败 [{name}]: {e}")
-
-                    if os.path.exists(metadata_path):
-                        valid_local_files.add(os.path.abspath(metadata_path))
-
         # =================================================================
         # 阶段 2: 分类目录级全局拉取 (耗时: 秒级/分钟级)
         # =================================================================
@@ -1670,9 +1777,9 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         valid_local_files = set()
         files_generated = 0
         subs_downloaded = 0
-        metadata_downloaded = 0
         root_anomaly_skipped = 0
         changed_strm_files = set()
+        home_video_strm_paths = set()
 
         total_targets = len(target_cids)
         
@@ -1685,12 +1792,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             fetch_types = [4] # 4=视频
             if download_subs:
                 fetch_types.append(1) # 1=文档(含字幕)
-            if cid_to_media_type.get(target_cid) == 'home_video':
-                for metadata_type in (1, 2, 99): # 文档、图片、其它
-                    if metadata_type not in fetch_types:
-                        fetch_types.append(metadata_type)
-
-            type_names = {1: "文档/字幕", 2: "图片", 4: "视频", 99: "其它文件"}
+            type_names = {1: "文档/字幕", 4: "视频"}
             for f_type in fetch_types:
                 type_name = type_names.get(f_type, str(f_type))
                 offset = 0
@@ -1737,7 +1839,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
 
         logger.info(
             f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, "
-            f"下载字幕: {subs_downloaded} 个, 下载家庭视频元数据: {metadata_downloaded} 个。"
+            f"下载字幕: {subs_downloaded} 个。"
         )
         moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
         if root_anomaly_skipped:
@@ -1987,6 +2089,9 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                     logger.warning("  ➜ 未配置 Emby 地址或 API Key，跳过全量生成 STRM 后的 Emby 扫描。")
             except Exception as e:
                 logger.warning(f"  ➜ 通知 Emby 扫描全量生成 STRM 变更失败: {e}")
+
+        if home_video_strm_paths:
+            _fill_home_video_screenshots(processor, config, home_video_strm_paths)
 
         end_message = "=== 家庭视频STRM同步任务结束 ===" if home_video_only else "=== 全量生成STRM任务结束 ==="
         update_progress(100, end_message)

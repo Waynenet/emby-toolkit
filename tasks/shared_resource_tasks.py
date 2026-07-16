@@ -2127,7 +2127,12 @@ def handle_create_logical_season_filelist_share_event(
             'report': report_resp,
         }
 
-    expected_count = _safe_int(payload.get('file_count') or payload.get('episode_total'), 0)
+    expected_count = _safe_int(
+        payload.get('episode_total')
+        or payload.get('expected_episode_count')
+        or payload.get('file_count'),
+        0,
+    )
     if not share_ids or (expected_count > 0 and len(share_ids) < expected_count):
         message = f'逻辑季分享缺少完整 file_id 列表：{len(share_ids)}/{expected_count or "?"}，无法创建 115 分享：{title}'
         report = _report_logical_share_failure(client, group_id=group_id, channel_id=channel_id, status='failed', message=message,

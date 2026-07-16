@@ -1418,7 +1418,8 @@ def get_tg_config():
     default_cfg = {
         'enabled': False, 'api_id': '', 'api_hash': '', 
         'phone': '', 'password': '', 'channels': [], 'monitor_types': ['movie', 'tv'],
-        'transfer_modes': ['subscribe'], 'transfer_keywords': [], 'block_keywords': []
+        'transfer_modes': ['subscribe'], 'transfer_mode_channels': {},
+        'transfer_keywords': [], 'block_keywords': []
     }
     default_cfg.update(cfg)
     return jsonify({"success": True, "data": default_cfg})

@@ -7,6 +7,9 @@ from psycopg2.extras import Json
 from database.connection import get_db_connection
 
 
+MEDIA_METADATA_SCHEMA_VERSION = 1
+
+
 def _first_image(images: Dict[str, Any], key: str) -> Optional[str]:
     values = images.get(key) if isinstance(images, dict) else None
     for value in values or []:
@@ -113,6 +116,7 @@ def persist_initial_tmdb_metadata(
         "keywords_json": _keywords(details, media_type),
         "total_episodes": details.get("number_of_episodes") or 0,
         "watchlist_tmdb_status": details.get("status"),
+        "metadata_schema_version": MEDIA_METADATA_SCHEMA_VERSION,
     }
 
     columns = list(row)
@@ -132,10 +136,15 @@ def persist_initial_tmdb_metadata(
     for column in columns:
         if column in {"tmdb_id", "item_type"}:
             continue
-        if column in protected:
+        if column == "metadata_schema_version":
             updates.append(
                 f"{column}=CASE WHEN media_metadata.actors_ready IS TRUE "
                 f"THEN media_metadata.{column} ELSE EXCLUDED.{column} END"
+            )
+        elif column in protected:
+            updates.append(
+                f"{column}=CASE WHEN media_metadata.actors_ready IS TRUE "
+                f"THEN COALESCE(media_metadata.{column}, EXCLUDED.{column}) ELSE EXCLUDED.{column} END"
             )
         else:
             updates.append(f"{column}=COALESCE(media_metadata.{column}, EXCLUDED.{column})")
@@ -167,8 +176,8 @@ def persist_initial_tmdb_metadata(
                         INSERT INTO media_metadata (
                             tmdb_id, item_type, parent_series_tmdb_id, season_number,
                             title, overview, release_date, poster_path, total_episodes,
-                            metadata_ready, actors_ready
-                        ) VALUES (%s, 'Season', %s, %s, %s, %s, %s, %s, %s, TRUE, FALSE)
+                            metadata_ready, actors_ready, metadata_schema_version
+                        ) VALUES (%s, 'Season', %s, %s, %s, %s, %s, %s, %s, TRUE, FALSE, %s)
                         ON CONFLICT (tmdb_id, item_type) DO UPDATE SET
                             parent_series_tmdb_id=EXCLUDED.parent_series_tmdb_id,
                             season_number=EXCLUDED.season_number,
@@ -179,12 +188,15 @@ def persist_initial_tmdb_metadata(
                             total_episodes=CASE WHEN media_metadata.actors_ready IS TRUE THEN media_metadata.total_episodes ELSE EXCLUDED.total_episodes END,
                             metadata_ready=TRUE,
                             actors_ready=media_metadata.actors_ready,
+                            metadata_schema_version=CASE WHEN media_metadata.actors_ready IS TRUE
+                                THEN media_metadata.metadata_schema_version ELSE EXCLUDED.metadata_schema_version END,
                             last_updated_at=NOW()
                         """,
                         (
                             season_id, tmdb_id, season_number, season.get("name"),
                             season.get("overview"), _date_value(season.get("air_date")),
                             season.get("poster_path"), season.get("episode_count") or 0,
+                            MEDIA_METADATA_SCHEMA_VERSION,
                         ),
                     )
         conn.commit()
@@ -199,9 +211,26 @@ def has_initial_tmdb_metadata(tmdb_id: str, media_type: str) -> bool:
                 """
                 SELECT 1 FROM media_metadata
                 WHERE tmdb_id=%s AND item_type=%s AND metadata_ready IS TRUE
+                  AND metadata_schema_version >= %s
                 LIMIT 1
                 """,
-                (str(tmdb_id), item_type),
+                (str(tmdb_id), item_type, MEDIA_METADATA_SCHEMA_VERSION),
+            )
+            return cursor.fetchone() is not None
+
+
+def needs_metadata_backfill(tmdb_id: str, media_type: str) -> bool:
+    item_type = "Series" if str(media_type).lower() == "tv" else "Movie"
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM media_metadata
+                WHERE tmdb_id=%s AND item_type=%s AND in_library IS TRUE
+                  AND metadata_schema_version < %s
+                LIMIT 1
+                """,
+                (str(tmdb_id), item_type, MEDIA_METADATA_SCHEMA_VERSION),
             )
             return cursor.fetchone() is not None
 
@@ -357,8 +386,12 @@ def load_emby_metadata(
             for item in _json_value(row.get("tags_json") or row.get("keywords_json"), [])
         ],
         "studios": studios,
-        "season_number": row.get("season_number") if row.get("season_number") is not None else season_number,
-        "episode_number": row.get("episode_number") if row.get("episode_number") is not None else episode_number,
+        "season_number": (
+            row.get("season_number") if row.get("season_number") is not None else season_number
+        ) if requested_type in {"Season", "Episode"} else None,
+        "episode_number": (
+            row.get("episode_number") if row.get("episode_number") is not None else episode_number
+        ) if requested_type == "Episode" else None,
         "actors_ready": bool(row.get("actors_ready")),
         "people": sorted(people, key=lambda item: item.get("order", 999)),
         "images": {

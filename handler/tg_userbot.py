@@ -60,6 +60,7 @@ class TGUserBotManager:
             'channels': cfg.get('channels', []),
             'monitor_types': cfg.get('monitor_types', ['movie', 'tv']),
             'transfer_modes': cfg.get('transfer_modes', ['subscribe']),
+            'transfer_mode_channels': cfg.get('transfer_mode_channels', {}),
             'transfer_keywords': cfg.get('transfer_keywords', []),
             'block_keywords': cfg.get('block_keywords', []),
             'custom_regex': cfg.get('custom_regex', {})
@@ -82,6 +83,34 @@ class TGUserBotManager:
             chat_username == target_clean
             or chat_id == target_channel
             or curr_id_clean == target_id_clean
+        )
+
+    @classmethod
+    def _transfer_mode_enabled(
+        cls,
+        cfg,
+        mode,
+        chat_username='',
+        chat_id='',
+        sender_username='',
+        sender_id='',
+    ):
+        """判断转存方式是否已启用并适用于当前消息来源。"""
+        if mode not in (cfg.get('transfer_modes') or []):
+            return False
+
+        mode_channels = cfg.get('transfer_mode_channels') or {}
+        targets = mode_channels.get(mode, []) if isinstance(mode_channels, dict) else []
+        if isinstance(targets, str):
+            targets = [targets]
+        targets = [target for target in targets if str(target or '').strip()]
+        if not targets:
+            return True
+
+        return any(
+            cls._channel_rule_matches(target, chat_username, chat_id)
+            or cls._channel_rule_matches(target, sender_username, sender_id)
+            for target in targets
         )
 
     def _match_block_rule(self, text, chat_username='', chat_id='', rules=None):
@@ -242,7 +271,7 @@ class TGUserBotManager:
         raw_channels = cfg.get('channels') or []
         monitor_channels = [c.replace('@', '').strip().lower() for c in raw_channels if c and c.strip()]
         transfer_modes = cfg.get('transfer_modes', ['subscribe'])
-        is_hdhive_push_enabled = 'hdhive_push' in transfer_modes
+        has_hdhive_push = 'hdhive_push' in transfer_modes
         
         if not monitor_channels:
             return
@@ -271,7 +300,7 @@ class TGUserBotManager:
 
         text = event.raw_text or ''
         if not matched:
-            if is_hdhive_push_enabled and (
+            if has_hdhive_push and (
                 'hdhive' in f"{chat_username} {sender_username}".lower()
                 or '影巢' in text
             ):
@@ -286,6 +315,21 @@ class TGUserBotManager:
             return
 
         if not text:
+            return
+
+        is_brainless = self._transfer_mode_enabled(
+            cfg, 'brainless', chat_username, chat_id, sender_username, sender_id
+        )
+        is_subscribe = self._transfer_mode_enabled(
+            cfg, 'subscribe', chat_username, chat_id, sender_username, sender_id
+        )
+        is_keyword_enabled = self._transfer_mode_enabled(
+            cfg, 'keyword', chat_username, chat_id, sender_username, sender_id
+        )
+        is_hdhive_push_enabled = self._transfer_mode_enabled(
+            cfg, 'hdhive_push', chat_username, chat_id, sender_username, sender_id
+        )
+        if not any((is_brainless, is_subscribe, is_keyword_enabled, is_hdhive_push_enabled)):
             return
 
         # =================================================================
@@ -304,9 +348,6 @@ class TGUserBotManager:
         # =================================================================
         # ★ 关键词转存匹配逻辑
         # =================================================================
-        is_brainless = 'brainless' in transfer_modes
-        is_subscribe = 'subscribe' in transfer_modes
-        is_keyword_enabled = 'keyword' in transfer_modes
         is_keyword_matched = False
         
         if is_keyword_enabled:
