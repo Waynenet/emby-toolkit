@@ -104,6 +104,57 @@ def _normalize_washing_skip_scope(value: Any, default: str = 'directory') -> str
     return scope if scope in {'directory', 'library'} else default
 
 
+def _normalize_washing_version_slots(value: Any) -> list:
+    slots = _washing_json_list(value)
+    normalized = []
+    list_fields = (
+        'resolution',
+        'source',
+        'codec',
+        'effect',
+        'audio',
+        'subtitle',
+        'release_group',
+    )
+
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, dict):
+            continue
+
+        raw_id = str(slot.get('id') or f'slot_{index + 1}').strip()
+        slot_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', raw_id).strip('_') or f'slot_{index + 1}'
+        name = str(slot.get('name') or f'版本槽位 {index + 1}').strip()
+        suffix = str(slot.get('suffix') or name).strip()
+        match = slot.get('match') if isinstance(slot.get('match'), dict) else {}
+        clean_match = {}
+
+        for field in list_fields:
+            values = match.get(field)
+            if not isinstance(values, list):
+                values = [values] if values not in (None, '') else []
+            clean_match[field] = list(dict.fromkeys(
+                str(item).strip()
+                for item in values
+                if str(item or '').strip()
+            ))
+
+        clean_match['subtitle_effect'] = bool(match.get('subtitle_effect'))
+        clean_match['clean_version'] = bool(match.get('clean_version'))
+        clean_match['exempt_original_lang'] = bool(match.get('exempt_original_lang'))
+        clean_match['min_size_gb'] = match.get('min_size_gb')
+        clean_match['max_size_gb'] = match.get('max_size_gb')
+
+        normalized.append({
+            'id': slot_id,
+            'name': name,
+            'suffix': suffix,
+            'fallback': bool(slot.get('fallback')),
+            'match': clean_match,
+        })
+
+    return normalized
+
+
 def _washing_json_list(value: Any) -> list:
     if isinstance(value, list):
         return value
@@ -337,15 +388,53 @@ def get_washing_priority_config(default_conflict_mode: str = 'replace') -> Dict[
 
     config['conflict_mode'] = _normalize_washing_conflict_mode(config.get('conflict_mode'), default_mode)
     config['skip_scope'] = _normalize_washing_skip_scope(config.get('skip_scope'), 'directory')
+    config['version_slots_enabled'] = bool(config.get('version_slots_enabled'))
+    config['version_slots'] = _normalize_washing_version_slots(config.get('version_slots'))
     return config
 
 def save_washing_priority_config(value: Dict[str, Any]) -> Dict[str, Any]:
     config = value if isinstance(value, dict) else {}
+    current = get_washing_priority_config()
     clean_config = {
         'conflict_mode': _normalize_washing_conflict_mode(config.get('conflict_mode'), 'replace'),
-        'skip_scope': _normalize_washing_skip_scope(config.get('skip_scope'), 'directory')
+        'skip_scope': _normalize_washing_skip_scope(config.get('skip_scope'), 'directory'),
+        'version_slots_enabled': bool(
+            config.get('version_slots_enabled')
+            if 'version_slots_enabled' in config
+            else current.get('version_slots_enabled')
+        ),
+        'version_slots': _normalize_washing_version_slots(
+            config.get('version_slots')
+            if 'version_slots' in config
+            else current.get('version_slots')
+        ),
     }
-    save_setting('p115_washing_priority_config', clean_config)
+
+    slots_changed = (
+        bool(current.get('version_slots_enabled')) != clean_config['version_slots_enabled']
+        or current.get('version_slots', []) != clean_config['version_slots']
+    )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            _save_setting_with_cursor(cursor, 'p115_washing_priority_config', clean_config)
+            if slots_changed:
+                cursor.execute(
+                    "SELECT value_json FROM app_settings WHERE setting_key = %s FOR UPDATE",
+                    (WASHING_PRIORITY_RECALCULATE_SETTING_KEY,),
+                )
+                row = cursor.fetchone()
+                current_state = row.get('value_json') if row else {}
+                pending_state = merge_washing_priority_recalculate_state(current_state, {
+                    'Movie': {'all': True, 'target_cids': []},
+                    'Series': {'all': True, 'target_cids': []},
+                })
+                _save_setting_with_cursor(
+                    cursor,
+                    WASHING_PRIORITY_RECALCULATE_SETTING_KEY,
+                    pending_state,
+                )
+        conn.commit()
     return clean_config
 
 def get_washing_conflict_mode(default: str = 'replace') -> str:
