@@ -6,7 +6,7 @@ from gevent import spawn_later
 # 导入需要的模块
 from database import custom_collection_db, tmdb_collection_db, settings_db
 from extensions import admin_required, DELETING_COLLECTIONS
-from handler import tmdb_collections as collections_handler 
+from handler import tmdb, tmdb_collections as collections_handler
 import config_manager
 import constants
 from handler import emby
@@ -15,6 +15,108 @@ from handler import emby
 collections_bp = Blueprint('collections', __name__, url_prefix='/api/collections')
 
 logger = logging.getLogger(__name__)
+
+
+def _collection_image_url(path):
+    if not path:
+        return None
+    path = str(path)
+    if path.startswith(('http://', 'https://')):
+        return path
+    return f"https://image.tmdb.org/t/p/original/{path.lstrip('/')}"
+
+
+def _collection_provider_payload(data):
+    if not data:
+        return None
+    tmdb_id = str(data.get('tmdb_collection_id') or data.get('id') or '').strip()
+    if not tmdb_id:
+        return None
+    backdrop = _collection_image_url(data.get('backdrop_path'))
+    return {
+        'item_type': 'BoxSet',
+        'tmdb_id': tmdb_id,
+        'name': data.get('name'),
+        'overview': data.get('overview'),
+        'actors_ready': False,
+        'genres': [],
+        'tags': [],
+        'studios': [],
+        'people': [],
+        'images': {
+            'primary': _collection_image_url(data.get('poster_path')),
+            'backdrop': backdrop,
+            'logo': None,
+            'thumb': backdrop,
+        },
+    }
+
+
+def _persist_collection_details(details, existing=None):
+    parts = details.get('parts') or []
+    tmdb_collection_db.upsert_native_collection({
+        'tmdb_collection_id': details.get('id'),
+        'emby_collection_id': (existing or {}).get('emby_collection_id'),
+        'name': details.get('name') or (existing or {}).get('name'),
+        'overview': details.get('overview'),
+        'poster_path': details.get('poster_path'),
+        'backdrop_path': details.get('backdrop_path'),
+        'all_tmdb_ids': [str(item.get('id')) for item in parts if item.get('id')],
+    })
+    return tmdb_collection_db.get_native_collection_by_tmdb_id(details.get('id'))
+
+
+@collections_bp.route('/provider/metadata/<tmdb_collection_id>', methods=['GET'])
+def api_get_collection_provider_metadata(tmdb_collection_id):
+    tmdb_collection_id = str(tmdb_collection_id or '').strip()
+    if not tmdb_collection_id.isdigit():
+        return jsonify({'error': 'invalid tmdb collection id'}), 400
+
+    row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
+    schema_version = int((row or {}).get('metadata_schema_version') or 0)
+    if not row or schema_version < tmdb_collection_db.COLLECTION_METADATA_SCHEMA_VERSION:
+        details = tmdb.get_collection_details(
+            int(tmdb_collection_id),
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
+        )
+        if details:
+            row = _persist_collection_details(details, existing=row)
+    payload = _collection_provider_payload(row)
+    if not payload:
+        return jsonify({'error': 'collection metadata not found'}), 404
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@collections_bp.route('/provider/search', methods=['GET'])
+def api_search_collection_provider():
+    query = str(request.args.get('query') or '').strip()
+    if not query:
+        return jsonify([])
+
+    query_key = query.casefold()
+    merged = {}
+    local_rows = tmdb_collection_db.get_all_native_collections()
+    local_rows.sort(key=lambda row: (
+        str(row.get('name') or '').casefold() != query_key,
+        not str(row.get('name') or '').casefold().startswith(query_key),
+        str(row.get('name') or '').casefold(),
+    ))
+    for row in local_rows:
+        if query_key in str(row.get('name') or '').casefold():
+            payload = _collection_provider_payload(row)
+            if payload:
+                merged[payload['tmdb_id']] = payload
+
+    for item in tmdb.search_collections(
+        query,
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
+    ):
+        payload = _collection_provider_payload(item)
+        if payload and payload['tmdb_id'] not in merged:
+            merged[payload['tmdb_id']] = payload
+    return jsonify(list(merged.values())[:20])
 
 # ======================================================================
 # 读取操作 (Read Operations) - 负责动态组装数据

@@ -9,6 +9,8 @@ from .connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+COLLECTION_METADATA_SCHEMA_VERSION = 1
+
 def upsert_native_collection(data: Dict[str, Any]):
     try:
         with get_db_connection() as conn:
@@ -17,15 +19,22 @@ def upsert_native_collection(data: Dict[str, Any]):
             sql = """
                 INSERT INTO collections_info (
                     tmdb_collection_id, emby_collection_id, name, overview,
-                    poster_path, all_tmdb_ids_json, last_checked_at
+                    poster_path, backdrop_path, metadata_schema_version,
+                    all_tmdb_ids_json, last_checked_at
                 )
-                VALUES (%(tmdb_id)s, %(emby_id)s, %(name)s, %(overview)s, %(poster)s, %(ids_json)s, NOW())
+                VALUES (
+                    %(tmdb_id)s, %(emby_id)s, %(name)s, %(overview)s,
+                    %(poster)s, %(backdrop)s, %(schema_version)s,
+                    %(ids_json)s, NOW()
+                )
                 ON CONFLICT (tmdb_collection_id) DO UPDATE SET
                     -- 如果新数据里有 emby_id，则更新它；否则保留原有的 emby_id
                     emby_collection_id = COALESCE(EXCLUDED.emby_collection_id, collections_info.emby_collection_id),
                     name = EXCLUDED.name,
                     overview = COALESCE(EXCLUDED.overview, collections_info.overview),
                     poster_path = EXCLUDED.poster_path,
+                    backdrop_path = COALESCE(EXCLUDED.backdrop_path, collections_info.backdrop_path),
+                    metadata_schema_version = EXCLUDED.metadata_schema_version,
                     all_tmdb_ids_json = EXCLUDED.all_tmdb_ids_json,
                     last_checked_at = NOW();
             """
@@ -36,6 +45,8 @@ def upsert_native_collection(data: Dict[str, Any]):
                 'name': data.get('name'),
                 'overview': data.get('overview'),
                 'poster': data.get('poster_path'),
+                'backdrop': data.get('backdrop_path'),
+                'schema_version': COLLECTION_METADATA_SCHEMA_VERSION,
                 'ids_json': json.dumps(data.get('all_tmdb_ids', []))
             }
             

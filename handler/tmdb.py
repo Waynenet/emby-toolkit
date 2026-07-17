@@ -698,6 +698,19 @@ def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool
 
     return data_zh
 
+
+def search_collections(query: str, api_key: str) -> List[Dict[str, Any]]:
+    """Search TMDb collections using ETK's network settings."""
+    query = str(query or "").strip()
+    if not query or not api_key:
+        return []
+    data = _tmdb_request(
+        "/search/collection",
+        api_key,
+        {"query": query, "language": DEFAULT_LANGUAGE},
+    )
+    return data.get("results", []) if isinstance(data, dict) else []
+
 # --- 搜索媒体 ---
 def search_media(query: str, api_key: str, item_type: str = 'movie', year: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
     """

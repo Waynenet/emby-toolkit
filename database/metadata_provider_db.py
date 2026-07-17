@@ -403,6 +403,24 @@ def load_emby_metadata(
 
             row = dict(row)
             people = []
+            collections = []
+            if requested_type == "Movie" and root_media_type == "movie":
+                cursor.execute(
+                    """
+                    SELECT tmdb_collection_id, name
+                    FROM collections_info
+                    WHERE all_tmdb_ids_json @> %s::jsonb
+                    ORDER BY last_checked_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (json.dumps([str(tmdb_id)]),),
+                )
+                collection = cursor.fetchone()
+                if collection and collection.get("tmdb_collection_id") and collection.get("name"):
+                    collections.append({
+                        "tmdb_id": str(collection["tmdb_collection_id"]),
+                        "name": collection["name"],
+                    })
             if row.get("actors_ready"):
                 actor_links = _json_value(row.get("actors_json"), [])
                 actor_ids = [link.get("tmdb_id") for link in actor_links if link.get("tmdb_id")]
@@ -466,6 +484,7 @@ def load_emby_metadata(
         ) if requested_type == "Episode" else None,
         "actors_ready": bool(row.get("actors_ready")),
         "people": sorted(people, key=lambda item: item.get("order", 999)),
+        "collections": collections,
         "images": {
             "primary": _tmdb_image_url(row.get("poster_path"), "original"),
             "backdrop": _tmdb_image_url(row.get("backdrop_path"), "original"),

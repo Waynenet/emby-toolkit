@@ -148,6 +148,8 @@ def init_db():
                         overview TEXT,
                         last_checked_at TIMESTAMP WITH TIME ZONE,
                         poster_path TEXT,
+                        backdrop_path TEXT,
+                        metadata_schema_version INTEGER NOT NULL DEFAULT 0,
                         item_type TEXT DEFAULT 'Movie' NOT NULL,
                         all_tmdb_ids_json JSONB
                     );
@@ -794,6 +796,8 @@ def init_db():
                         },
                         'collections_info': {
                             "poster_path": "TEXT",
+                            "backdrop_path": "TEXT",
+                            "metadata_schema_version": "INTEGER NOT NULL DEFAULT 0",
                             "all_tmdb_ids_json": "JSONB",
                             "overview": "TEXT" 
                         },
