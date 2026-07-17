@@ -18,7 +18,13 @@ settings_db_stub.get_setting = None
 sys.modules["database.settings_db"] = settings_db_stub
 
 import constants
-from database.metadata_provider_db import load_emby_metadata
+from database.metadata_provider_db import (
+    build_image_language_priority,
+    load_emby_metadata,
+    preferred_image_candidates,
+    select_image_path,
+    sort_image_candidates,
+)
 
 
 class _Cursor:
@@ -56,6 +62,46 @@ class _Connection:
 
 
 class MetadataProviderMappingTests(unittest.TestCase):
+    def test_image_selection_prefers_configured_language_before_rating(self):
+        images = [
+            {"file_path": "/english.jpg", "iso_639_1": "en", "vote_average": 9.8},
+            {"file_path": "/japanese.jpg", "iso_639_1": "ja", "vote_average": 7.0},
+            {"file_path": "/chinese.jpg", "iso_639_1": "zh", "vote_average": 9.9},
+        ]
+        priorities = build_image_language_priority("ja", "original")
+
+        self.assertEqual("/japanese.jpg", select_image_path(images, priorities))
+
+    def test_image_search_keeps_all_candidates_in_priority_order(self):
+        images = [
+            {"file_path": "/textless.jpg", "iso_639_1": None, "vote_average": 9.9},
+            {"file_path": "/chinese-low.jpg", "iso_639_1": "zh", "vote_average": 6.0},
+            {"file_path": "/chinese-high.jpg", "iso_639_1": "zh", "vote_average": 8.0},
+        ]
+        priorities = build_image_language_priority("en", "zh")
+
+        ordered = sort_image_candidates(images, priorities)
+
+        self.assertEqual(
+            ["/chinese-high.jpg", "/chinese-low.jpg", "/textless.jpg"],
+            [item["file_path"] for item in ordered],
+        )
+
+    def test_image_search_without_all_languages_keeps_only_original_group(self):
+        images = [
+            {"file_path": "/chinese.jpg", "iso_639_1": "zh", "vote_average": 10.0},
+            {"file_path": "/english-high.jpg", "iso_639_1": "en", "vote_average": 8.0},
+            {"file_path": "/english-low.jpg", "iso_639_1": "en", "vote_average": 6.0},
+        ]
+        priorities = build_image_language_priority("en", "original")
+
+        selected = preferred_image_candidates(images, priorities)
+
+        self.assertEqual(
+            ["/english-high.jpg", "/english-low.jpg"],
+            [item["file_path"] for item in selected],
+        )
+
     def test_only_mapped_chinese_labels_and_us_rating_are_returned(self):
         row = {
             "tmdb_id": "1669",

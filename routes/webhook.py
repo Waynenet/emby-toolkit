@@ -14,6 +14,7 @@ from gevent.event import Event
 
 import task_manager
 import handler.emby as emby
+import handler.tmdb as tmdb
 from handler.p115_copy_play import cleanup_for_playback_stop
 from handler import p115_play_pool
 import config_manager
@@ -1519,6 +1520,341 @@ def _trigger_metadata_update_task(item_id, item_name):
         item_id=item_id,
         item_name=item_name
     )
+
+
+@webhook_bp.route('/api/emby/metadata', methods=['GET'])
+def get_emby_metadata_by_path():
+    from database.metadata_provider_db import (
+        load_emby_metadata,
+        resolve_metadata_identity_by_path,
+    )
+
+    path = str(request.args.get('path') or '').strip()
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    if not path or requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+        return jsonify({'error': 'invalid metadata path request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    identity = resolve_metadata_identity_by_path(
+        path,
+        requested_type,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    if not identity or not identity.get('tmdb_id'):
+        return jsonify({'error': 'metadata path identity not found'}), 404
+
+    payload = load_emby_metadata(
+        identity['tmdb_id'],
+        identity['media_type'],
+        requested_type,
+        season_number=identity.get('season_number'),
+        episode_number=identity.get('episode_number'),
+    )
+    if not payload:
+        return jsonify({'error': 'metadata cache not found'}), 404
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@webhook_bp.route('/api/emby/metadata/backfill', methods=['POST'])
+def trigger_emby_metadata_backfill():
+    import task_manager
+    from tasks.media import task_backfill_media_metadata
+
+    submitted = task_manager.submit_task(
+        task_function=task_backfill_media_metadata,
+        task_name='补齐媒体元数据',
+        processor_type='media',
+        silent=True,
+    )
+    if submitted:
+        return jsonify({'ok': True, 'submitted': True}), 202
+    status = task_manager.get_task_status()
+    if status.get('is_running') and status.get('current_action') == '补齐媒体元数据':
+        return jsonify({'ok': True, 'submitted': False, 'reason': 'task_already_running'}), 200
+    return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
+
+
+@webhook_bp.route('/api/emby/metadata/images/refresh', methods=['POST'])
+def refresh_emby_metadata_images():
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from database.metadata_provider_db import (
+        build_image_language_parameter,
+        build_image_language_priority,
+        replace_cached_image_paths,
+        resolve_metadata_identity_by_path,
+        select_image_path,
+    )
+
+    path = str(request.args.get('path') or '').strip()
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    if not path or requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+        return jsonify({'ok': False, 'error': 'invalid image refresh request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    identity = resolve_metadata_identity_by_path(
+        path,
+        requested_type,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    if not identity or not identity.get('tmdb_id'):
+        return jsonify({'ok': False, 'error': 'metadata path identity not found'}), 404
+
+    tmdb_id = str(identity['tmdb_id'])
+    media_type = str(identity['media_type'])
+    season_number = identity.get('season_number')
+    episode_number = identity.get('episode_number')
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    if not api_key:
+        return jsonify({'ok': False, 'error': 'tmdb api key is not configured'}), 503
+
+    try:
+        if media_type == 'movie':
+            base = tmdb.get_movie_details(int(tmdb_id), api_key, append_to_response='')
+        else:
+            base = tmdb.get_tv_details(
+                int(tmdb_id), api_key, append_to_response='', allow_english_fallback=False
+            )
+        if not base:
+            return jsonify({'ok': False, 'error': 'tmdb media identity lookup failed'}), 502
+
+        preference = config_manager.APP_CONFIG.get(
+            constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+        )
+        priorities = build_image_language_priority(base.get('original_language'), preference)
+        image_languages = build_image_language_parameter(priorities)
+
+        root_images = None
+        season_posters = None
+        episode_still = None
+        if requested_type in {'Movie', 'Series'}:
+            if media_type == 'movie':
+                image_data = tmdb.get_movie_details(
+                    int(tmdb_id), api_key, append_to_response='images',
+                    include_image_language=image_languages,
+                )
+            else:
+                image_data = tmdb.get_tv_details(
+                    int(tmdb_id), api_key, append_to_response='images',
+                    include_image_language=image_languages,
+                    allow_english_fallback=False,
+                )
+            if not image_data:
+                return jsonify({'ok': False, 'error': 'tmdb image lookup failed'}), 502
+            images = image_data.get('images') or {}
+            backdrop = select_image_path(images.get('backdrops'), priorities) or image_data.get('backdrop_path')
+            root_images = {
+                'poster': select_image_path(images.get('posters'), priorities) or image_data.get('poster_path'),
+                'backdrop': backdrop,
+                'logo': select_image_path(images.get('logos'), priorities),
+                'thumb': backdrop,
+            }
+
+            if requested_type == 'Series':
+                seasons = [
+                    item for item in image_data.get('seasons') or []
+                    if item.get('season_number') is not None
+                ]
+                season_posters = {int(item['season_number']): None for item in seasons}
+
+                def _fetch_season_poster(number):
+                    details = tmdb.get_season_details_tmdb(
+                        int(tmdb_id), number, api_key,
+                        append_to_response='images',
+                        include_image_language=image_languages,
+                    )
+                    if not details:
+                        return number, None
+                    return number, (
+                        select_image_path((details.get('images') or {}).get('posters'), priorities)
+                        or details.get('poster_path')
+                    )
+
+                with ThreadPoolExecutor(max_workers=min(4, max(1, len(seasons)))) as executor:
+                    futures = [
+                        executor.submit(_fetch_season_poster, int(item['season_number']))
+                        for item in seasons
+                    ]
+                    for future in as_completed(futures):
+                        number, poster_path = future.result()
+                        season_posters[number] = poster_path
+        elif requested_type == 'Season':
+            if season_number is None:
+                return jsonify({'ok': False, 'error': 'season number is required'}), 400
+            details = tmdb.get_season_details_tmdb(
+                int(tmdb_id), int(season_number), api_key,
+                append_to_response='images',
+                include_image_language=image_languages,
+            )
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb season image lookup failed'}), 502
+            season_posters = {
+                int(season_number): (
+                    select_image_path((details.get('images') or {}).get('posters'), priorities)
+                    or details.get('poster_path')
+                )
+            }
+        else:
+            if season_number is None or episode_number is None:
+                return jsonify({'ok': False, 'error': 'episode numbers are required'}), 400
+            details = tmdb.get_episode_details_tmdb(
+                int(tmdb_id), int(season_number), int(episode_number), api_key,
+                append_to_response='images',
+                include_image_language=image_languages,
+            )
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb episode image lookup failed'}), 502
+            episode_still = (
+                select_image_path((details.get('images') or {}).get('stills'), priorities)
+                or details.get('still_path')
+            )
+
+        updated = replace_cached_image_paths(
+            tmdb_id,
+            media_type,
+            requested_type,
+            root_images=root_images,
+            season_number=season_number,
+            season_posters=season_posters,
+            episode_number=episode_number,
+            episode_still=episode_still,
+        )
+        logger.info(
+            "  ➜ [图片替换] 已按 %s 优先级重选 %s TMDb:%s 的图片，更新 %s 条缓存。",
+            '原语言' if preference == 'original' else '简体中文', requested_type, tmdb_id, updated,
+        )
+        return jsonify({'ok': True, 'updated': updated}), 200
+    except Exception as exc:
+        logger.error("  ➜ [图片替换] 重选 TMDb 图片失败: %s", exc, exc_info=True)
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@webhook_bp.route('/api/emby/metadata/images/search', methods=['GET'])
+def search_emby_metadata_images():
+    from database.metadata_provider_db import (
+        build_image_language_priority,
+        get_cached_original_language,
+        preferred_image_candidates,
+        resolve_metadata_identity_by_path,
+        sort_image_candidates,
+    )
+
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    path = str(request.args.get('path') or '').strip()
+    tmdb_id = str(request.args.get('tmdb_id') or '').strip()
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode', 'Boxset'}:
+        return jsonify({'error': 'invalid image search request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    if requested_type == 'Boxset':
+        if not tmdb_id.isdigit():
+            return jsonify({'error': 'invalid collection tmdb id'}), 400
+        media_type = 'movie'
+        original_language = ''
+    else:
+        identity = resolve_metadata_identity_by_path(
+            path,
+            requested_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get('tmdb_id'):
+            return jsonify({'error': 'metadata path identity not found'}), 404
+        tmdb_id = str(identity['tmdb_id'])
+        media_type = str(identity['media_type'])
+        season_number = identity.get('season_number')
+        episode_number = identity.get('episode_number')
+        original_language = get_cached_original_language(tmdb_id, media_type)
+
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    if not api_key:
+        return jsonify({'error': 'tmdb api key is not configured'}), 503
+
+    raw = tmdb.get_item_images_tmdb(
+        requested_type,
+        int(tmdb_id),
+        api_key,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    if raw is None:
+        return jsonify({'error': 'tmdb image search failed'}), 502
+
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+    )
+    priorities = build_image_language_priority(original_language, preference)
+    include_all_languages = str(
+        request.args.get('include_all_languages') or ''
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    candidates = []
+
+    def _append(values, image_type):
+        selected = (
+            sort_image_candidates(values, priorities)
+            if include_all_languages
+            else preferred_image_candidates(values, priorities)
+        )
+        for item in selected:
+            path_value = str(item.get('file_path') or '')
+            if not path_value:
+                continue
+            candidates.append({
+                'type': image_type,
+                'url': f"https://image.tmdb.org/t/p/original/{path_value.lstrip('/')}",
+                'thumbnail_url': f"https://image.tmdb.org/t/p/w500/{path_value.lstrip('/')}",
+                # When Emby asks for one language, ETK already applied its own priority.
+                # Mark it neutral so Emby does not filter it again using the library language.
+                'language': item.get('iso_639_1') if include_all_languages else None,
+                'width': item.get('width'),
+                'height': item.get('height'),
+                'community_rating': item.get('vote_average'),
+                'vote_count': item.get('vote_count'),
+            })
+
+    if requested_type in {'Movie', 'Series', 'Boxset'}:
+        _append(raw.get('posters'), 'Primary')
+        _append(raw.get('backdrops'), 'Backdrop')
+        if requested_type != 'Boxset':
+            _append(raw.get('logos'), 'Logo')
+            _append(raw.get('backdrops'), 'Thumb')
+    elif requested_type == 'Season':
+        _append(raw.get('posters'), 'Primary')
+    else:
+        _append(raw.get('stills'), 'Primary')
+        _append(raw.get('stills'), 'Thumb')
+
+    response = jsonify({'images': candidates})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
 
 # --- Webhook 路由 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])

@@ -5990,6 +5990,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     title=data.get('title'),
                     original_title=data.get('original_title'),
                     rating_label=data.get('rating_label'),
+                    image_language_preference=config_manager.APP_CONFIG.get(
+                        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+                    ),
                 )
             except Exception as persist_error:
                 logger.warning(

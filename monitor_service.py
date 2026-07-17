@@ -7,7 +7,6 @@ import logging
 import shutil
 import subprocess
 import threading
-import xml.etree.ElementTree as ET
 from typing import List, Optional, Any, Set, Dict
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -40,7 +39,6 @@ EMBY_BIND_PLUGIN_WAIT_SECONDS = 8
 EMBY_BIND_PENDING_PATHS = set()
 EMBY_BIND_PLUGIN_COMPLETED = set()
 EMBY_BIND_CONDITION = threading.Condition(EMBY_BIND_LOCK)
-NFO_WRITE_LOCK = threading.Lock()
 AUDIO_EXTENSIONS = {'.flac', '.m4a', '.mp3', '.aac', '.wav', '.ape', '.ogg', '.opus'}
 MEDIA_PREP_LOCK = threading.Lock()
 MEDIA_PREP_INFLIGHT = set()
@@ -129,71 +127,7 @@ def _filter_etk_standard_files(file_paths: List[str]) -> List[str]:
     return valid
 
 
-def _write_minimal_tmdb_nfo(file_path: str, tmdb_id: str, media_type: str, title: str, processor) -> bool:
-    if media_type == 'tv':
-        media_dir = os.path.dirname(file_path)
-        if processor._extract_season_from_path_or_text(os.path.basename(media_dir)) is not None:
-            media_dir = os.path.dirname(media_dir)
-        nfo_path = os.path.join(media_dir, 'tvshow.nfo')
-        root_tag = 'tvshow'
-    else:
-        nfo_path = os.path.splitext(file_path)[0] + '.nfo'
-        root_tag = 'movie'
-
-    try:
-        with NFO_WRITE_LOCK:
-            changed = False
-            if os.path.exists(nfo_path):
-                tree = ET.parse(nfo_path)
-                root = tree.getroot()
-                if root.tag.lower() != root_tag:
-                    logger.warning("  ➜ [入库预备] NFO 根节点不符合媒体类型，已保留原文件: %s", nfo_path)
-                    return False
-            else:
-                root = ET.Element(root_tag)
-                tree = ET.ElementTree(root)
-                changed = True
-
-            title_node = root.find('title')
-            if title and title_node is None:
-                title_node = ET.SubElement(root, 'title')
-                title_node.text = str(title)
-                changed = True
-
-            unique_node = next(
-                (node for node in root.findall('uniqueid') if str(node.get('type') or '').lower() == 'tmdb'),
-                None,
-            )
-            if unique_node is None:
-                unique_node = ET.SubElement(root, 'uniqueid', type='tmdb', default='true')
-                unique_node.text = str(tmdb_id)
-                changed = True
-            elif str(unique_node.text or '').strip() != str(tmdb_id):
-                unique_node.text = str(tmdb_id)
-                unique_node.set('default', 'true')
-                changed = True
-
-            tmdb_node = root.find('tmdbid')
-            if tmdb_node is None:
-                tmdb_node = ET.SubElement(root, 'tmdbid')
-                tmdb_node.text = str(tmdb_id)
-                changed = True
-            elif str(tmdb_node.text or '').strip() != str(tmdb_id):
-                tmdb_node.text = str(tmdb_id)
-                changed = True
-
-            if changed:
-                temp_path = nfo_path + '.etk-tmp'
-                tree.write(temp_path, encoding='utf-8', xml_declaration=True)
-                os.replace(temp_path, nfo_path)
-                logger.debug("  ➜ [入库预备] 已写入 Emby 识别 NFO: %s (TMDb: %s)", nfo_path, tmdb_id)
-        return True
-    except Exception as e:
-        logger.warning("  ➜ [入库预备] 写入简化 NFO 失败: %s -> %s", file_path, e)
-        return False
-
-
-def _ensure_strm_metadata_snapshot(file_path: str, tmdb_id: str, media_type: str, title: str, processor) -> bool:
+def _ensure_metadata_snapshot(file_path: str, tmdb_id: str, media_type: str, title: str, processor) -> bool:
     from database.metadata_provider_db import has_initial_tmdb_metadata, persist_initial_tmdb_metadata
     from handler.p115_service import P115CacheManager
     import handler.tmdb as tmdb
@@ -249,7 +183,14 @@ def _ensure_strm_metadata_snapshot(file_path: str, tmdb_id: str, media_type: str
             config=translation_config,
         )
     snapshot_title = details.get('name') if media_type == 'tv' else details.get('title')
-    return persist_initial_tmdb_metadata(details, media_type, title=snapshot_title or title)
+    return persist_initial_tmdb_metadata(
+        details,
+        media_type,
+        title=snapshot_title or title,
+        image_language_preference=processor.config.get(
+            constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+        ),
+    )
 
 
 def _identify_physical_media(file_path: str, processor):
@@ -262,30 +203,6 @@ def _identify_physical_media(file_path: str, processor):
         is_season_dir = processor._extract_season_from_path_or_text(folder_name) is not None
         main_dir_name = parent_name if is_season_dir else folder_name
         forced_type = 'tv' if is_season_dir or (season_num is not None and episode_num is not None) else None
-
-        def _existing_nfo_identity():
-            nfo_candidates = [os.path.splitext(file_path)[0] + '.nfo']
-            if forced_type == 'tv':
-                series_dir = os.path.dirname(media_dir) if is_season_dir else media_dir
-                nfo_candidates.insert(0, os.path.join(series_dir, 'tvshow.nfo'))
-            for nfo_path in nfo_candidates:
-                if not os.path.exists(nfo_path):
-                    continue
-                try:
-                    root = ET.parse(nfo_path).getroot()
-                    root_type = 'tv' if root.tag.lower() == 'tvshow' else 'movie' if root.tag.lower() == 'movie' else None
-                    unique_node = next(
-                        (node for node in root.findall('uniqueid') if str(node.get('type') or '').lower() == 'tmdb'),
-                        None,
-                    )
-                    existing_id = str((unique_node.text if unique_node is not None else '') or root.findtext('tmdbid') or '').strip()
-                    if root_type and existing_id.isdigit() and int(existing_id) > 0:
-                        existing_title = root.findtext('title') or os.path.splitext(filename)[0]
-                        logger.debug("  ➜ [入库预备] RAW 未命中，回退现有 NFO 身份: %s (TMDb: %s)", existing_title, existing_id)
-                        return existing_id, root_type, existing_title
-                except Exception as e:
-                    logger.debug("  ➜ [入库预备] 读取现有 NFO 失败: %s -> %s", nfo_path, e)
-            return None
 
         from handler.p115_service import _identify_media_enhanced
         _pick_code, sha1 = processor._extract_115_fingerprints(file_path, allow_api_fallback=False)
@@ -302,7 +219,7 @@ def _identify_physical_media(file_path: str, processor):
         )
         tmdb_id = str(tmdb_id or '').strip()
         if not tmdb_id.isdigit() or int(tmdb_id) <= 0 or media_type not in {'movie', 'tv'}:
-            return _existing_nfo_identity()
+            return None
         logger.debug(
             "  ➜ [入库预备] 增强识别命中《%s》，TMDb: %s，类型: %s。",
             title or filename, tmdb_id, media_type,
@@ -371,6 +288,10 @@ def _generate_local_mediainfo(
 
 
 def prepare_physical_files_for_binding(processor, file_paths: List[str]) -> List[str]:
+    etk_url = str(processor.config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip()
+    if not emby.configure_etk_plugin_origin(processor.emby_url, processor.emby_api_key, etk_url):
+        logger.error("  ➜ [入库准备] 无法把 ETK 服务地址注册到 Emby 插件，已停止实体媒体扫描。")
+        return []
     ready_paths = []
     for file_path in file_paths or []:
         identity = _identify_physical_media(file_path, processor)
@@ -378,7 +299,17 @@ def prepare_physical_files_for_binding(processor, file_paths: List[str]) -> List
             logger.warning("  ➜ [入库预备] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
             continue
         tmdb_id, media_type, title = identity
-        if not _write_minimal_tmdb_nfo(file_path, tmdb_id, media_type, title, processor):
+        if not _ensure_metadata_snapshot(file_path, tmdb_id, media_type, title, processor):
+            continue
+        season_number, episode_number = processor._extract_season_episode_from_path(file_path)
+        from database.metadata_provider_db import register_metadata_asset_path
+        if not register_metadata_asset_path(
+            tmdb_id,
+            media_type,
+            file_path,
+            season_number=season_number,
+            episode_number=episode_number,
+        ):
             continue
         mediainfo = _generate_local_mediainfo(file_path)
         if not mediainfo:
@@ -398,7 +329,7 @@ def _prepare_strm_for_binding(processor, file_path: str):
             logger.warning("  ➜ [STRM入库] 无法识别媒体，已跳过 Emby 扫描: %s", file_path)
             return
         tmdb_id, media_type, title = identity
-        if not _ensure_strm_metadata_snapshot(file_path, tmdb_id, media_type, title, processor):
+        if not _ensure_metadata_snapshot(file_path, tmdb_id, media_type, title, processor):
             logger.warning("  ➜ [STRM入库] 首次刮削元数据未就绪，已跳过 Emby 扫描: %s", file_path)
             return
         enqueue_emby_binding(file_path)

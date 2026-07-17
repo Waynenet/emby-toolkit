@@ -304,6 +304,53 @@ def get_season_details_tmdb(
 
     return _tmdb_request(endpoint, api_key, params)
 
+
+def get_episode_details_tmdb(
+    tv_id: int,
+    season_number: int,
+    episode_number: int,
+    api_key: str,
+    append_to_response: Optional[str] = "images",
+    language: Optional[str] = None,
+    include_image_language: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one episode, including its image candidates when requested."""
+    params = {"language": language or DEFAULT_LANGUAGE}
+    if append_to_response:
+        params["append_to_response"] = append_to_response
+    if include_image_language is not None:
+        params["include_image_language"] = include_image_language
+    return _tmdb_request(
+        f"/tv/{tv_id}/season/{season_number}/episode/{episode_number}",
+        api_key,
+        params,
+    )
+
+
+def get_item_images_tmdb(
+    item_type: str,
+    tmdb_id: int,
+    api_key: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the complete live TMDb image list for Emby's image search dialog."""
+    item_type = str(item_type or "").strip().title()
+    if item_type == "Movie":
+        endpoint = f"/movie/{tmdb_id}/images"
+    elif item_type == "Series":
+        endpoint = f"/tv/{tmdb_id}/images"
+    elif item_type == "Season" and season_number is not None:
+        endpoint = f"/tv/{tmdb_id}/season/{int(season_number)}/images"
+    elif item_type == "Episode" and season_number is not None and episode_number is not None:
+        endpoint = f"/tv/{tmdb_id}/season/{int(season_number)}/episode/{int(episode_number)}/images"
+    elif item_type == "Boxset":
+        endpoint = f"/collection/{tmdb_id}/images"
+    else:
+        return None
+    return _tmdb_request(endpoint, api_key, {}, use_default_language=False)
+
 # --- 获取电视剧某一季的集总数 ---
 def get_season_episode_count(api_key: str, tmdb_id: int, season_number: int) -> int:
     """

@@ -1963,7 +1963,7 @@ def process_subscription_items_and_update_db(
 def apply_rating_logic(payload: Dict[str, Any], tmdb_data: Dict[str, Any], item_type: str):
     """
     将 TMDb 的原始分级数据，经过配置的映射规则处理后，直接提取出最终的分级字符串。
-    不再维护复杂的嵌套结构，直接写入 payload 的 mpaa 字段供 NFO 使用。
+    不再维护复杂的嵌套结构，直接写入 payload 的 mpaa 字段供元数据持久化使用。
     ★ 修复：同时将映射结果存入 _official_rating_map 供数据库写入使用。
     """
     from database import settings_db
@@ -2057,7 +2057,7 @@ def apply_rating_logic(payload: Dict[str, Any], tmdb_data: Dict[str, Any], item_
         final_rating_str = target_us_code
         available_ratings['US'] = target_us_code # 确保 US 分级在字典中
 
-    # 4. 直接写入 payload 根节点供 NFO 使用
+    # 4. 直接写入 payload 根节点供元数据持久化使用
     if final_rating_str:
         payload['mpaa'] = final_rating_str
         payload['certification'] = final_rating_str
@@ -2069,8 +2069,7 @@ def construct_metadata_payload(item_type: str, tmdb_data: Dict[str, Any],
                                   aggregated_tmdb_data: Optional[Dict[str, Any]] = None,
                                   emby_data_fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    【纯净 NFO 版】将 TMDb 原始数据转换为扁平化的字典，直接供 NFO Builder 使用。
-    彻底移除了臃肿的 JSON 骨架模板。
+    将 TMDb 原始数据转换为供数据库持久化和插件响应使用的扁平化字典。
     """
     payload = {}
     if not tmdb_data:
@@ -2167,8 +2166,7 @@ def construct_metadata_payload(item_type: str, tmdb_data: Dict[str, Any],
 
 def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    【纯净 NFO 版】将数据库记录还原为扁平化的字典，直接供 NFO Builder 使用。
-    彻底移除了臃肿的 JSON 骨架模板。
+    将数据库记录还原为供插件响应和后续处理使用的扁平化字典。
     """
     item_type = db_row.get('item_type')
     payload = {}
