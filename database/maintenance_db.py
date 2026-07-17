@@ -416,6 +416,7 @@ def _washing_snapshot_for_remaining_versions(cursor, sha1s: List[Any], pcs: List
             'reason': snapshot.get('reason') or '',
             'target_cid': snapshot.get('target_cid') or '',
             'media_type': snapshot.get('media_type') or '',
+            'version_slot': snapshot.get('version_slot') or {},
             'identity': snapshot.get('identity') or {},
             'evaluated_at': snapshot.get('evaluated_at'),
         })
@@ -432,14 +433,33 @@ def _washing_snapshot_for_remaining_versions(cursor, sha1s: List[Any], pcs: List
         return (1, abs(int(level or 0)))
 
     best = sorted(versions, key=_sort_key)[0]
+    slot_levels = {}
+    for version in versions:
+        slot = version.get('version_slot') if isinstance(version.get('version_slot'), dict) else {}
+        slot_id = str(slot.get('id') or '__single__')
+        current = slot_levels.get(slot_id)
+        if current and _sort_key(current) <= _sort_key(version):
+            continue
+        slot_levels[slot_id] = {
+            'id': slot_id,
+            'name': slot.get('name') or ('主版本' if slot_id == '__single__' else slot_id),
+            'suffix': slot.get('suffix') or '',
+            'level': version.get('level'),
+            'reason': version.get('reason'),
+            'sha1': version.get('sha1'),
+        }
+
     return {
+        # level 是兼容旧逻辑的全版本最佳汇总值；逐槽等级存放在 snapshot.slot_levels。
         'level': best.get('level'),
         'snapshot': {
             'versions': versions,
+            'slot_levels': slot_levels,
             'reason': best.get('reason'),
             'sha1': best.get('sha1'),
             'target_cid': best.get('target_cid'),
             'media_type': best.get('media_type'),
+            'version_slot': best.get('version_slot') or {},
             'evaluated_at': best.get('evaluated_at'),
         },
     }
@@ -1272,7 +1292,11 @@ def _shared_cleanup_center_scope_payloads(contexts: List[Dict[str, Any]]) -> Lis
 
 
 def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    file_cleanup = _cleanup_shared_sources_for_deleted_file_identities(contexts)
+    scope_payloads = _shared_cleanup_center_scope_payloads(contexts)
+    if scope_payloads:
+        file_cleanup = {'ok': True, 'matched': 0, 'disabled': 0, 'failed': 0, 'items': []}
+    else:
+        file_cleanup = _cleanup_shared_sources_for_deleted_file_identities(contexts)
     if file_cleanup.get('failed'):
         return {
             'ok': False,
@@ -1284,7 +1308,11 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
         }
 
     rows = _shared_cleanup_select_sources(contexts)
-    if not rows:
+    if not rows and not scope_payloads:
+        logger.info(
+            "  ➜ [共享资源删除善后] 未匹配到需要下架的共享源: contexts=%s",
+            len(contexts or []),
+        )
         result = {'ok': file_cleanup.get('ok', True), 'matched': 0, 'disabled': 0, 'failed': 0}
         logical_share_cleanup = file_cleanup.get('logical_share_cleanup') if isinstance(file_cleanup, dict) else None
         if (
@@ -1311,6 +1339,8 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
     disabled = failed = 0
     deleted = 0
     items = []
+    center_scope_resp = None
+    scope_error = None
 
     def should_keep_violation_blacklist(row: Dict[str, Any], center_resp: Dict[str, Any]) -> bool:
         try:
@@ -1370,7 +1400,6 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
         normal_rows.append(row)
 
     rows_with_center = [r for r in normal_rows if str(r.get('center_source_id') or '').strip()]
-    scope_payloads = _shared_cleanup_center_scope_payloads(contexts)
     if scope_payloads:
         try:
             client = SharedCenterClient()
@@ -1406,11 +1435,37 @@ def _cleanup_shared_sources_after_media_delete(contexts: List[Dict[str, Any]]) -
                 int((share_cleanup or {}).get('deleted_115') or 0),
             )
         except Exception as e:
-            logger.warning(
-                "  ➜ [共享资源删除善后] 中心范围下架失败，回退逐源下架: scopes=%s, err=%s",
-                len(scope_payloads),
-                e,
-            )
+            error_text = str(e)
+            if '404 source not found' in error_text.lower():
+                center_scope_resp = {'scope_batch': True, 'scope_payloads': scope_payloads, 'already_absent': True}
+                for row in rows_with_center:
+                    center_results[int(row.get('id') or 0)] = {
+                        'ok': True,
+                        'id': int(row.get('id') or 0),
+                        'center': center_scope_resp,
+                    }
+                logger.info(
+                    "  ➜ [共享资源删除善后] 中心已无匹配共享源，视为下架完成: scopes=%s, local_sources=%s",
+                    len(scope_payloads),
+                    len(rows),
+                )
+            else:
+                scope_error = error_text
+                logger.warning(
+                    "  ➜ [共享资源删除善后] 中心范围下架失败，回退逐源下架: scopes=%s, err=%s",
+                    len(scope_payloads),
+                    e,
+                )
+
+    if not rows:
+        return {
+            'ok': scope_error is None,
+            'matched': 0,
+            'disabled': 0,
+            'failed': 1 if scope_error else 0,
+            'scope_cleanup': center_scope_resp,
+            'error': scope_error,
+        }
 
     rows_with_center = [r for r in rows_with_center if int(r.get('id') or 0) not in center_results]
     if len(rows_with_center) > 1:

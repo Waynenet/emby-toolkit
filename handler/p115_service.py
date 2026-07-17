@@ -736,7 +736,7 @@ def refresh_115_token(failed_token=None):
             url = "https://passportapi.115.com/open/refreshToken"
             payload = {"refresh_token": current_refresh}
             resp = requests.post(url, data=payload, timeout=10).json()
-            
+
             if resp.get('state'):
                 new_access_token = resp['data']['access_token']
                 new_refresh_token = resp['data']['refresh_token']
@@ -6559,6 +6559,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         if is_tv and real_info and is_p115_mediainfo_assisted_recognition_enabled():
             raw_probe_season = _se_int(real_info.get('season_number'))
             raw_probe_episode = _se_int(real_info.get('episode_number'))
+            explicit_season, explicit_episode = self._extract_season_episode_from_file_node(file_node)
+            season_conflict = explicit_season is not None and raw_probe_season not in (None, explicit_season)
+            episode_conflict = explicit_episode is not None and raw_probe_episode not in (None, explicit_episode)
+            if (season_conflict or episode_conflict) and not silent_log:
+                logger.warning(
+                    f"  ➜ [媒体信息缓存校验] 缓存 S{int(raw_probe_season or 0):02d}E{int(raw_probe_episode or 0):02d} "
+                    f"与文件名 S{int(explicit_season or 0):02d}E{int(explicit_episode or 0):02d} 冲突，已跳过冲突字段：{original_name}"
+                )
+            if season_conflict:
+                raw_probe_season = None
+            if episode_conflict:
+                raw_probe_episode = None
             if season_num is None:
                 season_num = raw_probe_season
                 if raw_probe_season is not None:
@@ -6821,34 +6833,25 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             )
             if not s_name: s_name = f"Season {season_num:02d}"
 
-        # raw_ffprobe_json 生成早于最终识别结果；此时 TMDb 身份与季集号已经落定，
-        # 反向补写本地 RAW。手动重组时强制覆盖 _etk.tmdb_id/type，避免旧错误身份继续污染共享 RAW。
+        # 这里只暂存身份；必须等 115 移动成功后才能提交永久缓存。
         if not is_sub and patch_raw_identity:
-            try:
-                raw_patch_sha1 = file_node.get('sha1') or file_node.get('sha')
-                force_identity = bool(getattr(self, 'is_manual_correct', False))
-                trusted_season = None
-                trusted_episode = None
+            force_identity = bool(getattr(self, 'is_manual_correct', False))
+            trusted_season = None
+            trusted_episode = None
 
-                if is_tv:
-                    trusted_season = season_num if (
-                        season_source not in (None, 'hint')
-                        and episode_source not in ('hint',)
-                    ) else None
-                    trusted_episode = episode_num if episode_source not in (None, 'hint') else None
+            if is_tv:
+                trusted_season = season_num if (
+                    season_source not in (None, 'hint')
+                    and episode_source not in ('hint',)
+                ) else None
+                trusted_episode = episode_num if episode_source not in (None, 'hint') else None
 
-                if raw_patch_sha1 and (force_identity or trusted_season is not None or trusted_episode is not None):
-                    P115CacheManager.patch_raw_ffprobe_etk_context(
-                        raw_patch_sha1,
-                        tmdb_id=self.tmdb_id,
-                        media_type=self.media_type,
-                        original_language=(self.raw_metadata or {}).get('lang_code'),
-                        season_number=trusted_season,
-                        episode_number=trusted_episode,
-                        force_identity=force_identity,
-                    )
-            except Exception:
-                pass
+            if force_identity or trusted_season is not None or trusted_episode is not None:
+                file_node['_etk_identity_patch'] = {
+                    'season_number': trusted_season,
+                    'episode_number': trusted_episode,
+                    'force_identity': force_identity,
+                }
 
         return new_name, season_num, episode_num, s_name, video_info, bool(real_info), part_num
 
@@ -7678,7 +7681,24 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         unqualified_items = [] # ★ 质检不合格垃圾桶
         conflict_mode = settings_db.get_washing_conflict_mode(default='replace')
         skip_scope = settings_db.get_washing_skip_scope(default='directory') if conflict_mode == 'skip' else 'directory'
+        washing_config = settings_db.get_washing_priority_config()
+        version_slots_active = bool(
+            conflict_mode == 'replace'
+            and washing_config.get('version_slots_enabled')
+            and washing_config.get('version_slots')
+        )
         from handler.resubscribe_service import WashingService
+
+        def _append_version_slot_suffix(filename, slot):
+            if not version_slots_active or not isinstance(slot, dict):
+                return filename
+            suffix = re.sub(r'[\\/:*?"<>|]+', '_', str(slot.get('suffix') or slot.get('name') or '').strip())
+            if not suffix:
+                return filename
+            stem, ext_name = os.path.splitext(str(filename or ''))
+            if re.search(rf'(?:^| - ){re.escape(suffix)}$', stem, re.IGNORECASE):
+                return filename
+            return f"{stem} - {suffix}{ext_name}"
         
         # ★ 新增：用于记录本批次已经生成的目标文件名，防止同名冲突
         seen_new_filenames = set()
@@ -7711,10 +7731,13 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         if not allowed_exts:
             allowed_exts = known_video_exts | {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
 
+        known_subtitle_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+
         # =================================================================
         # ★★★ 同批次字幕完美对齐视频命名 (解决 MP 单文件上传分离问题) ★★★
         # =================================================================
         batch_video_names = {} # key: (season, episode, part) -> base_name
+        slot_rejected_video_keys = set()
         if is_batch:
             # 1. 预扫描视频，生成标准命名
             for file_item in candidates:
@@ -7734,6 +7757,26 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     if not keep_original:
                         video_base_name = v_name.rsplit('.', 1)[0]
                     key = (v_s, v_e, v_part) if self.media_type == 'tv' else ('movie', v_part)
+                    if version_slots_active:
+                        slot_filename = fn if keep_original else v_name
+                        slot_info = WashingService.resolve_file_version_slot(
+                            sha1=file_item.get('sha1') or file_item.get('sha'),
+                            file_name=slot_filename,
+                            file_size=_parse_115_size(file_item.get('fs') or file_item.get('size')),
+                            media_type=self.media_type,
+                            tmdb_id=self.tmdb_id,
+                            season_num=v_s,
+                            episode_num=v_e,
+                            original_lang=(self.raw_metadata or {}).get('lang_code'),
+                            config=washing_config,
+                        )
+                        if not slot_info:
+                            slot_rejected_video_keys.add(key)
+                            continue
+                        file_item['_washing_slot'] = slot_info
+                        video_base_name = os.path.splitext(
+                            _append_version_slot_suffix(slot_filename, slot_info)
+                        )[0]
                     # 电影只保留第一个视频作为基准 (通常电影只有一个正片)
                     if key not in batch_video_names:
                         batch_video_names[key] = video_base_name
@@ -7743,7 +7786,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 for file_item in candidates:
                     fn = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
                     ext = fn.split('.')[-1].lower() if '.' in fn else ''
-                    if ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']:
+                    if ext in known_subtitle_exts:
                         s_num = file_item.get('_forced_season')
                         e_num = file_item.get('_forced_episode')
                         
@@ -8018,6 +8061,45 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         else:
                             real_target_cid = final_home_cid
 
+            if ext in known_video_exts and version_slots_active:
+                slot_info = file_item.get('_washing_slot')
+                if not slot_info:
+                    slot_info = WashingService.resolve_file_version_slot(
+                        sha1=file_item.get('sha1') or file_item.get('sha'),
+                        file_name=new_filename,
+                        file_size=file_size,
+                        media_type=self.media_type,
+                        tmdb_id=self.tmdb_id,
+                        season_num=season_num,
+                        episode_num=episode_num,
+                        original_lang=(self.raw_metadata or {}).get('lang_code'),
+                        config=washing_config,
+                    )
+                if not slot_info:
+                    logger.warning(f"  ➜ [多版本槽位] {file_name} 未命中任何槽位，已标记质检不合格")
+                    unqualified_items.append({
+                        'fid': fid,
+                        'name': file_name,
+                        'reason': '未命中任何多版本槽位',
+                        'pc': file_item.get('pc') or file_item.get('pick_code'),
+                        'season_num': season_num,
+                    })
+                    continue
+                file_item['_washing_slot'] = slot_info
+                new_filename = _append_version_slot_suffix(new_filename, slot_info)
+
+            if ext in known_subtitle_exts and version_slots_active and not file_item.get('_forced_base_name'):
+                subtitle_keys = []
+                if self.media_type == 'movie':
+                    subtitle_keys = [('movie', part_num), ('movie', None)]
+                elif season_num is not None and episode_num is not None:
+                    subtitle_keys = [(season_num, episode_num, part_num), (season_num, episode_num, None)]
+                if any(key in slot_rejected_video_keys for key in subtitle_keys):
+                    logger.info(f"  ➜ [多版本槽位] 同批视频未命中槽位，同步忽略关联字幕: {file_name}")
+                    if fid:
+                        unrecognized_fids.append(fid)
+                    continue
+
             # =================================================================
             # ★★★ 核心修复：严格去重逻辑 (防多版本/洗版残留冲突) ★★★
             # =================================================================
@@ -8072,12 +8154,38 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             existing_names = {}      
             existing_tv_eps = {}     
             existing_movie_vids = []
+            existing_tv_slots = {}
+            existing_movie_slots = {}
             original_lang = (self.raw_metadata or {}).get('lang_code')
             batch_new_fids = {
                 str(item.get('fid') or item.get('file_id') or '').strip()
                 for item in items
                 if str(item.get('fid') or item.get('file_id') or '').strip()
             }
+
+            def _existing_version_slot_id(_row):
+                if not version_slots_active:
+                    return '__single__'
+                snapshot = _row.get('washing_snapshot_json') if isinstance(_row, dict) else {}
+                if isinstance(snapshot, str):
+                    try:
+                        snapshot = json.loads(snapshot or '{}')
+                    except Exception:
+                        snapshot = {}
+                version_slot = snapshot.get('version_slot') if isinstance(snapshot, dict) else None
+                if isinstance(version_slot, dict) and version_slot.get('id'):
+                    return str(version_slot.get('id'))
+                slot_info = WashingService.resolve_file_version_slot(
+                    sha1=_row.get('sha1') if isinstance(_row, dict) else '',
+                    file_name=_row.get('name') if isinstance(_row, dict) else '',
+                    file_size=_row.get('size') if isinstance(_row, dict) else 0,
+                    media_type=self.media_type,
+                    tmdb_id=self.tmdb_id,
+                    original_lang=original_lang,
+                    config=washing_config,
+                )
+                return str(slot_info.get('id')) if isinstance(slot_info, dict) and slot_info.get('id') else ''
+
             try:
                 from database.connection import get_db_connection
                 with get_db_connection() as conn:
@@ -8097,14 +8205,19 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             
                             if e_ext in known_video_exts:
                                 existing_names[e_name] = e_fid
+                                slot_id = _existing_version_slot_id(row)
                                 if self.media_type == 'tv':
                                     match = re.search(r'(?:^|[ \.\-\_\[\(])(?:s|S)(\d{1,4})[ \.\-]*(?:e|E|p|P)(\d{1,4})\b', e_name, re.IGNORECASE)
                                     if match:
                                         s, e = int(match.group(1)), int(match.group(2))
                                         if (s, e) not in existing_tv_eps: existing_tv_eps[(s, e)] = []
                                         existing_tv_eps[(s, e)].append(e_fid)
+                                        if slot_id:
+                                            existing_tv_slots.setdefault((s, e, slot_id), []).append(e_fid)
                                 else:
                                     existing_movie_vids.append(e_fid)
+                                    if slot_id:
+                                        existing_movie_slots.setdefault(slot_id, []).append(e_fid)
 
                         if self.media_type == 'tv':
                             target_eps = sorted({
@@ -8142,6 +8255,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     existing_tv_eps.setdefault(key, [])
                                     if fid not in existing_tv_eps[key]:
                                         existing_tv_eps[key].append(fid)
+                                    slot_id = _existing_version_slot_id({
+                                        'name': name,
+                                        'sha1': row.get('sha1'),
+                                        'size': row.get('size'),
+                                        'washing_snapshot_json': row.get('washing_snapshot_json'),
+                                    })
+                                    if slot_id:
+                                        existing_tv_slots.setdefault((key[0], key[1], slot_id), [])
+                                        if fid not in existing_tv_slots[(key[0], key[1], slot_id)]:
+                                            existing_tv_slots[(key[0], key[1], slot_id)].append(fid)
             except Exception as e:
                 logger.warning(f"  ➜ [冲突检测] 查询本地缓存失败: {e}")
 
@@ -8174,16 +8297,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             def _batch_washing_identity_key(_item, _is_video):
                 if not _is_video:
                     return None
+                slot_id = '__single__'
+                if version_slots_active:
+                    slot = _item.get('_washing_slot') if isinstance(_item, dict) else {}
+                    slot_id = str((slot or {}).get('id') or '')
+                    if not slot_id:
+                        return None
                 if self.media_type == 'movie':
-                    return ('movie', str(self.tmdb_id))
+                    return ('movie', str(self.tmdb_id), slot_id)
                 _s = _item.get('_season_num')
                 _e = _item.get('_episode_num')
                 if _s is None or _e is None:
                     return None
                 try:
-                    return ('episode', int(_s), int(_e))
+                    return ('episode', int(_s), int(_e), slot_id)
                 except Exception:
-                    return ('episode', str(_s), str(_e))
+                    return ('episode', str(_s), str(_e), slot_id)
 
             def _batch_washing_level_from_reason(_reason):
                 text = str(_reason or '')
@@ -8256,6 +8385,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             'reason': level_reason or f'优先级 {level}',
                             'target_cid': str(target_cid or ''),
                             'media_type': 'movie' if self.media_type == 'movie' else 'series',
+                            'version_slot': _item.get('_washing_slot') if isinstance(_item, dict) else None,
                             'identity': identity,
                             'evaluated_at': datetime.now(timezone.utc).isoformat()
                         }
@@ -8409,7 +8539,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         video_info = item.get('_video_info') or self._extract_video_info(new_name)
                         file_sha1 = item.get('sha1') or item.get('sha')
                         
-                        action, reason = WashingService.decide_washing_action(
+                        action, reason, washing_details = WashingService.decide_washing_action(
                             sha1=file_sha1,
                             file_name=new_name,
                             file_size=file_size,
@@ -8421,7 +8551,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             original_lang=original_lang,
                             is_active_washing=is_ep_active_washing,
                             has_external_subtitle=has_ext_sub,
+                            return_details=True,
                         )
+                        resolved_slot = (washing_details or {}).get('version_slot')
+                        if resolved_slot:
+                            item['_washing_slot'] = resolved_slot
                     
                     if action == 'REJECT':
                         logger.warning(f"  ➜ [洗版拦截] {new_name} -> {reason}")
@@ -8447,9 +8581,17 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if not _register_batch_washing_candidate(item, new_name, action, reason, file_size):
                             continue
                         if self.media_type == 'tv' and s_num is not None and e_num is not None:
-                            fids_to_delete.update(existing_tv_eps.get((s_num, e_num), []))
+                            if version_slots_active:
+                                slot_id = str((item.get('_washing_slot') or {}).get('id') or '')
+                                fids_to_delete.update(existing_tv_slots.get((s_num, e_num, slot_id), []))
+                            else:
+                                fids_to_delete.update(existing_tv_eps.get((s_num, e_num), []))
                         else:
-                            fids_to_delete.update(existing_movie_vids)
+                            if version_slots_active:
+                                slot_id = str((item.get('_washing_slot') or {}).get('id') or '')
+                                fids_to_delete.update(existing_movie_slots.get(slot_id, []))
+                            else:
+                                fids_to_delete.update(existing_movie_vids)
                         valid_items.append(item)
                     elif action == 'ACCEPT':
                         logger.info(f"  ➜ [洗版入库] {new_name}，原因：{reason}")
@@ -8776,6 +8918,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     pick_code = file_item.get('pc') or file_item.get('pick_code') 
                     file_sha1 = file_item.get('sha1') or file_item.get('sha')
                     ext = new_filename.split('.')[-1].lower() if '.' in new_filename else ''
+
+                    identity_patch = file_item.get('_etk_identity_patch') or {}
+                    if file_sha1 and identity_patch:
+                        P115CacheManager.patch_raw_ffprobe_etk_context(
+                            file_sha1,
+                            tmdb_id=self.tmdb_id,
+                            media_type=self.media_type,
+                            original_language=(self.raw_metadata or {}).get('lang_code'),
+                            season_number=identity_patch.get('season_number'),
+                            episode_number=identity_patch.get('episode_number'),
+                            force_identity=bool(identity_patch.get('force_identity')),
+                        )
                     
                     # 整理日志
                     if ext in known_video_exts:
@@ -10014,6 +10168,10 @@ class WebhookDeleteBuffer:
 
     @classmethod
     def _process_batch(cls, pickcodes):
+        if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+            logger.info("  ➜ [深度删除] 联动删除未开启，放弃已进入缓冲队列的网盘删除任务。")
+            return
+
         client = P115Service.get_client()
         if not client: return
 
@@ -10095,6 +10253,9 @@ class WebhookDeleteBuffer:
                     # 第四步：执行唯一一次 115 API 删除调用
                     # =================================================================
                     if final_api_ids:
+                        if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+                            logger.info("  ➜ [深度删除] 联动删除已关闭，取消调用 115 删除 API。")
+                            return
                         logger.info(f"  ➜ [深度删除] 本地推导完毕！向 115 发送批量删除指令 (共 {len(final_api_ids)} 个顶级节点)...")
                         resp = client.fs_delete(final_api_ids)
                         
@@ -10127,6 +10288,9 @@ def delete_115_files_by_webhook(pickcodes):
     【V6 终极缓冲版】接收神医 Webhook 传来的提取码，加入缓冲队列。
     """
     if not pickcodes: return
+    if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+        logger.info("  ➜ [深度删除] 联动删除未开启，跳过网盘及上传源文件清理。")
+        return
     try:
         from handler.p115_upload_monitor import delete_local_sources_by_pickcodes
         local_result = delete_local_sources_by_pickcodes(pickcodes)
@@ -10409,6 +10573,12 @@ def _batch_manual_correct(record_ids, tmdb_id, media_type, target_cid, season_nu
 
     organizer = SmartOrganizer(client, tmdb_id, media_type, title, None, False)
     organizer.is_manual_correct = True
+    if not organizer.raw_metadata or not organizer.raw_metadata.get('title'):
+        logger.error(
+            f"  ➜ [批量重组] TMDb {tmdb_id} 元数据获取失败，"
+            "已中止重组，未修改文件或媒体信息缓存。"
+        )
+        return
     if season_num is not None and str(season_num).strip():
         organizer.forced_season = int(season_num)
         logger.info(f"  ➜ [批量重组] 已指定整理到第 {organizer.forced_season} 季。")

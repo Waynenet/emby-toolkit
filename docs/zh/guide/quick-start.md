@@ -13,7 +13,7 @@
 1. 使用 Docker Compose 启动服务。
 2. 访问 `http://<服务器IP>:5257` 打开管理界面。
 3. 填写 Emby、TMDb、MoviePilot（如需要）等配置并保存。
-4. 在 Emby 配置 Webhook 指向 `http://<服务器IP>:5257/webhook/emby`。
+4. 安装 ETK MediaInfo Bridge 插件，Emby 事件会由插件自动上报，无需配置 Emby Webhook。
 5. 配置 115 网盘登录，用于整理、STRM、播放直链和共享资源。
 6. 按需启用任务链、实时监控、反向代理等功能。
 7. 如果要使用公共资源互助，继续阅读 [共享资源中心](/zh/guide/shared-resource)。

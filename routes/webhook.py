@@ -28,7 +28,7 @@ from tasks.media import task_sync_all_metadata
 from handler.custom_collection import RecommendationEngine
 from handler import tmdb_collections as collections_handler
 from services.cover_generator import CoverGeneratorService
-from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
+from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, media_db, queries_db, watchlist_db
 from database.connection import get_db_connection
 from database.log_db import LogDBManager
 from handler.p115_service import P115Service, SmartOrganizer, get_config
@@ -503,64 +503,6 @@ def _normalize_mp_detail_size(value):
     except Exception:
         return None
     return None
-
-
-def _extract_deep_delete_pickcodes(webhook_payload):
-    if not isinstance(webhook_payload, dict):
-        return []
-
-    pickcodes = []
-    seen = set()
-
-    def _add_pickcode(text):
-        text = str(text or '').strip()
-        if text and text not in seen:
-            seen.add(text)
-            pickcodes.append(text)
-
-    def _add_pickcodes_from_text(text):
-        if text in (None, '', [], {}):
-            return
-        for match in re.finditer(r'/api/p115/play/([^/\s?#]+)', str(text)):
-            _add_pickcode(match.group(1))
-
-    def _add_value(value):
-        if value in (None, '', [], {}):
-            return
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                _add_value(item)
-            return
-        if isinstance(value, dict):
-            for key in ('pc', 'pick_code', 'pickcode', 'PickCode', 'PickCodeList', 'pick_codes'):
-                if key in value:
-                    _add_value(value.get(key))
-                    return
-            for key in ('File', 'file', 'Files', 'files', 'Item', 'item', 'Items', 'items'):
-                if key in value:
-                    _add_value(value.get(key))
-                    return
-            return
-
-        text = str(value).strip()
-        _add_pickcodes_from_text(text)
-        if '/api/p115/play/' not in text:
-            _add_pickcode(text)
-
-    def _scan_container(container):
-        if not isinstance(container, dict):
-            return
-        for key in ('pc', 'pick_code', 'pickcode', 'PickCode'):
-            _add_value(container.get(key))
-        for key in ('PickCodes', 'pick_codes', 'Files', 'files'):
-            _add_value(container.get(key))
-        for key in ('Description', 'Overview', 'Path', 'Url'):
-            _add_pickcodes_from_text(container.get(key))
-
-    _scan_container(webhook_payload)
-    _scan_container(webhook_payload.get('Item') or webhook_payload.get('item'))
-
-    return pickcodes
 
 
 def _refresh_mp_file_info_from_115(client, file_info):
@@ -1580,9 +1522,10 @@ def _trigger_metadata_update_task(item_id, item_name):
 
 # --- Webhook 路由 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])
+@webhook_bp.route('/api/emby/events', methods=['POST'])
 @extensions.processor_ready_required
 def emby_webhook():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     # ★★★            魔法日志 - START            ★★★
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
@@ -1599,58 +1542,13 @@ def emby_webhook():
     # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
-    # ======================================================================
-    # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
-    # ======================================================================
-    if event_type == "deep.delete":
-        logger.info("  ➜ 收到神医助手深度删除通知，准备执行清理流程...")
-        
-        item_from_webhook = data.get("Item", {})
-        original_item_id = item_from_webhook.get("Id")
-        original_item_type = item_from_webhook.get("Type")
-        original_item_name = item_from_webhook.get("Name", "未知项目")
-        # 如果是分集，提取所属剧集 ID，供后续清理主库使用
-        series_id_from_webhook = item_from_webhook.get("SeriesId") if original_item_type == "Episode" else None
-
-        # --------------------------------------------------------
-        # 任务 1: 联动删除 115 网盘文件 (所有层级均生效，且必须在清理数据库前执行！)
-        # --------------------------------------------------------
-        nb_config = get_config()
-        if nb_config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
-            try:
-                pickcodes = _extract_deep_delete_pickcodes(data)
-                if pickcodes:
-                    logger.info(f"  ➜ 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行联动删除。")
-                    from handler.p115_service import delete_115_files_by_webhook
-                    spawn(delete_115_files_by_webhook, pickcodes)
-                else:
-                    logger.warning("  ➜ 深度删除通知未携带有效 PC，跳过网盘清理。")
-            except Exception as e:
-                logger.error(f"  ➜ 解析深度删除通知失败: {e}", exc_info=True)
-        else:
-            logger.debug("  ➜ 联动删除未开启，跳过网盘清理。")
-
-        # --------------------------------------------------------
-        # 任务 2: 清理本地数据库、日志与内存缓存 (网盘删完再删本地)
-        # --------------------------------------------------------
-        if original_item_id:
-            try:
-                logger.info(f"  ➜ [深度删除] 开始清理本地数据库与缓存: {original_item_name} ({original_item_type})")
-                
-                # 1. 清理主媒体库记录 (★ 所有层级均生效，删一集就清理一集的记录)
-                # ★ 修复：日志和内存缓存的清理已下沉到此函数内部，利用其完善的多版本善后逻辑，防止误清理
-                maintenance_db.cleanup_deleted_media_item(
-                    item_id=original_item_id,
-                    item_name=original_item_name,
-                    item_type=original_item_type,
-                    series_id_from_webhook=series_id_from_webhook
-                )
-
-            except Exception as e:
-                logger.error(f"  ➜ [深度删除] 清理本地数据库与缓存失败: {e}", exc_info=True)
-
-        # 深度删除处理完毕，直接返回 200，不再往下走
-        return jsonify({"status": "deep_delete_processed"}), 200
+    is_plugin_endpoint = request.path == '/api/emby/events'
+    if is_plugin_endpoint:
+        if data.get('_etk_source') != 'ETKMediaInfoBridge' or not event_type:
+            return jsonify({"status": "invalid_plugin_event"}), 400
+    elif event_type:
+        logger.info("  ➜ 已忽略旧 Emby Webhook 事件；请使用 ETK MediaInfo Bridge 插件。")
+        return jsonify({"status": "emby_webhook_removed"}), 200
     # ======================================================================
     # ★★★ 处理 MoviePilot 订阅助手事件 ★★★
     # ======================================================================
@@ -1731,7 +1629,7 @@ def emby_webhook():
             logger.error(f"  ➜ [MP上传] 处理失败: {e}", exc_info=True)
             return jsonify({"status": "error", "message": str(e)}), 500
         
-    logger.debug(f"  ➜ 收到Emby Webhook: {event_type}")
+    logger.debug(f"  ➜ 收到 Emby 插件事件: {event_type}")
 
     USER_DATA_EVENTS = [
         "item.markfavorite", "item.unmarkfavorite",
@@ -1897,7 +1795,7 @@ def emby_webhook():
             logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
-    trigger_events = ["metadata.update", "image.update", "collection.items.removed", "deep.delete", "None"]
+    trigger_events = ["metadata.update", "image.update", "collection.items.removed"]
     if event_type not in trigger_events:
         logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
@@ -2037,5 +1935,8 @@ def emby_webhook():
             )
             UPDATE_DEBOUNCE_TIMERS[id_to_process] = new_timer
         return jsonify({"status": "metadata_update_task_debounced", "item_id": id_to_process}), 202
+
+    if event_type == "image.update":
+        return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
 
     return jsonify({"status": "event_unhandled"}), 500
