@@ -10029,6 +10029,10 @@ class WebhookDeleteBuffer:
 
     @classmethod
     def _process_batch(cls, pickcodes):
+        if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+            logger.info("  ➜ [深度删除] 联动删除未开启，放弃已进入缓冲队列的网盘删除任务。")
+            return
+
         client = P115Service.get_client()
         if not client: return
 
@@ -10110,6 +10114,9 @@ class WebhookDeleteBuffer:
                     # 第四步：执行唯一一次 115 API 删除调用
                     # =================================================================
                     if final_api_ids:
+                        if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+                            logger.info("  ➜ [深度删除] 联动删除已关闭，取消调用 115 删除 API。")
+                            return
                         logger.info(f"  ➜ [深度删除] 本地推导完毕！向 115 发送批量删除指令 (共 {len(final_api_ids)} 个顶级节点)...")
                         resp = client.fs_delete(final_api_ids)
                         
@@ -10142,6 +10149,9 @@ def delete_115_files_by_webhook(pickcodes):
     【V6 终极缓冲版】接收神医 Webhook 传来的提取码，加入缓冲队列。
     """
     if not pickcodes: return
+    if not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+        logger.info("  ➜ [深度删除] 联动删除未开启，跳过网盘及上传源文件清理。")
+        return
     try:
         from handler.p115_upload_monitor import delete_local_sources_by_pickcodes
         local_result = delete_local_sources_by_pickcodes(pickcodes)

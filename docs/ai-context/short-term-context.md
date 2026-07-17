@@ -54,7 +54,7 @@
 - 媒体查询、编辑、图片代理、自动标签：`routes/media.py`
 - 日志查看和搜索：`routes/logs.py`
 - 任务触发和动作入口：`routes/tasks.py`、`routes/actions.py`
-- Webhook：`routes/webhook.py`，核心入口包括 Emby Webhook。
+- Webhook：`/webhook/emby` 只保留 MoviePilot 事件，不再兼容 Emby Webhook；ETK MediaInfo Bridge 通过 `/api/emby/events` 上报播放、用户数据、权限、合集和手动元数据/图片编辑事件，用户主动删除走独立的两阶段接口。元数据只上报 `MetadataEdit`，图片只上报带手动 API 标记的 `ImageUpdate`，刷新导入和 ETK 自身回填会被过滤；主动删除按 Movie/Episode/Season/Series 从 `media_metadata` 展开完整 PickCode。
 - 115 网盘：`routes/p115.py`，包括扫码、cookie、目录、播放直链、整理规则、命名规则、播放池、音乐同步、STRM 替换等。
 - 追剧：`routes/watchlist.py`
 - 演员订阅：`routes/actor_subscriptions.py`

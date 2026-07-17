@@ -9,6 +9,7 @@ import os
 import re
 import time
 import random
+import secrets
 from urllib.parse import urlparse
 import requests
 from flask import Blueprint, jsonify, request, redirect, Response, stream_with_context, current_app, session
@@ -34,6 +35,10 @@ _qrcode_data = {
 }
 p115_bp = Blueprint('115_bp', __name__, url_prefix='/api/p115')
 logger = logging.getLogger(__name__)
+
+_DEEP_DELETE_TTL_SECONDS = 300
+_deep_delete_lock = threading.Lock()
+_deep_delete_snapshots = {}
 
 
 def _normalize_p115_category_path(path):
@@ -2077,6 +2082,146 @@ def accept_emby_item_by_pick_code(pick_code):
 @p115_bp.route('/mediainfo/sha1/<sha1>/item-ready', methods=['POST'])
 def accept_emby_item_by_sha1(sha1):
     return _accept_emby_item_response(sha1)
+
+
+def _prepare_deep_delete_response(sha1, expected_pick_code=''):
+    from database import media_db
+    from handler.shared_intro_service import get_verified_emby_item_for_cache
+
+    payload = request.get_json(silent=True) or {}
+    root_item_id = str(payload.get('root_item_id') or '').strip()
+    anchor_item_id = str(payload.get('anchor_item_id') or '').strip()
+    requested_type = str(payload.get('item_type') or '').strip().title()
+    if not re.fullmatch(r'\d{1,20}', root_item_id) or not re.fullmatch(r'\d{1,20}', anchor_item_id):
+        return jsonify({'ok': False, 'error': 'invalid item id'}), 400
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+        return jsonify({'ok': False, 'error': 'unsupported item type'}), 400
+
+    anchor = get_verified_emby_item_for_cache(
+        sha1,
+        anchor_item_id,
+        expected_pick_code=expected_pick_code,
+    )
+    if not anchor:
+        return jsonify({'ok': False, 'error': 'anchor identity mismatch'}), 409
+
+    root = emby.get_emby_item_details(
+        root_item_id,
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
+        fields='Type,Name',
+        silent_404=True,
+    )
+    if not root:
+        return jsonify({'ok': False, 'error': 'root item not found'}), 404
+    actual_type = str(root.get('Type') or requested_type).title()
+    if actual_type != requested_type:
+        return jsonify({'ok': False, 'error': 'root item type mismatch'}), 409
+
+    pickcodes = media_db.get_pickcodes_for_deleted_emby_item(root_item_id, actual_type)
+    anchor_pick_code = str(expected_pick_code or '').strip()
+    if not anchor_pick_code:
+        cache_row = P115CacheManager.get_file_cache_by_sha1(sha1) or {}
+        anchor_pick_code = str(cache_row.get('pick_code') or '').strip()
+    if not pickcodes or (anchor_pick_code and anchor_pick_code.lower() not in {pc.lower() for pc in pickcodes}):
+        return jsonify({'ok': False, 'error': 'delete scope identity mismatch'}), 409
+
+    now = time.time()
+    token = secrets.token_urlsafe(24)
+    snapshot = {
+        'created_at': now,
+        'item_id': root_item_id,
+        'item_name': str(root.get('Name') or payload.get('item_name') or root_item_id),
+        'item_type': actual_type,
+        'series_id': str(root.get('SeriesId') or payload.get('series_id') or '').strip(),
+        'pickcodes': pickcodes,
+    }
+    with _deep_delete_lock:
+        expired = [
+            key for key, value in _deep_delete_snapshots.items()
+            if now - float(value.get('created_at') or 0) > _DEEP_DELETE_TTL_SECONDS
+        ]
+        for key in expired:
+            _deep_delete_snapshots.pop(key, None)
+        _deep_delete_snapshots[token] = snapshot
+
+    logger.info(
+        '  -> [ETK deep delete] Prepared %s (%s, EmbyID=%s) with %s pick codes.',
+        snapshot['item_name'], actual_type, root_item_id, len(pickcodes),
+    )
+    return jsonify({'ok': True, 'token': token, 'pickcode_count': len(pickcodes)})
+
+
+def _commit_deep_delete_response():
+    payload = request.get_json(silent=True) or {}
+    token = str(payload.get('token') or '').strip()
+    if not token:
+        return jsonify({'ok': False, 'error': 'missing token'}), 400
+    with _deep_delete_lock:
+        snapshot = _deep_delete_snapshots.pop(token, None)
+    if not snapshot:
+        return jsonify({'ok': False, 'error': 'delete snapshot not found'}), 404
+    if time.time() - float(snapshot.get('created_at') or 0) > _DEEP_DELETE_TTL_SECONDS:
+        return jsonify({'ok': False, 'error': 'delete snapshot expired'}), 410
+
+    def _process_deep_delete():
+        try:
+            from database import maintenance_db
+            from handler.p115_service import delete_115_files_by_webhook
+
+            delete_115_files_by_webhook(snapshot['pickcodes'])
+            maintenance_db.cleanup_deleted_media_item(
+                item_id=snapshot['item_id'],
+                item_name=snapshot['item_name'],
+                item_type=snapshot['item_type'],
+                series_id_from_webhook=snapshot.get('series_id') or None,
+            )
+        except Exception:
+            logger.exception(
+                '  -> [ETK deep delete] Failed to process Emby item %s.',
+                snapshot['item_id'],
+            )
+
+    threading.Thread(
+        target=_process_deep_delete,
+        name=f"etk-deep-delete-{snapshot['item_id']}",
+        daemon=True,
+    ).start()
+    logger.info(
+        '  -> [ETK deep delete] Committed %s (%s, EmbyID=%s).',
+        snapshot['item_name'], snapshot['item_type'], snapshot['item_id'],
+    )
+    return jsonify({'ok': True, 'accepted': True, 'pickcode_count': len(snapshot['pickcodes'])}), 202
+
+
+@p115_bp.route('/mediainfo/<pick_code>/deep-delete/prepare', methods=['POST'])
+def prepare_deep_delete_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({'error': 'media identity not found'}), 404
+    return _prepare_deep_delete_response(row.get('sha1'), expected_pick_code=pick_code)
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/deep-delete/prepare', methods=['POST'])
+def prepare_deep_delete_by_sha1(sha1):
+    return _prepare_deep_delete_response(sha1)
+
+
+@p115_bp.route('/mediainfo/<pick_code>/deep-delete/commit', methods=['POST'])
+def commit_deep_delete_by_pick_code(pick_code):
+    row = P115CacheManager.get_file_cache_by_pickcode(pick_code) or {}
+    if not row.get('sha1'):
+        return jsonify({'error': 'media identity not found'}), 404
+    return _commit_deep_delete_response()
+
+
+@p115_bp.route('/mediainfo/sha1/<sha1>/deep-delete/commit', methods=['POST'])
+def commit_deep_delete_by_sha1(sha1):
+    sha1 = str(sha1 or '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{40}', sha1):
+        return jsonify({'error': 'media identity not found'}), 404
+    return _commit_deep_delete_response()
 
 
 @p115_bp.route('/play/<pick_code>', methods=['GET', 'HEAD']) 
