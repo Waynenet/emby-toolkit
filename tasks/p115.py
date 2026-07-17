@@ -25,6 +25,7 @@ from handler.p115_service import (
     _parse_115_size,
     _identify_media_enhanced,
     _transfer_context_to_recognition_hints,
+    _normalize_p115_move_target_cid,
     resolve_p115_sorting_target_by_local_path,
 )
 from handler.p115_media_analyzer import P115MediaAnalyzerMixin
@@ -778,10 +779,12 @@ def task_scan_and_organize_115(processor=None):
         save_name = str(save_val)
 
         # 1. 准备 '未识别' 目录
-        unidentified_cid = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        unidentified_cid = _normalize_p115_move_target_cid(
+            config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        )
         unidentified_folder_name = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_NAME, "未识别")
         
-        if not unidentified_cid or str(unidentified_cid) == '0':
+        if not unidentified_cid:
             unidentified_folder_name = "未识别"
             try:
                 search_res = client.fs_files({'cid': save_cid, 'search_value': unidentified_folder_name, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
