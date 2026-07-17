@@ -438,7 +438,7 @@
                     <n-form-item label="单次处理上限" path="monitor_scan_max_tasks">
                       <n-input-number
                         v-model:value="configModel.monitor_scan_max_tasks"
-                        :min="1"
+                        :min="0"
                         :max="1000"
                         placeholder="10"
                         style="width: 100%"
@@ -447,7 +447,7 @@
                       </n-input-number>
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          定时扫描发现大量积压时，本轮最多主动处理的目录数，剩余项目留到后续扫描。
+                          定时扫描发现大量积压时，本轮最多主动处理的目录数；设为 0 则不限制。
                         </n-text>
                       </template>
                     </n-form-item>
@@ -3500,7 +3500,7 @@ const save = async () => {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
     }
-    cleanConfigPayload.monitor_scan_max_tasks = Math.max(1, Math.floor(Number(cleanConfigPayload.monitor_scan_max_tasks || 10)));
+    cleanConfigPayload.monitor_scan_max_tasks = Math.max(0, Math.floor(Number(cleanConfigPayload.monitor_scan_max_tasks ?? 10)));
     cleanConfigPayload.monitor_scan_batch_size = Math.max(1, Math.floor(Number(cleanConfigPayload.monitor_scan_batch_size || 2)));
     if (configModel.value) {
         configModel.value.monitor_scan_max_tasks = cleanConfigPayload.monitor_scan_max_tasks;

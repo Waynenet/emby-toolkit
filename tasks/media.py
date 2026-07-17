@@ -2096,7 +2096,7 @@ def task_scan_monitor_folders(processor):
     scan_batch_size = processor.config.get(constants.CONFIG_OPTION_MONITOR_SCAN_BATCH_SIZE, constants.DEFAULT_MONITOR_SCAN_BATCH_SIZE)
 
     try:
-        scan_max_tasks = max(1, int(scan_max_tasks))
+        scan_max_tasks = max(0, int(scan_max_tasks))
     except (TypeError, ValueError):
         scan_max_tasks = constants.DEFAULT_MONITOR_SCAN_MAX_TASKS
 
@@ -2109,9 +2109,10 @@ def task_scan_monitor_folders(processor):
     monitor_exclude_dirs = processor.config.get(constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS, constants.DEFAULT_MONITOR_EXCLUDE_DIRS)
     exclude_paths = [os.path.normpath(d).lower() for d in (monitor_exclude_dirs or [])]
 
+    scan_limit_label = f"{scan_max_tasks} 个目录" if scan_max_tasks > 0 else "不限目录数"
     logger.info(
         f"  ➜ 开始执行监控目录查漏扫描 "
-        f"(回溯 {lookback_days} 天，单次最多处理 {scan_max_tasks} 个目录，批量 {scan_batch_size})"
+        f"(回溯 {lookback_days} 天，单次处理 {scan_limit_label}，批量 {scan_batch_size})"
     )
 
     if not monitor_enabled or not monitor_paths:
@@ -2213,7 +2214,7 @@ def task_scan_monitor_folders(processor):
                 processed_dirs.add(dir_key)
                 trigger_count += 1
 
-                if trigger_count >= scan_max_tasks:
+                if scan_max_tasks > 0 and trigger_count >= scan_max_tasks:
                     limit_reached = True
                     logger.warning(
                         f"  ➜ 本轮监控目录扫描已达到处理上限 {scan_max_tasks}，"
