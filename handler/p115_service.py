@@ -5899,7 +5899,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             data['actor_ids'] = [cast.get('id') for cast in raw_details.get('credits', {}).get('cast', [])[:3]]
 
             # =====================================================================
-            # ★★★ 5. 标题提取 (本地缓存优先 -> 隐身符清洗 -> 广告拦截 -> 别名兜底) ★★★
+            # ★★★ 5. 标题提取 (本地缓存优先 -> 隐身符清洗 -> 中文别名兜底) ★★★
             # =====================================================================
             cached_title = None
             cached_original_title = None
@@ -5953,10 +5953,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 raw_title = raw_details.get('title') or raw_details.get('name')
                 current_title = utils.clean_invisible_chars(raw_title)
                 
-                if utils.is_spam_title(current_title):
-                    logger.warning(f"  ➜ [115整理] 拦截到恶意广告片名: '{current_title}'，准备寻找干净的别名...")
-                    current_title = ""
-
                 if not current_title or not utils.contains_chinese(current_title):
                     chinese_alias = None
                     alt_titles_data = raw_details.get("alternative_titles", {})
@@ -5966,10 +5962,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     best_priority = 99
                     
                     for alt in alt_list:
+                        iso_country = alt.get("iso_3166_1", "").upper()
+                        if iso_country not in priority_map:
+                            continue
                         alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
-                            iso_country = alt.get("iso_3166_1", "").upper()
-                            current_priority = priority_map.get(iso_country, 5) 
+                        if utils.contains_chinese(alt_title):
+                            current_priority = priority_map[iso_country]
                             
                             if current_priority < best_priority:
                                 chinese_alias = alt_title
@@ -5979,11 +5977,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 break 
                     
                     if chinese_alias:
-                        logger.info(f"  ➜ [115整理] 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                        logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
                         current_title = chinese_alias
                     else:
                         original_title = original_main_title
-                        logger.info(f"  ➜ [115整理] 未找到干净的中文别名，回退到原名: '{original_title}'")
+                        logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
                         current_title = original_title
                 else:
                     # 如果主标题正常，提取原名

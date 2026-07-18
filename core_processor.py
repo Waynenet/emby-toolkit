@@ -2480,13 +2480,9 @@ class MediaProcessor:
                     logger.error("  ➜ 无法获取 TMDb 详情，中止处理。")
                     return False
 
-                # 提取 TMDb 官方中文别名 & 卖片哥广告拦截
+                # 提取 TMDb 官方中文别名
                 raw_title = fresh_data.get("title") if item_type == "Movie" else fresh_data.get("name")
                 current_title = utils.clean_invisible_chars(raw_title)
-                
-                if utils.is_spam_title(current_title):
-                    logger.warning(f"  ➜ [拦截] 检测到恶意广告片名: '{current_title}'，准备寻找替代片名...")
-                    current_title = ""
                 
                 if not current_title or not utils.contains_chinese(current_title):
                     chinese_alias = None
@@ -2495,18 +2491,19 @@ class MediaProcessor:
                     priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
                     best_priority = 99
                     for alt in alt_list:
+                        iso_country = alt.get("iso_3166_1", "").upper()
+                        if iso_country not in priority_map:
+                            continue
                         alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        # 别名也必须经过广告过滤
-                        if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
-                            iso_country = alt.get("iso_3166_1", "").upper()
-                            current_priority = priority_map.get(iso_country, 5)
+                        if utils.contains_chinese(alt_title):
+                            current_priority = priority_map[iso_country]
                             if current_priority < best_priority:
                                 chinese_alias = alt_title
                                 best_priority = current_priority
                             if best_priority == 1: break
                     
                     if chinese_alias:
-                        logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                        logger.info(f"  ➜ 发现 TMDb 官方中文别名: '{chinese_alias}'")
                         if item_type == "Movie": fresh_data["title"] = chinese_alias
                         else:
                             fresh_data["name"] = chinese_alias
@@ -2515,7 +2512,7 @@ class MediaProcessor:
                     else:
                         # 回退到原名，交给 AI 翻译
                         original_title = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
-                        logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
+                        logger.info(f"  ➜ 未找到中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
                         if item_type == "Movie": fresh_data["title"] = original_title
                         else:
                             fresh_data["name"] = original_title

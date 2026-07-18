@@ -800,6 +800,49 @@ class P115RecognitionRuleTests(unittest.TestCase):
         self.assertEqual(metadata.get("title_orig"), "原文主片名")
         self.assertEqual(metadata.get("original_title"), "原文主片名")
 
+    def test_fetch_raw_metadata_ignores_japanese_alias_with_kanji(self):
+        organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)
+        organizer.api_key = "fake"
+        organizer.media_type = "movie"
+        organizer.tmdb_id = "999"
+        organizer.rating_map = {}
+        organizer.rating_priority = []
+        organizer.recognition_hints = {}
+        organizer.ai_translator = None
+
+        raw_details = {
+            "title": "Croupier",
+            "original_title": "Croupier",
+            "original_language": "en",
+            "genres": [],
+            "production_countries": [],
+            "production_companies": [],
+            "keywords": {"keywords": []},
+            "credits": {"cast": []},
+            "alternative_titles": {
+                "titles": [
+                    {"iso_3166_1": "JP", "title": "ルール オブ デス〜カジノの死角"}
+                ]
+            },
+            "release_date": "1998-01-01",
+            "vote_average": 0,
+            "runtime": 0,
+        }
+
+        cursor = mock.MagicMock()
+        cursor.fetchone.return_value = None
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        p115_service._TMDB_METADATA_CACHE.clear()
+        with mock.patch.object(p115_service.tmdb, "get_movie_details", return_value=raw_details):
+            with mock.patch.object(p115_service.utils, "get_rating_label", return_value="未知"):
+                with mock.patch("database.connection.get_db_connection", return_value=connection):
+                    metadata = organizer._fetch_raw_metadata()
+
+        self.assertEqual(metadata.get("title"), "Croupier")
+
     def test_rename_file_node_consumes_rule_episode_result(self):
         organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)
         organizer.rename_config = {
