@@ -33,6 +33,87 @@ logger = logging.getLogger(__name__)
 FORCE_CACHE_MEDIAINFO = True
 
 
+def _normalize_p115_move_target_cid(cid):
+    """Return a usable non-root move target CID, or None."""
+    cid_text = str(cid or '').strip()
+    return cid_text if cid_text and cid_text != '0' else None
+
+
+def _p115_is_visible_child_dir(client, parent_cid, dir_name, cid):
+    """Confirm that a cached directory is visible under its expected parent."""
+    parent_cid = str(parent_cid or '').strip()
+    dir_name = str(dir_name or '').strip()
+    cid = str(cid or '').strip()
+    if not parent_cid or not dir_name or not cid:
+        return False
+
+    try:
+        search_res = client.fs_search({
+            'cid': parent_cid,
+            'search_value': dir_name,
+            'limit': 100,
+            'offset': 0,
+            'show_dir': 1,
+            'record_open_time': 0,
+        })
+        if isinstance(search_res, dict) and search_res.get('state'):
+            for item in search_res.get('data') or []:
+                item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                item_cid = item.get('fid') or item.get('file_id') or item.get('id') or item.get('cid')
+                item_parent = str(item.get('pid') or item.get('parent_id') or '').strip()
+                if (
+                    item_fc == '0'
+                    and item_name == dir_name
+                    and str(item_cid) == cid
+                    and (not item_parent or item_parent == parent_cid)
+                ):
+                    return True
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [115目录校验] 搜索接口不可用，回退目录列表: "
+            f"parent={parent_cid}, name={dir_name}, err={e}"
+        )
+
+    try:
+        # 搜索接口不可用时兼容旧客户端，目录较小时仍可通过列表确认。
+        offset = 0
+        limit = 1000
+        while offset < 5000:
+            res = client.fs_files({
+                'cid': parent_cid,
+                'limit': limit,
+                'offset': offset,
+                'show_dir': 1,
+                'record_open_time': 0,
+            })
+            if not isinstance(res, dict) or not res.get('state'):
+                return False
+            data = res.get('data')
+            if not isinstance(data, list):
+                return False
+            for item in data:
+                item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                item_cid = (
+                    item.get('fid')
+                    or item.get('file_id')
+                    or item.get('id')
+                    or item.get('cid')
+                )
+                if item_fc == '0' and item_name == dir_name and str(item_cid) == cid:
+                    return True
+            if len(data) < limit:
+                return False
+            offset += limit
+    except Exception as e:
+        logger.warning(
+            f"  ➜ [115目录校验] 无法确认目录可见性，已拒绝沿用 CID: "
+            f"parent={parent_cid}, cid={cid}, err={e}"
+        )
+    return False
+
+
 def _exclude_batch_conflict_rows(rows, batch_file_ids):
     """原地重组时，不把本批文件本身当成待替换旧版本。"""
     excluded = {
@@ -849,6 +930,9 @@ class P115OpenAPIClient:
         return resp
 
     def fs_move(self, fids, to_cid):
+        to_cid = _normalize_p115_move_target_cid(to_cid)
+        if not to_cid:
+            return {'state': False, 'code': 'invalid_target_cid', 'message': '拒绝将文件移动到 115 根目录'}
         url = f"{self.base_url}/open/ufile/move"
         # ★ 支持传入列表，自动用逗号拼接
         fids_str = ",".join([str(f) for f in fids]) if isinstance(fids, list) else str(fids)
@@ -1939,6 +2023,9 @@ class P115CookieClient:
         return _p115_normalize_mkdir_response(self._json_result(r))
 
     def fs_move(self, fids, to_cid):
+        to_cid = _normalize_p115_move_target_cid(to_cid)
+        if not to_cid:
+            return {'state': False, 'code': 'invalid_target_cid', 'message': '拒绝将文件移动到 115 根目录'}
         ids = [str(i) for i in _p115_as_list(fids) if i is not None]
         if self.webapi and hasattr(self.webapi, 'fs_move'):
             try:
@@ -2619,7 +2706,7 @@ class P115Service:
                     return None
 
                 try:
-                    search_res = self.fs_files({
+                    search_res = self.fs_search({
                         "cid": parent_cid,
                         "search_value": name,
                         "limit": 100,
@@ -2649,9 +2736,22 @@ class P115Service:
                             or item.get("id")
                             or item.get("cid")
                         )
+                        item_parent = str(item.get("pid") or item.get("parent_id") or "").strip()
 
-                        if item_name == name and item_fc == "0" and item_cid:
-                            return str(item_cid)
+                        if (
+                            item_name == name
+                            and item_fc == "0"
+                            and item_cid
+                            and (not item_parent or item_parent == str(parent_cid))
+                        ):
+                            if _p115_is_visible_child_dir(
+                                self, parent_cid, name, item_cid
+                            ):
+                                return str(item_cid)
+                            logger.warning(
+                                f"  ➜ [115目录自愈] mkdir 回查命中不可见目录，"
+                                f"已忽略幽灵 CID: {name} ({item_cid})"
+                            )
 
                 except Exception as e:
                     logger.debug(f"  ➜ [115] mkdir 已存在后回查目录失败: parent={parent_cid}, name={name}, err={e}")
@@ -2791,6 +2891,13 @@ class P115Service:
                 return last_resp or {"state": False, "message": "创建目录失败"}
 
             def fs_move(self, fids, to_cid):
+                to_cid = _normalize_p115_move_target_cid(to_cid)
+                if not to_cid:
+                    return {
+                        'state': False,
+                        'code': 'invalid_target_cid',
+                        'message': '拒绝将文件移动到 115 根目录',
+                    }
                 return self._call_api('fs_move', fids, to_cid, normalizer=_p115_normalize_common_response)
 
             def fs_copy(self, fids, to_cid):
@@ -5792,7 +5899,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             data['actor_ids'] = [cast.get('id') for cast in raw_details.get('credits', {}).get('cast', [])[:3]]
 
             # =====================================================================
-            # ★★★ 5. 标题提取 (本地缓存优先 -> 隐身符清洗 -> 广告拦截 -> 别名兜底) ★★★
+            # ★★★ 5. 标题提取 (本地缓存优先 -> 隐身符清洗 -> 中文别名兜底) ★★★
             # =====================================================================
             cached_title = None
             cached_original_title = None
@@ -5846,10 +5953,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 raw_title = raw_details.get('title') or raw_details.get('name')
                 current_title = utils.clean_invisible_chars(raw_title)
                 
-                if utils.is_spam_title(current_title):
-                    logger.warning(f"  ➜ [115整理] 拦截到恶意广告片名: '{current_title}'，准备寻找干净的别名...")
-                    current_title = ""
-
                 if not current_title or not utils.contains_chinese(current_title):
                     chinese_alias = None
                     alt_titles_data = raw_details.get("alternative_titles", {})
@@ -5859,10 +5962,12 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     best_priority = 99
                     
                     for alt in alt_list:
+                        iso_country = alt.get("iso_3166_1", "").upper()
+                        if iso_country not in priority_map:
+                            continue
                         alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
-                            iso_country = alt.get("iso_3166_1", "").upper()
-                            current_priority = priority_map.get(iso_country, 5) 
+                        if utils.contains_chinese(alt_title):
+                            current_priority = priority_map[iso_country]
                             
                             if current_priority < best_priority:
                                 chinese_alias = alt_title
@@ -5872,11 +5977,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 break 
                     
                     if chinese_alias:
-                        logger.info(f"  ➜ [115整理] 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                        logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
                         current_title = chinese_alias
                     else:
                         original_title = original_main_title
-                        logger.info(f"  ➜ [115整理] 未找到干净的中文别名，回退到原名: '{original_title}'")
+                        logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
                         current_title = original_title
                 else:
                     # 如果主标题正常，提取原名
@@ -5918,6 +6023,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     title=data.get('title'),
                     original_title=data.get('original_title'),
                     rating_label=data.get('rating_label'),
+                    image_language_preference=config_manager.APP_CONFIG.get(
+                        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+                    ),
                 )
             except Exception as persist_error:
                 logger.warning(
@@ -7036,9 +7144,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         
         # 获取或创建未识别目录 CID
         config = get_config()
-        unidentified_cid = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        unidentified_cid = _normalize_p115_move_target_cid(
+            config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        )
         
-        if not unidentified_cid or str(unidentified_cid) == '0':
+        if not unidentified_cid:
             save_cid = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID)
             unidentified_folder_name = "未识别"
             if save_cid and str(save_cid) != '0':
@@ -7233,7 +7343,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             logger.info(f"  ➜ 检测到疑似合集包: {root_name}，正在验证...")
             collection_movies = []
             try:
-                res_c = tmdb.get_collection_details(int(self.tmdb_id), self.api_key, skip_fallback=True)
+                res_c = tmdb.get_collection_details(
+                    int(self.tmdb_id), self.api_key,
+                    skip_fallback=True, apply_image_preference=False,
+                )
                 if res_c and 'parts' in res_c: collection_movies = res_c['parts']
             except: pass
             
@@ -7247,7 +7360,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if res_m and res_m.get('belongs_to_collection'):
                             c_id = res_m['belongs_to_collection']['id']
                     if c_id:
-                        res_c = tmdb.get_collection_details(int(c_id), self.api_key, skip_fallback=True)
+                        res_c = tmdb.get_collection_details(
+                            int(c_id), self.api_key,
+                            skip_fallback=True, apply_image_preference=False,
+                        )
                         if res_c and 'parts' in res_c: collection_movies = res_c['parts']
                 except: pass
 
@@ -7516,8 +7632,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         MIN_VIDEO_SIZE = min_size_mb * 1024 * 1024
 
         # 获取“未识别”目录的 CID
-        unidentified_cid = config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
-        if not unidentified_cid or str(unidentified_cid) == '0':
+        unidentified_cid = _normalize_p115_move_target_cid(
+            config.get(constants.CONFIG_OPTION_115_UNRECOGNIZED_CID)
+        )
+        if not unidentified_cid:
             save_cid = config.get(constants.CONFIG_OPTION_115_SAVE_PATH_CID)
             if save_cid and str(save_cid) != '0':
                 try:
@@ -7537,47 +7655,6 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # ★★★ 核心升级：支持 / 分层创建多级目录 ★★★
         dir_parts = [p.strip() for p in std_root_name.split('/') if p.strip()]
 
-        def _is_visible_child_dir(parent_cid, dir_name, cid):
-            """确认目录 CID 真实挂在指定父目录下，避免复用回收站残留的幽灵目录。"""
-            if not parent_cid or not dir_name or not cid:
-                return False
-            if not isinstance(cid, (str, int)):
-                return True
-            try:
-                offset = 0
-                limit = 1000
-                while offset < 5000:
-                    res = self.client.fs_files({
-                        'cid': parent_cid,
-                        'limit': limit,
-                        'offset': offset,
-                        'show_dir': 1,
-                        'record_open_time': 0
-                    })
-                    if not isinstance(res, dict) or not res.get('state'):
-                        return True
-                    data = res.get('data')
-                    if not isinstance(data, list):
-                        return True
-                    for item in data:
-                        item_name = item.get('fn') or item.get('n') or item.get('file_name')
-                        item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
-                        item_cid = (
-                            item.get('fid')
-                            or item.get('file_id')
-                            or item.get('id')
-                            or item.get('cid')
-                        )
-                        if item_fc == '0' and item_name == dir_name and str(item_cid) == str(cid):
-                            return True
-                    if len(data) < limit:
-                        return False
-                    offset += limit
-                return False
-            except Exception as e:
-                logger.debug(f"  ➜ 目录可见性校验失败，保守沿用 CID: parent={parent_cid}, cid={cid}, err={e}")
-                return True
-        
         # 提前计算基础相对路径，用于逐级修复 local_path
         category_rule = next((r for r in self.rules if str(r.get('cid')) == str(target_cid)), None)
         base_rel_path = category_rule.get('category_path') or category_rule.get('dir_name', '未识别') if category_rule else "未识别"
@@ -7596,6 +7673,16 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     part_cid = P115CacheManager.get_cid_by_exact_local_path(next_rel_path, part_name)
                     if part_cid:
                         logger.debug(f"  ➜ [115整理] 命中目录路径缓存：{next_rel_path} -> {part_cid}")
+
+                if part_cid and not _p115_is_visible_child_dir(
+                    self.client, temp_parent_cid, part_name, part_cid
+                ):
+                    logger.warning(
+                        f"  ➜ [目录自愈] 缓存目录已不在预期父目录下，"
+                        f"已清理失效 CID: {part_name} ({part_cid})"
+                    )
+                    P115CacheManager.delete_cid(part_cid)
+                    part_cid = None
 
                 # 缓存自愈检查
                 if part_cid and str(part_cid) == str(source_root_id) and str(temp_parent_cid) != str(root_item.get('pid') or root_item.get('parent_id')):
@@ -7636,7 +7723,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     )
                                     
                                     if item_fc == '0' and item_name == part_name and item_cid:
-                                        if not _is_visible_child_dir(temp_parent_cid, part_name, item_cid):
+                                        if not _p115_is_visible_child_dir(
+                                            self.client, temp_parent_cid, part_name, item_cid
+                                        ):
                                             logger.warning(f"  ➜ [目录自愈] 同名搜索返回不可见目录，已忽略幽灵 CID: {part_name} ({item_cid})")
                                             P115CacheManager.delete_cid(item_cid)
                                             continue
@@ -7863,6 +7952,29 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # 解决超大季/超多集整理时，频繁查询本地DB和请求115 API导致的严重卡死问题
         # =================================================================
         memory_dir_cache = {}
+        validated_dir_cache_keys = set()
+
+        def _get_visible_cached_child(parent_cid, child_name):
+            cache_key = f"{parent_cid}_{child_name}"
+            child_cid = memory_dir_cache.get(cache_key)
+            if not child_cid:
+                child_cid = P115CacheManager.get_cid(parent_cid, child_name)
+            if not child_cid:
+                return None
+            if cache_key in validated_dir_cache_keys:
+                return child_cid
+            if _p115_is_visible_child_dir(self.client, parent_cid, child_name, child_cid):
+                memory_dir_cache[cache_key] = child_cid
+                validated_dir_cache_keys.add(cache_key)
+                return child_cid
+
+            logger.warning(
+                f"  ➜ [目录自愈] 季目录缓存已失效，已清理 CID: "
+                f"{child_name} ({child_cid})"
+            )
+            memory_dir_cache.pop(cache_key, None)
+            P115CacheManager.delete_cid(child_cid)
+            return None
         
         # 提前拉取目标主目录下的现有文件夹，填充到内存缓存中 (★ 优化：直接查本地数据库，零 API 消耗)
         if final_home_cid:
@@ -7953,14 +8065,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # 剧集仍然进入标准季目录
                 if self.media_type == 'tv' and season_num is not None and s_name:
                     cache_key = f"{final_home_cid}_{s_name}"
-                    s_cid = memory_dir_cache.get(cache_key)
-
-                    if not s_cid:
-                        s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
+                    s_cid = _get_visible_cached_child(final_home_cid, s_name)
 
                     if s_cid:
                         real_target_cid = s_cid
-                        memory_dir_cache[cache_key] = s_cid
                     else:
                         s_mk = self.client.fs_mkdir(s_name, final_home_cid)
                         s_cid = s_mk.get('cid') if s_mk.get('state') else None
@@ -7984,7 +8092,14 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                         or item.get('cid')
                                     )
 
-                                    if item_fc == '0' and item_name == s_name and item_cid:
+                                    if (
+                                        item_fc == '0'
+                                        and item_name == s_name
+                                        and item_cid
+                                        and _p115_is_visible_child_dir(
+                                            self.client, final_home_cid, s_name, item_cid
+                                        )
+                                    ):
                                         s_cid = item_cid
                                         break
                             except Exception:
@@ -7993,6 +8108,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if s_cid:
                             P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
                             memory_dir_cache[cache_key] = s_cid
+                            validated_dir_cache_keys.add(cache_key)
                             real_target_cid = s_cid
 
                             season_rel_path = f"{base_rel_path}/{s_name}"
@@ -8013,14 +8129,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 # ★ 直接使用返回的 s_name 创建/查找季目录
                 if self.media_type == 'tv' and season_num is not None and s_name:
                     cache_key = f"{final_home_cid}_{s_name}"
-                    s_cid = memory_dir_cache.get(cache_key)
-                    
-                    if not s_cid:
-                        s_cid = P115CacheManager.get_cid(final_home_cid, s_name)
+                    s_cid = _get_visible_cached_child(final_home_cid, s_name)
                     
                     if s_cid:
                         real_target_cid = s_cid
-                        memory_dir_cache[cache_key] = s_cid
                     else:
                         s_mk = self.client.fs_mkdir(s_name, final_home_cid)
                         s_cid = s_mk.get('cid') if s_mk.get('state') else None
@@ -8045,7 +8157,14 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                         or item.get('cid')
                                     )
                                         
-                                    if item_fc == '0' and item_name == s_name and item_cid:
+                                    if (
+                                        item_fc == '0'
+                                        and item_name == s_name
+                                        and item_cid
+                                        and _p115_is_visible_child_dir(
+                                            self.client, final_home_cid, s_name, item_cid
+                                        )
+                                    ):
                                         s_cid = item_cid
                                         break
                             except Exception: pass
@@ -8053,6 +8172,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if s_cid:
                             P115CacheManager.save_cid(s_cid, final_home_cid, s_name)
                             memory_dir_cache[cache_key] = s_cid
+                            validated_dir_cache_keys.add(cache_key)
                             real_target_cid = s_cid
                                 
                             # ★ 同步更新季目录的 local_path

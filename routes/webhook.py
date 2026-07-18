@@ -6,14 +6,16 @@ import time
 import os
 import re
 import json
+import requests
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 from typing import Optional, List
 from gevent import spawn_later, spawn
 from gevent.event import Event
 
 import task_manager
 import handler.emby as emby
+import handler.tmdb as tmdb
 from handler.p115_copy_play import cleanup_for_playback_stop
 from handler import p115_play_pool
 import config_manager
@@ -127,7 +129,7 @@ def _enqueue_active_series_notification(item_details: dict, notification_type: s
 
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
-    """Webhook 只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
+    """Emby 事件只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
     if str(item_type or '') not in {'Movie', 'Episode'}:
         return False
     path = str(item_path or '').strip()
@@ -138,9 +140,9 @@ def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path:
         if _is_etk_standard_strm(path):
             return False
     except Exception as e:
-        logger.warning(f"  ➜ [Webhook] STRM 标准校验失败，已跳过：{item_name or os.path.basename(path)}，原因：{e}")
+        logger.warning(f"  ➜ [Emby事件] STRM 标准校验失败，已跳过：{item_name or os.path.basename(path)}，原因：{e}")
         return True
-    logger.warning(f"  ➜ [Webhook] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
+    logger.warning(f"  ➜ [Emby事件] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
     return True
 
 
@@ -362,14 +364,14 @@ def _submit_webhook_media_task(
     )
     if submitted:
         if from_pending_queue:
-            logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 已从待提交队列成功分派。")
+            logger.info(f"  ➜ [Emby事件队列] 任务 '{task_name}' 已从待提交队列成功分派。")
         return True
 
     if from_pending_queue:
-        logger.debug(f"  ➜ [Webhook队列] 任务 '{task_name}' 分派时媒体任务仍繁忙，稍后继续尝试。")
+        logger.debug(f"  ➜ [Emby事件队列] 任务 '{task_name}' 分派时媒体任务仍繁忙，稍后继续尝试。")
         return False
 
-    logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 因媒体任务繁忙，已加入待提交队列。")
+    logger.info(f"  ➜ [Emby事件队列] 任务 '{task_name}' 因媒体任务繁忙，已加入待提交队列。")
     _enqueue_pending_webhook_task(task_payload)
     return False
 
@@ -412,7 +414,7 @@ def _merge_pending_webhook_task(existing_task, new_task):
     existing_kwargs["force_full_update"] = bool(
         existing_kwargs.get("force_full_update") or new_kwargs.get("force_full_update")
     )
-    existing_kwargs["aggregate_notification"] = len(merged_episode_ids) == 1
+    existing_kwargs["aggregate_notification"] = bool(merged_episode_ids)
     if existing_kwargs["is_new_item"] and existing_task.get("task_name", "").startswith("主动追更:"):
         existing_task["task_name"] = existing_task["task_name"].replace("主动追更:", "主动入库:", 1)
     return True
@@ -431,18 +433,18 @@ def _enqueue_pending_webhook_task(task_payload):
         for pending_task in WEBHOOK_PENDING_TASKS:
             if _merge_pending_webhook_task(pending_task, task_payload):
                 logger.info(
-                    "  ➜ [Webhook队列] 已合并同剧任务 '%s'，当前包含 %s 个分集。",
+                    "  ➜ [Emby事件队列] 已合并同剧任务 '%s'，当前包含 %s 个分集。",
                     pending_task["task_name"],
                     len(pending_task["kwargs"].get("new_episode_ids") or []),
                 )
                 break
             if _is_same_pending_webhook_task(pending_task, task_payload):
-                logger.debug(f"  ➜ [Webhook队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
+                logger.debug(f"  ➜ [Emby事件队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
                 break
         else:
             WEBHOOK_PENDING_TASKS.append(task_payload)
             logger.info(
-                f"  ➜ [Webhook队列] 当前待提交任务数: {len(WEBHOOK_PENDING_TASKS)} "
+                f"  ➜ [Emby事件队列] 当前待提交任务数: {len(WEBHOOK_PENDING_TASKS)} "
                 f"(最新: {task_payload['task_name']})"
             )
 
@@ -741,8 +743,8 @@ def _shared_resource_auto_share_enabled() -> bool:
 def _run_shared_auto_share_batch_detached(task_name: str, register_items: List[dict]):
     """共享供给侧登记必须脱离 task_manager 单线程队列。
 
-    Webhook 本身已经运行在 task_manager 的单 worker + task_lock 中。
-    如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致 Webhook 任务假死。
+    Emby 事件本身已经运行在 task_manager 的单 worker + task_lock 中。
+    如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致事件任务假死。
 
     Rapid v2 不再判断“是否有人需要”。只要共享资源开关已启用，
     媒体入库完成并补齐指纹后，就立即把本机秒传源登记到中心。
@@ -948,9 +950,9 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
     emby_item_ids,
     *,
     expected_item_type: Optional[str] = None,
-    log_prefix: str = "Webhook指纹补齐",
+    log_prefix: str = "Emby事件指纹补齐",
 ) -> int:
-    """Webhook 入库后按 Emby ID 找 media_metadata 行，并执行 115 指纹体检补齐。"""
+    """Emby 事件入库后按 Item ID 找 media_metadata 行，并执行 115 指纹体检补齐。"""
     ids = [str(x).strip() for x in (emby_item_ids or []) if str(x or '').strip()]
     if not ids:
         return 0
@@ -1035,7 +1037,7 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
 
 def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True, aggregate_notification: bool = False):
     """
-    【Webhook 统一入口】
+    【Emby 事件统一入口】
     统一处理 新入库(New) 和 追更(Update) 两种情况。
     """
     if not processor:
@@ -1071,7 +1073,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             item_name_for_log,
             [item_id],
             expected_item_type="Movie",
-            log_prefix="Webhook电影指纹补齐",
+            log_prefix="Emby事件电影指纹补齐",
         )
     elif item_type == "Series" and precise_new_episode_ids:
         _repair_webhook_p115_fingerprints_for_emby_ids(
@@ -1079,12 +1081,12 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             item_name_for_log,
             precise_new_episode_ids,
             expected_item_type="Episode",
-            log_prefix="Webhook新集指纹补齐",
+            log_prefix="Emby事件新集指纹补齐",
         )
 
     _cleanup_promoting_virtual_imports_after_library_ready(item_details, item_type, tmdb_id)
 
-    # 3. 共享资源供给侧实时触发：电影/本轮新增分集均在 Webhook 入库完成后登记；中心端负责后续整季归类。
+    # 3. 共享资源供给侧实时触发：电影/本轮新增分集均在 Emby 事件入库完成后登记；中心端负责后续整季归类。
     _submit_shared_auto_share_after_library_ready(
         item_details,
         item_id,
@@ -1175,22 +1177,16 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             current_name = item_name   # 这个变量在函数前面也定义过了
 
             if current_type == 'Movie' and current_tmdb_id:
-                # 2. 检查开关
-                config = settings_db.get_setting('native_collections_config') or {}
-                is_auto_complete_enabled = config.get('auto_complete_enabled', False)
-
-                if is_auto_complete_enabled:
-                    logger.trace(f"  ➜ 正在检查电影 '{current_name}' 所属 TMDb 合集...")
-                    # 直接调用 handler
-                    collections_handler.check_and_subscribe_collection_from_movie(
-                        movie_tmdb_id=str(current_tmdb_id),
-                        movie_name=current_name,
-                        movie_emby_id=item_id
-                    )
+                logger.trace(f"  ➜ 正在检查电影 '{current_name}' 所属 TMDb 合集...")
+                collections_handler.check_and_subscribe_collection_from_movie(
+                    movie_tmdb_id=str(current_tmdb_id),
+                    movie_name=current_name,
+                    movie_emby_id=item_id
+                )
         except Exception as e:
             logger.warning(f"  ➜ 检查所属 TMDb 合集时发生错误: {e}")
 
-    logger.trace(f"  ➜ Webhook 任务及所有后续流程完成: '{item_name_for_log}'")
+    logger.trace(f"  ➜ Emby 事件任务及所有后续流程完成: '{item_name_for_log}'")
 
     # 4. ★★★ 通知分流 ★★★
     try:
@@ -1198,7 +1194,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         # 如果 is_new_item 为 True，说明是新入库通知
         notif_type = 'update' if (precise_new_episode_ids and not is_new_item) else 'new'
         
-        if aggregate_notification and item_type == "Series" and len(precise_new_episode_ids) == 1:
+        if aggregate_notification and item_type == "Series" and precise_new_episode_ids:
             _enqueue_active_series_notification(item_details, notif_type, precise_new_episode_ids)
         else:
             telegram.send_media_notification(
@@ -1209,7 +1205,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
     except Exception as e:
         logger.error(f"触发通知失败: {e}")
 
-    logger.trace(f"  ➜ Webhook 任务及所有后续流程完成: '{item_name_for_log}'")
+    logger.trace(f"  ➜ Emby 事件任务及所有后续流程完成: '{item_name_for_log}'")
 
     # 打标
     if is_new_item: 
@@ -1274,7 +1270,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
 
                 # =======================================================
 
-                # 新集指纹体检与共享源登记均已在 Webhook 中完成；watchlist_processor 只负责追剧状态刷新。
+                # 新集指纹体检与共享源登记均已在 Emby 事件链中完成；watchlist_processor 只负责追剧状态刷新。
                 refresh_scope_text = (
                     f"本次只刷新 {len(precise_new_episode_ids)} 个新增分集。"
                     if precise_new_episode_ids
@@ -1294,7 +1290,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             except Exception as e:
                 logger.error(f"  ➜ 触发智能追剧任务失败: {e}")
 
-        # 启动协程，不等待结果，直接让当前 Webhook 任务结束
+        # 启动协程，不等待结果，直接让当前 Emby 事件任务结束
         spawn(_async_trigger_watchlist)
 
 def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, known_rating=None):
@@ -1412,7 +1408,7 @@ def _flush_active_emby_series_dispatch(series_id: str):
         force_full_update=False,
         new_episode_ids=episode_ids,
         is_new_item=not already_processed,
-        aggregate_notification=len(episode_ids) == 1,
+        aggregate_notification=bool(episode_ids),
     )
 
 
@@ -1520,26 +1516,429 @@ def _trigger_metadata_update_task(item_id, item_name):
         item_name=item_name
     )
 
-# --- Webhook 路由 ---
+
+@webhook_bp.route('/api/emby/plugin-update', methods=['GET'])
+def proxy_emby_plugin_update():
+    """通过 ETK 的网络代理转发最新版 Emby 插件 DLL。"""
+    upstream = None
+    try:
+        upstream = requests.get(
+            'https://github.com/hbq0405/etk-mediainfo-bridge/releases/latest/download/ETKMediaInfoBridge.dll',
+            headers={'User-Agent': 'EmbyToolKit-PluginUpdater'},
+            stream=True,
+            timeout=(15, 300),
+            proxies=config_manager.get_proxies_for_requests(),
+        )
+        upstream.raise_for_status()
+    except requests.RequestException as e:
+        if upstream is not None:
+            upstream.close()
+        logger.error(f"  ➜ ETK 插件更新代理下载失败: {e}")
+        return jsonify({'error': 'plugin_update_download_failed'}), 502
+
+    def generate():
+        try:
+            for chunk in upstream.iter_content(chunk_size=128 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    headers = {
+        'Content-Disposition': 'attachment; filename="ETKMediaInfoBridge.dll"',
+        'Cache-Control': 'no-store',
+    }
+    content_length = upstream.headers.get('Content-Length')
+    if content_length:
+        headers['Content-Length'] = content_length
+    return Response(
+        stream_with_context(generate()),
+        content_type='application/octet-stream',
+        headers=headers,
+    )
+
+
+@webhook_bp.route('/api/emby/metadata', methods=['GET'])
+def get_emby_metadata_by_path():
+    from database.metadata_provider_db import (
+        load_emby_metadata,
+        resolve_metadata_identity_by_path,
+    )
+
+    path = str(request.args.get('path') or '').strip()
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    if not path or requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+        return jsonify({'error': 'invalid metadata path request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    identity = resolve_metadata_identity_by_path(
+        path,
+        requested_type,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    if not identity or not identity.get('tmdb_id'):
+        return jsonify({'error': 'metadata path identity not found'}), 404
+
+    payload = load_emby_metadata(
+        identity['tmdb_id'],
+        identity['media_type'],
+        requested_type,
+        season_number=identity.get('season_number'),
+        episode_number=identity.get('episode_number'),
+    )
+    if not payload:
+        return jsonify({'error': 'metadata cache not found'}), 404
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@webhook_bp.route('/api/emby/metadata/backfill', methods=['POST'])
+def trigger_emby_metadata_backfill():
+    import task_manager
+    from tasks.media import task_backfill_media_metadata
+
+    submitted = task_manager.submit_task(
+        task_function=task_backfill_media_metadata,
+        task_name='补齐媒体元数据',
+        processor_type='media',
+        silent=True,
+    )
+    if submitted:
+        return jsonify({'ok': True, 'submitted': True}), 202
+    status = task_manager.get_task_status()
+    if status.get('is_running') and status.get('current_action') == '补齐媒体元数据':
+        return jsonify({'ok': True, 'submitted': False, 'reason': 'task_already_running'}), 200
+    return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
+
+
+@webhook_bp.route('/api/emby/metadata/images/refresh', methods=['POST'])
+def refresh_emby_metadata_images():
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from database.metadata_provider_db import (
+        build_image_language_parameter,
+        build_image_language_priority,
+        replace_cached_image_paths,
+        resolve_metadata_identity_by_path,
+        select_image_path,
+    )
+
+    path = str(request.args.get('path') or '').strip()
+    requested_tmdb_id = str(request.args.get('tmdb_id') or '').strip()
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode', 'Boxset'}:
+        return jsonify({'ok': False, 'error': 'invalid image refresh request'}), 400
+    if requested_type == 'Boxset':
+        if not requested_tmdb_id.isdigit():
+            return jsonify({'ok': False, 'error': 'invalid collection tmdb id'}), 400
+    elif not path:
+        return jsonify({'ok': False, 'error': 'invalid image refresh request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    if requested_type == 'Boxset':
+        tmdb_id = requested_tmdb_id
+        media_type = 'movie'
+    else:
+        identity = resolve_metadata_identity_by_path(
+            path,
+            requested_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get('tmdb_id'):
+            return jsonify({'ok': False, 'error': 'metadata path identity not found'}), 404
+
+        tmdb_id = str(identity['tmdb_id'])
+        media_type = str(identity['media_type'])
+        season_number = identity.get('season_number')
+        episode_number = identity.get('episode_number')
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    if not api_key:
+        return jsonify({'ok': False, 'error': 'tmdb api key is not configured'}), 503
+
+    try:
+        if requested_type == 'Boxset':
+            from database import tmdb_collection_db
+
+            details = tmdb.get_collection_details(int(tmdb_id), api_key, skip_fallback=True)
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb collection image lookup failed'}), 502
+            updated = tmdb_collection_db.update_native_collection_images(
+                tmdb_id,
+                details.get('poster_path'),
+                details.get('backdrop_path'),
+            )
+            logger.info(
+                "  ➤[图片替换] 已按 %s 优先级重选 BoxSet TMDb:%s 的图片，更新 %s 条缓存。",
+                '原语言' if config_manager.APP_CONFIG.get(
+                    constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+                ) == 'original' else '简体中文',
+                tmdb_id,
+                updated,
+            )
+            return jsonify({'ok': True, 'updated': updated}), 200
+
+        if media_type == 'movie':
+            base = tmdb.get_movie_details(int(tmdb_id), api_key, append_to_response='')
+        else:
+            base = tmdb.get_tv_details(
+                int(tmdb_id), api_key, append_to_response='', allow_english_fallback=False
+            )
+        if not base:
+            return jsonify({'ok': False, 'error': 'tmdb media identity lookup failed'}), 502
+
+        preference = config_manager.APP_CONFIG.get(
+            constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+        )
+        priorities = build_image_language_priority(base.get('original_language'), preference)
+        image_languages = build_image_language_parameter(priorities)
+
+        root_images = None
+        season_posters = None
+        episode_still = None
+        if requested_type in {'Movie', 'Series'}:
+            if media_type == 'movie':
+                image_data = tmdb.get_movie_details(
+                    int(tmdb_id), api_key, append_to_response='images',
+                    include_image_language=image_languages,
+                )
+            else:
+                image_data = tmdb.get_tv_details(
+                    int(tmdb_id), api_key, append_to_response='images',
+                    include_image_language=image_languages,
+                    allow_english_fallback=False,
+                )
+            if not image_data:
+                return jsonify({'ok': False, 'error': 'tmdb image lookup failed'}), 502
+            images = image_data.get('images') or {}
+            backdrop = select_image_path(images.get('backdrops'), priorities) or image_data.get('backdrop_path')
+            root_images = {
+                'poster': select_image_path(images.get('posters'), priorities) or image_data.get('poster_path'),
+                'backdrop': backdrop,
+                'logo': select_image_path(images.get('logos'), priorities),
+                'thumb': backdrop,
+            }
+
+            if requested_type == 'Series':
+                seasons = [
+                    item for item in image_data.get('seasons') or []
+                    if item.get('season_number') is not None
+                ]
+                season_posters = {int(item['season_number']): None for item in seasons}
+
+                def _fetch_season_poster(number):
+                    details = tmdb.get_season_details_tmdb(
+                        int(tmdb_id), number, api_key,
+                        append_to_response='images',
+                        include_image_language=image_languages,
+                    )
+                    if not details:
+                        return number, None
+                    return number, (
+                        select_image_path((details.get('images') or {}).get('posters'), priorities)
+                        or details.get('poster_path')
+                    )
+
+                with ThreadPoolExecutor(max_workers=min(4, max(1, len(seasons)))) as executor:
+                    futures = [
+                        executor.submit(_fetch_season_poster, int(item['season_number']))
+                        for item in seasons
+                    ]
+                    for future in as_completed(futures):
+                        number, poster_path = future.result()
+                        season_posters[number] = poster_path
+        elif requested_type == 'Season':
+            if season_number is None:
+                return jsonify({'ok': False, 'error': 'season number is required'}), 400
+            details = tmdb.get_season_details_tmdb(
+                int(tmdb_id), int(season_number), api_key,
+                append_to_response='images',
+                include_image_language=image_languages,
+            )
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb season image lookup failed'}), 502
+            season_posters = {
+                int(season_number): (
+                    select_image_path((details.get('images') or {}).get('posters'), priorities)
+                    or details.get('poster_path')
+                )
+            }
+        else:
+            if season_number is None or episode_number is None:
+                return jsonify({'ok': False, 'error': 'episode numbers are required'}), 400
+            details = tmdb.get_episode_details_tmdb(
+                int(tmdb_id), int(season_number), int(episode_number), api_key,
+                append_to_response='images',
+                include_image_language=image_languages,
+            )
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb episode image lookup failed'}), 502
+            episode_still = (
+                select_image_path((details.get('images') or {}).get('stills'), priorities)
+                or details.get('still_path')
+            )
+
+        updated = replace_cached_image_paths(
+            tmdb_id,
+            media_type,
+            requested_type,
+            root_images=root_images,
+            season_number=season_number,
+            season_posters=season_posters,
+            episode_number=episode_number,
+            episode_still=episode_still,
+        )
+        logger.info(
+            "  ➜ [图片替换] 已按 %s 优先级重选 %s TMDb:%s 的图片，更新 %s 条缓存。",
+            '原语言' if preference == 'original' else '简体中文', requested_type, tmdb_id, updated,
+        )
+        return jsonify({'ok': True, 'updated': updated}), 200
+    except Exception as exc:
+        logger.error("  ➜ [图片替换] 重选 TMDb 图片失败: %s", exc, exc_info=True)
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@webhook_bp.route('/api/emby/metadata/images/search', methods=['GET'])
+def search_emby_metadata_images():
+    from database.metadata_provider_db import (
+        build_image_language_priority,
+        get_cached_original_language,
+        preferred_image_candidates,
+        resolve_metadata_identity_by_path,
+        sort_image_candidates,
+    )
+
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    path = str(request.args.get('path') or '').strip()
+    tmdb_id = str(request.args.get('tmdb_id') or '').strip()
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode', 'Boxset'}:
+        return jsonify({'error': 'invalid image search request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    if not api_key:
+        return jsonify({'error': 'tmdb api key is not configured'}), 503
+    if requested_type == 'Boxset':
+        if not tmdb_id.isdigit():
+            return jsonify({'error': 'invalid collection tmdb id'}), 400
+        media_type = 'movie'
+        collection_details = tmdb.get_collection_details(
+            int(tmdb_id),
+            api_key,
+            skip_fallback=True,
+            apply_image_preference=False,
+        )
+        parts = (collection_details or {}).get('parts') or []
+        original_language = next((
+            str(item.get('original_language') or '').strip()
+            for item in parts
+            if isinstance(item, dict) and item.get('original_language')
+        ), '')
+    else:
+        identity = resolve_metadata_identity_by_path(
+            path,
+            requested_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get('tmdb_id'):
+            return jsonify({'error': 'metadata path identity not found'}), 404
+        tmdb_id = str(identity['tmdb_id'])
+        media_type = str(identity['media_type'])
+        season_number = identity.get('season_number')
+        episode_number = identity.get('episode_number')
+        original_language = get_cached_original_language(tmdb_id, media_type)
+
+    raw = tmdb.get_item_images_tmdb(
+        requested_type,
+        int(tmdb_id),
+        api_key,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    if raw is None:
+        return jsonify({'error': 'tmdb image search failed'}), 502
+
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+    )
+    priorities = build_image_language_priority(original_language, preference)
+    include_all_languages = str(
+        request.args.get('include_all_languages') or ''
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    candidates = []
+
+    def _append(values, image_type):
+        selected = (
+            sort_image_candidates(values, priorities)
+            if include_all_languages
+            else preferred_image_candidates(values, priorities)
+        )
+        for item in selected:
+            path_value = str(item.get('file_path') or '')
+            if not path_value:
+                continue
+            candidates.append({
+                'type': image_type,
+                'url': f"https://image.tmdb.org/t/p/original/{path_value.lstrip('/')}",
+                'thumbnail_url': f"https://image.tmdb.org/t/p/w500/{path_value.lstrip('/')}",
+                # When Emby asks for one language, ETK already applied its own priority.
+                # Mark it neutral so Emby does not filter it again using the library language.
+                'language': item.get('iso_639_1') if include_all_languages else None,
+                'width': item.get('width'),
+                'height': item.get('height'),
+                'community_rating': item.get('vote_average'),
+                'vote_count': item.get('vote_count'),
+            })
+
+    if requested_type in {'Movie', 'Series', 'Boxset'}:
+        _append(raw.get('posters'), 'Primary')
+        _append(raw.get('backdrops'), 'Backdrop')
+        if requested_type != 'Boxset':
+            _append(raw.get('logos'), 'Logo')
+            _append(raw.get('backdrops'), 'Thumb')
+    elif requested_type == 'Season':
+        _append(raw.get('posters'), 'Primary')
+    else:
+        _append(raw.get('stills'), 'Primary')
+        _append(raw.get('stills'), 'Thumb')
+
+    response = jsonify({'images': candidates})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+# --- 外部事件路由：MoviePilot Webhook / ETK Emby 插件事件 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])
 @webhook_bp.route('/api/emby/events', methods=['POST'])
 @extensions.processor_ready_required
 def emby_webhook():
     data = request.get_json(silent=True) or {}
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # ★★★            魔法日志 - START            ★★★
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # try:
-    #     import json
-    #     # 使用 WARNING 级别和醒目的标记，让它在日志中容易检索
-    #     logger.warning("  ➜ [魔法日志] 收到原始 Webhook 负载：Event=%s, type=%s", data.get("Event") or "-", data.get("type") or "-")
-    #     # 将整个 JSON 数据格式化后打印出来
-    #     logger.warning(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    # except Exception as e:
-    #     logger.error(f"[魔法日志] 记录原始 Webhook 时出错: {e}")
-    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # # ★★★             魔法日志 - END             ★★★
-    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
     is_plugin_endpoint = request.path == '/api/emby/events'
@@ -1659,11 +2058,11 @@ def emby_webhook():
                     if user_details and 'Policy' in user_details:
                         # 更新数据库
                         user_db.upsert_emby_users_batch([user_details])
-                        logger.info(f"  ➜ Webhook: 已更新用户 {updated_user_id} 的本地权限缓存。")
+                        logger.info(f"  ➜ Emby事件: 已更新用户 {updated_user_id} 的本地权限缓存。")
                 except Exception as e:
-                    logger.error(f"  ➜ Webhook 更新本地 Policy 失败: {e}")
+                    logger.error(f"  ➜ Emby事件更新本地 Policy 失败: {e}")
 
-            # 异步执行，不阻塞 Webhook 返回
+            # 异步执行，不阻塞 Emby 事件响应
             spawn(_update_local_policy_task)
         except Exception as e:
             logger.error(f"启动 Policy 更新任务失败: {e}")
@@ -1673,7 +2072,7 @@ def emby_webhook():
             last_update_time = SYSTEM_UPDATE_MARKERS.get(updated_user_id)
             # 如果找到了标记，并且时间戳在我们的抑制窗口期内
             if last_update_time and (time.time() - last_update_time) < RECURSION_SUPPRESSION_WINDOW:
-                logger.debug(f"  ➜ 忽略由系统内部同步触发的用户 '{updated_user_name}' 的权限更新 Webhook。")
+                logger.debug(f"  ➜ 忽略由系统内部同步触发的用户 '{updated_user_name}' 权限更新事件。")
                 # 为了保险起见，用完就删掉这个标记
                 del SYSTEM_UPDATE_MARKERS[updated_user_id]
                 # 直接返回成功，不再创建任何后台任务
@@ -1762,7 +2161,7 @@ def emby_webhook():
             notify_types = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
             if 'playback' in notify_types and event_type in ["playback.start", "playback.pause", "playback.stop"]:
                 try:
-                    # 使用 spawn 异步丢给后台处理，杜绝网络波动卡住 Emby Webhook 导致延迟
+                    # 使用 spawn 异步丢给后台处理，避免网络波动阻塞 Emby 事件响应
                     spawn(telegram.send_playback_notification, data)
                 except Exception as e:
                     logger.error(f"  ➜ 发送播放通知任务分配失败: {e}")
@@ -1786,18 +2185,18 @@ def emby_webhook():
                 except Exception:
                     # 如果获取失败，不影响主流程，日志中继续使用ID
                     pass
-                logger.trace(f"  ➜ Webhook: 已更新用户 '{user_name_for_log}' 对项目 '{item_name_for_log}' 的状态 ({event_type})。")
+                logger.trace(f"  ➜ Emby事件: 已更新用户 '{user_name_for_log}' 对项目 '{item_name_for_log}' 的状态 ({event_type})。")
                 return jsonify({"status": "user_data_updated"}), 200
             else:
-                logger.debug(f"  ➜ Webhook '{event_type}' 未包含可更新的用户数据，已忽略。")
+                logger.debug(f"  ➜ Emby事件 '{event_type}' 未包含可更新的用户数据，已忽略。")
                 return jsonify({"status": "event_ignored_no_updatable_data"}), 200
         except Exception as e:
-            logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
+            logger.error(f"  ➜ 通过 Emby 事件更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
     trigger_events = ["metadata.update", "image.update", "collection.items.removed"]
     if event_type not in trigger_events:
-        logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
+        logger.debug(f"  ➜ Emby事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
     
     item_from_webhook = data.get("Item", {}) if data else {}
@@ -1817,7 +2216,7 @@ def emby_webhook():
     
     trigger_types = ["Movie", "Series", "Season", "Episode", "BoxSet"]
     if not (original_item_id and original_item_type in trigger_types):
-        logger.debug(f"  ➜ Webhook事件 '{event_type}' (项目: {original_item_name}, 类型: {original_item_type}) 被忽略。")
+        logger.debug(f"  ➜ Emby事件 '{event_type}' (项目: {original_item_name}, 类型: {original_item_type}) 被忽略。")
         return jsonify({"status": "event_ignored_no_id_or_wrong_type"}), 200
 
     # ======================================================================
@@ -1829,11 +2228,11 @@ def emby_webhook():
         collection_name = item_from_webhook.get("Name")
 
         if collection_id in DELETING_COLLECTIONS:
-            logger.debug(f"  ➜ Webhook: 忽略合集 '{collection_name}' 的移除通知 (正在执行手动删除)。")
+            logger.debug(f"  ➜ Emby事件: 忽略合集 '{collection_name}' 的移除通知 (正在执行手动删除)。")
             return jsonify({"status": "ignored_manual_deletion"}), 200
         
         if collection_id:
-            logger.info(f"  ➜ Webhook: 合集 '{collection_name}' 有成员移除，正在检查合集存活状态...")
+            logger.info(f"  ➜ Emby事件: 合集 '{collection_name}' 有成员移除，正在检查合集存活状态...")
             
             def _check_collection_survival_task(processor=None):
                 details = emby.get_emby_item_details(
@@ -1865,23 +2264,23 @@ def emby_webhook():
         
         # --- 【拦截 1】如果是系统正在生成的封面，直接拦截，不查库，不报错 ---
         if event_type == "image.update" and original_item_id in UPDATING_IMAGES:
-            logger.debug(f"  ➜ Webhook: 忽略项目 '{original_item_name}' 的图片更新通知 (系统生成的封面)。")
+            logger.debug(f"  ➜ Emby事件: 忽略项目 '{original_item_name}' 的图片更新通知 (系统生成的封面)。")
             return jsonify({"status": "ignored_self_triggered_update"}), 200
         
         # --- 【拦截 2】如果是系统正在更新元数据，直接拦截 ---
         if event_type == "metadata.update" and original_item_id in UPDATING_METADATA:
-            logger.debug(f"  ➜ Webhook: 忽略项目 '{original_item_name}' 的元数据更新通知 (系统触发的更新)。")
+            logger.debug(f"  ➜ Emby事件: 忽略项目 '{original_item_name}' 的元数据更新通知 (系统触发的更新)。")
             return jsonify({"status": "ignored_self_triggered_metadata_update"}), 200
 
         # --- 【拦截 3】如果是合集(BoxSet)，它没有物理路径，直接跳过库路径检查 ---
         if original_item_type == "BoxSet":
-            logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 是合集类型，跳过媒体库路径检查。")
+            logger.trace(f"  ➜ Emby事件: 项目 '{original_item_name}' 是合集类型，跳过媒体库路径检查。")
             library_info = None 
         else:
             # 正常的媒体项，才去获取所属库信息
             library_info = emby.get_library_root_for_item(
                 original_item_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id, 
-                item_path=original_item_path # ★★★ 核心优化：直接把 Webhook 传来的 Path 喂进去
+                item_path=original_item_path
             )
         
         if library_info:
@@ -1891,7 +2290,7 @@ def emby_webhook():
 
             # 【关键拦截点】
             if lib_id not in allowed_libs:
-                logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
+                logger.trace(f"  ➜ Emby事件: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
                 return jsonify({"status": "ignored_library"}), 200
 
         if _should_skip_non_etk_strm_webhook(original_item_type, original_item_name, original_item_path):
@@ -1907,7 +2306,7 @@ def emby_webhook():
             extensions.media_processor_instance.emby_api_key, extensions.media_processor_instance.emby_user_id, item_name=original_item_name
         )
         if not series_id:
-            logger.warning(f"  ➜ Webhook '{event_type}': 剧集 '{original_item_name}' 未找到所属剧集，跳过。")
+            logger.warning(f"  ➜ Emby事件 '{event_type}': 剧集 '{original_item_name}' 未找到所属剧集，跳过。")
             return jsonify({"status": "event_ignored_episode_no_series_id"}), 200
         id_to_process = series_id
         
@@ -1937,6 +2336,62 @@ def emby_webhook():
         return jsonify({"status": "metadata_update_task_debounced", "item_id": id_to_process}), 202
 
     if event_type == "image.update":
-        return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+        from urllib.parse import parse_qs, unquote, urlparse
+        from database.metadata_provider_db import (
+            resolve_metadata_identity_by_path,
+            update_cached_image_path,
+        )
+
+        image = data.get("Image") if isinstance(data.get("Image"), dict) else {}
+        image_type = str(image.get("Type") or "").strip()
+        image_url = str(image.get("Url") or "").strip()
+        if not image_type or not image_url:
+            return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+
+        parsed = urlparse(image_url)
+        proxied_url = parse_qs(parsed.query).get("url", [None])[0]
+        if proxied_url:
+            parsed = urlparse(unquote(proxied_url))
+        marker = "/t/p/"
+        marker_index = parsed.path.find(marker)
+        if marker_index < 0:
+            logger.warning("  ➜ [图片更新] 所选图片不是 TMDb 图片，未写入 ETK 缓存：%s", image_url)
+            return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+        image_path = "/" + parsed.path[marker_index + len(marker):].split("/", 1)[-1].lstrip("/")
+
+        def _number(value):
+            try:
+                return int(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        season_number = _number(item_from_webhook.get("IndexNumber")) if original_item_type == "Season" else (
+            _number(item_from_webhook.get("ParentIndexNumber"))
+        )
+        episode_number = _number(item_from_webhook.get("IndexNumber")) if original_item_type == "Episode" else None
+        identity = resolve_metadata_identity_by_path(
+            original_item_path,
+            original_item_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get("tmdb_id"):
+            logger.warning("  ➜ [图片更新] 无法定位 '%s' 的 ETK 元数据记录。", original_item_name)
+            return jsonify({"status": "image_update_identity_not_found", "item_id": original_item_id}), 200
+
+        updated = update_cached_image_path(
+            identity["tmdb_id"],
+            identity["media_type"],
+            original_item_type,
+            image_type,
+            image_path,
+            season_number=identity.get("season_number"),
+            episode_number=identity.get("episode_number"),
+        )
+        logger.info(
+            "  ➜ [图片更新] 已将 '%s' 手动选择的 %s 图片写入 ETK 缓存，更新 %s 条记录。",
+            original_item_name, image_type, updated,
+        )
+        return jsonify({"status": "image_update_cached", "item_id": original_item_id, "updated": updated}), 200
 
     return jsonify({"status": "event_unhandled"}), 500

@@ -134,7 +134,7 @@
         <template #feedback>
           <n-text depth="3" style="font-size: 12px;">
             {{ currentRule.media_type === 'home_video'
-              ? '不参与 TMDb 智能分类，按目标目录原结构同步 STRM、NFO 和图片。'
+              ? '不参与 TMDb 智能分类，按目标目录原结构同步 STRM。'
               : '“混合”仅包含电影和剧集，不包含家庭视频。' }}
           </n-text>
         </template>
@@ -448,7 +448,7 @@ const genreOptions = computed(() => {
 
 const getRuleSummary = (rule) => {
   if (rule.media_type === 'home_video') {
-    return '按原目录同步 STRM、NFO 和图片，不参与 TMDb 分类';
+    return '按原目录同步 STRM，不参与 TMDb 分类';
   }
 
   const parts = [];

@@ -2147,7 +2147,7 @@ def _prepare_deep_delete_response(sha1, expected_pick_code=''):
         _deep_delete_snapshots[token] = snapshot
 
     logger.info(
-        '  -> [ETK deep delete] Prepared %s (%s, EmbyID=%s) with %s pick codes.',
+        '  ➜ [ETK 深度删除] 已准备删除：%s（类型=%s，EmbyID=%s，PickCode=%s 个）。',
         snapshot['item_name'], actual_type, root_item_id, len(pickcodes),
     )
     return jsonify({'ok': True, 'token': token, 'pickcode_count': len(pickcodes)})
@@ -2179,7 +2179,7 @@ def _commit_deep_delete_response():
             )
         except Exception:
             logger.exception(
-                '  -> [ETK deep delete] Failed to process Emby item %s.',
+                '  ➜ [ETK 深度删除] 处理 Emby 媒体项失败：EmbyID=%s。',
                 snapshot['item_id'],
             )
 
@@ -2189,7 +2189,7 @@ def _commit_deep_delete_response():
         daemon=True,
     ).start()
     logger.info(
-        '  -> [ETK deep delete] Committed %s (%s, EmbyID=%s).',
+        '  ➜ [ETK 深度删除] 已确认删除并提交后续处理：%s（类型=%s，EmbyID=%s）。',
         snapshot['item_name'], snapshot['item_type'], snapshot['item_id'],
     )
     return jsonify({'ok': True, 'accepted': True, 'pickcode_count': len(snapshot['pickcodes'])}), 202

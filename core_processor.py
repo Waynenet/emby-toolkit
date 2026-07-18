@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import tempfile
 import re
-import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
@@ -34,7 +33,6 @@ from cachetools import TTLCache
 from ai_translator import AITranslator
 from watchlist_processor import WatchlistProcessor
 from handler.douban import DoubanApi
-import nfo_builder
 logger = logging.getLogger(__name__)
 try:
     from handler.douban import DoubanApi
@@ -232,75 +230,6 @@ class MediaProcessor:
 
         return season_num, episode_num
     
-    # -- [追更补洞专用] 从文件路径提取电影版本文件列表 --
-    def _collect_movie_version_files_from_dir(self, media_path: str) -> List[str]:
-        """
-        实时监控电影 NFO 专用：
-        给定一个代表电影文件，自动收集同目录下的其它电影版本文件，
-        用于为多版本电影生成同名 .nfo。
-
-        注意：
-        - 只扫描当前目录，不递归，避免误扫 Extras / Behind the Scenes 等子目录。
-        - 跳过明显的样片、预告、花絮、字幕、mediainfo 等非正片文件。
-        - 跳过 SxxEyy 文件，避免剧集被误判成电影多版本。
-        """
-        if not media_path:
-            return []
-
-        movie_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
-        if not movie_dir or not os.path.isdir(movie_dir):
-            return [media_path] if os.path.isfile(media_path) else []
-
-        valid_exts = {
-            ".mp4", ".mkv", ".avi", ".ts", ".iso", ".rmvb", ".strm", ".mov", ".m2ts", ".webm"
-        }
-
-        # 明显不是正片的文件名关键词
-        skip_pattern = re.compile(
-            r"(^|[\s._\-\[\]()])"
-            r"(sample|trailer|trailers|preview|teaser|extra|extras|behind|featurette|"
-            r"花絮|预告|样片|片花|彩蛋|特辑|访谈)"
-            r"($|[\s._\-\[\]()])",
-            re.IGNORECASE
-        )
-
-        result = []
-
-        try:
-            for filename in os.listdir(movie_dir):
-                full_path = os.path.join(movie_dir, filename)
-                if not os.path.isfile(full_path):
-                    continue
-
-                stem, ext = os.path.splitext(filename)
-                ext = ext.lower()
-
-                if ext not in valid_exts:
-                    continue
-
-                if filename.startswith("."):
-                    continue
-
-                # 防止电影分支误扫剧集文件
-                if re.search(r"[sS]\d{1,4}[eE]\d{1,4}", filename):
-                    continue
-
-                # 跳过明显非正片
-                if skip_pattern.search(filename):
-                    continue
-
-                result.append(full_path)
-
-        except Exception as e:
-            logger.warning(f"  ➜ [元数据写入] 扫描电影多版本文件失败: {e}")
-            return [media_path] if os.path.isfile(media_path) else []
-
-        # 至少保证代表文件自己在里面
-        if os.path.isfile(media_path) and media_path not in result:
-            result.append(media_path)
-
-        return sorted(set(result))
-
     # --- 媒体库 GUID 映射维护 ---
     def _refresh_lib_guid_map(self):
         """从 Emby 实时获取所有媒体库的 ID 到 GUID 映射"""
@@ -786,9 +715,17 @@ class MediaProcessor:
         def selected_image_path(details, image_type, fallback_key=None):
             images = details.get('images') if isinstance(details, dict) else None
             values = images.get(image_type) if isinstance(images, dict) else None
-            for value in values or []:
-                if isinstance(value, dict) and value.get('file_path'):
-                    return value.get('file_path')
+            from database.metadata_provider_db import (
+                build_image_language_priority,
+                select_image_path,
+            )
+            priorities = build_image_language_priority(
+                details.get('original_language') if isinstance(details, dict) else None,
+                self.config.get(constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'),
+            )
+            selected = select_image_path(values, priorities)
+            if selected:
+                return selected
             return details.get(fallback_key) if fallback_key and isinstance(details, dict) else None
 
         # 从真理之源 p115_mediainfo_cache 提取绝对准确的物理时长
@@ -1263,8 +1200,8 @@ class MediaProcessor:
                     "tagline": series_details.get('tagline'),
                     "release_date": series_details.get('first_air_date'), 
                     "last_air_date": series_details.get('last_air_date'),
-                    "poster_path": series_details.get('poster_path'),
-                    "backdrop_path": series_details.get('backdrop_path'),
+                    "poster_path": selected_image_path(series_details, 'posters', 'poster_path'),
+                    "backdrop_path": selected_image_path(series_details, 'backdrops', 'backdrop_path'),
                     "logo_path": selected_image_path(series_details, 'logos'),
                     "thumb_path": selected_image_path(series_details, 'backdrops', 'backdrop_path'),
                     "homepage": series_details.get('homepage'),
@@ -1460,7 +1397,7 @@ class MediaProcessor:
                     if s_num not in formatted_season_casts_db_cache:
                         if season_cast:
                             filtered_s_cast = [p for p in season_cast if p.get("id") and (not remove_no_avatar or p.get("profile_path"))]
-                            formatted_season_casts_db_cache[s_num] = self._format_episode_cast_for_nfo(filtered_s_cast, item_details_from_emby)
+                            formatted_season_casts_db_cache[s_num] = self._format_episode_cast(filtered_s_cast, item_details_from_emby)
                         else:
                             formatted_season_casts_db_cache[s_num] = []
 
@@ -1488,7 +1425,7 @@ class MediaProcessor:
                         # 1. 优先使用分集专属演员
                         filtered_ep_cast = [p for p in ep_cast_raw if p.get("id") and (not remove_no_avatar or p.get("profile_path"))]
                         # 只有分集独有演员才调用格式化
-                        formatted_ep_cast = self._format_episode_cast_for_nfo(filtered_ep_cast, item_details_from_emby)
+                        formatted_ep_cast = self._format_episode_cast(filtered_ep_cast, item_details_from_emby)
                         ep_actors_json_list = [
                             {"tmdb_id": int(p.get("id")), "character": p.get("character"), "order": p.get("order", 999)} 
                             for p in formatted_ep_cast
@@ -2473,15 +2410,15 @@ class MediaProcessor:
     def _process_item_core_logic(self, item_details_from_emby: Dict[str, Any], force_full_update: bool = False, specific_episode_ids: Optional[List[str]] = None, media_info_only: bool = False):
         """
         【V3 极简架构版】
-        - 未命中缓存/强制刷新：执行完整的 TMDb -> AI翻译 -> 演员处理 -> NFO生成。
-        - 命中缓存：跳过 TMDb/AI/演员重算，但仍从缓存重建完整 NFO 和图片。
+        - 未命中缓存/强制刷新：执行完整的 TMDb -> AI翻译 -> 演员处理 -> 数据库写入。
+        - 命中缓存：跳过 TMDb/AI/演员重算，直接由插件恢复元数据和图片。
         - 媒体信息修复：强制绕过 processed_log，但复用数据库缓存，只刷新视频流/资产信息。
         """
         item_id = item_details_from_emby.get("Id")
         item_name_for_log = item_details_from_emby.get("Name", f"未知项目(ID:{item_id})")
         tmdb_id = item_details_from_emby.get("ProviderIds", {}).get("Tmdb")
         item_type = item_details_from_emby.get("Type")
-        uses_etk_metadata_provider = self._is_etk_strm_item(item_details_from_emby)
+        uses_etk_metadata_provider = self._is_etk_metadata_item(item_details_from_emby)
         metadata_persisted_before_refresh = False
 
         logger.trace(f"--- 开始处理 '{item_name_for_log}' (TMDb ID: {tmdb_id}) ---")
@@ -2492,7 +2429,7 @@ class MediaProcessor:
 
         try:
             # ======================================================================
-            # ★★★ 数据库缓存复用：跳过外部重算，但保留本地完整文件写入 ★★★
+            # ★★★ 数据库缓存复用：跳过外部重算，保留插件刷新链路 ★★★
             # ======================================================================
             using_cached_metadata = False
             formatted_metadata = None
@@ -2505,7 +2442,7 @@ class MediaProcessor:
                     formatted_metadata = payload
                     final_processed_cast = cast
                     using_cached_metadata = True
-                    logger.info(f"  ➜ [媒体信息修复] 命中数据库缓存，跳过 TMDb/AI/演员处理/NFO生成，仅刷新视频流资产信息。")
+                    logger.info(f"  ➜ [媒体信息修复] 命中数据库缓存，跳过 TMDb/AI/演员处理，仅刷新视频流资产信息。")
                 else:
                     logger.warning(f"  ➜ [媒体信息修复] 未命中可复用的数据库元数据/演员缓存，无法执行轻量修复，已跳过重型流程。")
                     return False
@@ -2517,7 +2454,7 @@ class MediaProcessor:
                     formatted_metadata = payload
                     final_processed_cast = cast
                     using_cached_metadata = True
-                    logger.info(f"  ➜ [数据库缓存] 跳过 TMDb/AI/演员重算，后续重建完整 NFO 和图片。")
+                    logger.info(f"  ➜ [数据库缓存] 跳过 TMDb/AI/演员重算，后续由插件恢复元数据和图片。")
 
             # ======================================================================
             # 传统重型处理流程 (手动入库 / 强制刷新 / 预处理遗漏)
@@ -2543,13 +2480,9 @@ class MediaProcessor:
                     logger.error("  ➜ 无法获取 TMDb 详情，中止处理。")
                     return False
 
-                # 提取 TMDb 官方中文别名 & 卖片哥广告拦截
+                # 提取 TMDb 官方中文别名
                 raw_title = fresh_data.get("title") if item_type == "Movie" else fresh_data.get("name")
                 current_title = utils.clean_invisible_chars(raw_title)
-                
-                if utils.is_spam_title(current_title):
-                    logger.warning(f"  ➜ [拦截] 检测到恶意广告片名: '{current_title}'，准备寻找替代片名...")
-                    current_title = ""
                 
                 if not current_title or not utils.contains_chinese(current_title):
                     chinese_alias = None
@@ -2558,18 +2491,19 @@ class MediaProcessor:
                     priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
                     best_priority = 99
                     for alt in alt_list:
+                        iso_country = alt.get("iso_3166_1", "").upper()
+                        if iso_country not in priority_map:
+                            continue
                         alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        # 别名也必须经过广告过滤
-                        if utils.contains_chinese(alt_title) and not utils.is_spam_title(alt_title):
-                            iso_country = alt.get("iso_3166_1", "").upper()
-                            current_priority = priority_map.get(iso_country, 5)
+                        if utils.contains_chinese(alt_title):
+                            current_priority = priority_map[iso_country]
                             if current_priority < best_priority:
                                 chinese_alias = alt_title
                                 best_priority = current_priority
                             if best_priority == 1: break
                     
                     if chinese_alias:
-                        logger.info(f"  ➜ 发现干净的 TMDb 官方中文别名: '{chinese_alias}'")
+                        logger.info(f"  ➜ 发现 TMDb 官方中文别名: '{chinese_alias}'")
                         if item_type == "Movie": fresh_data["title"] = chinese_alias
                         else:
                             fresh_data["name"] = chinese_alias
@@ -2578,7 +2512,7 @@ class MediaProcessor:
                     else:
                         # 回退到原名，交给 AI 翻译
                         original_title = fresh_data.get("original_title") if item_type == "Movie" else fresh_data.get("original_name")
-                        logger.info(f"  ➜ 未找到干净的中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
+                        logger.info(f"  ➜ 未找到中文别名，回退到原名: '{original_title}'，等待 AI 翻译。")
                         if item_type == "Movie": fresh_data["title"] = original_title
                         else:
                             fresh_data["name"] = original_title
@@ -2742,7 +2676,7 @@ class MediaProcessor:
                             if ep_key in generated_jokes:
                                 ep["overview"] = generated_jokes[ep_key]
 
-                # ★★★ 首次入库时，将提取到的导演强行塞入 formatted_metadata 供 NFO 使用 ★★★
+                # 首次入库时补齐导演，供数据库元数据快照使用。
                 if item_type == "Series":
                     from tasks.helpers import extract_top_directors
                     top_directors = extract_top_directors(fresh_data, max_count=3)
@@ -2757,49 +2691,10 @@ class MediaProcessor:
                         if d['id'] not in existing_crew_ids:
                             formatted_metadata['credits']['crew'].append(d)
 
-                if not uses_etk_metadata_provider:
-                    self.sync_item_metadata(
-                        item_details=item_details_from_emby,
-                        tmdb_id=tmdb_id,
-                        final_cast_override=final_processed_cast,
-                        metadata_override=formatted_metadata,
-                        force_write=True
-                    )
-                    self.download_images_from_tmdb(
-                        tmdb_id=tmdb_id,
-                        item_type=item_type,
-                        aggregated_tmdb_data=formatted_metadata,
-                        item_details=item_details_from_emby
-                    )
-                    self._update_emby_person_names(final_cast=final_processed_cast, formatted_metadata=formatted_metadata, item_details_from_emby=item_details_from_emby, item_name_for_log=item_name_for_log)
-                    media_path = item_details_from_emby.get("Path")
-                    if media_path:
-                        logger.info(f"  ➜ 正在通知 Emby 扫描本地目录以读取最新 NFO...")
-                        emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
-                        time.sleep(3)
-                else:
-                    logger.info("  ➜ [ETK元数据] 已跳过 STRM 的 NFO、目录图片和人物直写，改由插件从数据库恢复。")
+                logger.info("  ➜ [ETK元数据] 元数据、图片和人物由插件从数据库恢复。")
 
             elif not media_info_only:
-                if not uses_etk_metadata_provider:
-                    self.sync_item_metadata(
-                        item_details=item_details_from_emby,
-                        tmdb_id=tmdb_id,
-                        final_cast_override=final_processed_cast,
-                        metadata_override=formatted_metadata,
-                        force_write=True
-                    )
-                    self.download_images_from_tmdb(
-                        tmdb_id=tmdb_id,
-                        item_type=item_type,
-                        aggregated_tmdb_data=formatted_metadata,
-                        item_details=item_details_from_emby
-                    )
-                    media_path = item_details_from_emby.get("Path")
-                    if media_path:
-                        logger.info(f"  ➜ [数据库缓存] 正在通知 Emby 扫描本地目录以读取完整 NFO...")
-                        emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
-                        time.sleep(3)
+                logger.info("  ➜ [数据库缓存] 元数据和图片由插件从数据库恢复。")
 
             if uses_etk_metadata_provider and not media_info_only:
                 with get_central_db_connection() as conn:
@@ -2815,7 +2710,7 @@ class MediaProcessor:
                 metadata_persisted_before_refresh = True
 
             # 7. 正常处理/回流需要刷新 Emby 元数据以确保外挂字幕可以加载；
-            #    媒体信息修复模式只写数据库，不再触发 Emby/NFO/图片/人物链路。
+            #    媒体信息修复模式只写数据库，不再触发 Emby 元数据/图片/人物链路。
             if not media_info_only:
                 emby.refresh_emby_item_metadata(
                     item_emby_id=item_id,
@@ -2823,7 +2718,7 @@ class MediaProcessor:
                     emby_api_key=self.emby_api_key,
                     user_id_for_ops=self.emby_user_id,
                     replace_all_metadata_param=uses_etk_metadata_provider,
-                    replace_all_images_param=uses_etk_metadata_provider,
+                    replace_all_images_param=uses_etk_metadata_provider and not specific_episode_ids,
                     item_name_for_log=item_name_for_log
                 )
                 if uses_etk_metadata_provider:
@@ -3754,32 +3649,19 @@ class MediaProcessor:
                         new_cast_built.append(new_actor_entry)
 
             # ======================================================================
-            # 步骤 5: 最终格式化并写入 NFO
+            # 步骤 5: 最终格式化演员列表
             # ======================================================================
-            logger.info(f"  ➜ 手动处理：步骤 5/6: 重建演员列表并生成物理 NFO...")
+            logger.info(f"  ➜ 手动处理：步骤 5/6: 重建演员列表...")
             genres = item_details.get("Genres", [])
             is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres
             final_formatted_cast = actor_utils.format_and_complete_cast_list(
                 new_cast_built, is_animation, self.config, mode='manual'
             )
             
-            # 直接调用 sync_item_metadata 写入 NFO
-            self.sync_item_metadata(
-                item_details=item_details,
-                tmdb_id=tmdb_id,
-                final_cast_override=final_formatted_cast,
-                metadata_override=payload,
-                force_write=True
-            )
-
             # ======================================================================
             # 步骤 6: 触发扫描并更新日志
             # ======================================================================
-            logger.info("  ➜ 手动处理：步骤 6/6: 触发 Emby 目录扫描并更新内部日志...")
-            
-            media_path = item_details.get("Path")
-            if media_path:
-                emby.notify_emby_file_changes([media_path], self.emby_url, self.emby_api_key)
+            logger.info("  ➜ 手动处理：步骤 6/6: 写入数据库并刷新 Emby...")
                 
             # 更新我们自己的数据库日志和缓存
             with get_central_db_connection() as conn:
@@ -3799,6 +3681,16 @@ class MediaProcessor:
                 self.log_db_manager.save_to_processed_log(cursor, item_id, item_name, score=10.0)
                 self.log_db_manager.remove_from_failed_log(cursor, item_id)
                 conn.commit()
+
+            emby.refresh_emby_item_metadata(
+                item_emby_id=item_id,
+                emby_server_url=self.emby_url,
+                emby_api_key=self.emby_api_key,
+                user_id_for_ops=self.emby_user_id,
+                replace_all_metadata_param=True,
+                replace_all_images_param=False,
+                item_name_for_log=item_name,
+            )
 
             logger.info(f"  ➜ 手动处理 '{item_name}' 流程完成。")
             return True
@@ -4273,15 +4165,15 @@ class MediaProcessor:
     # --- 从 TMDb 直接下载图片 (用于实时监控/预处理/追剧刷新) ---
     def download_images_from_tmdb(self, tmdb_id: str, item_type: str, aggregated_tmdb_data: Optional[Dict[str, Any]] = None, item_details: Optional[Dict[str, Any]] = None, force_overwrite_episodes: Optional[List[str]] = None, allow_etk_episode_images: bool = False) -> bool:
         if not tmdb_id: return False
-        is_etk_strm = bool(item_details and self._is_etk_strm_item(item_details))
-        if is_etk_strm:
+        uses_etk_metadata_provider = bool(item_details and self._is_etk_metadata_item(item_details))
+        if uses_etk_metadata_provider:
             if allow_etk_episode_images:
                 return self._sync_etk_episode_images(
                     aggregated_tmdb_data or {},
                     item_details,
                     force_overwrite_episodes,
                 )
-            logger.debug("  ➜ [ETK元数据] STRM 图片由插件远程恢复，跳过目录图片下载。")
+            logger.debug("  ➜ [ETK元数据] 图片由插件远程恢复，跳过目录图片下载。")
             return True
 
         try:
@@ -4544,8 +4436,8 @@ class MediaProcessor:
             logger.error(f"  ➜ [手动换图] 失败: {e}", exc_info=True)
             return False, f"替换失败: {str(e)}"
 
-    # --- 格式化演员列表用于 NFO 写入 ---
-    def _format_episode_cast_for_nfo(self, raw_cast_list: List[Dict[str, Any]], item_details: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # --- 格式化季/集演员列表 ---
+    def _format_episode_cast(self, raw_cast_list: List[Dict[str, Any]], item_details: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         分集演员表专用格式化：
         1. 先清洗角色名，去掉 AI 或原始数据里残留的“饰/配/as”前后缀
@@ -4600,335 +4492,13 @@ class MediaProcessor:
             return False
         return False
 
-    # --- 生成NFO元数据 ---
-    def sync_item_metadata(self, item_details: Dict[str, Any], tmdb_id: str,
-                       final_cast_override: Optional[List[Dict[str, Any]]] = None,
-                       metadata_override: Optional[Dict[str, Any]] = None,
-                       is_series_refresh: bool = False,
-                       force_write: bool = False):
-        """
-        【纯净 NFO 模式】基于模板和现有数据构建元数据文件，生成 XML 写入物理目录。
-        """
-        if self._is_etk_strm_item(item_details):
-            logger.debug("  ➜ [ETK元数据] STRM 元数据由插件恢复，跳过 NFO 生成。")
+    @classmethod
+    def _is_etk_metadata_item(cls, item_details: Dict[str, Any]) -> bool:
+        if cls._is_etk_strm_item(item_details):
             return True
-        item_type = item_details.get("Type")
-        log_prefix = "[元数据写入]"
-
-        data_to_write = copy.deepcopy(metadata_override) if metadata_override else {}
-        cast_to_write = final_cast_override or []
-
-        # 是否写入合集元数据（仅电影且开关未开启时剔除合集信息）
-        if item_type == 'Movie':
-            if not self.config.get(constants.CONFIG_OPTION_GENERATE_COLLECTION_NFO, False):
-                # 如果开关未开启，从写入数据中剔除合集信息
-                data_to_write.pop('belongs_to_collection', None)
-
-        # =========================================================
-        # ★★★ 通用数据净化阶段 ★★★
-        # =========================================================
-        if data_to_write:
-            # A. 工作室/电视网中文化处理 (过滤并翻译)
-            if self.config.get(constants.CONFIG_OPTION_STUDIO_TO_CHINESE, False):
-                try:
-                    studio_mapping_data = settings_db.get_setting('studio_mapping') or utils.DEFAULT_STUDIO_MAPPING
-                    company_id_map, network_id_map, name_map = {}, {}, {}
-                    for entry in studio_mapping_data:
-                        label = entry.get('label')
-                        if not label: continue
-                        for cid in entry.get('company_ids', []): company_id_map[int(cid)] = label
-                        for nid in entry.get('network_ids', []): network_id_map[int(nid)] = label
-                        for en_name in entry.get('en', []): name_map[en_name.lower().strip()] = label
-
-                    def filter_and_translate_studios(source_list, is_network_field=False):
-                        if not source_list: return []
-                        filtered = []
-                        for item in source_list:
-                            s_id, s_name = item.get('id'), item.get('name', '').strip()
-                            mapped_label = None
-                            if s_id is not None:
-                                try: mapped_label = network_id_map.get(int(s_id)) if is_network_field else company_id_map.get(int(s_id))
-                                except: pass
-                            if not mapped_label and s_name: mapped_label = name_map.get(s_name.lower())
-                            
-                            # ★★★ 核心修复：有映射则改名并保留，无映射则直接丢弃！ ★★★
-                            if mapped_label:
-                                item['name'] = mapped_label
-                                filtered.append(item)
-                        return filtered
-
-                    if item_type == 'Movie' and 'production_companies' in data_to_write:
-                        data_to_write['production_companies'] = filter_and_translate_studios(data_to_write['production_companies'], False)
-                    elif item_type == 'Series':
-                        if 'networks' in data_to_write: data_to_write['networks'] = filter_and_translate_studios(data_to_write['networks'], True)
-                        if 'production_companies' in data_to_write: data_to_write['production_companies'] = filter_and_translate_studios(data_to_write['production_companies'], False)
-                except Exception as e_studio:
-                    logger.warning(f"  ➜ {log_prefix} 处理工作室中文化时发生错误: {e_studio}")
-
-            # B. 剧集专属：合并 Networks 和 Production Companies
-            if item_type == 'Series':
-                merged_list = data_to_write.get('networks', []) + data_to_write.get('production_companies', [])
-                unique_networks, seen_ids, seen_names = [], set(), set()
-                for item in merged_list:
-                    if not isinstance(item, dict): continue
-                    i_id, i_name = item.get('id'), item.get('name')
-                    is_duplicate = False
-                    if i_id:
-                        if i_id in seen_ids: is_duplicate = True
-                        else: seen_ids.add(i_id)
-                    if i_name:
-                        if i_name in seen_names: is_duplicate = True
-                        else: seen_names.add(i_name)
-                    if not i_id and not i_name: continue
-                    if not is_duplicate: unique_networks.append(item)
-                data_to_write['networks'] = unique_networks
-                if 'production_companies' in data_to_write: del data_to_write['production_companies']
-
-            # C. 关键词映射处理
-            if self.config.get(constants.CONFIG_OPTION_KEYWORD_TO_TAGS, False):
-                try:
-                    mapping_data = settings_db.get_setting('keyword_mapping') or utils.DEFAULT_KEYWORD_MAPPING
-                    keyword_map = {str(kid): entry.get('label') for entry in mapping_data if entry.get('label') for kid in entry.get('ids', [])}
-                    
-                    # ★ 修复：同时兼容 TMDb 的字典格式和本地数据库的列表格式
-                    kw_data = data_to_write.get('keywords', [])
-                    source_keywords = []
-                    if isinstance(kw_data, dict):
-                        source_keywords = kw_data.get('keywords') or kw_data.get('results') or []
-                    elif isinstance(kw_data, list):
-                        source_keywords = kw_data
-                        
-                    final_tags = {keyword_map[str(k.get('id', ''))] for k in source_keywords if isinstance(k, dict) and str(k.get('id', '')) in keyword_map}
-                    
-                    # 将映射后的中文标签存入一个特殊字段
-                    data_to_write['_mapped_chinese_tags'] = list(final_tags)
-                except Exception as e_tags:
-                    logger.warning(f"  ➜ {log_prefix} 处理关键词映射时发生错误: {e_tags}")
-
-        # ======================================================================
-        # ★★★ 写入 NFO 文件 ★★★
-        # ======================================================================
-        logger.info(f"  ➜ 正在生成并写入 NFO 文件...")
-        media_path = item_details.get("Path")
-        if not media_path:
-            logger.warning(f"  ➜ 无法获取物理路径，跳过 NFO 生成。")
-            return
-
-        episode_dir = os.path.dirname(media_path) if os.path.isfile(media_path) else media_path
-        series_root_dir = episode_dir
-        if self._extract_season_from_path_or_text(os.path.basename(episode_dir)) is not None:
-            series_root_dir = os.path.dirname(episode_dir)
-
-        # --- 智能比稳写入函数 ---
-        def _write_nfo_if_changed(file_path: str, content: str) -> bool:
-            # ★ 核心修复：如果开启了强制写入，直接跳过比对！
-            if not force_write and os.path.exists(file_path):
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        old_content = f.read()
-                    
-                    def _get_tag_text(xml_str, tag):
-                        match = re.search(f'<{tag}[^>]*>(.*?)</{tag}>', xml_str, re.IGNORECASE | re.DOTALL)
-                        return match.group(1).strip() if match else ""
-
-                    old_title = _get_tag_text(old_content, 'title')
-                    old_plot = _get_tag_text(old_content, 'plot')
-                    new_title = _get_tag_text(content, 'title')
-                    new_plot = _get_tag_text(content, 'plot')
-
-                    if old_title == new_title and old_plot == new_plot:
-                        return False 
-                except Exception:
-                    pass 
-            
-            # 执行写入
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                return True
-            except Exception as e:
-                logger.error(f"  ➜ 写入 NFO 失败 {file_path}: {e}")
-                return False
-
-        try:
-            if item_type == "Movie":
-                nfo_content = nfo_builder.build_movie_nfo(data_to_write, cast_to_write)
-
-                movie_files = self._collect_movie_version_files_from_dir(media_path)
-                if not movie_files:
-                    movie_files = [media_path]
-
-                generated_count = 0
-                skipped_count = 0
-
-                for movie_file in movie_files:
-                    nfo_path = os.path.splitext(movie_file)[0] + ".nfo"
-                    if _write_nfo_if_changed(nfo_path, nfo_content):
-                        generated_count += 1
-                        logger.info(f"  ➜ 成功写入电影 NFO: {nfo_path}")
-                    else:
-                        skipped_count += 1
-                        logger.debug(f"  ➜ 电影 NFO 内容未变，跳过写入: {nfo_path}")
-
-                if len(movie_files) > 1:
-                    logger.info(
-                        f"  ➜ 电影多版本 NFO 生成完成：实际更新 {generated_count} 个，跳过 {skipped_count} 个未变更。"
-                    )
-
-            elif item_type == "Series":
-                nfo_path = os.path.join(series_root_dir, "tvshow.nfo")
-                
-                # 追剧刷新时，读取旧 NFO 锁定标题和演员表
-                if is_series_refresh and os.path.exists(nfo_path):
-                    try:
-                        import xml.etree.ElementTree as ET
-                        tree = ET.parse(nfo_path)
-                        root = tree.getroot()
-                        
-                        ext_title = root.findtext('title')
-                        ext_orig = root.findtext('originaltitle')
-                        ext_sort = root.findtext('sorttitle')
-                        
-                        if ext_title: data_to_write['name'] = ext_title
-                        if ext_orig: data_to_write['original_name'] = ext_orig
-                        if ext_sort: data_to_write['sorttitle'] = ext_sort
-                        
-                        if not cast_to_write:
-                            old_actors = []
-                            for actor_elem in root.findall('actor'):
-                                old_actors.append({
-                                    'name': actor_elem.findtext('name'),
-                                    'character': actor_elem.findtext('role'),
-                                    'order': actor_elem.findtext('order'),
-                                    'profile_path': actor_elem.findtext('thumb'),
-                                    'tmdb_id': actor_elem.findtext('tmdbid')
-                                })
-                            if old_actors:
-                                cast_to_write = old_actors
-                                logger.info(f"  ➜ 追剧刷新：已从旧 NFO 恢复 {len(old_actors)} 位演员。")
-                                
-                        logger.info("  ➜ 追剧刷新：已锁定并继承原有剧集标题与演员表。")
-                    except Exception as e:
-                        logger.warning(f"  ➜ 读取原有 NFO 失败: {e}")
-
-                nfo_content = nfo_builder.build_tvshow_nfo(data_to_write, cast_to_write)
-                if _write_nfo_if_changed(nfo_path, nfo_content):
-                    logger.info(f"  ➜ 成功写入剧 NFO: {nfo_path}")
-                
-                episodes_data = data_to_write.get("episodes_details", {})
-                seasons_data = data_to_write.get("seasons_details", [])
-                
-                if episodes_data and os.path.isdir(series_root_dir):
-                    valid_exts = {'.mp4', '.mkv', '.avi', '.ts', '.iso', '.rmvb', '.strm'}
-                    generated_count = 0
-                    skipped_count = 0
-                    season_dirs_processed = set()
-
-                    # ★★★ 新增：获取无头像过滤开关 ★★★
-                    remove_no_avatar = self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True)
-                    
-                    def _filter_raw_cast(raw_cast_list):
-                        """辅助函数：仅过滤无头像演员，无需再翻译，因为源头已翻译"""
-                        if not raw_cast_list: return []
-                        return [a for a in raw_cast_list if not remove_no_avatar or a.get('profile_path')]
-                    
-                    formatted_season_casts_cache = {}
-                    # 剧集总演员表其实在传入时 (cast_to_write) 已经是格式化好的了，直接复用
-                    formatted_series_cast = cast_to_write 
-
-                    for root_dir, dirs, files in os.walk(series_root_dir):
-                        for filename in files:
-                            if os.path.splitext(filename)[1].lower() not in valid_exts: continue
-                            match = re.search(r'[sS](\d{1,4})[eE](\d{1,4})', filename)
-                            if match:
-                                target_s, target_e = int(match.group(1)), int(match.group(2))
-                                
-                                season_info = next((s for s in seasons_data if s.get('season_number') == target_s), None)
-                                season_crew = []
-                                
-                                # ★ 缓存季演员表格式化结果
-                                if target_s not in formatted_season_casts_cache:
-                                    if season_info:
-                                        s_credits = season_info.get('credits') or season_info.get('aggregate_credits') or {}
-                                        raw_s_cast = _filter_raw_cast(s_credits.get('cast', []))
-                                        season_crew = s_credits.get('crew', [])
-                                        # 仅在这里调用一次格式化
-                                        formatted_season_casts_cache[target_s] = self._format_episode_cast_for_nfo(raw_s_cast, item_details)
-                                    else:
-                                        formatted_season_casts_cache[target_s] = []
-
-                                if root_dir not in season_dirs_processed:
-                                    if season_info:
-                                        season_nfo_content = nfo_builder.build_season_nfo(season_info)
-                                        season_nfo_path = os.path.join(root_dir, "season.nfo")
-                                        if _write_nfo_if_changed(season_nfo_path, season_nfo_content):
-                                            logger.info(f"  ➜ 成功写入季 NFO: {season_nfo_path}")
-                                    season_dirs_processed.add(root_dir)
-
-                                ep_list = episodes_data.values() if isinstance(episodes_data, dict) else (episodes_data if isinstance(episodes_data, list) else [])
-                                matched_ep = next((ep for ep in ep_list if ep.get("season_number") == target_s and ep.get("episode_number") == target_e), None)
-                                
-                                final_ep_cast = []
-
-                                max_ep_actors = int(self.config.get(constants.CONFIG_OPTION_MAX_EPISODE_ACTORS_TO_PROCESS, 0))
-                                
-                                if matched_ep:
-                                    raw_ep_cast = []
-                                    # 只有当配置 > 0 时，才提取分集专属演员并截断
-                                    if max_ep_actors > 0:
-                                        raw_ep_cast = matched_ep.get('credits', {}).get('cast', []) + matched_ep.get('credits', {}).get('guest_stars', [])
-                                        raw_ep_cast = raw_ep_cast[:max_ep_actors]
-                                        
-                                    ep_cast = _filter_raw_cast(raw_ep_cast)
-
-                                    if ep_cast:
-                                        # 只有当这一集有自己独有的演员表时，才调用格式化
-                                        final_ep_cast = self._format_episode_cast_for_nfo(ep_cast, item_details)
-                                    else:
-                                        # 兜底：直接拿缓存好的季演员表或剧演员表，不重复格式化！
-                                        final_ep_cast = formatted_season_casts_cache.get(target_s) or formatted_series_cast
-
-                                    ep_crew = matched_ep.get('crew', [])
-                                    if not ep_crew:
-                                        ep_crew = matched_ep.get('credits', {}).get('crew', [])
-                                    if not ep_crew and season_crew:
-                                        if 'credits' not in matched_ep:
-                                            matched_ep['credits'] = {}
-                                        matched_ep['credits']['crew'] = season_crew
-
-                                    ep_nfo_content = nfo_builder.build_episode_nfo(matched_ep, final_ep_cast)
-
-                                else:
-                                    dummy_ep = {
-                                        "season_number": target_s,
-                                        "episode_number": target_e,
-                                        "name": f"第 {target_e} 集",
-                                        "overview": "",
-                                        "id": "",
-                                        "credits": {"crew": season_crew}
-                                    }
-                                    # 兜底：直接拿缓存
-                                    final_ep_cast = formatted_season_casts_cache.get(target_s) or formatted_series_cast
-                                    ep_nfo_content = nfo_builder.build_episode_nfo(dummy_ep, final_ep_cast)
-
-                                ep_nfo_path = os.path.join(root_dir, os.path.splitext(filename)[0] + ".nfo")
-                                
-                                if _write_nfo_if_changed(ep_nfo_path, ep_nfo_content):
-                                    generated_count += 1
-                                else:
-                                    skipped_count += 1
-                    logger.info(f"  ➜ 生成NFO完成，实际更新了 {generated_count} 个 NFO (跳过了 {skipped_count} 个未变更的)。")
-
-            elif item_type == "Episode":
-                nfo_content = nfo_builder.build_episode_nfo(data_to_write, cast_to_write)
-                nfo_path = os.path.splitext(media_path)[0] + ".nfo"
-                if _write_nfo_if_changed(nfo_path, nfo_content):
-                    logger.info(f"  ➜ 成功写入分集 NFO: {nfo_path}")
-                else:
-                    logger.debug(f"  ➜ 分集 NFO 内容未变，跳过写入: {nfo_path}")
-
-        except Exception as e:
-            logger.error(f"  ➜ 写入 NFO 文件失败: {e}")
+        item_type = str((item_details or {}).get('Type') or '')
+        path = str((item_details or {}).get('Path') or '').strip()
+        return item_type in {'Movie', 'Series', 'Season', 'Episode'} and bool(path)
 
     # --- 提取标签 ---
     def extract_tag_names(item_data):

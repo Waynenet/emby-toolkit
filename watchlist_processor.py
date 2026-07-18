@@ -1182,7 +1182,7 @@ class WatchlistProcessor:
                 
         # logger.debug(f"  ➜ [调试] 成功构建 unified_episodes_dict，共 {len(unified_episodes_dict)} 集。")
         
-        # 强制覆盖 aggregated_data 中的 episodes_details，供后续 NFO 和图片下载使用
+        # 强制覆盖 aggregated_data 中的 episodes_details，供后续数据库写入和图片补齐使用。
         aggregated_data['episodes_details'] = unified_episodes_dict
 
         # ======================================================================
@@ -1388,11 +1388,11 @@ class WatchlistProcessor:
         # 直接使用我们刚才统一构建的 unified_episodes_dict
         all_tmdb_episodes = list(unified_episodes_dict.values())
             
-        # ★★★ 4.5 新增：并发下载缺失的图片 & 补全 NFO ★★★
+        # 4.5 补齐新增或变化的分集图片。
+        current_item_details = None
         try:
             import extensions
             if extensions.media_processor_instance:
-                current_item_details = None
                 if item_id:
                     current_item_details = emby.get_emby_item_details(
                         item_id, self.emby_url, self.emby_api_key, self.emby_user_id
@@ -1409,60 +1409,10 @@ class WatchlistProcessor:
                     allow_etk_episode_images=True,
                 )
 
-                # 2. ★★★ 核心修复：NFO 模式下，追剧刷新必须补全 NFO 文件 ★★★
-                if current_item_details:
-                    logger.debug(f"  ➜ [NFO模式] 正在为 '{item_name}' 补全 NFO 文件...")
-                    
-                    # A. 构造正确的 Payload 结构 (将嵌套的 series_details 提级到根目录)
-                    payload_for_nfo = latest_series_data.copy()
-                    payload_for_nfo['seasons_details'] = aggregated_data.get('seasons_details', [])
-                    payload_for_nfo['episodes_details'] = aggregated_data.get('episodes_details', {})
-                    
-                    # ★★★ 将辛苦抓取的导演强行塞入 payload，确保 NFO Builder 能读到 ★★★
-                    # 兼容 NFO Builder 的读取习惯，把导演伪装成 crew 塞进 credits 里
-                    if 'credits' not in payload_for_nfo:
-                        payload_for_nfo['credits'] = {'crew': []}
-                    elif 'crew' not in payload_for_nfo['credits']:
-                        payload_for_nfo['credits']['crew'] = []
-                        
-                    existing_crew_ids = {c.get('id') for c in payload_for_nfo['credits']['crew'] if c.get('job') in ['Director', 'Series Director']}
-                    for d in directors:
-                        if d.get('id') not in existing_crew_ids:
-                            payload_for_nfo['credits']['crew'].append({
-                                'id': d.get('id'),
-                                'name': d.get('name'),
-                                'job': 'Director'
-                            })
-                    
-                    # B. 从数据库逆向恢复之前精修过的演员表 (防止 NFO 演员表被清空)
-                    _, db_actors = extensions.media_processor_instance._reconstruct_full_data_from_db(tmdb_id, 'Series')
-                    
-                    # C. 写入 NFO
-                    extensions.media_processor_instance.sync_item_metadata(
-                        item_details=current_item_details,
-                        tmdb_id=tmdb_id,
-                        final_cast_override=db_actors, # 传入从数据库恢复的精修演员表
-                        metadata_override=payload_for_nfo, # 传入结构正确的 TMDb 数据
-                        is_series_refresh=True # ★★★ 修复4：标记为追剧刷新模式，跳过 tvshow.nfo ★★★
-                    )
-
         except Exception as e_img:
-            logger.warning(f"  ➜ 追剧刷新时处理物理资产失败: {e_img}")
+            logger.warning(f"  ➜ 追剧刷新时补齐图片失败: {e_img}")
 
-        # 5. NFO 在入库后生成，必须递归刷新整部剧才能让 Emby 重新读取全部 NFO。
-        if item_id and current_item_details:
-            logger.debug(f"  ➜ 正在通知 Emby 递归刷新《{item_name}》并重新读取全部 NFO...")
-            emby.refresh_emby_item_metadata(
-                item_emby_id=item_id,
-                emby_server_url=self.emby_url,
-                emby_api_key=self.emby_api_key,
-                user_id_for_ops=self.emby_user_id,
-                replace_all_metadata_param=True,
-                replace_all_images_param=False,
-                item_name_for_log=item_name,
-            )
-
-        # 6. 同步季和集到数据库 
+        # 5. 先同步季和集到数据库，确保随后刷新时插件能读到最新快照。
         emby_seasons_state = media_db.get_series_local_children_info(tmdb_id)
         
         try:
@@ -1480,6 +1430,19 @@ class WatchlistProcessor:
             logger.debug(f"  ➜ 已同步 '{item_name}' 的季/集元数据到数据库。")
         except Exception as e_sync:
             logger.error(f"  ➜ 同步 '{item_name}' 子项目数据库时出错: {e_sync}", exc_info=True)
+
+        # 6. 递归刷新整部剧，让插件恢复最新的季集元数据和图片。
+        if item_id and current_item_details:
+            logger.debug(f"  ➜ 正在通知 Emby 递归刷新《{item_name}》并恢复最新元数据...")
+            emby.refresh_emby_item_metadata(
+                item_emby_id=item_id,
+                emby_server_url=self.emby_url,
+                emby_api_key=self.emby_api_key,
+                user_id_for_ops=self.emby_user_id,
+                replace_all_metadata_param=True,
+                replace_all_images_param=False,
+                item_name_for_log=item_name,
+            )
         
         return latest_series_data, all_tmdb_episodes, emby_seasons_state
     
@@ -3909,7 +3872,7 @@ class WatchlistProcessor:
                 logger.debug(f"  ➜ [版本锁定] 《{item_name}》未找到可检查的活跃季，跳过锁版。")
 
         # 递归刷新 Series 时 Emby 可能只发送父级更新事件，但会清空所有子 Episode 的媒体流。
-        # 智能追剧完成全部 NFO、元数据和锁版操作后，按数据库中的实际版本 ID 统一回补。
+        # 智能追剧完成元数据和锁版操作后，按数据库中的实际版本 ID 统一回补。
         try:
             import extensions
             processor = extensions.media_processor_instance

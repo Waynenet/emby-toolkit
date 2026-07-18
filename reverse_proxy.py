@@ -1822,7 +1822,8 @@ def proxy_all(path):
         if _is_emby_transcode_playback_request(full_path_lower):
             return _block_emby_transcode_playback(full_path)
         
-        if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or ('/items/' in full_path_lower and '/download' in full_path_lower):
+        is_item_media_download = bool(re.search(r'/items/\d+/download/?$', full_path_lower))
+        if ('/videos/' in full_path_lower and ('/stream' in full_path_lower or '/original' in full_path_lower)) or is_item_media_download:
             # 检测浏览器客户端
             user_agent = request.headers.get('User-Agent', '').lower()
             client_name = request.headers.get('X-Emby-Client', '').lower()

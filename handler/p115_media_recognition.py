@@ -73,6 +73,54 @@ class P115RecognitionRuleTests(unittest.TestCase):
     def setUpClass(cls):
         cls.fixture_cases = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
+    def test_root_cid_is_not_a_valid_move_target(self):
+        self.assertIsNone(p115_service._normalize_p115_move_target_cid(None))
+        self.assertIsNone(p115_service._normalize_p115_move_target_cid(""))
+        self.assertIsNone(p115_service._normalize_p115_move_target_cid("0"))
+        self.assertIsNone(p115_service._normalize_p115_move_target_cid(0))
+        self.assertEqual("123", p115_service._normalize_p115_move_target_cid("123"))
+
+    def test_unified_client_rejects_root_move_without_calling_115(self):
+        openapi_client = mock.Mock()
+        with mock.patch.object(
+            p115_service.P115Service, "get_openapi_client", return_value=openapi_client
+        ), mock.patch.object(
+            p115_service.P115Service, "get_cookie_client", return_value=None
+        ):
+            client = p115_service.P115Service.get_client()
+
+        result = client.fs_move(["file-1"], "0")
+
+        self.assertFalse(result["state"])
+        self.assertEqual("invalid_target_cid", result["code"])
+        openapi_client.fs_move.assert_not_called()
+
+    def test_directory_visibility_rejects_ghost_cid(self):
+        client = mock.Mock()
+        client.fs_files.return_value = {
+            "state": True,
+            "data": [],
+        }
+
+        self.assertFalse(
+            p115_service._p115_is_visible_child_dir(
+                client, "parent-1", "Season 01", "ghost-1"
+            )
+        )
+
+    def test_directory_visibility_accepts_expected_child(self):
+        client = mock.Mock()
+        client.fs_files.return_value = {
+            "state": True,
+            "data": [{"fid": "child-1", "fn": "Season 01", "fc": "0"}],
+        }
+
+        self.assertTrue(
+            p115_service._p115_is_visible_child_dir(
+                client, "parent-1", "Season 01", "child-1"
+            )
+        )
+
     def test_rule_parse_fixture_coverage(self):
         for case in self.fixture_cases:
             with self.subTest(case=case["name"]):
@@ -751,6 +799,49 @@ class P115RecognitionRuleTests(unittest.TestCase):
         self.assertEqual(metadata.get("title_en"), "English Main Title")
         self.assertEqual(metadata.get("title_orig"), "原文主片名")
         self.assertEqual(metadata.get("original_title"), "原文主片名")
+
+    def test_fetch_raw_metadata_ignores_japanese_alias_with_kanji(self):
+        organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)
+        organizer.api_key = "fake"
+        organizer.media_type = "movie"
+        organizer.tmdb_id = "999"
+        organizer.rating_map = {}
+        organizer.rating_priority = []
+        organizer.recognition_hints = {}
+        organizer.ai_translator = None
+
+        raw_details = {
+            "title": "Croupier",
+            "original_title": "Croupier",
+            "original_language": "en",
+            "genres": [],
+            "production_countries": [],
+            "production_companies": [],
+            "keywords": {"keywords": []},
+            "credits": {"cast": []},
+            "alternative_titles": {
+                "titles": [
+                    {"iso_3166_1": "JP", "title": "ルール オブ デス〜カジノの死角"}
+                ]
+            },
+            "release_date": "1998-01-01",
+            "vote_average": 0,
+            "runtime": 0,
+        }
+
+        cursor = mock.MagicMock()
+        cursor.fetchone.return_value = None
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        p115_service._TMDB_METADATA_CACHE.clear()
+        with mock.patch.object(p115_service.tmdb, "get_movie_details", return_value=raw_details):
+            with mock.patch.object(p115_service.utils, "get_rating_label", return_value="未知"):
+                with mock.patch("database.connection.get_db_connection", return_value=connection):
+                    metadata = organizer._fetch_raw_metadata()
+
+        self.assertEqual(metadata.get("title"), "Croupier")
 
     def test_rename_file_node_consumes_rule_episode_result(self):
         organizer = p115_service.SmartOrganizer.__new__(p115_service.SmartOrganizer)

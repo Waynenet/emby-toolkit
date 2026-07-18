@@ -118,6 +118,7 @@ def sync_and_subscribe_native_collections(progress_callback=None):
             'name': collection.get('name'),
             'tmdb_collection_id': collection.get('tmdb_collection_id'),
             'poster_path': tmdb_details.get('poster_path'),
+            'backdrop_path': tmdb_details.get('backdrop_path'),
             'all_tmdb_ids': all_tmdb_ids,
             'overview': tmdb_details.get('overview') # 也可以顺便更新简介
         })
@@ -414,6 +415,7 @@ def check_and_subscribe_collection_from_movie(movie_tmdb_id: str, movie_name: st
                         'name': p_coll.get('Name') or tmdb_coll_name,
                         'tmdb_collection_id': tmdb_coll_id,
                         'poster_path': coll_details.get('poster_path'),
+                        'backdrop_path': coll_details.get('backdrop_path'),
                         'all_tmdb_ids': all_tmdb_ids,
                         'overview': final_overview
                     })
@@ -437,6 +439,7 @@ def check_and_subscribe_collection_from_movie(movie_tmdb_id: str, movie_name: st
                     'name': tmdb_coll_name,
                     'tmdb_collection_id': tmdb_coll_id,
                     'poster_path': coll_details.get('poster_path'),
+                    'backdrop_path': coll_details.get('backdrop_path'),
                     'all_tmdb_ids': all_tmdb_ids,
                     'overview': final_overview
                 })

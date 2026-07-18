@@ -593,7 +593,19 @@ def upsert_account(payload, account_id=None):
         target["allowed_effective_user_ids"] = _normalize_user_ids(target.get("allowed_effective_user_ids"))
     target["updated_at"] = _now_text()
     target.setdefault("temp_cid", "")
+    should_confirm_temp_dir = _has_account_auth(target) and (
+        "cookie" in payload
+        or "access_token" in payload
+        or not str(target.get("temp_cid") or "").strip()
+    )
     _save_config(config)
+    if should_confirm_temp_dir:
+        try:
+            cid = _confirm_temp_cid(target, _account_client(target))
+            _mark_account(target["id"], {"temp_cid": cid})
+            target = _find_account_by_id(target["id"]) or target
+        except Exception as e:
+            raise RuntimeError(f"确认小号临时目录失败: {e}") from e
     if _has_account_auth(target) and not _safe_bool(payload.get("_skip_auto_speedtest"), False):
         try:
             speedtest_account(target["id"])

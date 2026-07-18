@@ -304,6 +304,53 @@ def get_season_details_tmdb(
 
     return _tmdb_request(endpoint, api_key, params)
 
+
+def get_episode_details_tmdb(
+    tv_id: int,
+    season_number: int,
+    episode_number: int,
+    api_key: str,
+    append_to_response: Optional[str] = "images",
+    language: Optional[str] = None,
+    include_image_language: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one episode, including its image candidates when requested."""
+    params = {"language": language or DEFAULT_LANGUAGE}
+    if append_to_response:
+        params["append_to_response"] = append_to_response
+    if include_image_language is not None:
+        params["include_image_language"] = include_image_language
+    return _tmdb_request(
+        f"/tv/{tv_id}/season/{season_number}/episode/{episode_number}",
+        api_key,
+        params,
+    )
+
+
+def get_item_images_tmdb(
+    item_type: str,
+    tmdb_id: int,
+    api_key: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the complete live TMDb image list for Emby's image search dialog."""
+    item_type = str(item_type or "").strip().title()
+    if item_type == "Movie":
+        endpoint = f"/movie/{tmdb_id}/images"
+    elif item_type == "Series":
+        endpoint = f"/tv/{tmdb_id}/images"
+    elif item_type == "Season" and season_number is not None:
+        endpoint = f"/tv/{tmdb_id}/season/{int(season_number)}/images"
+    elif item_type == "Episode" and season_number is not None and episode_number is not None:
+        endpoint = f"/tv/{tmdb_id}/season/{int(season_number)}/episode/{int(episode_number)}/images"
+    elif item_type == "Boxset":
+        endpoint = f"/collection/{tmdb_id}/images"
+    else:
+        return None
+    return _tmdb_request(endpoint, api_key, {}, use_default_language=False)
+
 # --- 获取电视剧某一季的集总数 ---
 def get_season_episode_count(api_key: str, tmdb_id: int, season_number: int) -> int:
     """
@@ -654,7 +701,12 @@ def find_person_by_external_id(external_id: str, api_key: str, source: str = "im
         return None
 
 # --- 获取合集的详细信息 ---
-def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool = False) -> Optional[Dict[str, Any]]:
+def get_collection_details(
+    collection_id: int,
+    api_key: str,
+    skip_fallback: bool = False,
+    apply_image_preference: bool = True,
+) -> Optional[Dict[str, Any]]:
     """
     【V3 - 极致性能版】获取指定 TMDb 合集的详细信息。
     增加 skip_fallback 参数，允许调用方在不需要简介时跳过英文兜底请求。
@@ -673,7 +725,7 @@ def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool
 
     # ★ 核心优化：如果调用方明确表示不需要兜底，直接返回
     if skip_fallback:
-        return data_zh
+        return _apply_collection_image_preference(data_zh, api_key) if apply_image_preference else data_zh
 
     # 检查简介是否缺失，如果缺失则请求英文兜底
     overview = data_zh.get("overview", "")
@@ -696,7 +748,35 @@ def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool
             except Exception as e:
                 logger.warning(f"    ➜ 补全合集英文简介失败: {e}")
 
-    return data_zh
+    return _apply_collection_image_preference(data_zh, api_key) if apply_image_preference else data_zh
+
+
+def _apply_collection_image_preference(details: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+    from database.metadata_provider_db import select_collection_image_paths
+
+    images = get_item_images_tmdb("Boxset", int(details["id"]), api_key)
+    if images is None:
+        return details
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, "zh"
+    )
+    selected = select_collection_image_paths(details, images, preference)
+    details["poster_path"] = selected["poster_path"]
+    details["backdrop_path"] = selected["backdrop_path"]
+    return details
+
+
+def search_collections(query: str, api_key: str) -> List[Dict[str, Any]]:
+    """Search TMDb collections using ETK's network settings."""
+    query = str(query or "").strip()
+    if not query or not api_key:
+        return []
+    data = _tmdb_request(
+        "/search/collection",
+        api_key,
+        {"query": query, "language": DEFAULT_LANGUAGE},
+    )
+    return data.get("results", []) if isinstance(data, dict) else []
 
 # --- 搜索媒体 ---
 def search_media(query: str, api_key: str, item_type: str = 'movie', year: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:

@@ -10,13 +10,261 @@ from database.connection import get_db_connection
 MEDIA_METADATA_SCHEMA_VERSION = 1
 
 
-def _first_image(images: Dict[str, Any], key: str) -> Optional[str]:
-    values = images.get(key) if isinstance(images, dict) else None
-    for value in values or []:
-        path = value.get("file_path") if isinstance(value, dict) else None
-        if path:
-            return str(path)
-    return None
+def build_image_language_priority(original_language: str, preference: str):
+    """Return the configured image language groups from highest to lowest priority."""
+    original = str(original_language or "").strip().lower()
+    chinese = ("zh-cn", "zh-tw", "zh-hk", "zh-sg", "zh", "cn")
+    english_or_textless = ("en", "null")
+    groups = []
+
+    def _add(values):
+        values = tuple(value for value in values if value)
+        if values and values not in groups:
+            groups.append(values)
+
+    if str(preference or "").strip().lower() == "original":
+        if original.startswith("zh") or original == "cn":
+            _add(chinese)
+        else:
+            _add((original,))
+        _add(english_or_textless)
+        if not (original.startswith("zh") or original == "cn"):
+            _add(chinese)
+    else:
+        _add(("zh-cn",))
+        _add(("zh-tw", "zh-hk", "zh-sg", "zh", "cn"))
+        _add(english_or_textless)
+        if original and not original.startswith("zh") and original not in {"cn", "en"}:
+            _add((original,))
+    return groups
+
+
+def build_image_language_parameter(priority_groups) -> str:
+    tmdb_codes = {
+        "zh-cn": "zh-CN",
+        "zh-tw": "zh-TW",
+        "zh-hk": "zh-HK",
+        "zh-sg": "zh-SG",
+    }
+    values = []
+    for group in priority_groups or []:
+        for value in group:
+            value = tmdb_codes.get(value, value)
+            if value != "cn" and value not in values:
+                values.append(value)
+    return ",".join(values)
+
+
+def select_image_path(images, priority_groups) -> Optional[str]:
+    """Select the highest-rated image in the first configured language group that has one."""
+    candidates = sort_image_candidates(images, priority_groups)
+    return str(candidates[0]["file_path"]) if candidates else None
+
+
+def sort_image_candidates(images, priority_groups):
+    """Sort all TMDb images by ETK language preference, rating and vote count."""
+    candidates = [item for item in images or [] if isinstance(item, dict) and item.get("file_path")]
+
+    def _language(value):
+        return str(value or "null").strip().lower()
+
+    def _rank(item):
+        language = _language(item.get("iso_639_1"))
+        group_rank = len(priority_groups or [])
+        for index, group in enumerate(priority_groups or []):
+            if language in group:
+                group_rank = index
+                break
+        try:
+            vote_average = float(item.get("vote_average") or 0)
+        except (TypeError, ValueError):
+            vote_average = 0
+        try:
+            vote_count = int(item.get("vote_count") or 0)
+        except (TypeError, ValueError):
+            vote_count = 0
+        return group_rank, -vote_average, -vote_count
+
+    return sorted(candidates, key=_rank)
+
+
+def preferred_image_candidates(images, priority_groups):
+    """Return every candidate in the first configured language group that has images."""
+    ordered = sort_image_candidates(images, priority_groups)
+    for group in priority_groups or []:
+        selected = [
+            item for item in ordered
+            if str(item.get("iso_639_1") or "null").strip().lower() in group
+        ]
+        if selected:
+            return selected
+    return ordered
+
+
+def select_collection_image_paths(details, images, preference: str):
+    """Select collection artwork using the first movie's original language."""
+    parts = (details or {}).get("parts") or []
+    original_language = next(
+        (
+            str(item.get("original_language") or "").strip()
+            for item in parts
+            if isinstance(item, dict) and item.get("original_language")
+        ),
+        "",
+    )
+    priorities = build_image_language_priority(original_language, preference)
+    return {
+        "poster_path": (
+            select_image_path((images or {}).get("posters"), priorities)
+            or (details or {}).get("poster_path")
+        ),
+        "backdrop_path": (
+            select_image_path((images or {}).get("backdrops"), priorities)
+            or (details or {}).get("backdrop_path")
+        ),
+        "original_language": original_language,
+    }
+
+
+def get_cached_original_language(tmdb_id: str, media_type: str) -> str:
+    item_type = "Series" if str(media_type or "").lower() == "tv" else "Movie"
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT original_language FROM media_metadata WHERE tmdb_id=%s AND item_type=%s",
+                (str(tmdb_id), item_type),
+            )
+            row = cursor.fetchone()
+    return str((row or {}).get("original_language") or "")
+
+
+def replace_cached_image_paths(
+    tmdb_id: str,
+    media_type: str,
+    requested_type: str,
+    *,
+    root_images: Optional[Dict[str, Optional[str]]] = None,
+    season_number: Optional[int] = None,
+    season_posters: Optional[Dict[int, Optional[str]]] = None,
+    episode_number: Optional[int] = None,
+    episode_still: Optional[str] = None,
+) -> int:
+    """Replace only cached image paths, leaving all other localized metadata untouched."""
+    requested_type = str(requested_type or "").strip().title()
+    media_type = str(media_type or "").strip().lower()
+    updated = 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            if requested_type in {"Movie", "Series"} and root_images is not None:
+                item_type = "Movie" if media_type == "movie" else "Series"
+                cursor.execute(
+                    """
+                    UPDATE media_metadata SET
+                        poster_path=%s, backdrop_path=%s, logo_path=%s, thumb_path=%s,
+                        last_updated_at=NOW()
+                    WHERE tmdb_id=%s AND item_type=%s
+                    """,
+                    (
+                        root_images.get("poster"), root_images.get("backdrop"),
+                        root_images.get("logo"), root_images.get("thumb"),
+                        str(tmdb_id), item_type,
+                    ),
+                )
+                updated += cursor.rowcount
+
+                if item_type == "Series" and season_posters is not None:
+                    cursor.execute(
+                        """
+                        UPDATE media_metadata SET poster_path=NULL, last_updated_at=NOW()
+                        WHERE parent_series_tmdb_id=%s AND item_type='Season'
+                        """,
+                        (str(tmdb_id),),
+                    )
+                    for number, poster_path in season_posters.items():
+                        cursor.execute(
+                            """
+                            UPDATE media_metadata SET poster_path=%s, last_updated_at=NOW()
+                            WHERE parent_series_tmdb_id=%s AND item_type='Season' AND season_number=%s
+                            """,
+                            (poster_path, str(tmdb_id), int(number)),
+                        )
+                        updated += cursor.rowcount
+            elif requested_type == "Season" and season_number is not None:
+                poster_path = (season_posters or {}).get(int(season_number))
+                cursor.execute(
+                    """
+                    UPDATE media_metadata SET poster_path=%s, last_updated_at=NOW()
+                    WHERE parent_series_tmdb_id=%s AND item_type='Season' AND season_number=%s
+                    """,
+                    (poster_path, str(tmdb_id), int(season_number)),
+                )
+                updated += cursor.rowcount
+            elif requested_type == "Episode" and season_number is not None and episode_number is not None:
+                cursor.execute(
+                    """
+                    UPDATE media_metadata SET
+                        poster_path=%s, backdrop_path=%s, logo_path=NULL, thumb_path=%s,
+                        last_updated_at=NOW()
+                    WHERE parent_series_tmdb_id=%s AND item_type='Episode'
+                      AND season_number=%s AND episode_number=%s
+                    """,
+                    (
+                        episode_still, episode_still, episode_still, str(tmdb_id),
+                        int(season_number), int(episode_number),
+                    ),
+                )
+                updated += cursor.rowcount
+        conn.commit()
+    return updated
+
+
+def update_cached_image_path(
+    tmdb_id: str,
+    media_type: str,
+    requested_type: str,
+    image_type: str,
+    image_path: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> int:
+    """Update one manually selected TMDb image without changing the other cached images."""
+    requested_type = str(requested_type or "").strip().title()
+    image_type = str(image_type or "").strip().title()
+    column = {
+        "Primary": "poster_path",
+        "Backdrop": "backdrop_path",
+        "Logo": "logo_path",
+        "Thumb": "thumb_path",
+    }.get(image_type)
+    if not column or not image_path:
+        return 0
+
+    if requested_type in {"Movie", "Series"}:
+        item_type = "Movie" if str(media_type or "").lower() == "movie" else "Series"
+        where_sql = "tmdb_id=%s AND item_type=%s"
+        where_params = (str(tmdb_id), item_type)
+    elif requested_type == "Season" and season_number is not None and image_type == "Primary":
+        where_sql = "parent_series_tmdb_id=%s AND item_type='Season' AND season_number=%s"
+        where_params = (str(tmdb_id), int(season_number))
+    elif requested_type == "Episode" and season_number is not None and episode_number is not None:
+        where_sql = (
+            "parent_series_tmdb_id=%s AND item_type='Episode' "
+            "AND season_number=%s AND episode_number=%s"
+        )
+        where_params = (str(tmdb_id), int(season_number), int(episode_number))
+    else:
+        return 0
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE media_metadata SET {column}=%s, last_updated_at=NOW() WHERE {where_sql}",
+                (image_path, *where_params),
+            )
+            updated = cursor.rowcount
+        conn.commit()
+    return updated
 
 
 def _keywords(details: Dict[str, Any], media_type: str):
@@ -67,6 +315,7 @@ def persist_initial_tmdb_metadata(
     title: str = "",
     original_title: str = "",
     rating_label: str = "",
+    image_language_preference: str = "zh",
 ) -> bool:
     """Persist the pre-Emby TMDb snapshot without overwriting translated metadata."""
     if not isinstance(details, dict):
@@ -77,10 +326,13 @@ def persist_initial_tmdb_metadata(
         return False
 
     images = details.get("images") or {}
-    poster_path = _first_image(images, "posters") or details.get("poster_path")
-    backdrop_path = _first_image(images, "backdrops") or details.get("backdrop_path")
-    logo_path = _first_image(images, "logos")
-    thumb_path = _first_image(images, "backdrops") or backdrop_path
+    priorities = build_image_language_priority(
+        details.get("original_language"), image_language_preference
+    )
+    poster_path = select_image_path(images.get("posters"), priorities) or details.get("poster_path")
+    backdrop_path = select_image_path(images.get("backdrops"), priorities) or details.get("backdrop_path")
+    logo_path = select_image_path(images.get("logos"), priorities)
+    thumb_path = backdrop_path
     item_type = "Series" if media_type == "tv" else "Movie"
     release_date = details.get("first_air_date") if media_type == "tv" else details.get("release_date")
     countries = details.get("origin_country") or [
@@ -246,6 +498,145 @@ def _json_value(value, default):
         return default
 
 
+def _normalize_media_path(value: str) -> str:
+    path = str(value or "").strip().replace("\\", "/")
+    if not path:
+        return ""
+    while "//" in path:
+        path = path.replace("//", "/")
+    return path.rstrip("/") or "/"
+
+
+def register_metadata_asset_path(
+    tmdb_id: str,
+    media_type: str,
+    path: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> bool:
+    """Persist a physical path before Emby performs its first metadata lookup."""
+    tmdb_id = str(tmdb_id or "").strip()
+    media_type = str(media_type or "").strip().lower()
+    path = _normalize_media_path(path)
+    item_type = "Series" if media_type == "tv" else "Movie"
+    if not tmdb_id.isdigit() or media_type not in {"movie", "tv"} or not path:
+        return False
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT asset_details_json
+                FROM media_metadata
+                WHERE tmdb_id=%s AND item_type=%s
+                FOR UPDATE
+                """,
+                (tmdb_id, item_type),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            assets = _json_value(row.get("asset_details_json"), [])
+            assets = assets if isinstance(assets, list) else []
+            target = next(
+                (
+                    asset for asset in assets
+                    if isinstance(asset, dict)
+                    and _normalize_media_path(asset.get("path")) == path
+                ),
+                None,
+            )
+            if target is None:
+                target = {"path": path}
+                assets.append(target)
+            if season_number is not None:
+                target["season_number"] = int(season_number)
+            if episode_number is not None:
+                target["episode_number"] = int(episode_number)
+            cursor.execute(
+                """
+                UPDATE media_metadata
+                SET asset_details_json=%s, last_updated_at=NOW()
+                WHERE tmdb_id=%s AND item_type=%s
+                """,
+                (Json(assets, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)), tmdb_id, item_type),
+            )
+        conn.commit()
+    return True
+
+
+def resolve_metadata_identity_by_path(
+    path: str,
+    requested_type: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a physical Emby path to the root TMDb identity stored by ETK."""
+    path = _normalize_media_path(path)
+    requested_type = str(requested_type or "").strip().title()
+    if not path or requested_type not in {"Movie", "Series", "Season", "Episode"}:
+        return None
+    item_types = ("Movie",) if requested_type == "Movie" else ("Series", "Season", "Episode")
+    child_prefix = path.rstrip("/") + "/%"
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT m.tmdb_id, m.item_type, m.parent_series_tmdb_id,
+                       m.season_number, m.episode_number, asset.value AS asset
+                FROM media_metadata m
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(m.asset_details_json)='array'
+                         THEN m.asset_details_json ELSE '[]'::jsonb END
+                ) AS asset(value)
+                WHERE m.item_type=ANY(%s)
+                  AND asset.value->>'path' IS NOT NULL
+                  AND (
+                      lower(asset.value->>'path')=lower(%s)
+                      OR lower(asset.value->>'path') LIKE lower(%s)
+                      OR lower(%s) LIKE lower(rtrim(asset.value->>'path', '/')) || '/%%'
+                  )
+                """,
+                (list(item_types), path, child_prefix, path),
+            )
+            candidates = [dict(row) for row in cursor.fetchall()]
+    if not candidates:
+        return None
+
+    def _score(row):
+        asset = _json_value(row.get("asset"), {})
+        asset_path = _normalize_media_path(asset.get("path") if isinstance(asset, dict) else "")
+        return (
+            0 if asset_path.casefold() == path.casefold() else 1,
+            0 if row.get("item_type") == requested_type else 1,
+            0 if season_number is None or row.get("season_number") in {None, season_number} else 1,
+            0 if episode_number is None or row.get("episode_number") in {None, episode_number} else 1,
+            abs(len(asset_path) - len(path)),
+        )
+
+    selected = min(candidates, key=_score)
+    asset = _json_value(selected.get("asset"), {})
+    is_movie = selected.get("item_type") == "Movie"
+    root_tmdb_id = selected.get("tmdb_id") if is_movie else (
+        selected.get("parent_series_tmdb_id") or selected.get("tmdb_id")
+    )
+    return {
+        "tmdb_id": str(root_tmdb_id or ""),
+        "media_type": "movie" if is_movie else "tv",
+        "season_number": season_number if season_number is not None else (
+            selected.get("season_number") if selected.get("season_number") is not None
+            else asset.get("season_number")
+        ),
+        "episode_number": episode_number if episode_number is not None else (
+            selected.get("episode_number") if selected.get("episode_number") is not None
+            else asset.get("episode_number")
+        ),
+    }
+
+
 def _text_date(value):
     if isinstance(value, (datetime, date)):
         return value.isoformat()
@@ -403,6 +794,29 @@ def load_emby_metadata(
 
             row = dict(row)
             people = []
+            collections = []
+            if requested_type == "Movie" and root_media_type == "movie":
+                cursor.execute(
+                    """
+                    SELECT tmdb_collection_id, name, all_tmdb_ids_json
+                    FROM collections_info
+                    WHERE all_tmdb_ids_json @> %s::jsonb
+                    ORDER BY last_checked_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (json.dumps([str(tmdb_id)]),),
+                )
+                collection = cursor.fetchone()
+                if collection and collection.get("tmdb_collection_id") and collection.get("name"):
+                    collections.append({
+                        "tmdb_id": str(collection["tmdb_collection_id"]),
+                        "name": collection["name"],
+                        "member_tmdb_ids": [
+                            str(value)
+                            for value in _json_value(collection.get("all_tmdb_ids_json"), [])
+                            if value is not None
+                        ],
+                    })
             if row.get("actors_ready"):
                 actor_links = _json_value(row.get("actors_json"), [])
                 actor_ids = [link.get("tmdb_id") for link in actor_links if link.get("tmdb_id")]
@@ -466,6 +880,7 @@ def load_emby_metadata(
         ) if requested_type == "Episode" else None,
         "actors_ready": bool(row.get("actors_ready")),
         "people": sorted(people, key=lambda item: item.get("order", 999)),
+        "collections": collections,
         "images": {
             "primary": _tmdb_image_url(row.get("poster_path"), "original"),
             "backdrop": _tmdb_image_url(row.get("backdrop_path"), "original"),

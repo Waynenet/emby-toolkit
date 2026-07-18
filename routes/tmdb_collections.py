@@ -6,7 +6,7 @@ from gevent import spawn_later
 # 导入需要的模块
 from database import custom_collection_db, tmdb_collection_db, settings_db
 from extensions import admin_required, DELETING_COLLECTIONS
-from handler import tmdb_collections as collections_handler 
+from handler import tmdb, tmdb_collections as collections_handler
 import config_manager
 import constants
 from handler import emby
@@ -15,6 +15,108 @@ from handler import emby
 collections_bp = Blueprint('collections', __name__, url_prefix='/api/collections')
 
 logger = logging.getLogger(__name__)
+
+
+def _collection_image_url(path):
+    if not path:
+        return None
+    path = str(path)
+    if path.startswith(('http://', 'https://')):
+        return path
+    return f"https://image.tmdb.org/t/p/original/{path.lstrip('/')}"
+
+
+def _collection_provider_payload(data):
+    if not data:
+        return None
+    tmdb_id = str(data.get('tmdb_collection_id') or data.get('id') or '').strip()
+    if not tmdb_id:
+        return None
+    backdrop = _collection_image_url(data.get('backdrop_path'))
+    return {
+        'item_type': 'BoxSet',
+        'tmdb_id': tmdb_id,
+        'name': data.get('name'),
+        'overview': data.get('overview'),
+        'actors_ready': False,
+        'genres': [],
+        'tags': [],
+        'studios': [],
+        'people': [],
+        'images': {
+            'primary': _collection_image_url(data.get('poster_path')),
+            'backdrop': backdrop,
+            'logo': None,
+            'thumb': backdrop,
+        },
+    }
+
+
+def _persist_collection_details(details, existing=None):
+    parts = details.get('parts') or []
+    tmdb_collection_db.upsert_native_collection({
+        'tmdb_collection_id': details.get('id'),
+        'emby_collection_id': (existing or {}).get('emby_collection_id'),
+        'name': details.get('name') or (existing or {}).get('name'),
+        'overview': details.get('overview'),
+        'poster_path': details.get('poster_path'),
+        'backdrop_path': details.get('backdrop_path'),
+        'all_tmdb_ids': [str(item.get('id')) for item in parts if item.get('id')],
+    })
+    return tmdb_collection_db.get_native_collection_by_tmdb_id(details.get('id'))
+
+
+@collections_bp.route('/provider/metadata/<tmdb_collection_id>', methods=['GET'])
+def api_get_collection_provider_metadata(tmdb_collection_id):
+    tmdb_collection_id = str(tmdb_collection_id or '').strip()
+    if not tmdb_collection_id.isdigit():
+        return jsonify({'error': 'invalid tmdb collection id'}), 400
+
+    row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
+    schema_version = int((row or {}).get('metadata_schema_version') or 0)
+    if not row or schema_version < tmdb_collection_db.COLLECTION_METADATA_SCHEMA_VERSION:
+        details = tmdb.get_collection_details(
+            int(tmdb_collection_id),
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
+        )
+        if details:
+            row = _persist_collection_details(details, existing=row)
+    payload = _collection_provider_payload(row)
+    if not payload:
+        return jsonify({'error': 'collection metadata not found'}), 404
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@collections_bp.route('/provider/search', methods=['GET'])
+def api_search_collection_provider():
+    query = str(request.args.get('query') or '').strip()
+    if not query:
+        return jsonify([])
+
+    query_key = query.casefold()
+    merged = {}
+    local_rows = tmdb_collection_db.get_all_native_collections()
+    local_rows.sort(key=lambda row: (
+        str(row.get('name') or '').casefold() != query_key,
+        not str(row.get('name') or '').casefold().startswith(query_key),
+        str(row.get('name') or '').casefold(),
+    ))
+    for row in local_rows:
+        if query_key in str(row.get('name') or '').casefold():
+            payload = _collection_provider_payload(row)
+            if payload:
+                merged[payload['tmdb_id']] = payload
+
+    for item in tmdb.search_collections(
+        query,
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
+    ):
+        payload = _collection_provider_payload(item)
+        if payload and payload['tmdb_id'] not in merged:
+            merged[payload['tmdb_id']] = payload
+    return jsonify(list(merged.values())[:20])
 
 # ======================================================================
 # 读取操作 (Read Operations) - 负责动态组装数据
@@ -39,6 +141,20 @@ def api_get_collections_status():
 # ======================================================================
 # ★★★ 删除合集路由 ★★★
 # ======================================================================
+@collections_bp.route('/tmdb/<tmdb_collection_id>', methods=['DELETE'])
+@admin_required
+def api_delete_cached_collection(tmdb_collection_id):
+    row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
+    if not row:
+        return jsonify({"error": "合集记录不存在"}), 404
+    if row.get('emby_collection_id'):
+        return jsonify({"error": "该合集已在 Emby 中生成，请按 Emby 合集删除"}), 409
+    if tmdb_collection_db.delete_native_collection_by_tmdb_id(tmdb_collection_id):
+        logger.info(f"  ➤ [删除合集] 已删除 ETK 合集缓存 (TMDb ID: {tmdb_collection_id})")
+        return jsonify({"message": "ETK 合集记录已删除"}), 200
+    return jsonify({"error": "删除 ETK 合集记录失败"}), 500
+
+
 @collections_bp.route('/<emby_collection_id>', methods=['DELETE'])
 @admin_required
 def api_delete_collection(emby_collection_id):
@@ -97,7 +213,6 @@ def api_get_collection_settings():
         
         # 2. 确保返回给前端的数据包含默认字段 (防止前端报错)
         default_config = {
-            "auto_complete_enabled": False,
             "auto_sub_enabled": False,
             # 未来可以在这里加更多默认值，例如:
             # "exclude_genres": [],
@@ -106,6 +221,7 @@ def api_get_collection_settings():
         
         # 合并默认值 (数据库里的值覆盖默认值)
         final_config = {**default_config, **config}
+        final_config.pop('auto_complete_enabled', None)
         
         return jsonify(final_config)
     except Exception as e:
@@ -121,8 +237,13 @@ def api_save_collection_settings():
         if not isinstance(new_data, dict):
             return jsonify({"error": "无效的数据格式"}), 400
 
+        new_data = {
+            "auto_sub_enabled": bool(new_data["auto_sub_enabled"])
+        } if "auto_sub_enabled" in new_data else {}
+
         # 1. 先读取旧配置
         current_config = settings_db.get_setting('native_collections_config') or {}
+        current_config.pop('auto_complete_enabled', None)
         
         # 2. 更新字段 (增量更新，保留旧配置中未修改的字段)
         current_config.update(new_data)

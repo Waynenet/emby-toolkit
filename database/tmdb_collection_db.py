@@ -9,6 +9,8 @@ from .connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+COLLECTION_METADATA_SCHEMA_VERSION = 1
+
 def upsert_native_collection(data: Dict[str, Any]):
     try:
         with get_db_connection() as conn:
@@ -17,15 +19,22 @@ def upsert_native_collection(data: Dict[str, Any]):
             sql = """
                 INSERT INTO collections_info (
                     tmdb_collection_id, emby_collection_id, name, overview,
-                    poster_path, all_tmdb_ids_json, last_checked_at
+                    poster_path, backdrop_path, metadata_schema_version,
+                    all_tmdb_ids_json, last_checked_at
                 )
-                VALUES (%(tmdb_id)s, %(emby_id)s, %(name)s, %(overview)s, %(poster)s, %(ids_json)s, NOW())
+                VALUES (
+                    %(tmdb_id)s, %(emby_id)s, %(name)s, %(overview)s,
+                    %(poster)s, %(backdrop)s, %(schema_version)s,
+                    %(ids_json)s, NOW()
+                )
                 ON CONFLICT (tmdb_collection_id) DO UPDATE SET
                     -- 如果新数据里有 emby_id，则更新它；否则保留原有的 emby_id
                     emby_collection_id = COALESCE(EXCLUDED.emby_collection_id, collections_info.emby_collection_id),
                     name = EXCLUDED.name,
                     overview = COALESCE(EXCLUDED.overview, collections_info.overview),
                     poster_path = EXCLUDED.poster_path,
+                    backdrop_path = COALESCE(EXCLUDED.backdrop_path, collections_info.backdrop_path),
+                    metadata_schema_version = EXCLUDED.metadata_schema_version,
                     all_tmdb_ids_json = EXCLUDED.all_tmdb_ids_json,
                     last_checked_at = NOW();
             """
@@ -36,6 +45,8 @@ def upsert_native_collection(data: Dict[str, Any]):
                 'name': data.get('name'),
                 'overview': data.get('overview'),
                 'poster': data.get('poster_path'),
+                'backdrop': data.get('backdrop_path'),
+                'schema_version': COLLECTION_METADATA_SCHEMA_VERSION,
                 'ids_json': json.dumps(data.get('all_tmdb_ids', []))
             }
             
@@ -127,6 +138,23 @@ def delete_native_collection_by_emby_id(emby_collection_id: str):
         logger.error(f"删除原生合集记录失败: {e}", exc_info=True)
         return False
 
+
+def delete_native_collection_by_tmdb_id(tmdb_collection_id: str) -> bool:
+    """Delete an ETK collection cache that has not been created in Emby."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM collections_info WHERE tmdb_collection_id = %s",
+                (str(tmdb_collection_id),),
+            )
+            deleted_count = cursor.rowcount
+            conn.commit()
+            return deleted_count > 0
+    except Exception as e:
+        logger.error(f"删除 ETK 原生合集记录失败 (TMDb ID: {tmdb_collection_id}): {e}", exc_info=True)
+        return False
+
 def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[str, Any]]:
     """
     根据 TMDb 合集 ID 查找本地数据库中的原生合集记录。
@@ -141,6 +169,27 @@ def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[s
             return cursor.fetchone()
     except Exception as e:
         logger.error(f"查询原生合集 (TMDb ID: {tmdb_collection_id}) 失败: {e}")
+
+
+def update_native_collection_images(tmdb_collection_id: str, poster_path, backdrop_path) -> int:
+    """Update only the cached collection image paths."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE collections_info
+                SET poster_path = %s, backdrop_path = %s, last_checked_at = NOW()
+                WHERE tmdb_collection_id = %s
+                """,
+                (poster_path, backdrop_path, str(tmdb_collection_id)),
+            )
+            updated = cursor.rowcount
+            conn.commit()
+            return updated
+    except Exception as e:
+        logger.error(f"更新原生合集图片失败 (TMDb ID: {tmdb_collection_id}): {e}")
+        return 0
 
 def touch_native_collection_by_child_id(tmdb_id: str) -> bool:
     """

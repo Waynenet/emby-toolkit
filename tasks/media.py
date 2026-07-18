@@ -204,10 +204,10 @@ def _has_und_text_subtitle(raw_ffprobe):
 def task_sync_all_metadata(processor, item_id: str, item_name: str):
     """
     【任务：全能元数据同步器】
-    当收到 metadata.update Webhook 时，此任务会：
+    当收到 metadata.update Emby 事件时，此任务会：
     1. 从 Emby 获取最新数据。
     2. 将更新同步到 media_metadata 数据库缓存。
-    (注：NFO 模式下，物理文件的修改由 Emby 自身负责)
+    （实体媒体流信息仍由 Emby 自身维护。）
     """
     log_prefix = f"全能元数据同步 for '{item_name}'"
     logger.trace(f"  ➜ 任务开始：{log_prefix}")
@@ -435,7 +435,7 @@ def task_reprocess_single_item(processor, item_id: str, item_name_for_ui: str, f
         # 步骤 4：验收成果 & 写入数据库
         # =================================================================
         if is_missing_info:
-            logger.info(f"  ➜ 缺失媒体信息修复模式：跳过演员翻译、NFO、图片、人物同步等重型流程，仅刷新媒体信息资产缓存。")
+            logger.info(f"  ➜ 缺失媒体信息修复模式：跳过演员翻译、图片和人物同步等重型流程，仅刷新媒体信息资产缓存。")
             task_manager.update_status_from_thread(50, f"正在写入媒体信息: {item_name_for_ui}")
             success = processor.process_single_item(
                 item_id,
