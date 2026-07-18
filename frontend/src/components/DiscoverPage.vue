@@ -226,12 +226,20 @@
                         <img :src="`https://image.tmdb.org/t/p/w500${currentRecommendation.poster_path}`" class="recommendation-poster" />
                     </div>
                     <div class="details-column">
-                        <n-h3 style="margin-top: 0; margin-bottom: 8px;">{{ currentRecommendation.title }}</n-h3>
+                        <!-- 同样将每日推荐的标题修改为可点击跳转，增强交互一致性 -->
+                        <n-h3 
+                          style="margin-top: 0; margin-bottom: 8px;" 
+                          class="recommendation-title"
+                          :title="`${currentRecommendation.title || currentRecommendation.name} (点击跳转详情)`"
+                          @click="handleClickCard(currentRecommendation)"
+                        >
+                          {{ currentRecommendation.title || currentRecommendation.name }}
+                        </n-h3>
                         <n-space align="center" size="small" style="margin-bottom: 16px;">
                             <n-icon :component="StarIcon" color="#f7b824" />
                             <span>{{ currentRecommendation.vote_average?.toFixed(1) }}</span>
                             <span>·</span>
-                            <span>{{ new Date(currentRecommendation.release_date).getFullYear() }}</span>
+                            <span>{{ new Date(currentRecommendation.release_date || currentRecommendation.first_air_date).getFullYear() }}</span>
                         </n-space>
                         <n-ellipsis :line-clamp="4" :tooltip="false" class="overview-text">
                             {{ currentRecommendation.overview }}
@@ -285,7 +293,8 @@
           :key="media.id" 
           class="grid-item"
         >
-          <n-card class="dashboard-card media-card" content-style="padding: 0; position: relative;" @click="handleClickCard(media)">
+          <!-- 修改 1：点击卡片不再直接跳转详情，而是调用 handleCardClick 进行订阅操作 -->
+          <n-card class="dashboard-card media-card" content-style="padding: 0; position: relative;" @click="handleCardClick(media)">
             <div class="poster-wrapper">
               <img :src="media.poster_path ? `https://image.tmdb.org/t/p/w300${media.poster_path}` : '/default-poster.png'" class="media-poster" @error="onImageError">
               
@@ -303,7 +312,14 @@
 
               <div class="overlay-info">
                 <div class="text-content">
-                  <div class="media-title" :title="media.title || media.name">{{ media.title || media.name }}</div>
+                  <!-- 修改 2：限制点击标题才跳转详情。添加 @click.stop 阻止事件冒泡到卡片，并附加跳转提示 -->
+                  <div 
+                    class="media-title" 
+                    :title="`${media.title || media.name} (点击跳转详情)`"
+                    @click.stop="handleClickCard(media)"
+                  >
+                    {{ media.title || media.name }}
+                  </div>
                   <div class="media-meta-row">
                     <span class="media-year">{{ getYear(media) }}</span>
                     <span v-if="getYear(media) && getGenreNames(media.genre_ids)" class="media-dot">·</span>
@@ -888,6 +904,13 @@ const handleSubscribe = async (media) => {
   showConfirmModal.value = true;
 };
 
+// 新增：点击卡片背景或图片的触发处理。若当前可订阅/标记想看，则唤起订阅流程。
+const handleCardClick = (media) => {
+  if (canShowSubscribeAction(media)) {
+    handleSubscribe(media);
+  }
+};
+
 // 确认模态框的提交事件
 const submitConfirmedSubscription = async () => {
   if (!confirmMedia.value) return;
@@ -1218,6 +1241,14 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* ★ 修改：允许在 pointer-events: none 容器中捕获事件，并改写为手型光标 */
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* ★ 新增：鼠标移至卡片标题时的下划线暗示效果 */
+.media-title:hover {
+  text-decoration: underline;
 }
 
 .media-meta-row {
@@ -1346,6 +1377,14 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column; 
   min-width: 0; 
+}
+
+/* ★ 新增：每日推荐模块标题的可点击与悬浮下划线指示 */
+.recommendation-title {
+  cursor: pointer;
+}
+.recommendation-title:hover {
+  text-decoration: underline;
 }
 
 .overview-text {
