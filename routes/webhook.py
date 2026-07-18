@@ -413,7 +413,7 @@ def _merge_pending_webhook_task(existing_task, new_task):
     existing_kwargs["force_full_update"] = bool(
         existing_kwargs.get("force_full_update") or new_kwargs.get("force_full_update")
     )
-    existing_kwargs["aggregate_notification"] = len(merged_episode_ids) == 1
+    existing_kwargs["aggregate_notification"] = bool(merged_episode_ids)
     if existing_kwargs["is_new_item"] and existing_task.get("task_name", "").startswith("主动追更:"):
         existing_task["task_name"] = existing_task["task_name"].replace("主动追更:", "主动入库:", 1)
     return True
@@ -1193,7 +1193,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         # 如果 is_new_item 为 True，说明是新入库通知
         notif_type = 'update' if (precise_new_episode_ids and not is_new_item) else 'new'
         
-        if aggregate_notification and item_type == "Series" and len(precise_new_episode_ids) == 1:
+        if aggregate_notification and item_type == "Series" and precise_new_episode_ids:
             _enqueue_active_series_notification(item_details, notif_type, precise_new_episode_ids)
         else:
             telegram.send_media_notification(
@@ -1407,7 +1407,7 @@ def _flush_active_emby_series_dispatch(series_id: str):
         force_full_update=False,
         new_episode_ids=episode_ids,
         is_new_item=not already_processed,
-        aggregate_notification=len(episode_ids) == 1,
+        aggregate_notification=bool(episode_ids),
     )
 
 
