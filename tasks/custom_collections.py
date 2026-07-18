@@ -287,18 +287,23 @@ def task_process_all_custom_collections(processor):
                 # 执行健康检查 (榜单类和全局AI推荐都需要)
                 # 作用：对比 TMDB 列表和本地库，自动订阅缺失的媒体
                 if collection_type in ['list', 'ai_recommendation_global']:
-                    # ★★★ 修复：构造 subscription_source 并适配新签名 ★★★
-                    subscription_source = {
-                        "type": "custom_collection",
-                        "id": collection_id,
-                        "name": collection_name
-                    }
-                    process_subscription_items_and_update_db(
-                        tmdb_items=tmdb_items, 
-                        tmdb_to_emby_item_map=tmdb_to_emby_item_map, 
-                        subscription_source=subscription_source,
-                        tmdb_api_key=processor.tmdb_api_key
-                    )
+                    # 读取前端开关，没有则默认 True 以兼容历史合集
+                    auto_subscribe_missing = definition.get('auto_subscribe_missing', True)
+                    if auto_subscribe_missing:
+                        # ★★★ 修复：构造 subscription_source 并适配新签名 ★★★
+                        subscription_source = {
+                            "type": "custom_collection",
+                            "id": collection_id,
+                            "name": collection_name
+                        }
+                        process_subscription_items_and_update_db(
+                            tmdb_items=tmdb_items, 
+                            tmdb_to_emby_item_map=tmdb_to_emby_item_map, 
+                            subscription_source=subscription_source,
+                            tmdb_api_key=processor.tmdb_api_key
+                        )
+                    else:
+                        logger.info(f"  ➜ 合集 '{collection_name}' 已关闭自动订阅缺失媒体开关，跳过订阅推送。")
 
                 # 后续处理
                 # 1. 更新 Emby 实体合集 (用于封面)
@@ -550,26 +555,32 @@ def process_single_custom_collection(processor, custom_collection_id: int):
 
                 logger.info(
                     f"  ➜ [订阅检查] 合集《{collection_name}》类型={collection_type}，"
-                    f"候选 {len(tmdb_items)} 部，在库 {in_library_count} 部，缺失 {missing_count} 部，开始处理订阅..."
+                    f"候选 {len(tmdb_items)} 部，在库 {in_library_count} 部，缺失 {missing_count} 部。"
                 )
 
-                subscription_source = {
-                    "type": "custom_collection",
-                    "id": custom_collection_id,
-                    "name": collection_name
-                }
+                # 读取前端配置的自动订阅缺失媒体开关，默认 True 保持向后兼容
+                auto_subscribe_missing = definition.get('auto_subscribe_missing', True)
+                if auto_subscribe_missing:
+                    logger.info("  ➜ 检测到开启自动订阅，开始处理推送...")
+                    subscription_source = {
+                        "type": "custom_collection",
+                        "id": custom_collection_id,
+                        "name": collection_name
+                    }
 
-                processed_active_ids = process_subscription_items_and_update_db(
-                    tmdb_items=tmdb_items,
-                    tmdb_to_emby_item_map=tmdb_to_emby_map_full,
-                    subscription_source=subscription_source,
-                    tmdb_api_key=processor.tmdb_api_key
-                )
+                    processed_active_ids = process_subscription_items_and_update_db(
+                        tmdb_items=tmdb_items,
+                        tmdb_to_emby_item_map=tmdb_to_emby_map_full,
+                        subscription_source=subscription_source,
+                        tmdb_api_key=processor.tmdb_api_key
+                    )
 
-                logger.info(
-                    f"  ➜ [订阅检查] 合集《{collection_name}》订阅处理完成，"
-                    f"活跃候选 {len(processed_active_ids)} 个。"
-                )
+                    logger.info(
+                        f"  ➜ [订阅检查] 合集《{collection_name}》订阅处理完成，"
+                        f"活跃候选 {len(processed_active_ids)} 个。"
+                    )
+                else:
+                    logger.info(f"  ➜ 合集《{collection_name}》已关闭自动订阅缺失媒体开关，跳过自动订阅推送。")
 
         # ==================================================================
         # 分支 C: 个人推荐类 (AI) - 封面快车道 (遵守前端定义的库和类型)
