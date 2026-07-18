@@ -260,13 +260,16 @@ class _UdfIsoReader:
         pos = 440
         end = pos + part_map_len
         metadata_file_lbn = None
+        has_physical_partition = False
         for _ in range(part_map_count):
             if pos + 2 > end:
                 break
             map_type = logical_volume[pos]
             map_len = logical_volume[pos + 1]
             raw = logical_volume[pos:pos + map_len]
-            if map_type == 2 and map_len >= 44:
+            if map_type == 1 and map_len >= 6:
+                has_physical_partition = True
+            elif map_type == 2 and map_len >= 44:
                 ident = raw[5:28].rstrip(b"\0").decode("latin1", "ignore")
                 if "Metadata Partition" in ident:
                     metadata_file_lbn = _u32(raw, 40)
@@ -274,7 +277,9 @@ class _UdfIsoReader:
             pos += map_len
 
         if metadata_file_lbn is None:
-            raise RuntimeError("未找到 UDF Metadata Partition")
+            if has_physical_partition and self.fsd_part == 0:
+                return
+            raise RuntimeError("未找到可用的 UDF 分区映射")
 
         metadata_fe = self.read(self.physical_offset(metadata_file_lbn), 2048)
         chunks = []
@@ -290,14 +295,14 @@ class _UdfIsoReader:
         flags = _u16(entry, 34)
         allocation_type = flags & 7
         if tag_id == 261:
-            lea = _u32(entry, 176)
+            lea = _u32(entry, 168)
             return {
                 "tag": tag_id,
                 "atype": allocation_type,
                 "file_type": entry[27],
                 "info_len": _u64(entry, 56),
-                "lad": _u32(entry, 180),
-                "ad_start": 184 + lea,
+                "lad": _u32(entry, 172),
+                "ad_start": 176 + lea,
             }
         if tag_id == 266:
             lea = _u32(entry, 208)
@@ -374,6 +379,13 @@ class _UdfIsoReader:
         ranges = []
         for entry in entries:
             ranges.extend(self.physical_ranges_for_file(entry))
+        return self.reader.prefetch(ranges, **kwargs)
+
+    def prefetch_file_entries(self, entries, **kwargs):
+        ranges = []
+        for entry in entries:
+            if entry.get("part") == 0:
+                ranges.append((self.physical_offset(entry["lbn"]), max(2048, int(entry.get("len") or 0))))
         return self.reader.prefetch(ranges, **kwargs)
 
     def file_data(self, file_entry, current_part):
@@ -694,9 +706,11 @@ def probe_bluray_iso(client, file_node, sha1=None):
     if not (playlist_dir and stream_dir and clipinf_dir):
         raise RuntimeError("BDMV 目录缺少 PLAYLIST/STREAM/CLIPINF")
 
+    stream_entries = iso.list_dir(stream_dir)
+    iso.prefetch_file_entries(stream_entries, max_gap=262144, max_chunk=16 * 1024 * 1024)
     stream_sizes = {}
     stream_ads = {}
-    for entry in iso.list_dir(stream_dir):
+    for entry in stream_entries:
         fields, ads, _ = iso.entry_info(entry)
         stream_sizes[entry["name"]] = fields["info_len"]
         stream_ads[entry["name"]] = ads
@@ -704,6 +718,7 @@ def probe_bluray_iso(client, file_node, sha1=None):
         raise RuntimeError("BDMV STREAM 目录为空")
 
     playlist_entries = iso.list_dir(playlist_dir)
+    iso.prefetch_file_entries(playlist_entries, max_gap=262144, max_chunk=16 * 1024 * 1024)
     iso.prefetch_files(playlist_entries, max_gap=262144, max_chunk=16 * 1024 * 1024)
 
     playlists = []
@@ -723,6 +738,7 @@ def probe_bluray_iso(client, file_node, sha1=None):
     clpi_entry = iso.find(clipinf_dir, clpi_name)
     streams = []
     if clpi_entry:
+        iso.prefetch_file_entries([clpi_entry], max_gap=0, max_chunk=1024 * 1024)
         iso.prefetch_files([clpi_entry], max_gap=0, max_chunk=1024 * 1024)
         clpi_data = iso.file_data(iso.read_file_entry(clpi_entry), clpi_entry["part"])
         streams = _parse_clpi_streams(clpi_data, name)
