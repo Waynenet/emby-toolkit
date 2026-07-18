@@ -263,6 +263,8 @@ class SchedulerManager:
             logger.debug("  ➜ 定时任务调度器已启动。")
             # 在启动时，根据当前配置更新所有任务
             self.update_all_scheduled_jobs()
+            from handler.etk_plugin_update import schedule_etk_plugin_update_check
+            schedule_etk_plugin_update_check()
         except Exception as e:
             logger.error(f"  ➜ 启动定时任务调度器失败: {e}", exc_info=True)
 

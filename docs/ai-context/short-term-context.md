@@ -56,7 +56,7 @@
 - 媒体查询、编辑、图片代理、自动标签：`routes/media.py`
 - 日志查看和搜索：`routes/logs.py`
 - 任务触发和动作入口：`routes/tasks.py`、`routes/actions.py`
-- Webhook：`/webhook/emby` 只保留 MoviePilot 事件，不再兼容 Emby Webhook；ETK MediaInfo Bridge 通过 `/api/emby/events` 上报播放、用户数据、权限、合集和手动元数据/图片编辑事件，用户主动删除走独立的两阶段接口。元数据和图片都由对应的 Emby 手动保存 API 打短时标记后才上报，普通 `MetadataEdit`、刷新导入和 ETK 自身回填会被过滤；从 Emby 搜索图像手动下载 TMDb 图片时，插件同时上报图片类型与原始链接，ETK 只更新 `media_metadata` 对应的单个图片字段，不覆盖其他图片缓存；主动删除按 Movie/Episode/Season/Series 从 `media_metadata` 展开完整 PickCode。插件计划任务更新固定从已注册的 ETK 地址访问 `/api/emby/plugin-update`，由 ETK 使用全局网络代理流式转发官方 Release DLL，Emby 不再直连 GitHub。
+- Webhook：`/webhook/emby` 只保留 MoviePilot 事件，不再兼容 Emby Webhook；ETK MediaInfo Bridge 通过 `/api/emby/events` 上报播放、用户数据、权限、合集和手动元数据/图片编辑事件，用户主动删除走独立的两阶段接口。元数据和图片都由对应的 Emby 手动保存 API 打短时标记后才上报，普通 `MetadataEdit`、刷新导入和 ETK 自身回填会被过滤；从 Emby 搜索图像手动下载 TMDb 图片时，插件同时上报图片类型与原始链接，ETK 只更新 `media_metadata` 对应的单个图片字段，不覆盖其他图片缓存；主动删除按 Movie/Episode/Season/Series 从 `media_metadata` 展开完整 PickCode。插件计划任务更新固定从已注册的 ETK 地址访问 `/api/emby/plugin-update`，由 ETK 使用全局网络代理流式转发官方 Release DLL，Emby 不再直连 GitHub。ETK 每次启动 30 秒后比较 Emby 已装插件和 GitHub Latest；仅版本落后时触发插件更新任务，且只有任务成功并确认 `HasPendingRestart=true` 才自动重启 Emby。
 - 115 网盘：`routes/p115.py`，包括扫码、cookie、目录、播放直链、整理规则、命名规则、播放池、音乐同步、STRM 替换等。
 - 追剧：`routes/watchlist.py`
 - 演员订阅：`routes/actor_subscriptions.py`
