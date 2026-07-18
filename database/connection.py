@@ -260,6 +260,7 @@ def init_db():
                         watching_status TEXT DEFAULT 'NONE', -- 'NONE', 'Watching', 'Paused', 'Completed', 'Pending'
                         paused_until DATE,
                         force_ended BOOLEAN DEFAULT FALSE,
+                        enable_mp_subscribe BOOLEAN DEFAULT TRUE, -- 🚀【新增：单剧 MP 订阅开关，默认开启】
                         watchlist_last_checked_at TIMESTAMP WITH TIME ZONE,
                         watchlist_tmdb_status TEXT,
                         watchlist_next_episode_json JSONB,
@@ -550,7 +551,8 @@ def init_db():
                             "production_companies_json": "JSONB",
                             "networks_json": "JSONB",
                             "tagline": "TEXT",
-                            "tmdb_episode_group_id": "TEXT"
+                            "tmdb_episode_group_id": "TEXT",
+                            "enable_mp_subscribe": "BOOLEAN DEFAULT TRUE"
                         },
                         'subscribe_assistant_snapshots': {
                             "last_checked_at": "TIMESTAMP WITH TIME ZONE"
