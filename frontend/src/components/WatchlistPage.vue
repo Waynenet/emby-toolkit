@@ -385,8 +385,7 @@
                           @click.stop="() => forceEndSingleItem(item)"
                         >
                           <template #icon>
-                            <!-- 💡 按钮保持普通 quaternary，直接染红图标 -->
-                            <n-icon :component="ForceEndIcon" style="color: #d03050;" />
+                            <n-icon :component="ForceEndIcon" />
                           </template>
                         </n-button>
                       </template>
@@ -402,8 +401,7 @@
                           @click.stop="() => updateStatus(item.tmdb_id, 'Watching')"
                         >
                           <template #icon>
-                            <!-- 💡 按钮保持普通 quaternary，直接染绿图标 -->
-                            <n-icon :component="WatchingIcon" style="color: #18a058;" />
+                            <n-icon :component="WatchingIcon" />
                           </template>
                         </n-button>
                       </template>
