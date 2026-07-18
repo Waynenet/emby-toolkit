@@ -23,7 +23,8 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             SELECT tmdb_id, title, watching_status, watchlist_last_checked_at,
                    watchlist_next_episode_json, watchlist_missing_info_json,
                    emby_item_ids_json, watchlist_tmdb_status, total_episodes,
-                   first_requested_at
+                   first_requested_at,
+                   enable_mp_subscribe
             FROM media_metadata
             WHERE item_type = 'Series' 
               AND watching_status != 'NONE'
@@ -84,7 +85,8 @@ def get_all_watchlist_items() -> List[Dict[str, Any]]:
             COALESCE(ss.series_collected_count, 0) as series_collected_count,
                
             p.total_episodes as series_total_episodes,
-            s.total_episodes_locked
+            s.total_episodes_locked,
+            p.enable_mp_subscribe
 
         FROM media_metadata s
         JOIN active_series p ON s.parent_series_tmdb_id = p.tmdb_id
@@ -820,7 +822,8 @@ def get_series_by_dynamic_condition(condition_sql: str = None, library_ids: Opti
             watchlist_missing_info_json AS missing_info_json,
             subscription_status,
             total_episodes,
-            total_episodes_locked
+            total_episodes_locked,
+            enable_mp_subscribe
         FROM media_metadata
         WHERE item_type = 'Series'
     """
