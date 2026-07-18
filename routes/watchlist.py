@@ -91,12 +91,26 @@ watchlist_bp = Blueprint('watchlist', __name__, url_prefix='/api/watchlist')
 
 logger = logging.getLogger(__name__)
 
+# --- 自愈式添加字段辅助函数 ---
+def _ensure_enable_mp_subscribe_column():
+    """确保数据库表具有 enable_mp_subscribe 字段，零配置无感迁移"""
+    try:
+        with watchlist_db.get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN IF NOT EXISTS enable_mp_subscribe BOOLEAN DEFAULT TRUE;")
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"自愈数据库字段 'enable_mp_subscribe' 失败: {e}")
+
 # 2. 使用蓝图定义路由
-@watchlist_bp.route('', methods=['GET']) # 注意：这里的路径是空的，因为前缀已经定义
+@watchlist_bp.route('', methods=['GET'])
 @admin_required
 def api_get_watchlist():
     logger.debug("API (Blueprint): 收到获取追剧列表的请求。")
     try:
+        # 💡 每次获取列表时自动检查并补齐新字段
+        _ensure_enable_mp_subscribe_column()
+
         items = watchlist_db.get_all_watchlist_items()
 
         for item in items:
@@ -121,6 +135,64 @@ def api_get_watchlist():
     except Exception as e:
         logger.error(f"获取追剧列表时发生错误: {e}", exc_info=True)
         return jsonify({"error": "获取追剧列表时发生服务器内部错误"}), 500
+
+
+# --- 新增：单剧 MoviePilot 订阅开关接口 ---
+@watchlist_bp.route('/update_mp_subscribe', methods=['POST'])
+@admin_required
+def api_update_mp_subscribe():
+    """更新剧集是否启用 MoviePilot 订阅"""
+    data = request.json
+    tmdb_id = data.get('tmdb_id')
+    enabled = data.get('enabled')
+
+    if not tmdb_id or enabled is None:
+        return jsonify({"error": "参数无效"}), 400
+
+    logger.info(f"API (Blueprint): 收到请求，将项目 {tmdb_id} 的 MoviePilot 自动订阅设为 {enabled}。")
+    try:
+        _ensure_enable_mp_subscribe_column()
+        with watchlist_db.get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE media_metadata
+                    SET enable_mp_subscribe = %s
+                    WHERE tmdb_id = %s AND item_type = 'Series'
+                """, (enabled, str(tmdb_id)))
+            conn.commit()
+        return jsonify({"message": "MoviePilot 订阅设置更新成功"}), 200
+    except Exception as e:
+        logger.error(f"更新 MoviePilot 订阅状态时发生错误: {e}", exc_info=True)
+        return jsonify({"error": "服务器在更新订阅设置时发生内部错误"}), 500
+
+
+# --- 新增：批量更新 MoviePilot 订阅开关接口 ---
+@watchlist_bp.route('/batch_update_mp_subscribe', methods=['POST'])
+@admin_required
+def api_batch_update_mp_subscribe():
+    """批量更新剧集是否启用 MoviePilot 订阅"""
+    data = request.json
+    item_ids = data.get('item_ids') # 接收一系列 parent_tmdb_id 列表
+    enabled = data.get('enabled')
+
+    if not isinstance(item_ids, list) or not item_ids or enabled is None:
+        return jsonify({"error": "请求参数无效：必须提供剧集ID列表 (item_ids) 和状态值 (enabled)。"}), 400
+
+    logger.info(f"API (Blueprint): 收到批量请求，将 {len(item_ids)} 个剧集的 MoviePilot 自动订阅设为 {enabled}。")
+    try:
+        _ensure_enable_mp_subscribe_column()
+        with watchlist_db.get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE media_metadata
+                    SET enable_mp_subscribe = %s
+                    WHERE tmdb_id = ANY(%s) AND item_type = 'Series'
+                """, (enabled, [str(i) for i in item_ids]))
+            conn.commit()
+        return jsonify({"message": f"批量操作成功！已同步更新 {len(item_ids)} 个剧集的 MoviePilot 自动订阅设置。"}), 200
+    except Exception as e:
+        logger.error(f"批量更新 MoviePilot 订阅状态时发生错误: {e}", exc_info=True)
+        return jsonify({"error": "批量更新订阅设置时发生服务器内部错误"}), 500
 
 @watchlist_bp.route('/add', methods=['POST'])
 @admin_required

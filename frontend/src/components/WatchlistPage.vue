@@ -315,13 +315,7 @@
                   <div class="card-actions">
                     <n-tooltip v-if="hasMissing(item)">
                       <template #trigger>
-                        <!-- 修改点：quaternary circle 保持透明圆底，指定 type="warning" 让图标带颜色 -->
-                        <n-button
-                          quaternary
-                          circle
-                          type="warning"
-                          @click.stop="() => openMissingInfoModal(item)"
-                        >
+                        <n-button quaternary circle type="warning" @click.stop="() => openMissingInfoModal(item)">
                           <template #icon><n-icon :component="EyeIcon" /></template>
                         </n-button>
                       </template>
@@ -330,25 +324,26 @@
 
                     <n-tooltip>
                       <template #trigger>
-                        <n-button
-                          quaternary
-                          circle
-                          :loading="refreshingItems[item.parent_tmdb_id]" 
-                          @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)"
-                        >
+                        <n-button quaternary circle :loading="refreshingItems[item.parent_tmdb_id]" @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)">
                           <template #icon><n-icon :component="SyncOutline" /></template>
                         </n-button>
                       </template>
                       立即刷新此剧集
                     </n-tooltip>
 
+                    <!-- 🚀 新增：MoviePilot 自动订阅开关，替换原有的 Emby 打开按钮 -->
                     <n-tooltip>
                       <template #trigger>
-                        <n-button quaternary circle @click.stop="openInEmby(item.emby_item_ids_json)">
-                          <template #icon><n-icon :component="EmbyIcon" /></template>
+                        <n-button 
+                          quaternary 
+                          circle 
+                          :type="item.enable_mp_subscribe !== false ? 'primary' : 'default'" 
+                          @click.stop="() => saveMpSubscribe(item, item.enable_mp_subscribe === false)"
+                        >
+                          <template #icon><n-icon :component="PaperPlaneIcon" /></template>
                         </n-button>
                       </template>
-                      在 Emby 中打开
+                      {{ item.enable_mp_subscribe !== false ? 'MoviePilot 自动订阅：已开启 (点击关闭)' : 'MoviePilot 自动订阅：已关闭 (点击开启)' }}
                     </n-tooltip>
 
                     <n-tooltip>
@@ -466,14 +461,10 @@
 import { ref, shallowRef, triggerRef, onMounted, onBeforeUnmount, h, computed, watch } from 'vue';
 import axios from 'axios';
 import { NPageHeader, NDivider, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NPopconfirm, NTooltip, NCard, NImage, NEllipsis, NSpin, NAlert, NRadioGroup, NRadioButton, NModal, NTabs, NTabPane, NList, NListItem, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup, NProgress, useThemeVars, NPopover, NInputNumber, NSwitch } from 'naive-ui';
-import { SyncOutline, TvOutline as TvIcon, TrashOutline as TrashIcon, EyeOutline as EyeIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, PlayCircleOutline as WatchingIcon, PauseCircleOutline as PausedIcon, CheckmarkCircleOutline as CompletedIcon, ScanCircleOutline as ScanIcon, CaretDownOutline as CaretDownIcon, FlashOffOutline as ForceEndIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, DownloadOutline as DownloadIcon, AlbumsOutline as CollectionsIcon, SettingsOutline as SettingsIcon, HourglassOutline as PendingIcon, TimerOutline as TimerIcon, RefreshCircleOutline as RefreshIcon, GitNetworkOutline as GapIcon, CloudDownloadOutline as BackfillIcon, EarthOutline as DoubanIcon, PaperPlaneOutline as PaperPlaneIcon } from '@vicons/ionicons5';
+import { SyncOutline, TvOutline as TvIcon, TrashOutline as TrashIcon, EyeOutline as EyeIcon, CalendarOutline as CalendarIcon, TimeOutline as TimeIcon, PlayCircleOutline as WatchingIcon, PauseCircleOutline as PausedIcon, CheckmarkCircleOutline as CompletedIcon, ScanCircleOutline as ScanIcon, CaretDownOutline as CaretDownIcon, FlashOffOutline as ForceEndIcon, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, DownloadOutline as DownloadIcon, AlbumsOutline as CollectionsIcon, SettingsOutline as SettingsIcon, HourglassOutline as PendingIcon, TimerOutline as TimerIcon, RefreshCircleOutline as RefreshIcon, GitNetworkOutline as GapIcon, CloudDownloadOutline as BackfillIcon, EarthOutline as DoubanIcon, PaperPlaneOutline as PaperPlaneIcon, BanOutline as IgnoredIcon } from '@vicons/ionicons5';
 import { format, parseISO } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';
 
-const EmbyIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 48 48", width: "1em", height: "1em" }, [
-  h('path', { d: "M24,4.2c-11,0-19.8,8.9-19.8,19.8S13,43.8,24,43.8s19.8-8.9,19.8-19.8S35,4.2,24,4.2z M24,39.8c-8.7,0-15.8-7.1-15.8-15.8S15.3,8.2,24,8.2s15.8,7.1,15.8,15.8S32.7,39.8,24,39.8z", fill: "currentColor" }),
-  h('polygon', { points: "22.2,16.4 22.2,22.2 16.4,22.2 16.4,25.8 22.2,25.8 22.2,31.6 25.8,31.6 25.8,25.8 31.6,31.6 31.6,22.2 25.8,22.2 25.8,16.4 ", fill: "currentColor" })
-]);
 const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 512 512", width: "1em", height: "1em" }, [
   h('path', { d: "M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM133.2 176.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zM133.2 262.6a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8zm63.3-22.4a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm74.8 108.2c-27.5-3.3-50.2-26-53.5-53.5a8 8 0 0 1 16-.6c2.3 19.3 18.8 34 38.1 31.7a8 8 0 0 1 7.4 8c-2.3.3-4.5.4-6.8.4zm-74.8-108.2a22.4 22.4 0 1 1 44.8 0 22.4 22.4 0 1 1 -44.8 0zm149.7 22.4a22.4 22.4 0 1 1 0-44.8 22.4 22.4 0 1 1 0 44.8z", fill: "#01b4e4" })
 ]);
@@ -608,10 +599,23 @@ const sortKeyOptions = [
 
 const batchActions = computed(() => {
   const removeAction = { label: '批量移除', key: 'remove', icon: () => h(NIcon, { component: TrashIcon }) };
+  const enableMpAction = { label: '开启 MP 订阅', key: 'enableMp', icon: () => h(NIcon, { component: PaperPlaneIcon }) };
+  const disableMpAction = { label: '关闭 MP 订阅', key: 'disableMp', icon: () => h(NIcon, { component: IgnoredIcon }) };
+
   if (currentView.value === 'inProgress') {
-    return [{ label: '强制完结', key: 'forceEnd', icon: () => h(NIcon, { component: ForceEndIcon }) }, removeAction];
+    return [
+      { label: '强制完结', key: 'forceEnd', icon: () => h(NIcon, { component: ForceEndIcon }) }, 
+      enableMpAction,
+      disableMpAction,
+      removeAction
+    ];
   } else if (currentView.value === 'completed') {
-    return [{ label: '重新追剧', key: 'rewatch', icon: () => h(NIcon, { component: WatchingIcon }) }, removeAction];
+    return [
+      { label: '重新追剧', key: 'rewatch', icon: () => h(NIcon, { component: WatchingIcon }) }, 
+      enableMpAction,
+      disableMpAction,
+      removeAction
+    ];
   }
   return []; 
 });
@@ -835,6 +839,37 @@ const handleBatchAction = (key) => {
         } catch (err) { message.error(err.response?.data?.error || '批量移除失败。'); }
       }
     });
+  // 🚀 新增：批量“开启/关闭 MP 订阅”的处理逻辑
+  } else if (key === 'enableMp' || key === 'disableMp') {
+    const parentIds = getParentIds();
+    const enabled = (key === 'enableMp');
+    
+    dialog.info({
+      title: '批量操作确认',
+      content: `确定要将选中的 ${parentIds.length} 部剧集的 MoviePilot 自动订阅设为【${enabled ? '开启' : '关闭'}】吗？`,
+      positiveText: '确定',
+      negativeText: '取消',
+      onPositiveClick: async () => {
+        try {
+          const response = await axios.post('/api/watchlist/batch_update_mp_subscribe', { 
+            item_ids: parentIds, 
+            enabled: enabled 
+          });
+          message.success(response.data.message || '批量修改配置成功！');
+          
+          // 💡 将更改无感同步到当前内存视图，避免刷新页面
+          rawWatchlist.value.forEach(i => {
+            if (parentIds.includes(i.parent_tmdb_id) || parentIds.includes(i.tmdb_id)) {
+              i.enable_mp_subscribe = enabled;
+            }
+          });
+          triggerRef(rawWatchlist);
+          selectedItems.value = [];
+        } catch (err) {
+          message.error(err.response?.data?.error || '批量操作配置失败。');
+        }
+      }
+    });
   }
 };
 
@@ -879,14 +914,27 @@ const getPosterUrl = (embyIds) => {
   return `/image_proxy/Items/${itemId}/Images/Primary?maxHeight=480&tag=1`;
 };
 
-const openInEmby = (embyIds) => {
-  const itemId = embyIds?.[0];
-  const embyServerUrl = configModel.value?.emby_server_url;
-  if (!embyServerUrl || !itemId) return;
-  const baseUrl = embyServerUrl.endsWith('/') ? embyServerUrl.slice(0, -1) : embyServerUrl;
-  const serverId = configModel.value?.emby_server_id;
-  let finalUrl = `${baseUrl}/web/index.html#!/item?id=${itemId}${serverId ? `&serverId=${serverId}` : ''}`;
-  window.open(finalUrl, '_blank');
+// 🚀 新增：单体 MoviePilot 订阅开关控制（反复交替切换）
+const saveMpSubscribe = async (item, enabled) => {
+  try {
+    const parentId = item.parent_tmdb_id || item.tmdb_id;
+    await axios.post('/api/watchlist/update_mp_subscribe', { 
+      tmdb_id: parentId, 
+      enabled: enabled 
+    });
+    
+    // 💡 内存状态无感刷新（更新该影视剧在当前视图下所有关联季的显示状态）
+    rawWatchlist.value.forEach(i => {
+      if (i.parent_tmdb_id === parentId || i.tmdb_id === parentId) {
+        i.enable_mp_subscribe = enabled;
+      }
+    });
+    triggerRef(rawWatchlist);
+    
+    message.success(enabled ? `已开启《${item.item_name}》的 MoviePilot 订阅同步` : `已关闭《${item.item_name}》的 MoviePilot 订阅同步`);
+  } catch (err) {
+    message.error('订阅状态切换失败');
+  }
 };
 
 const statusInfo = (status) => {

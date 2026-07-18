@@ -391,6 +391,18 @@ class WatchlistProcessor:
 
                 # --- 4. 复活判定逻辑 ---
                 
+                # 💡 新增：自愈查询该剧集是否启用了 MoviePilot 自动订阅开关
+                enable_mp_subscribe = True
+                try:
+                    with connection.get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("SELECT enable_mp_subscribe FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Series' LIMIT 1", (str(tmdb_id),))
+                            row = cursor.fetchone()
+                            if row and row.get('enable_mp_subscribe') is not None:
+                                enable_mp_subscribe = row.get('enable_mp_subscribe')
+                except Exception:
+                    pass
+
                 # 计算本地已有的最大季号，以及该季的本地集数
                 local_max_season = 0
                 local_max_season_episodes = 0
@@ -457,7 +469,24 @@ class WatchlistProcessor:
                             status_desc = "已开播" if days_diff <= 0 else f"{days_diff}天后开播"
                             logger.info(f"  ➜ 发现《{series_name}》第 {new_season_num} 季{status_desc}，触发复活订阅流程。")
 
+                            # --- 分支 A：老季集数更新复活 ---
                             if is_updated_old_season:
+                                # 💡 开关不开启时，仅做本地状态修正、标记复活，但彻底阻断 MP 订阅提报
+                                if not enable_mp_subscribe:
+                                    logger.info(f"  ➜ 《{series_name}》已关闭 MoviePilot 自动订阅，更新本地剧集状态但跳过 MP 洗版提报。")
+                                    watchlist_db.update_specific_season_total_episodes(
+                                        tmdb_id,
+                                        new_season_num,
+                                        tmdb_ep_count,
+                                        locked=False
+                                    )
+                                    watchlist_db.revive_completed_series_and_season(tmdb_id, new_season_num)
+                                    season_info['episode_count'] = tmdb_ep_count
+                                    self._update_watchlist_entry(tmdb_id, series_name, {
+                                        "watchlist_tmdb_status": "Returning Series"
+                                    })
+                                    break
+
                                 mp_wash_kwargs = _watchlist_mp_wash_kwargs(watchlist_cfg)
                                 sub_success = moviepilot.subscribe_series_to_moviepilot(
                                     series_info={'tmdb_id': tmdb_id, 'title': series_name},
@@ -482,6 +511,7 @@ class WatchlistProcessor:
                                     logger.error(f"  ➜ 动画《{series_name}》第 {new_season_num} 季提交 MoviePilot 订阅失败。")
                                 break
 
+                            # --- 分支 B：全新季度开播复活 ---
                             # 1. 构造媒体信息
                             season_tmdb_id = str(season_info.get('id'))
                             media_info = {
@@ -494,6 +524,14 @@ class WatchlistProcessor:
                                 'parent_series_tmdb_id': tmdb_id,
                                 'overview': season_info.get('overview')
                             }
+
+                            # 💡 开关不开启时，仅将 TMDb 状态变更为 Returning Series 并退出循环，不再向订阅模块提报
+                            if not enable_mp_subscribe:
+                                logger.info(f"  ➜ 《{series_name}》已关闭 MoviePilot 自动订阅，跳过第 {new_season_num} 季想看提报。")
+                                self._update_watchlist_entry(tmdb_id, series_name, {
+                                    "watchlist_tmdb_status": "Returning Series"
+                                })
+                                break
 
                             # ★★★ 修改点：定义专属的 source type，并区分开播状态 ★★★
                             source_data = {"type": "revived_season", "reason": "watchlist_revival", "item_id": tmdb_id}
@@ -1529,15 +1567,23 @@ class WatchlistProcessor:
         # ======================================================================
         # ★★★ MP 状态接管与同步 (自动待定 & 自动暂停) ★★★
         # ======================================================================
-        self._sync_status_to_moviepilot(
-            tmdb_id=tmdb_id, 
-            series_name=item_name, 
-            series_details=latest_series_data, 
-            final_status=final_status,
-            old_status=old_status,
-            all_tmdb_episodes=all_tmdb_episodes,
-            real_next_episode=real_next_episode_to_air,
-        )
+        enable_mp_subscribe = series_data.get('enable_mp_subscribe')
+        if enable_mp_subscribe is None:
+            enable_mp_subscribe = True # 默认缺省值为 True
+
+        if enable_mp_subscribe:
+            self._sync_status_to_moviepilot(
+                tmdb_id=tmdb_id, 
+                series_name=item_name, 
+                series_details=latest_series_data, 
+                final_status=final_status,
+                old_status=old_status,
+                all_tmdb_episodes=all_tmdb_episodes,
+                real_next_episode=real_next_episode_to_air,
+            )
+        else:
+            logger.info(f"  ➜ [订阅屏蔽] 《{item_name}》已关闭 MoviePilot 自动订阅，跳过向 MoviePilot 推送及状态同步。")
+
         self._close_completed_subscription_status(tmdb_id, item_name, final_status)
 
     # --- 统一的、公开的追剧处理入口 ★★★
