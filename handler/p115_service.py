@@ -48,6 +48,35 @@ def _p115_is_visible_child_dir(client, parent_cid, dir_name, cid):
         return False
 
     try:
+        search_res = client.fs_search({
+            'cid': parent_cid,
+            'search_value': dir_name,
+            'limit': 100,
+            'offset': 0,
+            'show_dir': 1,
+            'record_open_time': 0,
+        })
+        if isinstance(search_res, dict) and search_res.get('state'):
+            for item in search_res.get('data') or []:
+                item_name = item.get('fn') or item.get('n') or item.get('file_name')
+                item_fc = str(item.get('fc') if item.get('fc') is not None else item.get('type'))
+                item_cid = item.get('fid') or item.get('file_id') or item.get('id') or item.get('cid')
+                item_parent = str(item.get('pid') or item.get('parent_id') or '').strip()
+                if (
+                    item_fc == '0'
+                    and item_name == dir_name
+                    and str(item_cid) == cid
+                    and (not item_parent or item_parent == parent_cid)
+                ):
+                    return True
+    except Exception as e:
+        logger.debug(
+            f"  ➜ [115目录校验] 搜索接口不可用，回退目录列表: "
+            f"parent={parent_cid}, name={dir_name}, err={e}"
+        )
+
+    try:
+        # 搜索接口不可用时兼容旧客户端，目录较小时仍可通过列表确认。
         offset = 0
         limit = 1000
         while offset < 5000:
@@ -2677,7 +2706,7 @@ class P115Service:
                     return None
 
                 try:
-                    search_res = self.fs_files({
+                    search_res = self.fs_search({
                         "cid": parent_cid,
                         "search_value": name,
                         "limit": 100,
@@ -2707,8 +2736,14 @@ class P115Service:
                             or item.get("id")
                             or item.get("cid")
                         )
+                        item_parent = str(item.get("pid") or item.get("parent_id") or "").strip()
 
-                        if item_name == name and item_fc == "0" and item_cid:
+                        if (
+                            item_name == name
+                            and item_fc == "0"
+                            and item_cid
+                            and (not item_parent or item_parent == str(parent_cid))
+                        ):
                             if _p115_is_visible_child_dir(
                                 self, parent_cid, name, item_cid
                             ):
