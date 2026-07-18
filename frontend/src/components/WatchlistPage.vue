@@ -216,7 +216,18 @@
                 <!-- 右侧内容 -->
                 <div class="card-content-container">
                   <div class="card-header">
-                    <n-ellipsis class="card-title" :tooltip="{ style: { maxWidth: '300px' } }">{{ item.item_name }}</n-ellipsis>
+                    <!-- 🚀 修改：将文本嵌套在 a 标签中，实现点击片名跳转 TMDb 并阻止冒泡 -->
+                    <n-ellipsis class="card-title click-title" :tooltip="{ style: { maxWidth: '300px' } }">
+                      <a 
+                        :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" 
+                        target="_blank" 
+                        @click.stop
+                        style="text-decoration: none; color: inherit;"
+                      >
+                        {{ item.item_name }}
+                      </a>
+                    </n-ellipsis>
+                    
                     <n-popconfirm @positive-click="() => removeFromWatchlist(item.parent_tmdb_id, item.item_name)" @click.stop>
                       <template #trigger>
                         <n-button text type="error" size="small" @click.stop>
@@ -325,7 +336,12 @@
                   <div class="card-actions">
                     <n-tooltip v-if="hasMissing(item)">
                       <template #trigger>
-                        <n-button quaternary circle type="warning" @click.stop="() => openMissingInfoModal(item)">
+                        <n-button
+                          quaternary
+                          circle
+                          type="warning"
+                          @click.stop="() => openMissingInfoModal(item)"
+                        >
                           <template #icon><n-icon :component="EyeIcon" /></template>
                         </n-button>
                       </template>
@@ -334,14 +350,18 @@
 
                     <n-tooltip>
                       <template #trigger>
-                        <n-button quaternary circle :loading="refreshingItems[item.parent_tmdb_id]" @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)">
+                        <n-button
+                          quaternary
+                          circle
+                          :loading="refreshingItems[item.parent_tmdb_id]" 
+                          @click.stop="() => triggerSingleRefresh(item.parent_tmdb_id, item.item_name)"
+                        >
                           <template #icon><n-icon :component="SyncOutline" /></template>
                         </n-button>
                       </template>
                       立即刷新此剧集
                     </n-tooltip>
 
-                    <!-- 🚀 新增：MoviePilot 自动订阅开关，替换原有的 Emby 打开按钮 -->
                     <n-tooltip>
                       <template #trigger>
                         <n-button 
@@ -356,13 +376,34 @@
                       {{ item.enable_mp_subscribe !== false ? 'MoviePilot 自动订阅：已开启 (点击关闭)' : 'MoviePilot 自动订阅：已关闭 (点击开启)' }}
                     </n-tooltip>
 
-                    <n-tooltip>
+                    <!-- A. 追剧中视图：显示强制完结按钮 -->
+                    <n-tooltip v-if="currentView === 'inProgress'">
                       <template #trigger>
-                        <n-button quaternary circle tag="a" :href="`https://www.themoviedb.org/tv/${item.parent_tmdb_id}`" target="_blank" @click.stop>
-                          <template #icon><n-icon :component="TMDbIcon" /></template>
+                        <n-button 
+                          quaternary 
+                          circle 
+                          type="error"
+                          @click.stop="() => forceEndSingleItem(item)"
+                        >
+                          <template #icon><n-icon :component="ForceEndIcon" /></template>
                         </n-button>
                       </template>
-                      在 TMDb 中打开
+                      强制完结此季
+                    </n-tooltip>
+
+                    <!-- B. 已完结视图：显示重新追剧按钮 -->
+                    <n-tooltip v-if="currentView === 'completed'">
+                      <template #trigger>
+                        <n-button 
+                          quaternary 
+                          circle 
+                          type="success"
+                          @click.stop="() => updateStatus(item.tmdb_id, 'Watching')"
+                        >
+                          <template #icon><n-icon :component="WatchingIcon" /></template>
+                        </n-button>
+                      </template>
+                      重新追剧
                     </n-tooltip>
                   </div>
                 </div>
@@ -969,6 +1010,25 @@ const saveMpSubscribe = async (item, enabled) => {
   }
 };
 
+// 🚀 新增：单剧一键强制完结
+const forceEndSingleItem = (item) => {
+  dialog.warning({
+    title: '确认强制完结',
+    content: `确定要将《${item.item_name}》标记为“强制完结”吗？强制完结后它将不再被后台自动复活订阅，这不会影响同剧其它季。`,
+    positiveText: '确定完结',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await axios.post('/api/watchlist/batch_force_end', { item_ids: [item.tmdb_id] });
+        message.success(`《${item.item_name}》已成功标记为强制完结！`);
+        await fetchWatchlist();
+      } catch (err) {
+        message.error(err.response?.data?.error || '操作失败。');
+      }
+    }
+  });
+};
+
 const statusInfo = (status) => {
   const map = {
     'Watching': { type: 'success', text: '追剧中', icon: WatchingIcon, next: 'Paused', nextText: '暂停' },
@@ -1432,6 +1492,15 @@ watch(loaderRef, (newEl, oldEl) => { if (oldEl && observer) observer.unobserve(o
 
 .assistant-aux-layout {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* 🚀 新增：标题悬停高亮跳转效果 */
+.click-title a {
+  transition: color 0.2s ease-in-out;
+}
+.click-title a:hover {
+  color: var(--n-primary-color) !important;
+  text-shadow: 0 0 2px rgba(24, 160, 88, 0.2);
 }
 
 /* 策略配置：移动端响应式 */
