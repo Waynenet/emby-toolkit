@@ -5309,18 +5309,25 @@ def _candidate_is_completed_season(candidate: Dict[str, Any], *, source_provider
 
 
 def _title_looks_invalid_for_center(title: Any, tmdb_id: str = '') -> bool:
-    """中心公共标题防污染：空值、纯数字、等于 TMDb ID 都视为无效。"""
+    """中心公共标题防污染：只拒绝空值和当前条目的 TMDb ID 占位标题。"""
     text = str(title or '').strip()
     if not text:
         return True
     if text.lower() in {'none', 'null', 'undefined', 'nan'}:
         return True
-    if re.fullmatch(r'\d+', text):
-        return True
     tmdb_id = str(tmdb_id or '').strip()
-    if tmdb_id and text == tmdb_id:
-        return True
-    return False
+    if not tmdb_id:
+        return False
+    compact = re.sub(r'[\s:_#-]+', '', text).lower()
+    return compact in {tmdb_id.lower(), f'tmdb{tmdb_id.lower()}', f'id{tmdb_id.lower()}'}
+
+
+def _first_valid_center_title(tmdb_id: str, *values: Any) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text and not _title_looks_invalid_for_center(text, tmdb_id):
+            return text
+    return ''
 
 
 def _strip_season_suffix_from_title(title: str) -> str:
@@ -5831,7 +5838,15 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
         genres = _safe_json_list(row.get('genres_json')) if row and include_series_fields else []
         title_value = _first_display_text(row.get('title'), fallback_title)
         original_title_value = _first_display_text(row.get('original_title'), candidate.get('original_title'))
-        if item_type == 'Series':
+        if item_type == 'Movie':
+            title_value = _first_valid_center_title(
+                tmdb_id,
+                row.get('title'),
+                fallback_title,
+                row.get('original_title'),
+                candidate.get('original_title'),
+            )
+        elif item_type == 'Series':
             title_value = _safe_series_title(row.get('title'), fallback_title, candidate.get('series_title'), candidate.get('name'))
             if _display_title_is_season_only(original_title_value):
                 original_title_value = ''
@@ -8094,10 +8109,18 @@ def _filter_display_meta_for_center_upload(meta: Dict[str, Any]) -> Dict[str, An
         }
 
     out = dict(meta)
+    tmdb_id = str(out.get('tmdb_id') or '').strip()
+    title = str(out.get('title') or '').strip()
+    valid_numeric_title = bool(
+        re.fullmatch(r'\d+', title)
+        and not _title_looks_invalid_for_center(title, tmdb_id)
+    )
     for key in ('title', 'original_title', 'overview'):
+        if key == 'title' and valid_numeric_title:
+            continue
         if out.get(key) not in (None, '', [], {}) and not utils.contains_chinese(str(out.get(key) or '')):
             out.pop(key, None)
-    if not _display_meta_text_is_chinese(out):
+    if not _display_meta_text_is_chinese(out) and not valid_numeric_title:
         for key in ('title', 'original_title', 'overview', 'poster_path', 'backdrop_path', 'genres_json', 'original_language'):
             out.pop(key, None)
     return out if _display_meta_has_useful_payload(out) else {}
