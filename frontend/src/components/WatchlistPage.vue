@@ -382,10 +382,12 @@
                         <n-button 
                           quaternary 
                           circle 
-                          type="error"
                           @click.stop="() => forceEndSingleItem(item)"
                         >
-                          <template #icon><n-icon :component="ForceEndIcon" /></template>
+                          <template #icon>
+                            <!-- 💡 按钮保持普通 quaternary，直接染红图标 -->
+                            <n-icon :component="ForceEndIcon" style="color: #d03050;" />
+                          </template>
                         </n-button>
                       </template>
                       强制完结此季
@@ -397,10 +399,12 @@
                         <n-button 
                           quaternary 
                           circle 
-                          type="success"
                           @click.stop="() => updateStatus(item.tmdb_id, 'Watching')"
                         >
-                          <template #icon><n-icon :component="WatchingIcon" /></template>
+                          <template #icon>
+                            <!-- 💡 按钮保持普通 quaternary，直接染绿图标 -->
+                            <n-icon :component="WatchingIcon" style="color: #18a058;" />
+                          </template>
                         </n-button>
                       </template>
                       重新追剧
