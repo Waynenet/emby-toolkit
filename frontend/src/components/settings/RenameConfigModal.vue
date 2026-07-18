@@ -504,6 +504,16 @@ const renderExpression = (expr, data) => {
   return value;
 };
 
+const renderedPunctuationMap = {
+  ':': '：',
+  '*': '＊',
+  '?': '？',
+  '"': '＂',
+  '<': '＜',
+  '>': '＞',
+  '|': '｜'
+};
+
 const renderTemplate = (template, data) => {
   let output = normalizeMpTemplate(template);
   for (let i = 0; i < 8; i++) {
@@ -512,7 +522,12 @@ const renderTemplate = (template, data) => {
     output = next;
   }
   output = output.replace(/{{\s*([^}]+?)\s*}}/g, (_, expr) => renderExpression(expr, data));
-  return cleanupEmptySeparators(output.replace(/:/g, '：').replace(/[\\*?"<>|]/g, '').trim());
+  return cleanupEmptySeparators(
+    output
+      .replace(/\\/g, '/')
+      .replace(/[:*?"<>|]/g, char => renderedPunctuationMap[char])
+      .trim()
+  );
 };
 
 const formatVideoCodecLabel = (codec, style = config.value.video_codec_style) => {

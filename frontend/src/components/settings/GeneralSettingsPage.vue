@@ -1645,12 +1645,9 @@
       <n-spin :show="tempDirConfigLoading">
         <n-space vertical :size="14">
           <n-alert type="warning" :bordered="false">
-            临时目录为 ETK临时目录。保存时会为主号和所有小号确认或创建目录并记录 CID；如果临时目录被误删，请务必重新保存该配置。
+            临时目录为 ETK临时目录。保存时会为主号和所有小号自动确认或创建目录；如果临时目录被误删，请务必重新保存该配置。
           </n-alert>
           <n-form label-placement="left" label-width="140">
-            <n-form-item label="临时目录 CID">
-              <n-input :value="tempDirConfig.cid || '未保存'" readonly />
-            </n-form-item>
             <n-form-item label="清理 CRON">
               <n-input v-model:value="tempDirConfig.cleanup_cron" placeholder="0 * * * *" />
               <template #feedback>
@@ -2341,7 +2338,6 @@ const showTempDirConfigModal = ref(false);
 const tempDirConfigLoading = ref(false);
 const tempDirConfigSaving = ref(false);
 const tempDirConfig = ref({
-  cid: '',
   cleanup_cron: '0 * * * *',
   accounts: []
 });
@@ -2367,7 +2363,6 @@ const loadTempDirConfig = async () => {
     const res = await axios.get('/api/p115/temp_dir_config');
     if (res.data?.success) {
       tempDirConfig.value = {
-        cid: res.data.data?.cid || '',
         cleanup_cron: res.data.data?.cleanup_cron ?? '',
         accounts: res.data.data?.accounts || []
       };
@@ -2392,7 +2387,6 @@ const saveTempDirConfig = async () => {
     });
     if (res.data?.success) {
       tempDirConfig.value = {
-        cid: res.data.data?.cid || '',
         cleanup_cron: res.data.data?.cleanup_cron || '',
         accounts: res.data.data?.accounts || []
       };

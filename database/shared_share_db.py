@@ -431,7 +431,13 @@ def p115_file_rows_by_sha1_or_pc(sha1s: List[str] = None, pickcodes: List[str] =
             return _rows(cur.fetchall())
 
 
-def _media_rows_for_search(keyword: str = '', limit: int = 200) -> List[Dict[str, Any]]:
+def _media_rows_for_search(
+    keyword: str = '',
+    limit: int = 200,
+    *,
+    item_types=('Movie', 'Series', 'Season', 'Episode'),
+    max_limit: int = 2000,
+) -> List[Dict[str, Any]]:
     """搜索可手动登记的本地媒体。
 
     Rapid v2 不需要 115 分享码，真正需要的是：media_metadata 里能定位到
@@ -440,8 +446,8 @@ def _media_rows_for_search(keyword: str = '', limit: int = 200) -> List[Dict[str
     Season.in_library；只要该父剧该季存在已入库 Episode，就允许返回季候选。
     """
     keyword = str(keyword or '').strip()
-    args = []
-    where = ["m.item_type IN ('Movie','Series','Season','Episode')"]
+    args = [list(item_types)]
+    where = ["m.item_type = ANY(%s)"]
     if keyword:
         kw = f"%{keyword}%"
         where.append("""
@@ -503,7 +509,7 @@ def _media_rows_for_search(keyword: str = '', limit: int = 200) -> List[Dict[str
                     CASE m.item_type WHEN 'Movie' THEN 0 WHEN 'Series' THEN 1 WHEN 'Season' THEN 2 ELSE 3 END,
                     COALESCE(m.date_added, m.created_at, m.last_updated_at) DESC NULLS LAST
                 LIMIT %s
-            """, args + [max(1, min(int(limit or 200), 2000))])
+            """, args + [max(1, min(int(limit or 200), int(max_limit or 2000), 100000))])
             return _rows(cur.fetchall())
 
 
@@ -1269,7 +1275,12 @@ def all_library_share_candidates(
         2,
         f"已有有效共享：资源 {existing_summary.get('source_count', 0)}，电影 {existing_summary.get('movie_files', 0)}，分集 {existing_summary.get('episode_files', 0)}。正在读取媒体库候选..."
     )
-    rows = _media_rows_for_search('', limit)
+    rows = _media_rows_for_search(
+        '',
+        limit,
+        item_types=('Movie', 'Episode'),
+        max_limit=100000,
+    )
     timings['load_media_rows_sec'] = round(time.perf_counter() - t_media, 3)
 
     result = []

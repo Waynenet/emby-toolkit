@@ -12,7 +12,26 @@ _JINJA_ENV = SandboxedEnvironment(autoescape=False)
 
 
 class P115RenameRenderer:
-    _P115_INVALID_NAME_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
+    _P115_INVALID_NAME_CHAR_TRANSLATION = str.maketrans({
+        '\\': '＼',
+        '/': '／',
+        ':': '：',
+        '*': '＊',
+        '?': '？',
+        '"': '＂',
+        '<': '＜',
+        '>': '＞',
+        '|': '｜',
+    })
+    _P115_INVALID_RENDERED_CHAR_TRANSLATION = str.maketrans({
+        ':': '：',
+        '*': '＊',
+        '?': '？',
+        '"': '＂',
+        '<': '＜',
+        '>': '＞',
+        '|': '｜',
+    })
 
     def __init__(self, details=None, tmdb_id="", original_title="", config=None):
         self.details = details or {}
@@ -81,16 +100,13 @@ class P115RenameRenderer:
     @classmethod
     def sanitize_name_component(cls, text):
         cleaned = utils.clean_invisible_chars(text)
-        cleaned = cleaned.replace(':', '：')
-        cleaned = cls._P115_INVALID_NAME_CHARS_RE.sub('', cleaned).strip()
-        return cleaned
+        return cleaned.translate(cls._P115_INVALID_NAME_CHAR_TRANSLATION).strip()
 
-    @staticmethod
-    def sanitize_rendered_template(text):
+    @classmethod
+    def sanitize_rendered_template(cls, text):
         cleaned = utils.clean_invisible_chars(text).replace("\\", "/")
         cleaned = re.sub(r'[\r\n\t]+', ' ', cleaned)
-        cleaned = cleaned.replace(':', '：')
-        cleaned = re.sub(r'[:*?"<>|]', '', cleaned).strip()
+        cleaned = cleaned.translate(cls._P115_INVALID_RENDERED_CHAR_TRANSLATION).strip()
         cleaned = P115RenameRenderer.cleanup_empty_separators(cleaned)
         return cleaned
 
