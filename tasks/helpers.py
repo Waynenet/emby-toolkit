@@ -2525,6 +2525,8 @@ def translate_tmdb_metadata_recursively(
                         full_coll = get_collection_details(int(coll_id), tmdb_api_key)
                         if full_coll:
                             coll_info['overview'] = full_coll.get('overview', '')
+                            coll_info['poster_path'] = full_coll.get('poster_path')
+                            coll_info['backdrop_path'] = full_coll.get('backdrop_path')
                             # 顺便把 parts 里的电影 ID 提取出来，准备后续占坑
                             coll_info['all_tmdb_ids'] = [str(p.get('id')) for p in full_coll.get('parts', []) if p.get('id')]
                             
@@ -2882,6 +2884,7 @@ def translate_tmdb_metadata_recursively(
                     'name': c_name,
                     'overview': coll.get('overview', ''),
                     'poster_path': coll.get('poster_path'),
+                    'backdrop_path': coll.get('backdrop_path'),
                     'all_tmdb_ids': coll.get('all_tmdb_ids', []),
                     'emby_collection_id': None 
                 })

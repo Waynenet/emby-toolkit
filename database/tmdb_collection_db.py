@@ -138,6 +138,23 @@ def delete_native_collection_by_emby_id(emby_collection_id: str):
         logger.error(f"删除原生合集记录失败: {e}", exc_info=True)
         return False
 
+
+def delete_native_collection_by_tmdb_id(tmdb_collection_id: str) -> bool:
+    """Delete an ETK collection cache that has not been created in Emby."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM collections_info WHERE tmdb_collection_id = %s",
+                (str(tmdb_collection_id),),
+            )
+            deleted_count = cursor.rowcount
+            conn.commit()
+            return deleted_count > 0
+    except Exception as e:
+        logger.error(f"删除 ETK 原生合集记录失败 (TMDb ID: {tmdb_collection_id}): {e}", exc_info=True)
+        return False
+
 def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[str, Any]]:
     """
     根据 TMDb 合集 ID 查找本地数据库中的原生合集记录。
@@ -152,6 +169,27 @@ def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[s
             return cursor.fetchone()
     except Exception as e:
         logger.error(f"查询原生合集 (TMDb ID: {tmdb_collection_id}) 失败: {e}")
+
+
+def update_native_collection_images(tmdb_collection_id: str, poster_path, backdrop_path) -> int:
+    """Update only the cached collection image paths."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE collections_info
+                SET poster_path = %s, backdrop_path = %s, last_checked_at = NOW()
+                WHERE tmdb_collection_id = %s
+                """,
+                (poster_path, backdrop_path, str(tmdb_collection_id)),
+            )
+            updated = cursor.rowcount
+            conn.commit()
+            return updated
+    except Exception as e:
+        logger.error(f"更新原生合集图片失败 (TMDb ID: {tmdb_collection_id}): {e}")
+        return 0
 
 def touch_native_collection_by_child_id(tmdb_id: str) -> bool:
     """

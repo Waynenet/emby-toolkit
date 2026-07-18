@@ -701,7 +701,12 @@ def find_person_by_external_id(external_id: str, api_key: str, source: str = "im
         return None
 
 # --- 获取合集的详细信息 ---
-def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool = False) -> Optional[Dict[str, Any]]:
+def get_collection_details(
+    collection_id: int,
+    api_key: str,
+    skip_fallback: bool = False,
+    apply_image_preference: bool = True,
+) -> Optional[Dict[str, Any]]:
     """
     【V3 - 极致性能版】获取指定 TMDb 合集的详细信息。
     增加 skip_fallback 参数，允许调用方在不需要简介时跳过英文兜底请求。
@@ -720,7 +725,7 @@ def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool
 
     # ★ 核心优化：如果调用方明确表示不需要兜底，直接返回
     if skip_fallback:
-        return data_zh
+        return _apply_collection_image_preference(data_zh, api_key) if apply_image_preference else data_zh
 
     # 检查简介是否缺失，如果缺失则请求英文兜底
     overview = data_zh.get("overview", "")
@@ -743,7 +748,22 @@ def get_collection_details(collection_id: int, api_key: str, skip_fallback: bool
             except Exception as e:
                 logger.warning(f"    ➜ 补全合集英文简介失败: {e}")
 
-    return data_zh
+    return _apply_collection_image_preference(data_zh, api_key) if apply_image_preference else data_zh
+
+
+def _apply_collection_image_preference(details: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+    from database.metadata_provider_db import select_collection_image_paths
+
+    images = get_item_images_tmdb("Boxset", int(details["id"]), api_key)
+    if images is None:
+        return details
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, "zh"
+    )
+    selected = select_collection_image_paths(details, images, preference)
+    details["poster_path"] = selected["poster_path"]
+    details["backdrop_path"] = selected["backdrop_path"]
+    return details
 
 
 def search_collections(query: str, api_key: str) -> List[Dict[str, Any]]:

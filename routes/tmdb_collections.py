@@ -141,6 +141,20 @@ def api_get_collections_status():
 # ======================================================================
 # ★★★ 删除合集路由 ★★★
 # ======================================================================
+@collections_bp.route('/tmdb/<tmdb_collection_id>', methods=['DELETE'])
+@admin_required
+def api_delete_cached_collection(tmdb_collection_id):
+    row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
+    if not row:
+        return jsonify({"error": "合集记录不存在"}), 404
+    if row.get('emby_collection_id'):
+        return jsonify({"error": "该合集已在 Emby 中生成，请按 Emby 合集删除"}), 409
+    if tmdb_collection_db.delete_native_collection_by_tmdb_id(tmdb_collection_id):
+        logger.info(f"  ➤ [删除合集] 已删除 ETK 合集缓存 (TMDb ID: {tmdb_collection_id})")
+        return jsonify({"message": "ETK 合集记录已删除"}), 200
+    return jsonify({"error": "删除 ETK 合集记录失败"}), 500
+
+
 @collections_bp.route('/<emby_collection_id>', methods=['DELETE'])
 @admin_required
 def api_delete_collection(emby_collection_id):
@@ -199,7 +213,6 @@ def api_get_collection_settings():
         
         # 2. 确保返回给前端的数据包含默认字段 (防止前端报错)
         default_config = {
-            "auto_complete_enabled": False,
             "auto_sub_enabled": False,
             # 未来可以在这里加更多默认值，例如:
             # "exclude_genres": [],
@@ -208,6 +221,7 @@ def api_get_collection_settings():
         
         # 合并默认值 (数据库里的值覆盖默认值)
         final_config = {**default_config, **config}
+        final_config.pop('auto_complete_enabled', None)
         
         return jsonify(final_config)
     except Exception as e:
@@ -223,8 +237,13 @@ def api_save_collection_settings():
         if not isinstance(new_data, dict):
             return jsonify({"error": "无效的数据格式"}), 400
 
+        new_data = {
+            "auto_sub_enabled": bool(new_data["auto_sub_enabled"])
+        } if "auto_sub_enabled" in new_data else {}
+
         # 1. 先读取旧配置
         current_config = settings_db.get_setting('native_collections_config') or {}
+        current_config.pop('auto_complete_enabled', None)
         
         # 2. 更新字段 (增量更新，保留旧配置中未修改的字段)
         current_config.update(new_data)

@@ -7310,7 +7310,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             logger.info(f"  ➜ 检测到疑似合集包: {root_name}，正在验证...")
             collection_movies = []
             try:
-                res_c = tmdb.get_collection_details(int(self.tmdb_id), self.api_key, skip_fallback=True)
+                res_c = tmdb.get_collection_details(
+                    int(self.tmdb_id), self.api_key,
+                    skip_fallback=True, apply_image_preference=False,
+                )
                 if res_c and 'parts' in res_c: collection_movies = res_c['parts']
             except: pass
             
@@ -7324,7 +7327,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         if res_m and res_m.get('belongs_to_collection'):
                             c_id = res_m['belongs_to_collection']['id']
                     if c_id:
-                        res_c = tmdb.get_collection_details(int(c_id), self.api_key, skip_fallback=True)
+                        res_c = tmdb.get_collection_details(
+                            int(c_id), self.api_key,
+                            skip_fallback=True, apply_image_preference=False,
+                        )
                         if res_c and 'parts' in res_c: collection_movies = res_c['parts']
                 except: pass
 

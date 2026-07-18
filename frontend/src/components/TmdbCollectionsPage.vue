@@ -31,25 +31,6 @@
               <n-tooltip trigger="hover">
                 <template #trigger>
                   <div style="display: flex; align-items: center;">
-                    <n-text depth="3" style="margin-right: 8px; font-size: 12px;">自动发现合集</n-text>
-                    <n-switch 
-                      :value="autoCompleteEnabled" 
-                      @update:value="handleAutoCompleteChange" 
-                      :loading="isUpdatingSettings"
-                      size="small"
-                    >
-                      <template #checked>开启</template>
-                      <template #unchecked>关闭</template>
-                    </n-switch>
-                  </div>
-                </template>
-                开启后，当单部电影入库时，会自动检测其所属系列,并检查缺失。
-              </n-tooltip>
-            </div>
-            <div style="display: flex; align-items: center; margin-right: 12px;">
-              <n-tooltip trigger="hover">
-                <template #trigger>
-                  <div style="display: flex; align-items: center;">
                     <n-text depth="3" style="margin-right: 8px; font-size: 12px;">自动订阅缺失</n-text>
                     <n-switch 
                       :value="autoSubEnabled" 
@@ -193,7 +174,8 @@
                       </template>
                       <div style="max-width: 240px;">
                         <p style="margin-bottom: 5px; font-weight: bold;">确定要删除此合集吗？</p>
-                        <p style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
+                        <p v-if="item.emby_collection_id" style="font-size: 12px; color: gray;">这将清空合集内的所有影片关联，并从 Emby 中永久删除该合集条目。（不会删除影片文件）</p>
+                        <p v-else style="font-size: 12px; color: gray;">该合集尚未在 Emby 中生成，将仅删除 ETK 的合集记录。</p>
                       </div>
                     </n-popconfirm>
                   </div>
@@ -427,17 +409,29 @@ const globalStats = computed(() => {
 });
 
 const handleDeleteCollection = async (collection) => {
-  if (!collection || !collection.emby_collection_id) return;
+  if (!collection) return;
+  const deleteUrl = collection.emby_collection_id
+    ? `/api/collections/${collection.emby_collection_id}`
+    : collection.tmdb_collection_id
+      ? `/api/collections/tmdb/${collection.tmdb_collection_id}`
+      : null;
+  if (!deleteUrl) {
+    message.error('合集缺少可用的 Emby/TMDb ID，无法删除。');
+    return;
+  }
   
   const d = message.loading('正在删除合集，请稍候...', { duration: 0 });
   
   try {
-    await axios.delete(`/api/collections/${collection.emby_collection_id}`);
+    await axios.delete(deleteUrl);
     d.destroy();
     message.success(`合集 "${collection.name}" 删除成功！`);
     
     // 从本地列表中移除，避免需要刷新页面
-    collections.value = collections.value.filter(c => c.emby_collection_id !== collection.emby_collection_id);
+    collections.value = collections.value.filter(c => collection.emby_collection_id
+      ? String(c.emby_collection_id || '') !== String(collection.emby_collection_id)
+      : String(c.tmdb_collection_id || '') !== String(collection.tmdb_collection_id)
+    );
     
   } catch (err) {
     d.destroy();
@@ -532,7 +526,6 @@ const loadCachedData = async () => {
 };
 
 /// ★★★ 1. 状态变量 ★★★
-const autoCompleteEnabled = ref(false);
 const autoSubEnabled = ref(false);
 const isUpdatingSettings = ref(false);
 
@@ -540,8 +533,6 @@ const isUpdatingSettings = ref(false);
 const loadSettings = async () => {
   try {
     const response = await axios.get('/api/collections/settings');
-    // 后端现在返回的是整个对象 { auto_complete_enabled: true, ... }
-    autoCompleteEnabled.value = response.data.auto_complete_enabled;
     autoSubEnabled.value = response.data.auto_sub_enabled;
   } catch (e) {
     console.error("加载合集设置失败", e);
@@ -550,35 +541,11 @@ const loadSettings = async () => {
 
 // ★★★ 3. 保存设置 ★★★
 
-// 处理“自动发现合集”开关
-const handleAutoCompleteChange = async (value) => {
-  isUpdatingSettings.value = true;
-  try {
-    // 发送 JSON 对象，注意保持另一个设置的原值
-    await axios.post('/api/collections/settings', {
-      auto_complete_enabled: value,
-      auto_sub_enabled: autoSubEnabled.value 
-    });
-    autoCompleteEnabled.value = value;
-    if (value) {
-      message.success("已开启电影入库实时检查所属合集");
-    } else {
-      message.info("已关闭电影入库实时检查所属合集");
-    }
-  } catch (e) {
-    message.error("保存设置失败");
-  } finally {
-    isUpdatingSettings.value = false;
-  }
-};
-
 // 处理“自动订阅缺失”开关
 const handleAutoSubChange = async (value) => {
   isUpdatingSettings.value = true;
   try {
-    // 发送 JSON 对象，注意保持另一个设置的原值
     await axios.post('/api/collections/settings', {
-      auto_complete_enabled: autoCompleteEnabled.value,
       auto_sub_enabled: value 
     });
     autoSubEnabled.value = value;

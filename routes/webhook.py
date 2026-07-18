@@ -1176,18 +1176,12 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             current_name = item_name   # 这个变量在函数前面也定义过了
 
             if current_type == 'Movie' and current_tmdb_id:
-                # 2. 检查开关
-                config = settings_db.get_setting('native_collections_config') or {}
-                is_auto_complete_enabled = config.get('auto_complete_enabled', False)
-
-                if is_auto_complete_enabled:
-                    logger.trace(f"  ➜ 正在检查电影 '{current_name}' 所属 TMDb 合集...")
-                    # 直接调用 handler
-                    collections_handler.check_and_subscribe_collection_from_movie(
-                        movie_tmdb_id=str(current_tmdb_id),
-                        movie_name=current_name,
-                        movie_emby_id=item_id
-                    )
+                logger.trace(f"  ➜ 正在检查电影 '{current_name}' 所属 TMDb 合集...")
+                collections_handler.check_and_subscribe_collection_from_movie(
+                    movie_tmdb_id=str(current_tmdb_id),
+                    movie_name=current_name,
+                    movie_emby_id=item_id
+                )
         except Exception as e:
             logger.warning(f"  ➜ 检查所属 TMDb 合集时发生错误: {e}")
 
@@ -1597,8 +1591,14 @@ def refresh_emby_metadata_images():
     )
 
     path = str(request.args.get('path') or '').strip()
+    requested_tmdb_id = str(request.args.get('tmdb_id') or '').strip()
     requested_type = str(request.args.get('item_type') or '').strip().title()
-    if not path or requested_type not in {'Movie', 'Series', 'Season', 'Episode'}:
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode', 'Boxset'}:
+        return jsonify({'ok': False, 'error': 'invalid image refresh request'}), 400
+    if requested_type == 'Boxset':
+        if not requested_tmdb_id.isdigit():
+            return jsonify({'ok': False, 'error': 'invalid collection tmdb id'}), 400
+    elif not path:
         return jsonify({'ok': False, 'error': 'invalid image refresh request'}), 400
 
     def _number(name):
@@ -1610,24 +1610,49 @@ def refresh_emby_metadata_images():
 
     season_number = _number('season_number')
     episode_number = _number('episode_number')
-    identity = resolve_metadata_identity_by_path(
-        path,
-        requested_type,
-        season_number=season_number,
-        episode_number=episode_number,
-    )
-    if not identity or not identity.get('tmdb_id'):
-        return jsonify({'ok': False, 'error': 'metadata path identity not found'}), 404
+    if requested_type == 'Boxset':
+        tmdb_id = requested_tmdb_id
+        media_type = 'movie'
+    else:
+        identity = resolve_metadata_identity_by_path(
+            path,
+            requested_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get('tmdb_id'):
+            return jsonify({'ok': False, 'error': 'metadata path identity not found'}), 404
 
-    tmdb_id = str(identity['tmdb_id'])
-    media_type = str(identity['media_type'])
-    season_number = identity.get('season_number')
-    episode_number = identity.get('episode_number')
+        tmdb_id = str(identity['tmdb_id'])
+        media_type = str(identity['media_type'])
+        season_number = identity.get('season_number')
+        episode_number = identity.get('episode_number')
     api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
     if not api_key:
         return jsonify({'ok': False, 'error': 'tmdb api key is not configured'}), 503
 
     try:
+        if requested_type == 'Boxset':
+            from database import tmdb_collection_db
+
+            details = tmdb.get_collection_details(int(tmdb_id), api_key, skip_fallback=True)
+            if not details:
+                return jsonify({'ok': False, 'error': 'tmdb collection image lookup failed'}), 502
+            updated = tmdb_collection_db.update_native_collection_images(
+                tmdb_id,
+                details.get('poster_path'),
+                details.get('backdrop_path'),
+            )
+            logger.info(
+                "  ➤[图片替换] 已按 %s 优先级重选 BoxSet TMDb:%s 的图片，更新 %s 条缓存。",
+                '原语言' if config_manager.APP_CONFIG.get(
+                    constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
+                ) == 'original' else '简体中文',
+                tmdb_id,
+                updated,
+            )
+            return jsonify({'ok': True, 'updated': updated}), 200
+
         if media_type == 'movie':
             base = tmdb.get_movie_details(int(tmdb_id), api_key, append_to_response='')
         else:
@@ -1773,11 +1798,25 @@ def search_emby_metadata_images():
 
     season_number = _number('season_number')
     episode_number = _number('episode_number')
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    if not api_key:
+        return jsonify({'error': 'tmdb api key is not configured'}), 503
     if requested_type == 'Boxset':
         if not tmdb_id.isdigit():
             return jsonify({'error': 'invalid collection tmdb id'}), 400
         media_type = 'movie'
-        original_language = ''
+        collection_details = tmdb.get_collection_details(
+            int(tmdb_id),
+            api_key,
+            skip_fallback=True,
+            apply_image_preference=False,
+        )
+        parts = (collection_details or {}).get('parts') or []
+        original_language = next((
+            str(item.get('original_language') or '').strip()
+            for item in parts
+            if isinstance(item, dict) and item.get('original_language')
+        ), '')
     else:
         identity = resolve_metadata_identity_by_path(
             path,
@@ -1792,10 +1831,6 @@ def search_emby_metadata_images():
         season_number = identity.get('season_number')
         episode_number = identity.get('episode_number')
         original_language = get_cached_original_language(tmdb_id, media_type)
-
-    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
-    if not api_key:
-        return jsonify({'error': 'tmdb api key is not configured'}), 503
 
     raw = tmdb.get_item_images_tmdb(
         requested_type,

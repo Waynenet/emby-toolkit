@@ -101,6 +101,31 @@ def preferred_image_candidates(images, priority_groups):
     return ordered
 
 
+def select_collection_image_paths(details, images, preference: str):
+    """Select collection artwork using the first movie's original language."""
+    parts = (details or {}).get("parts") or []
+    original_language = next(
+        (
+            str(item.get("original_language") or "").strip()
+            for item in parts
+            if isinstance(item, dict) and item.get("original_language")
+        ),
+        "",
+    )
+    priorities = build_image_language_priority(original_language, preference)
+    return {
+        "poster_path": (
+            select_image_path((images or {}).get("posters"), priorities)
+            or (details or {}).get("poster_path")
+        ),
+        "backdrop_path": (
+            select_image_path((images or {}).get("backdrops"), priorities)
+            or (details or {}).get("backdrop_path")
+        ),
+        "original_language": original_language,
+    }
+
+
 def get_cached_original_language(tmdb_id: str, media_type: str) -> str:
     item_type = "Series" if str(media_type or "").lower() == "tv" else "Movie"
     with get_db_connection() as conn:
@@ -724,7 +749,7 @@ def load_emby_metadata(
             if requested_type == "Movie" and root_media_type == "movie":
                 cursor.execute(
                     """
-                    SELECT tmdb_collection_id, name
+                    SELECT tmdb_collection_id, name, all_tmdb_ids_json
                     FROM collections_info
                     WHERE all_tmdb_ids_json @> %s::jsonb
                     ORDER BY last_checked_at DESC NULLS LAST
@@ -737,6 +762,11 @@ def load_emby_metadata(
                     collections.append({
                         "tmdb_id": str(collection["tmdb_collection_id"]),
                         "name": collection["name"],
+                        "member_tmdb_ids": [
+                            str(value)
+                            for value in _json_value(collection.get("all_tmdb_ids_json"), [])
+                            if value is not None
+                        ],
                     })
             if row.get("actors_ready"):
                 actor_links = _json_value(row.get("actors_json"), [])
