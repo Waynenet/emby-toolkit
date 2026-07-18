@@ -6,8 +6,9 @@ import time
 import os
 import re
 import json
+import requests
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 from typing import Optional, List
 from gevent import spawn_later, spawn
 from gevent.event import Event
@@ -1513,6 +1514,47 @@ def _trigger_metadata_update_task(item_id, item_name):
         processor_type='media',
         item_id=item_id,
         item_name=item_name
+    )
+
+
+@webhook_bp.route('/api/emby/plugin-update', methods=['GET'])
+def proxy_emby_plugin_update():
+    """通过 ETK 的网络代理转发最新版 Emby 插件 DLL。"""
+    upstream = None
+    try:
+        upstream = requests.get(
+            'https://github.com/hbq0405/etk-mediainfo-bridge/releases/latest/download/ETKMediaInfoBridge.dll',
+            headers={'User-Agent': 'EmbyToolKit-PluginUpdater'},
+            stream=True,
+            timeout=(15, 300),
+            proxies=config_manager.get_proxies_for_requests(),
+        )
+        upstream.raise_for_status()
+    except requests.RequestException as e:
+        if upstream is not None:
+            upstream.close()
+        logger.error(f"  ➜ ETK 插件更新代理下载失败: {e}")
+        return jsonify({'error': 'plugin_update_download_failed'}), 502
+
+    def generate():
+        try:
+            for chunk in upstream.iter_content(chunk_size=128 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    headers = {
+        'Content-Disposition': 'attachment; filename="ETKMediaInfoBridge.dll"',
+        'Cache-Control': 'no-store',
+    }
+    content_length = upstream.headers.get('Content-Length')
+    if content_length:
+        headers['Content-Length'] = content_length
+    return Response(
+        stream_with_context(generate()),
+        content_type='application/octet-stream',
+        headers=headers,
     )
 
 
