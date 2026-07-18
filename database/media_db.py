@@ -973,7 +973,7 @@ def get_global_popular_items(limit: int = 20) -> List[Dict[str, Any]]:
 def is_emby_id_in_library(emby_id: str) -> bool:
     """
     检查指定 Emby ID 对应的媒体项是否标记为在库 (in_library = TRUE)。
-    用于 Webhook 分流时的双重检查，防止洗版后的僵尸条目走错流程。
+    用于 Emby 事件分流时的双重检查，防止洗版后的僵尸条目走错流程。
     """
     if not emby_id:
         return False

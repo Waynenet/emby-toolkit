@@ -218,6 +218,55 @@ def replace_cached_image_paths(
     return updated
 
 
+def update_cached_image_path(
+    tmdb_id: str,
+    media_type: str,
+    requested_type: str,
+    image_type: str,
+    image_path: str,
+    *,
+    season_number: Optional[int] = None,
+    episode_number: Optional[int] = None,
+) -> int:
+    """Update one manually selected TMDb image without changing the other cached images."""
+    requested_type = str(requested_type or "").strip().title()
+    image_type = str(image_type or "").strip().title()
+    column = {
+        "Primary": "poster_path",
+        "Backdrop": "backdrop_path",
+        "Logo": "logo_path",
+        "Thumb": "thumb_path",
+    }.get(image_type)
+    if not column or not image_path:
+        return 0
+
+    if requested_type in {"Movie", "Series"}:
+        item_type = "Movie" if str(media_type or "").lower() == "movie" else "Series"
+        where_sql = "tmdb_id=%s AND item_type=%s"
+        where_params = (str(tmdb_id), item_type)
+    elif requested_type == "Season" and season_number is not None and image_type == "Primary":
+        where_sql = "parent_series_tmdb_id=%s AND item_type='Season' AND season_number=%s"
+        where_params = (str(tmdb_id), int(season_number))
+    elif requested_type == "Episode" and season_number is not None and episode_number is not None:
+        where_sql = (
+            "parent_series_tmdb_id=%s AND item_type='Episode' "
+            "AND season_number=%s AND episode_number=%s"
+        )
+        where_params = (str(tmdb_id), int(season_number), int(episode_number))
+    else:
+        return 0
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE media_metadata SET {column}=%s, last_updated_at=NOW() WHERE {where_sql}",
+                (image_path, *where_params),
+            )
+            updated = cursor.rowcount
+        conn.commit()
+    return updated
+
+
 def _keywords(details: Dict[str, Any], media_type: str):
     container = details.get("keywords") or {}
     if isinstance(container, list):

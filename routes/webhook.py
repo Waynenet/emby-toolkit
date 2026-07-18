@@ -128,7 +128,7 @@ def _enqueue_active_series_notification(item_details: dict, notification_type: s
 
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
-    """Webhook 只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
+    """Emby 事件只处理 ETK 自己生成的 STRM，避免第三方 STRM 进入整理/刮削链路。"""
     if str(item_type or '') not in {'Movie', 'Episode'}:
         return False
     path = str(item_path or '').strip()
@@ -139,9 +139,9 @@ def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path:
         if _is_etk_standard_strm(path):
             return False
     except Exception as e:
-        logger.warning(f"  ➜ [Webhook] STRM 标准校验失败，已跳过：{item_name or os.path.basename(path)}，原因：{e}")
+        logger.warning(f"  ➜ [Emby事件] STRM 标准校验失败，已跳过：{item_name or os.path.basename(path)}，原因：{e}")
         return True
-    logger.warning(f"  ➜ [Webhook] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
+    logger.warning(f"  ➜ [Emby事件] 非 ETK 标准 STRM，已跳过：{item_name or os.path.basename(path)}")
     return True
 
 
@@ -363,14 +363,14 @@ def _submit_webhook_media_task(
     )
     if submitted:
         if from_pending_queue:
-            logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 已从待提交队列成功分派。")
+            logger.info(f"  ➜ [Emby事件队列] 任务 '{task_name}' 已从待提交队列成功分派。")
         return True
 
     if from_pending_queue:
-        logger.debug(f"  ➜ [Webhook队列] 任务 '{task_name}' 分派时媒体任务仍繁忙，稍后继续尝试。")
+        logger.debug(f"  ➜ [Emby事件队列] 任务 '{task_name}' 分派时媒体任务仍繁忙，稍后继续尝试。")
         return False
 
-    logger.info(f"  ➜ [Webhook队列] 任务 '{task_name}' 因媒体任务繁忙，已加入待提交队列。")
+    logger.info(f"  ➜ [Emby事件队列] 任务 '{task_name}' 因媒体任务繁忙，已加入待提交队列。")
     _enqueue_pending_webhook_task(task_payload)
     return False
 
@@ -432,18 +432,18 @@ def _enqueue_pending_webhook_task(task_payload):
         for pending_task in WEBHOOK_PENDING_TASKS:
             if _merge_pending_webhook_task(pending_task, task_payload):
                 logger.info(
-                    "  ➜ [Webhook队列] 已合并同剧任务 '%s'，当前包含 %s 个分集。",
+                    "  ➜ [Emby事件队列] 已合并同剧任务 '%s'，当前包含 %s 个分集。",
                     pending_task["task_name"],
                     len(pending_task["kwargs"].get("new_episode_ids") or []),
                 )
                 break
             if _is_same_pending_webhook_task(pending_task, task_payload):
-                logger.debug(f"  ➜ [Webhook队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
+                logger.debug(f"  ➜ [Emby事件队列] 任务 '{task_payload['task_name']}' 已在待提交队列中，跳过重复入队。")
                 break
         else:
             WEBHOOK_PENDING_TASKS.append(task_payload)
             logger.info(
-                f"  ➜ [Webhook队列] 当前待提交任务数: {len(WEBHOOK_PENDING_TASKS)} "
+                f"  ➜ [Emby事件队列] 当前待提交任务数: {len(WEBHOOK_PENDING_TASKS)} "
                 f"(最新: {task_payload['task_name']})"
             )
 
@@ -742,8 +742,8 @@ def _shared_resource_auto_share_enabled() -> bool:
 def _run_shared_auto_share_batch_detached(task_name: str, register_items: List[dict]):
     """共享供给侧登记必须脱离 task_manager 单线程队列。
 
-    Webhook 本身已经运行在 task_manager 的单 worker + task_lock 中。
-    如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致 Webhook 任务假死。
+    Emby 事件本身已经运行在 task_manager 的单 worker + task_lock 中。
+    如果这里再 submit_task，会在同一线程内二次获取 task_lock，导致事件任务假死。
 
     Rapid v2 不再判断“是否有人需要”。只要共享资源开关已启用，
     媒体入库完成并补齐指纹后，就立即把本机秒传源登记到中心。
@@ -949,9 +949,9 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
     emby_item_ids,
     *,
     expected_item_type: Optional[str] = None,
-    log_prefix: str = "Webhook指纹补齐",
+    log_prefix: str = "Emby事件指纹补齐",
 ) -> int:
-    """Webhook 入库后按 Emby ID 找 media_metadata 行，并执行 115 指纹体检补齐。"""
+    """Emby 事件入库后按 Item ID 找 media_metadata 行，并执行 115 指纹体检补齐。"""
     ids = [str(x).strip() for x in (emby_item_ids or []) if str(x or '').strip()]
     if not ids:
         return 0
@@ -1036,7 +1036,7 @@ def _repair_webhook_p115_fingerprints_for_emby_ids(
 
 def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, force_full_update: bool, new_episode_ids: Optional[List[str]] = None, is_new_item: bool = True, aggregate_notification: bool = False):
     """
-    【Webhook 统一入口】
+    【Emby 事件统一入口】
     统一处理 新入库(New) 和 追更(Update) 两种情况。
     """
     if not processor:
@@ -1072,7 +1072,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             item_name_for_log,
             [item_id],
             expected_item_type="Movie",
-            log_prefix="Webhook电影指纹补齐",
+            log_prefix="Emby事件电影指纹补齐",
         )
     elif item_type == "Series" and precise_new_episode_ids:
         _repair_webhook_p115_fingerprints_for_emby_ids(
@@ -1080,12 +1080,12 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             item_name_for_log,
             precise_new_episode_ids,
             expected_item_type="Episode",
-            log_prefix="Webhook新集指纹补齐",
+            log_prefix="Emby事件新集指纹补齐",
         )
 
     _cleanup_promoting_virtual_imports_after_library_ready(item_details, item_type, tmdb_id)
 
-    # 3. 共享资源供给侧实时触发：电影/本轮新增分集均在 Webhook 入库完成后登记；中心端负责后续整季归类。
+    # 3. 共享资源供给侧实时触发：电影/本轮新增分集均在 Emby 事件入库完成后登记；中心端负责后续整季归类。
     _submit_shared_auto_share_after_library_ready(
         item_details,
         item_id,
@@ -1185,7 +1185,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         except Exception as e:
             logger.warning(f"  ➜ 检查所属 TMDb 合集时发生错误: {e}")
 
-    logger.trace(f"  ➜ Webhook 任务及所有后续流程完成: '{item_name_for_log}'")
+    logger.trace(f"  ➜ Emby 事件任务及所有后续流程完成: '{item_name_for_log}'")
 
     # 4. ★★★ 通知分流 ★★★
     try:
@@ -1204,7 +1204,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
     except Exception as e:
         logger.error(f"触发通知失败: {e}")
 
-    logger.trace(f"  ➜ Webhook 任务及所有后续流程完成: '{item_name_for_log}'")
+    logger.trace(f"  ➜ Emby 事件任务及所有后续流程完成: '{item_name_for_log}'")
 
     # 打标
     if is_new_item: 
@@ -1269,7 +1269,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
 
                 # =======================================================
 
-                # 新集指纹体检与共享源登记均已在 Webhook 中完成；watchlist_processor 只负责追剧状态刷新。
+                # 新集指纹体检与共享源登记均已在 Emby 事件链中完成；watchlist_processor 只负责追剧状态刷新。
                 refresh_scope_text = (
                     f"本次只刷新 {len(precise_new_episode_ids)} 个新增分集。"
                     if precise_new_episode_ids
@@ -1289,7 +1289,7 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             except Exception as e:
                 logger.error(f"  ➜ 触发智能追剧任务失败: {e}")
 
-        # 启动协程，不等待结果，直接让当前 Webhook 任务结束
+        # 启动协程，不等待结果，直接让当前 Emby 事件任务结束
         spawn(_async_trigger_watchlist)
 
 def _handle_immediate_tagging_with_lib(item_id, item_name, lib_id, lib_name, known_rating=None):
@@ -1891,26 +1891,12 @@ def search_emby_metadata_images():
     return response
 
 
-# --- Webhook 路由 ---
+# --- 外部事件路由：MoviePilot Webhook / ETK Emby 插件事件 ---
 @webhook_bp.route('/webhook/emby', methods=['POST'])
 @webhook_bp.route('/api/emby/events', methods=['POST'])
 @extensions.processor_ready_required
 def emby_webhook():
     data = request.get_json(silent=True) or {}
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # ★★★            魔法日志 - START            ★★★
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # try:
-    #     import json
-    #     # 使用 WARNING 级别和醒目的标记，让它在日志中容易检索
-    #     logger.warning("  ➜ [魔法日志] 收到原始 Webhook 负载：Event=%s, type=%s", data.get("Event") or "-", data.get("type") or "-")
-    #     # 将整个 JSON 数据格式化后打印出来
-    #     logger.warning(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    # except Exception as e:
-    #     logger.error(f"[魔法日志] 记录原始 Webhook 时出错: {e}")
-    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # # ★★★             魔法日志 - END             ★★★
-    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
     is_plugin_endpoint = request.path == '/api/emby/events'
@@ -2030,11 +2016,11 @@ def emby_webhook():
                     if user_details and 'Policy' in user_details:
                         # 更新数据库
                         user_db.upsert_emby_users_batch([user_details])
-                        logger.info(f"  ➜ Webhook: 已更新用户 {updated_user_id} 的本地权限缓存。")
+                        logger.info(f"  ➜ Emby事件: 已更新用户 {updated_user_id} 的本地权限缓存。")
                 except Exception as e:
-                    logger.error(f"  ➜ Webhook 更新本地 Policy 失败: {e}")
+                    logger.error(f"  ➜ Emby事件更新本地 Policy 失败: {e}")
 
-            # 异步执行，不阻塞 Webhook 返回
+            # 异步执行，不阻塞 Emby 事件响应
             spawn(_update_local_policy_task)
         except Exception as e:
             logger.error(f"启动 Policy 更新任务失败: {e}")
@@ -2044,7 +2030,7 @@ def emby_webhook():
             last_update_time = SYSTEM_UPDATE_MARKERS.get(updated_user_id)
             # 如果找到了标记，并且时间戳在我们的抑制窗口期内
             if last_update_time and (time.time() - last_update_time) < RECURSION_SUPPRESSION_WINDOW:
-                logger.debug(f"  ➜ 忽略由系统内部同步触发的用户 '{updated_user_name}' 的权限更新 Webhook。")
+                logger.debug(f"  ➜ 忽略由系统内部同步触发的用户 '{updated_user_name}' 权限更新事件。")
                 # 为了保险起见，用完就删掉这个标记
                 del SYSTEM_UPDATE_MARKERS[updated_user_id]
                 # 直接返回成功，不再创建任何后台任务
@@ -2133,7 +2119,7 @@ def emby_webhook():
             notify_types = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES, constants.DEFAULT_TELEGRAM_NOTIFY_TYPES)
             if 'playback' in notify_types and event_type in ["playback.start", "playback.pause", "playback.stop"]:
                 try:
-                    # 使用 spawn 异步丢给后台处理，杜绝网络波动卡住 Emby Webhook 导致延迟
+                    # 使用 spawn 异步丢给后台处理，避免网络波动阻塞 Emby 事件响应
                     spawn(telegram.send_playback_notification, data)
                 except Exception as e:
                     logger.error(f"  ➜ 发送播放通知任务分配失败: {e}")
@@ -2157,18 +2143,18 @@ def emby_webhook():
                 except Exception:
                     # 如果获取失败，不影响主流程，日志中继续使用ID
                     pass
-                logger.trace(f"  ➜ Webhook: 已更新用户 '{user_name_for_log}' 对项目 '{item_name_for_log}' 的状态 ({event_type})。")
+                logger.trace(f"  ➜ Emby事件: 已更新用户 '{user_name_for_log}' 对项目 '{item_name_for_log}' 的状态 ({event_type})。")
                 return jsonify({"status": "user_data_updated"}), 200
             else:
-                logger.debug(f"  ➜ Webhook '{event_type}' 未包含可更新的用户数据，已忽略。")
+                logger.debug(f"  ➜ Emby事件 '{event_type}' 未包含可更新的用户数据，已忽略。")
                 return jsonify({"status": "event_ignored_no_updatable_data"}), 200
         except Exception as e:
-            logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
+            logger.error(f"  ➜ 通过 Emby 事件更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
     trigger_events = ["metadata.update", "image.update", "collection.items.removed"]
     if event_type not in trigger_events:
-        logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
+        logger.debug(f"  ➜ Emby事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
     
     item_from_webhook = data.get("Item", {}) if data else {}
@@ -2188,7 +2174,7 @@ def emby_webhook():
     
     trigger_types = ["Movie", "Series", "Season", "Episode", "BoxSet"]
     if not (original_item_id and original_item_type in trigger_types):
-        logger.debug(f"  ➜ Webhook事件 '{event_type}' (项目: {original_item_name}, 类型: {original_item_type}) 被忽略。")
+        logger.debug(f"  ➜ Emby事件 '{event_type}' (项目: {original_item_name}, 类型: {original_item_type}) 被忽略。")
         return jsonify({"status": "event_ignored_no_id_or_wrong_type"}), 200
 
     # ======================================================================
@@ -2200,11 +2186,11 @@ def emby_webhook():
         collection_name = item_from_webhook.get("Name")
 
         if collection_id in DELETING_COLLECTIONS:
-            logger.debug(f"  ➜ Webhook: 忽略合集 '{collection_name}' 的移除通知 (正在执行手动删除)。")
+            logger.debug(f"  ➜ Emby事件: 忽略合集 '{collection_name}' 的移除通知 (正在执行手动删除)。")
             return jsonify({"status": "ignored_manual_deletion"}), 200
         
         if collection_id:
-            logger.info(f"  ➜ Webhook: 合集 '{collection_name}' 有成员移除，正在检查合集存活状态...")
+            logger.info(f"  ➜ Emby事件: 合集 '{collection_name}' 有成员移除，正在检查合集存活状态...")
             
             def _check_collection_survival_task(processor=None):
                 details = emby.get_emby_item_details(
@@ -2236,23 +2222,23 @@ def emby_webhook():
         
         # --- 【拦截 1】如果是系统正在生成的封面，直接拦截，不查库，不报错 ---
         if event_type == "image.update" and original_item_id in UPDATING_IMAGES:
-            logger.debug(f"  ➜ Webhook: 忽略项目 '{original_item_name}' 的图片更新通知 (系统生成的封面)。")
+            logger.debug(f"  ➜ Emby事件: 忽略项目 '{original_item_name}' 的图片更新通知 (系统生成的封面)。")
             return jsonify({"status": "ignored_self_triggered_update"}), 200
         
         # --- 【拦截 2】如果是系统正在更新元数据，直接拦截 ---
         if event_type == "metadata.update" and original_item_id in UPDATING_METADATA:
-            logger.debug(f"  ➜ Webhook: 忽略项目 '{original_item_name}' 的元数据更新通知 (系统触发的更新)。")
+            logger.debug(f"  ➜ Emby事件: 忽略项目 '{original_item_name}' 的元数据更新通知 (系统触发的更新)。")
             return jsonify({"status": "ignored_self_triggered_metadata_update"}), 200
 
         # --- 【拦截 3】如果是合集(BoxSet)，它没有物理路径，直接跳过库路径检查 ---
         if original_item_type == "BoxSet":
-            logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 是合集类型，跳过媒体库路径检查。")
+            logger.trace(f"  ➜ Emby事件: 项目 '{original_item_name}' 是合集类型，跳过媒体库路径检查。")
             library_info = None 
         else:
             # 正常的媒体项，才去获取所属库信息
             library_info = emby.get_library_root_for_item(
                 original_item_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id, 
-                item_path=original_item_path # ★★★ 核心优化：直接把 Webhook 传来的 Path 喂进去
+                item_path=original_item_path
             )
         
         if library_info:
@@ -2262,7 +2248,7 @@ def emby_webhook():
 
             # 【关键拦截点】
             if lib_id not in allowed_libs:
-                logger.trace(f"  ➜ Webhook: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
+                logger.trace(f"  ➜ Emby事件: 项目 '{original_item_name}' 所属库 '{lib_name}' (ID: {lib_id}) 不在处理范围内，已跳过。")
                 return jsonify({"status": "ignored_library"}), 200
 
         if _should_skip_non_etk_strm_webhook(original_item_type, original_item_name, original_item_path):
@@ -2278,7 +2264,7 @@ def emby_webhook():
             extensions.media_processor_instance.emby_api_key, extensions.media_processor_instance.emby_user_id, item_name=original_item_name
         )
         if not series_id:
-            logger.warning(f"  ➜ Webhook '{event_type}': 剧集 '{original_item_name}' 未找到所属剧集，跳过。")
+            logger.warning(f"  ➜ Emby事件 '{event_type}': 剧集 '{original_item_name}' 未找到所属剧集，跳过。")
             return jsonify({"status": "event_ignored_episode_no_series_id"}), 200
         id_to_process = series_id
         
@@ -2308,6 +2294,62 @@ def emby_webhook():
         return jsonify({"status": "metadata_update_task_debounced", "item_id": id_to_process}), 202
 
     if event_type == "image.update":
-        return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+        from urllib.parse import parse_qs, unquote, urlparse
+        from database.metadata_provider_db import (
+            resolve_metadata_identity_by_path,
+            update_cached_image_path,
+        )
+
+        image = data.get("Image") if isinstance(data.get("Image"), dict) else {}
+        image_type = str(image.get("Type") or "").strip()
+        image_url = str(image.get("Url") or "").strip()
+        if not image_type or not image_url:
+            return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+
+        parsed = urlparse(image_url)
+        proxied_url = parse_qs(parsed.query).get("url", [None])[0]
+        if proxied_url:
+            parsed = urlparse(unquote(proxied_url))
+        marker = "/t/p/"
+        marker_index = parsed.path.find(marker)
+        if marker_index < 0:
+            logger.warning("  ➜ [图片更新] 所选图片不是 TMDb 图片，未写入 ETK 缓存：%s", image_url)
+            return jsonify({"status": "image_update_observed", "item_id": id_to_process}), 200
+        image_path = "/" + parsed.path[marker_index + len(marker):].split("/", 1)[-1].lstrip("/")
+
+        def _number(value):
+            try:
+                return int(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        season_number = _number(item_from_webhook.get("IndexNumber")) if original_item_type == "Season" else (
+            _number(item_from_webhook.get("ParentIndexNumber"))
+        )
+        episode_number = _number(item_from_webhook.get("IndexNumber")) if original_item_type == "Episode" else None
+        identity = resolve_metadata_identity_by_path(
+            original_item_path,
+            original_item_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get("tmdb_id"):
+            logger.warning("  ➜ [图片更新] 无法定位 '%s' 的 ETK 元数据记录。", original_item_name)
+            return jsonify({"status": "image_update_identity_not_found", "item_id": original_item_id}), 200
+
+        updated = update_cached_image_path(
+            identity["tmdb_id"],
+            identity["media_type"],
+            original_item_type,
+            image_type,
+            image_path,
+            season_number=identity.get("season_number"),
+            episode_number=identity.get("episode_number"),
+        )
+        logger.info(
+            "  ➜ [图片更新] 已将 '%s' 手动选择的 %s 图片写入 ETK 缓存，更新 %s 条记录。",
+            original_item_name, image_type, updated,
+        )
+        return jsonify({"status": "image_update_cached", "item_id": original_item_id, "updated": updated}), 200
 
     return jsonify({"status": "event_unhandled"}), 500

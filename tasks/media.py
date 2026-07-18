@@ -204,7 +204,7 @@ def _has_und_text_subtitle(raw_ffprobe):
 def task_sync_all_metadata(processor, item_id: str, item_name: str):
     """
     【任务：全能元数据同步器】
-    当收到 metadata.update Webhook 时，此任务会：
+    当收到 metadata.update Emby 事件时，此任务会：
     1. 从 Emby 获取最新数据。
     2. 将更新同步到 media_metadata 数据库缓存。
     （实体媒体流信息仍由 Emby 自身维护。）

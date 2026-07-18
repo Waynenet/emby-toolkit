@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 
 def upsert_user_media_data(data: Dict[str, Any]):
-    """【V2 - 健壮版】根据Webhook传入的数据，更新或插入单条用户媒体状态。
-    - 明确列出所有要更新的字段，避免因 webhook 负载变化而遗漏数据。
+    """根据 Emby 事件数据更新或插入单条用户媒体状态。
+    - 明确列出所有要更新的字段，避免因事件载荷变化而遗漏数据。
     """
     user_id = data.get('user_id')
     item_id = data.get('item_id')
@@ -38,7 +38,7 @@ def upsert_user_media_data(data: Dict[str, Any]):
     update_data = {k: v for k, v in update_data.items() if v is not None}
 
     if not update_data:
-        logger.warning(f"Webhook 为 user {user_id}, item {item_id} 传来的数据为空，跳过更新。")
+        logger.warning(f"Emby 事件中 user {user_id}, item {item_id} 没有可更新数据，已跳过。")
         return
 
     # 动态构建 SQL
