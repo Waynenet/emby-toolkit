@@ -62,7 +62,17 @@
       </n-page-header>
       <n-divider />
 
-      <n-space :wrap="true" :size="[20, 12]" style="margin-bottom: 20px;">
+      <n-space :wrap="true" :size="[20, 12]" style="margin-bottom: 20px; align-items: center;">
+        
+        <n-checkbox 
+          :checked="isAllSelected" 
+          :indeterminate="isIndeterminate"
+          @update:checked="handleSelectAll"
+          style="margin-right: 8px;"
+        >
+          全选 ({{ filteredWatchlist.length }})
+        </n-checkbox>
+
         <n-input v-model:value="searchQuery" placeholder="按名称搜索..." clearable style="min-width: 200px;" />
         
         <n-select
@@ -786,6 +796,28 @@ const toggleSelection = (itemId, event, index) => {
     else selectedItems.value.push(itemId);
   }
   lastSelectedIndex.value = index;
+};
+
+// 🚀 新增：全选计算状态（仅针对当前经过搜索、筛选过滤后的候选列表）
+const isAllSelected = computed(() => {
+  return filteredWatchlist.value.length > 0 && selectedItems.value.length === filteredWatchlist.value.length;
+});
+
+// 🚀 新增：半选（模糊）状态，即已勾选部分，但没勾选完
+const isIndeterminate = computed(() => {
+  return selectedItems.value.length > 0 && selectedItems.value.length < filteredWatchlist.value.length;
+});
+
+// 🚀 新增：一键全选/反选事件
+const handleSelectAll = () => {
+  if (isAllSelected.value) {
+    // 如果已经全选了，点击则一键清空
+    selectedItems.value = [];
+  } else {
+    // 否则一键将当前过滤出来所有影视剧的 tmdb_id 填入勾选列表
+    selectedItems.value = filteredWatchlist.value.map(item => item.tmdb_id);
+    message.info(`已全选当前过滤列表下的 ${filteredWatchlist.value.length} 个项目`);
+  }
 };
 
 const handleBatchAction = (key) => {
