@@ -457,7 +457,8 @@
               
               <n-divider style="margin: 12px 0;" />
               
-              <n-space justify="space-between" align="center">
+              <!-- 调整为合理的响应式间距以容纳三个开关 -->
+              <n-space :size="[24, 12]" align="center">
                 <n-form-item :show-label="false" style="margin-bottom: 0;">
                    <n-checkbox v-model:checked="currentCollection.definition.show_in_latest">
                      在首页“最新媒体”中显示
@@ -466,6 +467,11 @@
                 <n-form-item :show-label="false" style="margin-bottom: 0;">
                    <n-checkbox v-model:checked="currentCollection.definition.dynamic_filter_enabled">
                      启用实时用户状态过滤
+                   </n-checkbox>
+                </n-form-item>
+                <n-form-item :show-label="false" style="margin-bottom: 0;">
+                   <n-checkbox v-model:checked="currentCollection.definition.auto_subscribe_missing">
+                     自动订阅缺失媒体
                    </n-checkbox>
                 </n-form-item>
               </n-space>
@@ -672,7 +678,6 @@
 </template>
 
 <script setup>
-// 这里的 script 逻辑完全保持你原来的代码不变
 import { ref, onMounted, h, computed, watch, nextTick } from 'vue';
 import axios from 'axios';
 import { useConfig } from '../composables/useConfig.js';
@@ -1124,13 +1129,33 @@ const sortOrderOptions = ref([{ label: '升序', value: 'Ascending' }, { label: 
 
 const getInitialFormModel = () => ({
   id: null, name: '', type: 'list', status: 'active', allowed_user_ids: [],
-  definition: { item_type: ['Movie'], url: '', limit: null, target_library_ids: [], default_sort_by: 'original', default_sort_order: 'Ascending', dynamic_filter_enabled: false, dynamic_logic: 'AND', dynamic_rules: [], show_in_latest: false }
+  definition: { 
+    item_type: ['Movie'], 
+    url: '', 
+    limit: null, 
+    target_library_ids: [], 
+    default_sort_by: 'original', 
+    default_sort_order: 'Ascending', 
+    dynamic_filter_enabled: false, 
+    dynamic_logic: 'AND', 
+    dynamic_rules: [], 
+    show_in_latest: false,
+    auto_subscribe_missing: false // 新增自动订阅缺失开关默认值
+  }
 });
 const currentCollection = ref(getInitialFormModel());
 
 watch(() => currentCollection.value.type, (newType) => {
   if (isEditing.value) return;
-  const sharedProps = { item_type: ['Movie'], default_sort_order: 'Ascending', dynamic_filter_enabled: false, dynamic_logic: 'AND', dynamic_rules: [], show_in_latest: false };
+  const sharedProps = { 
+    item_type: ['Movie'], 
+    default_sort_order: 'Ascending', 
+    dynamic_filter_enabled: false, 
+    dynamic_logic: 'AND', 
+    dynamic_rules: [], 
+    show_in_latest: false,
+    auto_subscribe_missing: false // 新增到类型切换的初始预设
+  };
   if (newType === 'filter') {
     currentCollection.value.definition = { ...sharedProps, logic: 'AND', rules: [{ field: null, operator: null, value: '' }], target_library_ids: [], default_sort_by: 'none' };
   } else if (newType === 'ai_recommendation') {
@@ -1243,7 +1268,7 @@ const typeOptions = [
 const formRules = computed(() => {
   const baseRules = { name: { required: true, message: '请输入合集名称', trigger: 'blur' }, type: { required: true, message: '请选择合集类型' }, 'definition.item_type': { type: 'array', required: true, message: '请至少选择一种合集内容' } };
   if (currentCollection.value.type === 'list') {
-    baseRules['definition.url'] = { required: true, message: '请选择一个内置榜单或输入一个自定义URL', trigger: 'blur' };
+    baseRules['definition.url'] = { required: true, message: '请选择一个内置榜单 or 输入一个自定义URL', trigger: 'blur' };
   } else if (currentCollection.value.type === 'filter') {
     baseRules['definition.rules'] = {
       type: 'array', required: true,
@@ -1379,6 +1404,8 @@ const handleEditClick = (row) => {
     rowCopy.definition = rowCopy.type === 'filter' ? { item_type: ['Movie'], logic: 'AND', rules: [] } : { item_type: ['Movie'], url: '' };
   }
   if (typeof rowCopy.definition.show_in_latest === 'undefined') rowCopy.definition.show_in_latest = false;
+  // 编辑老数据时，如果发现缺失该属性，提供安全默认值
+  if (typeof rowCopy.definition.auto_subscribe_missing === 'undefined') rowCopy.definition.auto_subscribe_missing = false;
   if (!rowCopy.definition.default_sort_by) rowCopy.definition.default_sort_by = 'none';
   if (!rowCopy.definition.default_sort_order) rowCopy.definition.default_sort_order = 'Ascending';
   currentCollection.value = rowCopy;
