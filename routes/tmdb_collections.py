@@ -143,20 +143,6 @@ def api_get_collections_status():
 # ======================================================================
 # ★★★ 删除合集路由 ★★★
 # ======================================================================
-@collections_bp.route('/tmdb/<tmdb_collection_id>', methods=['DELETE'])
-@admin_required
-def api_delete_cached_collection(tmdb_collection_id):
-    row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
-    if not row:
-        return jsonify({"error": "合集记录不存在"}), 404
-    if row.get('emby_collection_id'):
-        return jsonify({"error": "该合集已在 Emby 中生成，请按 Emby 合集删除"}), 409
-    if tmdb_collection_db.delete_native_collection_by_tmdb_id(tmdb_collection_id):
-        logger.info(f"  ➤ [删除合集] 已删除 ETK 合集缓存 (TMDb ID: {tmdb_collection_id})")
-        return jsonify({"message": "ETK 合集记录已删除"}), 200
-    return jsonify({"error": "删除 ETK 合集记录失败"}), 500
-
-
 @collections_bp.route('/<emby_collection_id>', methods=['DELETE'])
 @admin_required
 def api_delete_collection(emby_collection_id):
@@ -192,8 +178,8 @@ def api_delete_collection(emby_collection_id):
         delete_success = emby.delete_item(emby_collection_id, base_url, api_key, user_id)
 
         if delete_success:
-            # 4. 清理本地数据库缓存 
-            tmdb_collection_db.delete_native_collection_by_emby_id(emby_collection_id)
+            # 4. 取消激活，保留插件读取所需的合集元数据
+            tmdb_collection_db.deactivate_native_collection_by_emby_id(emby_collection_id)
             return jsonify({"message": "合集已成功从 Emby 删除"}), 200
         else:
             return jsonify({"error": "删除合集失败，请检查 Emby 日志"}), 500

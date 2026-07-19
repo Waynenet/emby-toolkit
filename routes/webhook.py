@@ -1166,26 +1166,6 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
         except Exception as e:
             logger.error(f"  ➜ 在新入库后执行封面生成时发生错误: {e}", exc_info=True)
 
-        # ======================================================================
-        # ★★★  TMDb 合集自动补全 ★★★
-        # ======================================================================
-        try:
-            # 1. 检查类型 (只处理电影)
-            # ★★★ 修复：直接使用 item_details 和 tmdb_id，不再依赖 item_metadata ★★★
-            current_type = item_details.get('Type')
-            current_tmdb_id = tmdb_id  # 这个变量在函数前面已经定义过了
-            current_name = item_name   # 这个变量在函数前面也定义过了
-
-            if current_type == 'Movie' and current_tmdb_id:
-                logger.trace(f"  ➜ 正在检查电影 '{current_name}' 所属 TMDb 合集...")
-                collections_handler.check_and_subscribe_collection_from_movie(
-                    movie_tmdb_id=str(current_tmdb_id),
-                    movie_name=current_name,
-                    movie_emby_id=item_id
-                )
-        except Exception as e:
-            logger.warning(f"  ➜ 检查所属 TMDb 合集时发生错误: {e}")
-
     logger.trace(f"  ➜ Emby 事件任务及所有后续流程完成: '{item_name_for_log}'")
 
     # 4. ★★★ 通知分流 ★★★
@@ -1602,6 +1582,29 @@ def get_emby_metadata_by_path():
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response
+
+
+@webhook_bp.route('/api/emby/collections/activate', methods=['POST'])
+def activate_emby_collection():
+    data = request.get_json(silent=True) or {}
+    tmdb_collection_id = str(data.get('tmdb_collection_id') or '').strip()
+    emby_collection_id = str(data.get('emby_collection_id') or '').strip()
+    collection_name = str(data.get('name') or '').strip()
+    if not tmdb_collection_id.isdigit() or not emby_collection_id:
+        return jsonify({'ok': False, 'error': 'invalid collection activation request'}), 400
+
+    activated = collections_handler.activate_collection_from_emby(
+        tmdb_collection_id,
+        emby_collection_id,
+        collection_name,
+    )
+    if not activated:
+        return jsonify({'ok': False, 'error': 'collection metadata cache not found'}), 404
+    spawn(
+        collections_handler.subscribe_missing_for_activated_collection,
+        tmdb_collection_id,
+    )
+    return jsonify({'ok': True}), 200
 
 
 @webhook_bp.route('/api/emby/metadata/backfill', methods=['POST'])
@@ -2247,9 +2250,9 @@ def emby_webhook():
                 )
                 
                 if not details:
-                    logger.info(f"  ➜ 合集《{collection_name}》已在 Emby 中消失，正在同步删除本地记录。")
+                    logger.info(f"  ➜ 合集《{collection_name}》已在 Emby 中消失，正在取消激活本地记录。")
                     logger.debug(f"  ➜ 已消失合集 ID：{collection_id}")
-                    tmdb_collection_db.delete_native_collection_by_emby_id(collection_id)
+                    tmdb_collection_db.deactivate_native_collection_by_emby_id(collection_id)
                 else:
                     logger.debug(f"  ➜ 合集 '{collection_name}' 依然存在，无需操作。")
 

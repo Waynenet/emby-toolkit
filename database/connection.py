@@ -150,6 +150,7 @@ def init_db():
                         poster_path TEXT,
                         backdrop_path TEXT,
                         metadata_schema_version INTEGER NOT NULL DEFAULT 0,
+                        is_active BOOLEAN NOT NULL DEFAULT FALSE,
                         item_type TEXT DEFAULT 'Movie' NOT NULL,
                         all_tmdb_ids_json JSONB
                     );
@@ -817,6 +818,7 @@ def init_db():
                             "poster_path": "TEXT",
                             "backdrop_path": "TEXT",
                             "metadata_schema_version": "INTEGER NOT NULL DEFAULT 0",
+                            "is_active": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "all_tmdb_ids_json": "JSONB",
                             "overview": "TEXT" 
                         },
@@ -858,6 +860,12 @@ def init_db():
                         WHERE (metadata_ready IS FALSE OR actors_ready IS FALSE)
                           AND jsonb_typeof(actors_json) = 'array'
                           AND jsonb_array_length(actors_json) > 0
+                    """)
+                    cursor.execute("""
+                        UPDATE collections_info
+                        SET is_active = TRUE
+                        WHERE emby_collection_id IS NOT NULL
+                          AND is_active IS NOT TRUE
                     """)
 
                 except Exception as e_alter:

@@ -701,7 +701,9 @@ def get_stats_subscription():
                             emby_collection_id,
                             jsonb_array_elements_text(all_tmdb_ids_json) AS tmdb_id
                         FROM collections_info
-                        WHERE all_tmdb_ids_json IS NOT NULL AND jsonb_typeof(all_tmdb_ids_json) = 'array'
+                        WHERE is_active IS TRUE
+                          AND all_tmdb_ids_json IS NOT NULL
+                          AND jsonb_typeof(all_tmdb_ids_json) = 'array'
                     ),
                     missing_pairs AS (
                         -- 2. 关联媒体表，找出真正缺失的项目 (Collection ID, TMDB ID) 对
@@ -717,7 +719,7 @@ def get_stats_subscription():
                             (m.in_library IS NULL OR m.in_library = FALSE)
                     )
                     SELECT 
-                        (SELECT COUNT(*) FROM collections_info) as total,
+                        (SELECT COUNT(*) FROM collections_info WHERE is_active IS TRUE) as total,
                         -- 统计有多少个合集存在缺失 (按合集ID去重)
                         (SELECT COUNT(DISTINCT emby_collection_id) FROM missing_pairs) as with_missing,
                         -- 统计总共缺失多少部电影 (按TMDB ID去重，避免一部电影在多个合集中被重复计算)
@@ -2043,7 +2045,8 @@ def cleanup_deleted_media_item(item_id: str, item_name: str, item_type: str, ser
                         cursor.execute("""
                             SELECT emby_collection_id, name, all_tmdb_ids_json
                             FROM collections_info
-                            WHERE all_tmdb_ids_json @> %s::jsonb
+                            WHERE is_active IS TRUE
+                              AND all_tmdb_ids_json @> %s::jsonb
                         """, (json.dumps([target_tmdb_id_for_full_cleanup]),))
                         
                         affected_collections = cursor.fetchall()

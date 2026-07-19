@@ -243,7 +243,7 @@ Emby 事件由 ETK MediaInfo Bridge 直接监听并通过 `/api/emby/events` 上
 
 插件元数据接口必须复用 ETK 的关键词和工作室映射配置：对应中文化开关开启时只返回命中 ID/英文名映射的中文标签，未映射原始值直接丢弃。中文分级标签仅供 ETK 分类和筛选；Emby 家长控制不读取 ETK `emby_value`，因此 `OfficialRating` 必须返回 `official_rating_json.US` 中的美国分级代码。
 
-TMDb 合集不再受 ETK 独立开关控制。ETK Movie 元数据接口始终返回数据库中按电影 TMDb ID 匹配的合集关系，插件只在电影所属 Emby 媒体库开启 `LibraryOptions.ImportCollections` 时按 TMDb 合集 ID 创建或加入 BoxSet。Emby 单项刷新在元数据无变化时可能既不调用 Provider 也不触发 `ItemUpdated`，因此插件通过 Harmony 拦截 `Emby.Api.ItemRefreshService.Post(RefreshItem)`，取得 ItemID 后沿用 3 秒延迟回补流程恢复媒体流、缺图和合集关系。
+TMDb 合集不再受 ETK 独立开关控制。电影处理可把所属合集元数据写入 `collections_info`，但默认保持未激活，仅供 ETK Movie 元数据接口和插件读取；插件只在电影所属 Emby 媒体库开启 `LibraryOptions.ImportCollections` 且满足 `MinCollectionItems` 时按 TMDb 合集 ID 创建或加入 BoxSet。插件创建 BoxSet 成功后主动调用 ETK 激活接口绑定 Emby ID，主入库流程不延迟、不反查 Emby；合集页面、统计和缺失订阅只读取激活记录，Emby 删除 BoxSet 时记录退回未激活而不删除元数据缓存。Emby 单项刷新在元数据无变化时可能既不调用 Provider 也不触发 `ItemUpdated`，因此插件通过 Harmony 拦截 `Emby.Api.ItemRefreshService.Post(RefreshItem)`，取得 ItemID 后沿用 3 秒延迟回补流程恢复媒体流、缺图和合集关系。
 
 媒体信息桥接插件的接口是 `POST /Items/{Id}/ETKMediaInfo`。每个实际版本必须使用自己的 Emby Item ID；插件注入前清空旧媒体流，新入库时删除抢占格式化流索引的外挂流，最终刷新重新识别外挂流后，刷新回补会把冲突外挂流移动到未占用索引并安全保留。插件同时同步章节、时长、大小、封装、码率和分辨率，并监听 Emby Item 刷新事件；刷新稳定后根据 STRM 中的 pick code 或虚拟播放 SHA1 调用 `/api/p115/mediainfo/...` 重新注入，事件按 Item 合并并限制为 4 路并发。
 
