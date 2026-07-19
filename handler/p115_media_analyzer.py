@@ -2498,6 +2498,7 @@ class P115MediaAnalyzerMixin:
 
             return {}
 
+        streams = []
         try:
             source_info = _pick_media_source(raw_json)
             streams = [s for s in (source_info.get("MediaStreams") or []) if isinstance(s, dict)]
@@ -2636,4 +2637,4 @@ class P115MediaAnalyzerMixin:
         if etk_episode_number is not None:
             info["episode_number"] = etk_episode_number
 
-        return info
+        return info if any(s.get("Type") == "Video" for s in streams) else {}

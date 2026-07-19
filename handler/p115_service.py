@@ -8194,6 +8194,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         else:
                             real_target_cid = final_home_cid
 
+            if ext in known_video_exts and not has_real_info:
+                reason = '无法获取有效媒体流信息(可能是不支持的格式或文件损坏)'
+                logger.warning(f"  ➜ [媒体信息门槛] {file_name} -> {reason}")
+                unqualified_items.append({
+                    'fid': fid,
+                    'name': file_name,
+                    'reason': reason,
+                    'pc': file_item.get('pc') or file_item.get('pick_code'),
+                    'season_num': season_num,
+                })
+                continue
+
             if ext in known_video_exts and version_slots_active:
                 slot_info = file_item.get('_washing_slot')
                 if not slot_info:
