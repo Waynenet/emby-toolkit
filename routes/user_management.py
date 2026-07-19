@@ -320,7 +320,14 @@ def register_with_invite():
             
             cursor.execute("BEGIN;")
             cursor.execute(
-                "SELECT * FROM invitations WHERE token = %s AND status = 'active' FOR UPDATE", (token,)
+                """
+                SELECT * FROM invitations
+                WHERE token = %s
+                  AND status = 'active'
+                  AND (expires_at IS NULL OR expires_at >= NOW())
+                FOR UPDATE
+                """,
+                (token,)
             )
             invitation = cursor.fetchone()
             if not invitation:
@@ -370,9 +377,15 @@ def register_with_invite():
                     config.get("emby_server_url"), config.get("emby_api_key")
                 )
 
-            # 4. 后续的数据库操作保持不变
+            # 用户同步可能在 Emby 创建成功后抢先写入本地记录，注册落库必须保持幂等。
             cursor.execute(
-                "INSERT INTO emby_users (id, name, is_administrator) VALUES (%s, %s, %s)",
+                """
+                INSERT INTO emby_users (id, name, is_administrator)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    is_administrator = EXCLUDED.is_administrator
+                """,
                 (new_user_id, username, False)
             )
             expiration_date = None # 默认设置为 None (即 NULL)
@@ -384,6 +397,11 @@ def register_with_invite():
                 """
                 INSERT INTO emby_users_extended (emby_user_id, status, expiration_date, created_by, template_id)
                 VALUES (%s, 'active', %s, 'self-registered', %s)
+                ON CONFLICT (emby_user_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    expiration_date = EXCLUDED.expiration_date,
+                    created_by = EXCLUDED.created_by,
+                    template_id = EXCLUDED.template_id
                 """,
                 (new_user_id, expiration_date, invitation['template_id'])
             )

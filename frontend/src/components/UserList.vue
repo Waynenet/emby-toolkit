@@ -12,7 +12,7 @@
           :positive-button-props="{ type: 'error' }"
         >
           <template #trigger>
-            <n-button type="error" size="small" ghost>批量删除</n-button>
+            <n-button type="error" size="small" ghost :loading="isBulkDeleting" :disabled="isBulkDeleting">批量删除</n-button>
           </template>
           确定要彻底删除选中的 {{ checkedRowKeys.length }} 个用户吗？此操作不可恢复！
         </n-popconfirm>
@@ -117,7 +117,22 @@ const api = {
   getUserTemplates: () => fetch('/api/admin/user_templates').then(res => res.json()),
   changeUserTemplate: (userId, templateId) => fetch(`/api/admin/users/${userId}/template`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: templateId }) }),
   // ★★★ 新增批量API (前端封装) ★★★
-  bulkDeleteUsers: (userIds) => Promise.allSettled(userIds.map(id => api.deleteUser(id))),
+  bulkDeleteUsers: async (userIds) => {
+    const results = [];
+    for (const id of userIds) {
+      try {
+        const response = await api.deleteUser(id);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.message || `删除失败 (${response.status})`);
+        }
+        results.push({ status: 'fulfilled', value: response });
+      } catch (reason) {
+        results.push({ status: 'rejected', reason });
+      }
+    }
+    return results;
+  },
   bulkChangeUserTemplate: (userIds, templateId) => Promise.allSettled(userIds.map(id => api.changeUserTemplate(id, templateId))),
 };
 
@@ -145,6 +160,7 @@ const templateOptions = computed(() =>
   allTemplates.value.map(t => ({ label: t.name, value: t.id }))
 );
 const checkedRowKeys = ref([]);
+const isBulkDeleting = ref(false);
 const filterName = ref('');
 const filterStatus = ref(null);
 const filterTemplateId = ref(null);
@@ -352,16 +368,25 @@ const handleRowClick = (row, event) => {
 
 // ★★★ 新增：批量操作处理 ★★★
 const handleBulkDelete = async () => {
+  if (isBulkDeleting.value) return;
+
   const userIds = [...checkedRowKeys.value];
-  const results = await api.bulkDeleteUsers(userIds);
-  const failedCount = results.filter(r => r.status === 'rejected').length;
-  if (failedCount > 0) {
-    message.error(`${failedCount} 个用户删除失败，其余成功。`);
-  } else {
-    message.success(`成功删除 ${userIds.length} 个用户。`);
+  isBulkDeleting.value = true;
+  try {
+    const results = await api.bulkDeleteUsers(userIds);
+    const failedIds = userIds.filter((_, index) => results[index].status === 'rejected');
+    const successCount = userIds.length - failedIds.length;
+
+    if (failedIds.length > 0) {
+      message.error(`批量删除完成：成功 ${successCount} 个，失败 ${failedIds.length} 个。`);
+    } else {
+      message.success(`成功删除 ${successCount} 个用户。`);
+    }
+    checkedRowKeys.value = failedIds;
+    await fetchData();
+  } finally {
+    isBulkDeleting.value = false;
   }
-  checkedRowKeys.value = [];
-  fetchData();
 };
 
 const showBulkChangeTemplateModal = () => {

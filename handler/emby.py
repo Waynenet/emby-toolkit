@@ -2913,6 +2913,15 @@ def delete_emby_user(user_id: str) -> bool:
     try:
         response = emby_client.delete(api_url, headers=headers)
         response.raise_for_status()
+
+        remaining_users = get_all_emby_users_from_server(base_url, api_key)
+        if remaining_users is None:
+            logger.error(f"  ➜ Emby 已接受删除用户 '{user_name_for_log}' 的请求，但无法验证删除结果。")
+            return False
+        if any(user.get('Id') == user_id for user in remaining_users):
+            logger.error(f"  ➜ Emby 返回删除成功，但用户 '{user_name_for_log}' (ID: {user_id}) 仍然存在。")
+            return False
+
         logger.info(f"  ➜ 成功删除 Emby 用户 '{user_name_for_log}' (ID: {user_id})。")
         return True
     except requests.exceptions.HTTPError as e:
