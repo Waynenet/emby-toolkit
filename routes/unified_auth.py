@@ -3,6 +3,7 @@
 import logging
 import secrets
 import time
+from urllib.parse import urlsplit
 from flask import Blueprint, request, jsonify, session
 import config_manager
 import constants
@@ -85,6 +86,36 @@ def _save_emby_service_authorization(auth_result):
     }
     from web_app import save_config_and_reload
     save_config_and_reload(new_config)
+
+
+def _etk_origin_for_plugin():
+    configured = str(config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip().rstrip('/')
+    configured_host = str(urlsplit(configured).hostname or '').lower() if configured else ''
+    if configured.startswith(('http://', 'https://')) and 'x' not in configured_host:
+        return configured
+    return request.host_url.rstrip('/')
+
+
+def _install_etk_plugin_after_authorization(auth_result):
+    from handler.etk_plugin_update import ensure_etk_plugin_installed
+    return ensure_etk_plugin_installed(
+        auth_result['_normalized_url'],
+        auth_result['AccessToken'],
+        _etk_origin_for_plugin(),
+    )
+
+
+def _configure_libraries_after_plugin_install(auth_result, plugin_install):
+    if not plugin_install.get('ok'):
+        return {
+            'ok': False,
+            'status': 'skipped',
+            'message': 'ETK 插件未就绪，已跳过媒体库加速配置',
+        }
+    return emby.configure_etk_library_defaults(
+        auth_result['_normalized_url'],
+        auth_result['AccessToken'],
+    )
 
 
 @unified_auth_bp.route('/check_status', methods=['GET'])
@@ -235,11 +266,24 @@ def save_emby_config():
         logger.error(f"保存配置失败: {e}")
         return jsonify({"status": "error", "message": "保存配置失败，请检查日志"}), 500
 
+    plugin_install = _install_etk_plugin_after_authorization(auth_result)
+    library_config = _configure_libraries_after_plugin_install(auth_result, plugin_install)
     _sync_and_start_session(auth_result['User'])
     logger.info("Emby 管理员服务授权已保存，账号密码未持久化。")
+    message = "Emby 服务授权成功"
+    if plugin_install.get('ok'):
+        message += "，" + plugin_install.get('message', 'ETK 插件已就绪')
+        if library_config.get('ok'):
+            message += "，" + library_config.get('message', '媒体库加速配置已应用')
+        else:
+            message += "；媒体库加速配置失败：" + library_config.get('message', '未知错误')
+    else:
+        message += "；ETK 插件自动安装失败：" + plugin_install.get('message', '未知错误')
     return jsonify({
         "status": "ok",
-        "message": "Emby 服务授权成功",
+        "message": message,
+        "plugin_install": plugin_install,
+        "library_config": library_config,
         "user": {
             "id": session['emby_user_id'],
             "name": session['emby_username'],
@@ -282,10 +326,23 @@ def reauthorize_emby_service():
         logger.error(f"重新授权 Emby 服务失败: {e}", exc_info=True)
         return jsonify({"status": "error", "message": "保存服务授权失败，请检查日志"}), 500
 
+    plugin_install = _install_etk_plugin_after_authorization(auth_result)
+    library_config = _configure_libraries_after_plugin_install(auth_result, plugin_install)
     user_info = auth_result['User']
+    message = "Emby 服务授权已更新"
+    if plugin_install.get('ok'):
+        message += "，" + plugin_install.get('message', 'ETK 插件已就绪')
+        if library_config.get('ok'):
+            message += "，" + library_config.get('message', '媒体库加速配置已应用')
+        else:
+            message += "；媒体库加速配置失败：" + library_config.get('message', '未知错误')
+    else:
+        message += "；ETK 插件自动安装失败：" + plugin_install.get('message', '未知错误')
     return jsonify({
         "status": "ok",
-        "message": "Emby 服务授权已更新",
+        "message": message,
+        "plugin_install": plugin_install,
+        "library_config": library_config,
         "authorization": {
             "url": auth_result['_normalized_url'],
             "user_id": user_info['Id'],
