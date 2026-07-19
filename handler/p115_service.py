@@ -8666,41 +8666,43 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 effective_conflict_mode = 'replace' if (
                     is_ep_active_washing
                     or getattr(self, 'is_shared_transfer_context', False)
-                    or getattr(self, 'is_manual_correct', False)
                 ) else conflict_mode
 
                 # ★ 判断是否享有外挂字幕豁免权
                 has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
 
+                # 手动重组只修正用户选中的文件，不承担洗版职责。
+                # 其他版本无论位于目标目录还是原目录，都不能进入删除集合。
+                if is_vid and getattr(self, 'is_manual_correct', False):
+                    reason = '手动重组仅处理选中版本，保留其他版本'
+                    logger.info(f"  ➜ [手动重组] {new_name}，原因：{reason}")
+                    item['_washing_snapshot'] = _build_washing_snapshot(item, new_name, reason, file_size, has_ext_sub)
+                    valid_items.append(item)
+
                 # 调用阶梯洗版优先级服务
-                if is_vid and effective_conflict_mode == 'replace':
-                    # ★ 核心修复：手动重组拥有最高特权，无视洗版规则直接放行！
-                    if getattr(self, 'is_manual_correct', False):
-                        action = 'REPLACE'
-                        reason = '手动重组，无视洗版规则强制放行'
-                    else:
-                        logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
-                        
-                        video_info = item.get('_video_info') or self._extract_video_info(new_name)
-                        file_sha1 = item.get('sha1') or item.get('sha')
-                        
-                        action, reason, washing_details = WashingService.decide_washing_action(
-                            sha1=file_sha1,
-                            file_name=new_name,
-                            file_size=file_size,
-                            target_cid=target_cid,
-                            media_type=self.media_type,
-                            tmdb_id=self.tmdb_id,
-                            season_num=s_num,
-                            episode_num=e_num,
-                            original_lang=original_lang,
-                            is_active_washing=is_ep_active_washing,
-                            has_external_subtitle=has_ext_sub,
-                            return_details=True,
-                        )
-                        resolved_slot = (washing_details or {}).get('version_slot')
-                        if resolved_slot:
-                            item['_washing_slot'] = resolved_slot
+                elif is_vid and effective_conflict_mode == 'replace':
+                    logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
+
+                    video_info = item.get('_video_info') or self._extract_video_info(new_name)
+                    file_sha1 = item.get('sha1') or item.get('sha')
+
+                    action, reason, washing_details = WashingService.decide_washing_action(
+                        sha1=file_sha1,
+                        file_name=new_name,
+                        file_size=file_size,
+                        target_cid=target_cid,
+                        media_type=self.media_type,
+                        tmdb_id=self.tmdb_id,
+                        season_num=s_num,
+                        episode_num=e_num,
+                        original_lang=original_lang,
+                        is_active_washing=is_ep_active_washing,
+                        has_external_subtitle=has_ext_sub,
+                        return_details=True,
+                    )
+                    resolved_slot = (washing_details or {}).get('version_slot')
+                    if resolved_slot:
+                        item['_washing_slot'] = resolved_slot
                     
                     if action == 'REJECT':
                         logger.warning(f"  ➜ [洗版拦截] {new_name} -> {reason}")
