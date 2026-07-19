@@ -624,7 +624,8 @@ def _process_batch_webhook_events():
 
 def _trigger_metadata_update_task(item_id, item_name):
     """触发元数据同步任务"""
-    logger.info(f"  ➜ 防抖计时器到期，为 '{item_name}' (ID: {item_id}) 执行元数据缓存同步任务。")
+    logger.info(f"  ➜ 防抖计时器到期，开始同步《{item_name}》的元数据缓存。")
+    logger.debug(f"  ➜ 元数据缓存同步对象：item_id={item_id}")
     task_manager.submit_task(
         task_sync_all_metadata,
         task_name=f"元数据同步: {item_name}",
@@ -712,7 +713,8 @@ def _wait_for_stream_data_and_enqueue(item_id, item_name, item_type, file_path=N
         _dispatch_item(item_id, item_name, item_type)
         return
 
-    logger.info(f"  ➜ [预检] 开始处理 '{item_name}' (ID:{item_id}) 的媒体信息...")
+    logger.info(f"  ➜ [预检] 开始检查《{item_name}》的媒体信息。")
+    logger.debug(f"  ➜ [预检] 媒体信息检查对象：item_id={item_id}")
 
     app_config = config_manager.APP_CONFIG
     emby_url = app_config.get("emby_server_url")
@@ -1115,7 +1117,8 @@ def emby_webhook():
                 )
                 
                 if not details:
-                    logger.info(f"  ➜ 合集 '{collection_name}' (ID: {collection_id}) 已在 Emby 中消失 (可能是变空自动删除)，同步删除本地记录...")
+                    logger.info(f"  ➜ 合集《{collection_name}》已在 Emby 中消失，正在同步删除本地记录。")
+                    logger.debug(f"  ➜ 已消失合集 ID：{collection_id}")
                     tmdb_collection_db.delete_native_collection_by_emby_id(collection_id)
                 else:
                     logger.debug(f"  ➜ 合集 '{collection_name}' 依然存在，无需操作。")

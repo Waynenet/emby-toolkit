@@ -403,7 +403,7 @@ class MediaProcessor:
                 results = tmdb.search_media(search_query, self.tmdb_api_key, item_type=search_type, year=search_year)
                 if results:
                     tmdb_id = str(results[0].get('id'))
-                    logger.info(f"  ➜ [实时监控] 搜索匹配成功: {results[0].get('title') or results[0].get('name')} (ID: {tmdb_id})")
+                    logger.info(f"  ➜ [实时监控] 搜索匹配成功：《{results[0].get('title') or results[0].get('name')}》，TMDb：{tmdb_id}")
                 else:
                     logger.warning(f"  ➜ [实时监控] 搜索失败，无法处理: {search_query}")
                     return None
@@ -627,7 +627,8 @@ class MediaProcessor:
 
             if not should_skip_full_processing:
                 time.sleep(random.uniform(0.5, 2.0))
-                logger.info(f"  ➜ [实时监控] 正在获取 TMDb 详情并执行核心处理 (ID: {tmdb_id})...")
+                logger.info("  ➜ [实时监控] 开始获取 TMDb 详情并处理媒体。")
+                logger.debug(f"  ➜ [实时监控] TMDb 详情处理对象：TMDb={tmdb_id}")
                 
                 if item_type == "Movie":
                     details = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key)
@@ -2939,7 +2940,8 @@ class MediaProcessor:
         return translated_cast
     
     def process_item_with_manual_cast(self, item_id: str, manual_cast_list: List[Dict[str, Any]], item_name: str) -> bool:
-        logger.info(f"  ➜ 手动处理流程启动：ItemID: {item_id} ('{item_name}')")
+        logger.info(f"  ➜ 手动处理流程启动：《{item_name}》。")
+        logger.debug(f"  ➜ 手动处理对象：ItemID={item_id}")
         
         try:
             item_details = emby.get_emby_item_details(item_id, self.emby_url, self.emby_api_key, self.emby_user_id)
@@ -3099,7 +3101,8 @@ class MediaProcessor:
                         new_cast_built.append(updated_actor_entry)
                     
                     else:
-                        logger.info(f"    ├─ 发现新演员: '{actor_from_frontend.get('name')}' (TMDb ID: {tmdb_id_str})，开始补全元数据...")
+                        logger.info(f"    ├─ 发现新演员：{actor_from_frontend.get('name')}，开始补全元数据。")
+                        logger.debug(f"    ├─ 新演员 TMDb ID：{tmdb_id_str}")
                         
                         person_details = all_new_actors_metadata.get(int(tmdb_id_str))
                         

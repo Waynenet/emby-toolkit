@@ -528,7 +528,11 @@ def enrich_all_actor_aliases_task(
 
                                         target_tmdb_id = target_actor['tmdb_person_id']
                                         source_tmdb_id = source_actor['tmdb_person_id']
-                                        logger.info(f"  ➜ 准备合并：源(tmdb:{source_tmdb_id}) -> 目标(tmdb:{target_tmdb_id}, imdb:{imdb_id})")
+                                        logger.info("  ➜ 准备合并演员记录。")
+                                        logger.debug(
+                                            f"  ➜ 演员合并详情：源 TMDb={source_tmdb_id}, "
+                                            f"目标 TMDb={target_tmdb_id}, IMDb={imdb_id}"
+                                        )
 
                                         # --- 定义一个可重用的、安全的ID合并函数 ---
                                         def safe_merge_id(id_field_name: str, id_value: Any, target_id: int):

@@ -144,7 +144,7 @@ class WatchlistProcessor:
         """【新架构】直接调用 DB 层更新，不再做字段映射。"""
         try:
             watchlist_db.update_watchlist_metadata(tmdb_id, updates)
-            logger.info(f"  ➜ 成功更新数据库中 '{item_name}' 的追剧信息。")
+            logger.info(f"  ➜ 已更新《{item_name}》的追剧信息。")
         except Exception as e:
             logger.error(f"  更新 '{item_name}' 追剧信息时出错: {e}")
 
@@ -933,7 +933,10 @@ class WatchlistProcessor:
                     # 3. episode_count <= threshold_episodes: 集数很少 (如只有1集)
                     # 只有同时满足这三点，才认为是“刚开播且信息不全”，需要待定
                     if (days_diff >= 0) and (days_diff <= threshold_days) and (episode_count <= threshold_episodes):
-                        logger.info(f"  ➜ [自动待定] 触发: S{latest_season.get('season_number')} 上线{days_diff}天, 集数{episode_count} (阈值: {threshold_episodes})")
+                        logger.info(
+                            f"  ➜ [自动待定] 第 {latest_season.get('season_number')} 季刚开播 {days_diff} 天，"
+                            f"当前仅 {episode_count} 集，先转为待定。"
+                        )
                         return True
                 except ValueError:
                     pass
@@ -1228,7 +1231,8 @@ class WatchlistProcessor:
         old_status = series_data.get('watching_status') 
         is_force_ended = bool(series_data.get('force_ended', False))
         
-        logger.info(f"  ➜ 【追剧检查】正在处理: '{item_name}' (TMDb ID: {tmdb_id})")
+        logger.info(f"  ➜ [追剧检查] 开始检查《{item_name}》。")
+        logger.debug(f"  ➜ [追剧检查] TMDb={tmdb_id}")
 
         if not item_id:
             logger.warning(f"  ➜ 剧集 '{item_name}' 在数据库中没有关联的 Emby ID，跳过。")
@@ -1336,11 +1340,12 @@ class WatchlistProcessor:
                     # 信任豆瓣权威数据，查到即锁定
                     if douban_count and douban_count > 0:
                         if is_locked and douban_count > locked_count:
-                            logger.info(f"  ✨ [豆瓣修正更新] 豆瓣也已更新集数 ({locked_count} -> {douban_count})！正在更新锁定...")
+                            logger.info(f"  ➜ [豆瓣修正更新] 豆瓣也已更新集数 ({locked_count} -> {douban_count})！正在更新锁定。")
                         elif douban_count != current_tmdb_count:
-                            logger.info(f"  ✨ [豆瓣修正] 《{item_name}》第{latest_s_num}季 TMDb集数({current_tmdb_count}) -> 豆瓣集数({douban_count})。正在锁定...")
+                            logger.info(f"  ➜ [豆瓣修正] 《{item_name}》第 {latest_s_num} 季集数已按豆瓣修正为 {douban_count} 集，正在锁定。")
+                            logger.debug(f"  ➜ [豆瓣修正] TMDb 原集数：{current_tmdb_count}，豆瓣集数：{douban_count}")
                         else:
-                            logger.info(f"  ➜ [豆瓣锁定] 《{item_name}》第{latest_s_num}季 集数与豆瓣一致({douban_count})。正在锁定以防TMDb变动...")
+                            logger.info(f"  ➜ [豆瓣锁定] 《{item_name}》第{latest_s_num}季 集数与豆瓣一致({douban_count})。正在锁定以防TMDb变动。")
                         
                         # 1. 更新数据库并锁定 (locked=True)
                         watchlist_db.update_specific_season_total_episodes(
@@ -1398,7 +1403,8 @@ class WatchlistProcessor:
                         # 仅在第一次剔除时打印详细日志，避免刷屏
                         if discarded_count == 1:
                             lock_count = lock_info.get('count') or 0
-                            logger.info(f"  ➜ [分季锁定生效] S{s_num} 锁定为 {lock_count} 集，正在剔除 TMDb 多余集数 (如 S{s_num}E{e_num})...")
+                            logger.info(f"  ➜ [分季锁定生效] 第 {s_num} 季已锁定为 {lock_count} 集，正在剔除 TMDb 多余集数。")
+                            logger.debug(f"  ➜ [分季锁定生效] 首个被剔除的分集：S{s_num}E{e_num}")
                         continue
                     
                     # 否则保留该集
@@ -1652,7 +1658,7 @@ class WatchlistProcessor:
             if s_num not in emby_seasons or e_num not in emby_seasons.get(s_num, set()):
                 # 找到了！这才是基于用户当前进度的“下一集”
                 # 可能是当前季的下一集，也可能是新的一季的第一集
-                logger.info(f"  ➜ 找到本季缺失的下一集: S{s_num}E{e_num} ('{episode.get('name')}')。")
+                logger.info(f"  ➜ 找到下一集缺口：第 {s_num} 季第 {e_num} 集（{episode.get('name') or '未命名'}）。")
                 return episode
         
         # 4. 如果循环完成，说明本地拥有TMDb上所有的剧集 (或者只缺了未来的)
