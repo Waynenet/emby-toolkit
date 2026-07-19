@@ -42,6 +42,108 @@ class ListImporter:
     }
     VALID_MAOYAN_PLATFORMS = {'tencent', 'iqiyi', 'youku', 'mango'}
 
+    @staticmethod
+    def _positive_limit(value) -> Optional[int]:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return None
+        return limit if limit > 0 else None
+
+    @staticmethod
+    def _normalize_person_ids(value) -> List[int]:
+        if isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            raw_values = str(value or '').replace('|', ',').split(',')
+        return [int(item) for item in raw_values if str(item).strip().isdigit()]
+
+    def _resolve_tv_person_items(self, cast_value=None, crew_value=None) -> Optional[Dict[str, Dict]]:
+        """返回同时满足全部演员和导演条件的剧集；未配置人物时返回 None。"""
+        credit_maps = []
+        for raw_value, credit_type in ((cast_value, 'cast'), (crew_value, 'crew')):
+            for person_id in self._normalize_person_ids(raw_value):
+                credits = tmdb.get_person_tv_credits_tmdb(person_id, self.tmdb_api_key)
+                if credits is None:
+                    raise RuntimeError(f"读取 TMDb 人物 {person_id} 的剧集作品失败")
+                credit_maps.append({
+                    str(item.get('id')): item
+                    for item in credits.get(credit_type, [])
+                    if item.get('id') is not None
+                })
+
+        if not credit_maps:
+            return None
+
+        matched_ids = set.intersection(*(set(items) for items in credit_maps))
+        return {
+            tmdb_id: next(items[tmdb_id] for items in credit_maps if tmdb_id in items)
+            for tmdb_id in matched_ids
+        }
+
+    @staticmethod
+    def _filter_tv_credit_items(items: List[Dict], params: Dict) -> List[Dict]:
+        def token_groups(value):
+            return [
+                {token.strip() for token in group.split('|') if token.strip()}
+                for group in str(value or '').split(',')
+                if group.strip()
+            ]
+
+        required_genres = token_groups(params.get('with_genres'))
+        excluded_genres = set().union(*token_groups(params.get('without_genres'))) if params.get('without_genres') else set()
+        required_countries = set().union(*token_groups(params.get('with_origin_country'))) if params.get('with_origin_country') else set()
+        required_language = str(params.get('with_original_language') or '').strip()
+        date_gte = str(params.get('first_air_date.gte') or '').strip()
+        date_lte = str(params.get('first_air_date.lte') or '').strip()
+        include_adult = str(params.get('include_adult') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+        try:
+            vote_gte = float(params.get('vote_average.gte') or 0)
+        except (TypeError, ValueError):
+            vote_gte = 0
+        try:
+            vote_count_gte = int(params.get('vote_count.gte') or 0)
+        except (TypeError, ValueError):
+            vote_count_gte = 0
+
+        filtered = []
+        for item in items:
+            genres = {str(value) for value in item.get('genre_ids', [])}
+            countries = {str(value) for value in item.get('origin_country', [])}
+            first_air_date = str(item.get('first_air_date') or '')
+            if not item.get('poster_path') or not item.get('overview'):
+                continue
+            if not include_adult and item.get('adult'):
+                continue
+            if required_genres and not all(group.intersection(genres) for group in required_genres):
+                continue
+            if excluded_genres.intersection(genres):
+                continue
+            if required_countries and not required_countries.intersection(countries):
+                continue
+            if required_language and item.get('original_language') != required_language:
+                continue
+            if date_gte and (not first_air_date or first_air_date < date_gte):
+                continue
+            if date_lte and (not first_air_date or first_air_date > date_lte):
+                continue
+            if float(item.get('vote_average') or 0) < vote_gte:
+                continue
+            if int(item.get('vote_count') or 0) < vote_count_gte:
+                continue
+            filtered.append(item)
+
+        sort_by = str(params.get('sort_by') or 'popularity.desc')
+        sort_field, _, direction = sort_by.partition('.')
+        if sort_field not in {'popularity', 'vote_average', 'vote_count', 'first_air_date'}:
+            sort_field = 'popularity'
+        filtered.sort(
+            key=lambda item: item.get(sort_field) or ('' if sort_field == 'first_air_date' else 0),
+            reverse=direction != 'asc',
+        )
+        return filtered
+
     def __init__(self, tmdb_api_key: str):
         self.tmdb_api_key = tmdb_api_key
         self.session = requests.Session()
@@ -67,7 +169,7 @@ class ListImporter:
             logger.error(f"  ➜ 无法从猫眼URL '{maoyan_url}' 中解析出有效的类型。")
             return []
             
-        limit = definition.get('limit')
+        limit = self._positive_limit(definition.get('limit'))
         if not limit:
             limit = 50
 
@@ -324,7 +426,7 @@ class ListImporter:
         logger.info(f"  ➜ TMDb片单获取完成，从 {total_pages} 个页面中总共解析出 {len(all_items)} 个项目。")
         return all_items
     
-    def _get_items_from_tmdb_discover(self, url: str) -> List[Dict[str, str]]:
+    def _get_items_from_tmdb_discover(self, url: str, limit=None) -> List[Dict[str, str]]:
         """专门用于解析TMDb Discover URL并获取结果的函数"""
         
         # 在解析前处理动态日期占位符 
@@ -333,6 +435,38 @@ class ListImporter:
         parsed_url = urlparse(processed_url) # 使用处理后的 URL
         query_params = parse_qs(parsed_url.query)
         params = {k: v[0] for k, v in query_params.items()}
+        limit = self._positive_limit(limit)
+
+        is_tv_discover = '/discover/tv' in parsed_url.path
+        person_items = None
+        if is_tv_discover:
+            cast_value = params.pop('with_cast', None)
+            crew_value = params.pop('with_crew', None)
+            try:
+                person_items = self._resolve_tv_person_items(cast_value, crew_value)
+            except RuntimeError as e:
+                logger.error(f"  ➜ {e}")
+                return []
+
+            if person_items == {}:
+                logger.info("  ➜ 剧集演员/导演条件没有共同作品，获取结束。")
+                return []
+
+            local_filter_params = {
+                'sort_by', 'page', 'first_air_date.gte', 'first_air_date.lte',
+                'with_genres', 'without_genres', 'with_origin_country',
+                'with_original_language', 'vote_average.gte', 'vote_count.gte',
+                'include_adult', 'language',
+            }
+            needs_discover_intersection = any(
+                value not in (None, '') and key not in local_filter_params
+                for key, value in params.items()
+            )
+            if person_items is not None and not needs_discover_intersection:
+                credit_items = self._filter_tv_credit_items(list(person_items.values()), params)
+                if limit:
+                    credit_items = credit_items[:limit]
+                return [self._tmdb_discover_item(item, 'Series') for item in credit_items]
 
         all_items = []
         current_page = 1
@@ -365,6 +499,8 @@ class ListImporter:
                     total_pages = discover_data.get('total_pages', 1)
 
                 for item in discover_data['results']:
+                    if person_items is not None and str(item.get('id')) not in person_items:
+                        continue
                     if not item.get('poster_path'):
                         continue
                     if not item.get('overview'):
@@ -372,16 +508,11 @@ class ListImporter:
                     
                     tmdb_id = item.get('id')
                     if tmdb_id and item_type_for_result:
-                        title = item.get('title') if item_type_for_result == 'Movie' else item.get('name')
-                        date_str = item.get('release_date') if item_type_for_result == 'Movie' else item.get('first_air_date')
-                        year = date_str[:4] if date_str else None
-                        all_items.append({
-                            'id': str(tmdb_id), 
-                            'type': item_type_for_result,
-                            'title': title,
-                            'release_date': date_str, 
-                            'year': year
-                        })
+                        all_items.append(self._tmdb_discover_item(item, item_type_for_result))
+
+                if limit and len(all_items) >= limit:
+                    all_items = all_items[:limit]
+                    break
                 
                 current_page += 1
 
@@ -391,14 +522,26 @@ class ListImporter:
 
         logger.info(f"  ➜ TMDb Discover 获取完成，从 {total_pages} 个页面中总共解析出 {len(all_items)} 个项目。")
         return all_items
+
+    @staticmethod
+    def _tmdb_discover_item(item: Dict, item_type: str) -> Dict[str, str]:
+        title = item.get('title') if item_type == 'Movie' else item.get('name')
+        date_str = item.get('release_date') if item_type == 'Movie' else item.get('first_air_date')
+        return {
+            'id': str(item.get('id')),
+            'type': item_type,
+            'title': title,
+            'release_date': date_str,
+            'year': date_str[:4] if date_str else None,
+        }
     
-    def _get_titles_and_imdbids_from_url(self, url: str) -> Tuple[List[Dict[str, str]], str]:
+    def _get_titles_and_imdbids_from_url(self, url: str, limit=None) -> Tuple[List[Dict[str, str]], str]:
         source_type = 'list_rss' 
         items = []
 
         if 'themoviedb.org/discover/' in url:
             source_type = 'list_discover'
-            items = self._get_items_from_tmdb_discover(url)
+            items = self._get_items_from_tmdb_discover(url, limit=limit)
         elif 'themoviedb.org/list/' in url:
             source_type = 'list_tmdb'
             items = self._get_items_from_tmdb_list(url)
@@ -680,8 +823,8 @@ class ListImporter:
                 seen_keys.add(key)
                 unique_items.append(item)
         
-        limit = definition.get('limit')
-        if limit and isinstance(limit, int) and limit > 0:
+        limit = self._positive_limit(definition.get('limit'))
+        if limit:
             unique_items = unique_items[:limit]
             
         return unique_items, last_source_type
@@ -703,19 +846,19 @@ class ListImporter:
 
         item_types = definition.get('item_type', ['Movie'])
         if isinstance(item_types, str): item_types = [item_types]
-        limit = definition.get('limit')
+        limit = self._positive_limit(definition.get('limit'))
         
-        items, source_type = self._get_titles_and_imdbids_from_url(url)
+        items, source_type = self._get_titles_and_imdbids_from_url(url, limit=limit)
         
         if not items: return [], source_type
         
         if items and 'id' in items[0] and 'type' in items[0]:
             logger.info(f"  ➜ 检测到来自TMDb源 ({source_type}) 的预匹配ID，将跳过标题匹配。")
-            if limit and isinstance(limit, int) and limit > 0:
+            if limit:
                 items = items[:limit]
             return items, source_type
 
-        if limit and isinstance(limit, int) and limit > 0:
+        if limit:
             items = items[:limit]
         
         tmdb_items = []

@@ -137,6 +137,12 @@ def _is_same_cached_local_path(old_path, current_path):
     current_normalized = _normalize_cached_local_path(current_path)
     return bool(old_normalized and current_normalized and old_normalized == current_normalized)
 
+
+def _should_keep_cached_title(cached_title, tmdb_title, conflicts_with_authority=False):
+    if not cached_title or conflicts_with_authority:
+        return False
+    return utils.contains_chinese(cached_title) or not utils.contains_chinese(tmdb_title)
+
 P115_APP_LABELS = {
     "web": "网页版",
     "tv": "安卓电视端",
@@ -5940,7 +5946,36 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     cached_norm and authoritative_norm and cached_norm != authoritative_norm
                 )
 
-            if cached_title and not cached_title_conflicts_with_authority:
+            raw_title = raw_details.get('title') or raw_details.get('name')
+            tmdb_title = utils.clean_invisible_chars(raw_title)
+            chinese_alias = None
+
+            if not tmdb_title or not utils.contains_chinese(tmdb_title):
+                alt_titles_data = raw_details.get("alternative_titles", {})
+                alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
+                priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
+                best_priority = 99
+
+                for alt in alt_list:
+                    iso_country = alt.get("iso_3166_1", "").upper()
+                    if iso_country not in priority_map:
+                        continue
+                    alt_title = utils.clean_invisible_chars(alt.get("title", ""))
+                    if utils.contains_chinese(alt_title):
+                        current_priority = priority_map[iso_country]
+                        if current_priority < best_priority:
+                            chinese_alias = alt_title
+                            best_priority = current_priority
+                        if best_priority == 1:
+                            break
+
+                tmdb_title = chinese_alias or original_main_title or tmdb_title
+
+            if _should_keep_cached_title(
+                cached_title,
+                tmdb_title,
+                cached_title_conflicts_with_authority,
+            ):
                 logger.info(f"  ➜ [115整理] 命中本地数据库片名: '{cached_title}'，无视 TMDb 最新变动。")
                 current_title = cached_title
                 original_title = cached_original_title or cached_title
@@ -5950,43 +5985,20 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         f"  ➜ [115整理] 权威识别标题 '{authoritative_title_hint}' 与本地数据库片名 '{cached_title}' 冲突，"
                         f"优先使用当前 TMDb 标题。"
                     )
-                # 5.2 本地无缓存 (首次入库)，走 TMDb 提取与清洗流程
-                raw_title = raw_details.get('title') or raw_details.get('name')
-                current_title = utils.clean_invisible_chars(raw_title)
-                
-                if not current_title or not utils.contains_chinese(current_title):
-                    chinese_alias = None
-                    alt_titles_data = raw_details.get("alternative_titles", {})
-                    alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
-                    
-                    priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
-                    best_priority = 99
-                    
-                    for alt in alt_list:
-                        iso_country = alt.get("iso_3166_1", "").upper()
-                        if iso_country not in priority_map:
-                            continue
-                        alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        if utils.contains_chinese(alt_title):
-                            current_priority = priority_map[iso_country]
-                            
-                            if current_priority < best_priority:
-                                chinese_alias = alt_title
-                                best_priority = current_priority
-                                
-                            if best_priority == 1:
-                                break 
-                    
-                    if chinese_alias:
-                        logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
-                        current_title = chinese_alias
-                    else:
-                        original_title = original_main_title
-                        logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
-                        current_title = original_title
+                elif cached_title and utils.contains_chinese(tmdb_title):
+                    logger.info(
+                        f"  ➜ [115整理] 本地数据库片名 '{cached_title}' 为非中文，"
+                        f"升级为 TMDb 中文片名 '{tmdb_title}'。"
+                    )
+
+                current_title = tmdb_title
+                original_title = original_main_title
+                if chinese_alias:
+                    logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
+                elif not utils.contains_chinese(current_title):
+                    logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
                 else:
-                    # 如果主标题正常，提取原名
-                    original_title = original_main_title
+                    logger.debug(f"  ➜ [115整理] 使用 TMDb 中文主片名: '{current_title}'")
 
             data['title'] = current_title
             data['original_title'] = original_main_title or original_title
