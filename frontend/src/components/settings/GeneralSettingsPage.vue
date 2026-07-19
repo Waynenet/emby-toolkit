@@ -44,13 +44,13 @@
             </n-gi>
             <n-gi>
               <n-card :bordered="false" class="dashboard-card quick-deploy-card">
-                <template #header><span class="card-title">一键部署</span></template>
-                <template #header-extra>
+                <div class="quick-deploy-header">
+                  <span class="card-title">一键部署</span>
                   <n-button type="primary" ghost :loading="quickDeployLoading" @click="handleQuickDeploy115">
                     <template #icon><n-icon :component="FlashIcon" /></template>
                     开始部署
                   </n-button>
-                </template>
+                </div>
                 <n-space vertical :size="10">
                   <n-grid cols="1 m:2" :x-gap="12" :y-gap="8" responsive="screen">
                     <n-gi v-for="item in quickDeployPrerequisites" :key="item.label">
@@ -92,60 +92,35 @@
                     <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
                     <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
                       
-                      <!-- 1. Emby URL (左) -->
-                      <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                      <n-form-item-grid-item label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>Emby URL</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" />
-                              </template>
-                              此项修改需要重启容器才能生效。
-                            </n-tooltip>
-                          </div>
-                        </template>
-                        <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
+                      <n-form-item-grid-item label="Emby URL" span="1 m:2" label-width="100">
+                        <n-input-group>
+                          <n-input v-model:value="configModel.emby_server_url" readonly />
+                          <n-button type="primary" ghost @click="openEmbyServiceAuthorization">
+                            <template #icon><n-icon :component="RefreshIcon" /></template>
+                            重新授权
+                          </n-button>
+                        </n-input-group>
                       </n-form-item-grid-item>
 
-                      <!-- 2. 外网访问 URL (右) -->
                       <n-form-item-grid-item label="外网URL" path="emby_public_url" label-width="100">
                         <n-input v-model:value="configModel.emby_public_url" placeholder="留空则不开启" />
                       </n-form-item-grid-item>
 
-                      <!-- 3. API Key (左) -->
-                      <n-form-item-grid-item label="APIKey" path="emby_api_key" label-width="100">
-                        <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="输入 API Key" />
+                      <n-form-item-grid-item label="服务授权" label-width="100">
+                        <n-tag :type="embyServiceAuthorized ? 'success' : 'error'" :bordered="false">
+                          {{ embyServiceAuthorized ? '已授权' : '需要授权' }}
+                        </n-tag>
                       </n-form-item-grid-item>
 
-                      <!-- 4. 用户 ID (右) -->
-                      <n-form-item-grid-item label="用户ID" :rule="embyUserIdRule" path="emby_user_id" label-width="100">
-                        <n-input v-model:value="configModel.emby_user_id" placeholder="32位用户ID" />
-                        <template #feedback>
-                          <div v-if="isInvalidUserId" style="color: #e88080; font-size: 12px;">格式错误！ID应为32位。</div>
-                        </template>
-                      </n-form-item-grid-item>
-
-                      <!-- 分割线 (占满一行) -->
                       <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin: 8px 0; font-size: 0.9em; color: gray;">管理员凭证 (选填)</n-divider>
+                        <n-collapse>
+                          <n-collapse-item title="高级设置" name="emby-advanced">
+                            <n-form-item label="API 超时时间 (秒)" path="emby_api_timeout" label-width="160">
+                              <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
+                            </n-form-item>
+                          </n-collapse-item>
+                        </n-collapse>
                       </n-gi>
-
-                      <!-- 5. 管理员用户 (左) -->
-                      <n-form-item-grid-item label="用户名" path="emby_admin_user" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_user" placeholder="管理员用户名" />
-                      </n-form-item-grid-item>
-
-                      <!-- 6. 管理员密码 (右) -->
-                      <n-form-item-grid-item label="密码" path="emby_admin_pass" label-width="100">
-                        <n-input v-model:value="configModel.emby_admin_pass" type="password" show-password-on="click" placeholder="管理员密码" />
-                      </n-form-item-grid-item>
-
-                      <!-- 7. 超时时间 (占满一行，保持长标签) -->
-                      <n-form-item-grid-item label="Emby API 超时时间 (秒)" path="emby_api_timeout" span="1 m:2" label-width="200">
-                        <n-input-number v-model:value="configModel.emby_api_timeout" :min="15" :step="5" placeholder="建议 30-90" style="width: 100%;" />
-                      </n-form-item-grid-item>
 
                       <n-form-item-grid-item label="STRM 根目录" path="local_strm_root" span="1 m:2" label-width="100">
                         <n-input-group>
@@ -176,8 +151,8 @@
                               <n-checkbox v-for="lib in availableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name" />
                             </n-space>
                           </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key)">
-                            未找到媒体库。请检查 Emby URL 和 API Key。
+                          <n-text depth="3" v-if="!loadingLibraries && availableLibraries.length === 0 && embyServiceAuthorized">
+                            未找到媒体库。请检查 Emby 服务授权。
                           </n-text>
                           <div v-if="libraryError" style="color: red; margin-top: 5px;">{{ libraryError }}</div>
                         </n-spin>
@@ -255,8 +230,8 @@
                               <n-checkbox v-for="lib in nativeAvailableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name"/>
                             </n-space>
                           </n-checkbox-group>
-                          <n-text depth="3" v-if="!loadingNativeLibraries && nativeAvailableLibraries.length === 0 && (configModel.emby_server_url && configModel.emby_api_key && configModel.emby_user_id)">
-                            未找到原生媒体库。请检查 Emby URL、API Key 和 用户ID。
+                          <n-text depth="3" v-if="!loadingNativeLibraries && nativeAvailableLibraries.length === 0 && embyServiceAuthorized">
+                            未找到原生媒体库。请检查 Emby 服务授权。
                           </n-text>
                           <div v-if="nativeLibraryError" style="color: red; margin-top: 5px;">{{ nativeLibraryError }}</div>
                         </n-spin>
@@ -292,6 +267,37 @@
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
                           从视频流中截取高清画面作为分集图或背景图。
+                        </n-text>
+                      </template>
+                    </n-form-item-grid-item>
+                    <n-form-item-grid-item label="持久化元数据图片" path="media_image_archive_enabled">
+                      <n-switch v-model:value="configModel.media_image_archive_enabled" />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          将最终采用的元数据图片和分集兜底截图保存到 ETK 图片仓库。
+                        </n-text>
+                      </template>
+                    </n-form-item-grid-item>
+                    <n-form-item-grid-item label="图片仓库目录" path="media_image_archive_path">
+                      <n-input-group>
+                        <n-input
+                          v-model:value="configModel.media_image_archive_path"
+                          :disabled="!configModel.media_image_archive_enabled"
+                          placeholder="默认: /config/media_images"
+                          @click="openLocalFolderSelector('media_image_archive_path', false)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button
+                          type="primary"
+                          ghost
+                          :disabled="!configModel.media_image_archive_enabled"
+                          @click="openLocalFolderSelector('media_image_archive_path', false)"
+                        >选择</n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          可填写容器内绝对路径；自定义目录请同时配置持久化挂载。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
@@ -2053,7 +2059,7 @@ import {
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
   NFormItemGridItem, NCheckboxGroup, NCheckbox, NText, NRadioGroup, NRadio,
   NTag, NIcon, NUpload, NModal, NDivider, NInputGroup, NTabs, NTabPane, NTooltip,
-  NQrCode, NResult, NProgress
+  NQrCode, NResult, NProgress, NCollapse, NCollapseItem
 } from 'naive-ui';
 import { 
   DownloadOutline as ExportIcon, 
@@ -2237,6 +2243,7 @@ const tableInfo = {
   'failed_log': { cn: '待复核日志', isSharable: false },
   'custom_collections': { cn: '自建合集', isSharable: false },
   'media_metadata': { cn: '媒体元数据', isSharable: true },
+  'media_image_cache': { cn: '媒体图片缓存', isSharable: false },
   'resubscribe_rules': { cn: '媒体洗版规则', isSharable: false },
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },
@@ -2344,7 +2351,6 @@ const tempDirConfig = ref({
 let unwatchGlobal = null;
 let unwatchEmbyConfig = null;
 const isTestingProxy = ref(false);
-const embyUserIdRegex = /^[a-f0-9]{32}$/i;
 const isCleaningOffline = ref(false);
 const isClearingVectors = ref(false);
 const isTestingAI = ref(false);
@@ -2552,18 +2558,26 @@ const proStatusInfo = computed(() => {
   }
 });
 
-const isInvalidUserId = computed(() => {
-  if (!configModel.value || !configModel.value.emby_user_id) return false;
-  return configModel.value.emby_user_id.trim() !== '' && !embyUserIdRegex.test(configModel.value.emby_user_id);
+const embyServiceAuthorized = computed(() => {
+  const model = configModel.value || {};
+  return model.emby_auth_mode === 'user_token'
+    && !!model.emby_server_url
+    && !!model.emby_api_key
+    && !!model.emby_user_id;
 });
-const embyUserIdRule = {
-  trigger: ['input', 'blur'],
-  validator(rule, value) {
-    if (value && !embyUserIdRegex.test(value)) {
-      return new Error('ID格式不正确，应为32位。');
-    }
-    return true;
-  }
+
+const openEmbyServiceAuthorization = () => {
+  window.dispatchEvent(new CustomEvent('etk-open-emby-authorization'));
+};
+
+const handleEmbyAuthorizationUpdated = (event) => {
+  if (!configModel.value) return;
+  const authorization = event.detail || {};
+  configModel.value.emby_server_url = authorization.url || configModel.value.emby_server_url;
+  configModel.value.emby_user_id = authorization.user_id || configModel.value.emby_user_id;
+  configModel.value.emby_auth_mode = authorization.auth_mode || 'user_token';
+  configModel.value.emby_api_key = '********';
+  fetchEmbyLibrariesInternal();
 };
 const showResetMappingsModal = () => { resetMappingsModalVisible.value = true; };
 const handleResetActorMappings = async () => {
@@ -2714,7 +2728,7 @@ const resetPrompts = async () => {
   }
 };
 const fetchNativeViewsSimple = async () => {
-  if (!configModel.value?.emby_server_url || !configModel.value?.emby_api_key || !configModel.value?.emby_user_id) {
+  if (!embyServiceAuthorized.value) {
     nativeAvailableLibraries.value = [];
     return;
   }
@@ -2753,8 +2767,8 @@ watch(
     }
   }
 );
-watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_native_libraries, configModel.value?.emby_server_url, configModel.value?.emby_api_key, configModel.value?.emby_user_id], ([proxyEnabled, mergeNative, url, apiKey, userId]) => {
-  if (proxyEnabled && mergeNative && url && apiKey && userId) {
+watch(() => [configModel.value?.proxy_enabled, configModel.value?.proxy_merge_native_libraries, configModel.value?.emby_auth_mode, configModel.value?.emby_server_url, configModel.value?.emby_user_id], ([proxyEnabled, mergeNative]) => {
+  if (proxyEnabled && mergeNative && embyServiceAuthorized.value) {
     fetchNativeViewsSimple();
   } else {
     nativeAvailableLibraries.value = [];
@@ -2868,7 +2882,7 @@ const quickDeployPrerequisites = computed(() => {
   return [
     { label: '115 授权', done: p115Ready, tab: '115_drive' },
     { label: 'Emby URL', done: !!model.emby_server_url, tab: 'emby' },
-    { label: 'Emby API Key', done: !!model.emby_api_key, tab: 'emby' },
+    { label: 'Emby 服务授权', done: embyServiceAuthorized.value, tab: 'emby' },
     { label: 'STRM 根目录', done: !!model.local_strm_root, tab: 'emby' },
     { label: 'STRM 链接地址', done: strmUrlReady, tab: '115_drive' }
   ];
@@ -3353,7 +3367,7 @@ const handleQuickDeploy115 = () => {
   const missing = [];
   if (!(p115Info.value?.has_token || p115Info.value?.has_cookie)) missing.push('115 授权');
   if (!configModel.value?.emby_server_url) missing.push('Emby URL');
-  if (!configModel.value?.emby_api_key) missing.push('Emby API Key');
+  if (!embyServiceAuthorized.value) missing.push('Emby 服务授权');
   if (!configModel.value?.local_strm_root) missing.push('STRM 根目录');
   if (!configModel.value?.etk_server_url) missing.push('STRM 链接地址');
   if (configModel.value?.etk_server_url && !/^https?:\/\//i.test(configModel.value.etk_server_url)) {
@@ -3418,7 +3432,7 @@ const handleQuickDeploy115 = () => {
       showQuickDeployResult.value = true;
       quickDeployProgress.value = 100;
       quickDeployStatus.value = finalEvent.message || '一键部署完成';
-      if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
+      if (embyServiceAuthorized.value) {
         await fetchEmbyLibrariesInternal();
       }
       message.success(finalEvent.message || '115 网盘基础配置已部署完成');
@@ -3547,7 +3561,7 @@ const save = async () => {
   }
 };
 const fetchEmbyLibrariesInternal = async () => {
-  if (!configModel.value.emby_server_url || !configModel.value.emby_api_key) {
+  if (!embyServiceAuthorized.value) {
     availableLibraries.value = [];
     return;
   }
@@ -3769,6 +3783,7 @@ const handleCorrectSequences = async () => {
 };
 
 onMounted(async () => {
+  window.addEventListener('etk-emby-authorization-updated', handleEmbyAuthorizationUpdated);
   updateViewportState();
   if (typeof window !== 'undefined') {
     window.addEventListener('resize', updateViewportState, { passive: true });
@@ -3782,7 +3797,7 @@ onMounted(async () => {
       if (!['permanent', 'virtual'].includes(configModel.value.p115_shared_resource_mode)) configModel.value.p115_shared_resource_mode = 'permanent';
       if (!configModel.value.p115_shared_cache_retention_days || Number(configModel.value.p115_shared_cache_retention_days) < 1) configModel.value.p115_shared_cache_retention_days = 7;
       if (configModel.value.p115_shared_max_active_shares === undefined || configModel.value.p115_shared_max_active_shares === null || Number(configModel.value.p115_shared_max_active_shares) < 0) configModel.value.p115_shared_max_active_shares = 0;
-      if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
+      if (embyServiceAuthorized.value) {
         fetchEmbyLibrariesInternal();
       }
       initialRestartableConfig.value = {
@@ -3794,7 +3809,7 @@ onMounted(async () => {
       if (unwatchGlobal) { unwatchGlobal(); }
     }
   }, { immediate: true });
-  unwatchEmbyConfig = watch(() => [configModel.value?.emby_server_url, configModel.value?.emby_api_key], (newValues, oldValues) => {
+  unwatchEmbyConfig = watch(() => [configModel.value?.emby_server_url, configModel.value?.emby_auth_mode], (newValues, oldValues) => {
     if (componentIsMounted.value && oldValues) {
       if (newValues[0] !== oldValues[0] || newValues[1] !== oldValues[1]) {
         fetchEmbyLibrariesInternal();
@@ -3804,6 +3819,7 @@ onMounted(async () => {
   checkUserBotStatus();
 });
 onUnmounted(() => {
+  window.removeEventListener('etk-emby-authorization-updated', handleEmbyAuthorizationUpdated);
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', updateViewportState);
   }
@@ -3911,6 +3927,16 @@ onUnmounted(() => {
 }
 .quick-deploy-card {
   height: 100%;
+}
+.quick-deploy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.quick-deploy-header .card-title {
+  flex: none;
 }
 .prerequisite-item {
   display: flex;

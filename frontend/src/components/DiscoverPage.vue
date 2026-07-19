@@ -6,12 +6,12 @@
       <n-grid :x-gap="24" :y-gap="24" :cols="isMobile ? 1 : 2" style="margin-top: 24px;">
         <!-- 左侧筛选面板 (占1列) -->
         <n-gi :span="1">
-          <n-card :bordered="false" class="dashboard-card">
+          <n-card :bordered="false" class="dashboard-card filter-card">
             <template #header>
               <span class="card-title">筛选条件</span>
             </template>
-            <n-space vertical size="large">
-              <n-space align="center">
+            <div class="filter-grid">
+              <n-space align="center" class="filter-field">
                 <label>搜索:</label>
                 <n-input
                   v-model:value="searchQuery"
@@ -20,14 +20,14 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>类型:</label>
                 <n-radio-group v-model:value="mediaType" :disabled="isSearchMode">
                   <n-radio-button value="movie" label="电影" />
                   <n-radio-button value="tv" label="电视剧" />
                 </n-radio-group>
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field filter-span-2">
                 <label>排序:</label>
                 <n-radio-group v-model:value="filters['sort_by']" :disabled="isSearchMode">
                   <n-radio-button value="popularity.desc" label="热度降序" />
@@ -38,7 +38,7 @@
                   <n-radio-button value="vote_average.asc" label="评分升序" />
                 </n-radio-group>
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field filter-field-wide filter-span-2">
                 <label>风格:</label>
                 <n-radio-group v-model:value="genreFilterMode" :disabled="isSearchMode">
                   <n-radio-button value="include" label="包含" />
@@ -54,7 +54,7 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>分级:</label>
                 <n-select
                   v-model:value="selectedRating"
@@ -65,7 +65,7 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
               <label>地区:</label>
               <n-select
                   v-model:value="selectedRegions"
@@ -77,7 +77,7 @@
                   style="min-width: 300px;"
               />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>语言:</label>
                 <n-select
                   v-model:value="selectedLanguage"
@@ -89,7 +89,7 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>发行年份:</label>
                 <n-input-group>
                   <n-input-number
@@ -110,7 +110,7 @@
                   />
                 </n-input-group>
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>{{ studioLabel }}:</label>
                 <n-select
                   v-model:value="selectedStudios"
@@ -122,7 +122,7 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>关键词:</label>
                 <n-select
                   v-model:value="selectedKeywords"
@@ -134,7 +134,45 @@
                   style="min-width: 300px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
+                <label>演员:</label>
+                <n-select
+                  v-model:value="selectedActors"
+                  :disabled="isSearchMode"
+                  multiple
+                  filterable
+                  remote
+                  clearable
+                  placeholder="搜索演员"
+                  :options="actorOptions"
+                  :loading="personSearchLoading.actors"
+                  label-field="name"
+                  value-field="id"
+                  :render-label="renderPersonLabel"
+                  @search="handleActorSearch"
+                  style="min-width: 300px;"
+                />
+              </n-space>
+              <n-space align="center" class="filter-field">
+                <label>导演:</label>
+                <n-select
+                  v-model:value="selectedDirectors"
+                  :disabled="isSearchMode"
+                  multiple
+                  filterable
+                  remote
+                  clearable
+                  placeholder="搜索导演"
+                  :options="directorOptions"
+                  :loading="personSearchLoading.directors"
+                  label-field="name"
+                  value-field="id"
+                  :render-label="renderPersonLabel"
+                  @search="handleDirectorSearch"
+                  style="min-width: 300px;"
+                />
+              </n-space>
+              <n-space align="center" class="filter-field">
                 <label>评分不低于:</label>
                 <n-input-number
                   v-model:value="filters.vote_average_gte"
@@ -146,14 +184,14 @@
                   style="width: 120px;"
                 />
               </n-space>
-              <n-space align="center">
+              <n-space align="center" class="filter-field">
                 <label>隐藏已入库:</label>
                 <n-switch v-model:value="hideInLibrary" :disabled="loading || isLoadingMore">
                   <template #checked>开启</template>
                   <template #unchecked>关闭</template>
                 </n-switch>
               </n-space>
-            </n-space>
+            </div>
           </n-card>
         </n-gi>
         <!-- 右侧“每日推荐”面板 -->
@@ -356,7 +394,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, onMounted, onUnmounted, computed } from 'vue';
+import { ref, reactive, watch, onMounted, onUnmounted, computed, h } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
@@ -364,7 +402,7 @@ import HDHiveResourceModal from './HDHiveResourceModal.vue';
 import { 
   NPageHeader, NCard, NSpace, NRadioGroup, NRadioButton, NSelect,
   NInputNumber, NSpin, NGrid, NGi, NButton, NThing, useMessage, NIcon, 
-  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag, NSwitch
+  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag, NSwitch, NAvatar
 } from 'naive-ui';
 import { Heart, HeartOutline, HourglassOutline, Star as StarIcon, FlashOutline as LightningIcon, DiceOutline as DiceIcon, ListOutline as ListIcon, CloudDownloadOutline as CloudDownloadIcon, PersonOutline as PersonIcon, TicketOutline as TicketIcon, CalendarOutline as CalendarIcon } from '@vicons/ionicons5';
 const authStore = useAuthStore();
@@ -390,6 +428,12 @@ const keywordOptions = ref([]);
 const selectedKeywords = ref([]); 
 const allStudios = ref([]); 
 const selectedStudios = ref([]);
+const selectedActors = ref([]);
+const selectedDirectors = ref([]);
+const actorOptions = ref([]);
+const directorOptions = ref([]);
+const personSearchLoading = reactive({ actors: false, directors: false });
+const personSearchTimers = { actors: null, directors: null };
 // ★ 新增：订阅源状态
 const isMpConfigured = ref(false);
 const isHdhiveConfigured = ref(false);
@@ -513,6 +557,43 @@ const genreOptions = computed(() => {
     value: item.id    
   }));
 });
+const renderPersonLabel = (option) => h(
+  'div',
+  { style: { display: 'flex', alignItems: 'center', padding: '4px 0' } },
+  [
+    h(NAvatar, {
+      round: true,
+      size: 'small',
+      src: option.profile_path ? `https://image.tmdb.org/t/p/w45${option.profile_path}` : undefined,
+      style: { marginRight: '12px', flexShrink: 0 }
+    }),
+    h('span', option.name)
+  ]
+);
+const searchPerson = (query, targetRef, loadingKey) => {
+  clearTimeout(personSearchTimers[loadingKey]);
+  const normalizedQuery = String(query || '').trim();
+  if (!normalizedQuery) {
+    personSearchLoading[loadingKey] = false;
+    return;
+  }
+
+  personSearchLoading[loadingKey] = true;
+  personSearchTimers[loadingKey] = setTimeout(async () => {
+    try {
+      const response = await axios.get('/api/custom_collections/config/tmdb_search_persons', {
+        params: { q: normalizedQuery }
+      });
+      targetRef.value = Array.isArray(response.data) ? response.data : [];
+    } catch (error) {
+      targetRef.value = [];
+    } finally {
+      personSearchLoading[loadingKey] = false;
+    }
+  }, 500);
+};
+const handleActorSearch = (query) => searchPerson(query, actorOptions, 'actors');
+const handleDirectorSearch = (query) => searchPerson(query, directorOptions, 'directors');
 const fetchGenres = async () => {  
   try {
     const endpoint = mediaType.value === 'movie' 
@@ -588,6 +669,8 @@ const fetchDiscoverData = async () => {
         'with_original_language': selectedLanguage.value,
         'with_keywords': selectedKeywords.value,
         'with_companies': selectedStudios.value,
+        'with_cast': selectedActors.value.join(','),
+        'with_crew': selectedDirectors.value.join(','),
         'with_rating_label': selectedRating.value,
         'hide_in_library': hideInLibrary.value
       };
@@ -900,7 +983,7 @@ watch(mediaType, () => {
   resetAndFetch();
 });
 watch(searchQuery, (newValue) => { resetAndFetch(); });
-watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, genreFilterMode, yearFrom, yearTo, selectedRating, hideInLibrary], () => { resetAndFetch(); }, { deep: true });
+watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, selectedActors, selectedDirectors, genreFilterMode, yearFrom, yearTo, selectedRating, hideInLibrary], () => { resetAndFetch(); }, { deep: true });
 let observer = null;
 onMounted(() => {
   checkMobile();
@@ -922,11 +1005,71 @@ onMounted(() => {
 });
 onUnmounted(() => { 
   window.removeEventListener('resize', checkMobile);
+  clearTimeout(personSearchTimers.actors);
+  clearTimeout(personSearchTimers.directors);
   if (observer) { observer.disconnect(); } 
 });
 </script>
 
 <style scoped>
+.filter-card,
+.recommendation-card {
+  height: 100%;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 20px;
+}
+
+.filter-field {
+  display: grid !important;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px !important;
+  row-gap: 6px !important;
+  min-width: 0;
+}
+
+.filter-field-wide {
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+}
+
+.filter-span-2 {
+  grid-column: 1 / -1;
+}
+
+.filter-field :deep(.n-space-item) {
+  min-width: 0;
+}
+
+.filter-field :deep(.n-input),
+.filter-field :deep(.n-input-group),
+.filter-field :deep(.n-input-number),
+.filter-field :deep(.n-select) {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+@media (max-width: 1280px) {
+  .filter-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .filter-span-2 {
+    grid-column: auto;
+  }
+
+  .filter-field-wide {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+
+  .filter-field-wide :deep(.n-space-item:nth-child(3)) {
+    grid-column: 2;
+  }
+}
+
 .responsive-grid {
   display: grid;
   gap: 16px; 

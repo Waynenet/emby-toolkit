@@ -10,10 +10,50 @@
     @update:selected-theme="handleThemeChange"
     @edit-custom-theme="openThemeEditor"
   />
+
+  <n-modal
+    v-model:show="serviceAuthorizationVisible"
+    preset="card"
+    title="Emby 服务授权"
+    :style="{ width: 'min(480px, calc(100vw - 24px))' }"
+    :mask-closable="serviceAuthorized"
+    :close-on-esc="serviceAuthorized"
+    :closable="serviceAuthorized"
+  >
+    <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px;">
+      后台任务需要 Emby 管理员授权。账号密码仅用于本次认证，不会保存。
+    </n-alert>
+    <n-form ref="serviceAuthorizationFormRef" :model="serviceAuthorizationForm" :rules="serviceAuthorizationRules">
+      <n-form-item label="Emby URL" path="url">
+        <n-input v-model:value="serviceAuthorizationForm.url" placeholder="http://localhost:8096" />
+      </n-form-item>
+      <n-form-item label="管理员用户名" path="username">
+        <n-input v-model:value="serviceAuthorizationForm.username" autocomplete="username" />
+      </n-form-item>
+      <n-form-item label="管理员密码" path="password">
+        <n-input
+          v-model:value="serviceAuthorizationForm.password"
+          type="password"
+          show-password-on="mousedown"
+          autocomplete="current-password"
+          placeholder="无密码账号可留空"
+          @keydown.enter="submitServiceAuthorization"
+        />
+      </n-form-item>
+    </n-form>
+    <template #footer>
+      <n-space justify="end">
+        <n-button v-if="serviceAuthorized" @click="serviceAuthorizationVisible = false">取消</n-button>
+        <n-button type="primary" :loading="serviceAuthorizationSubmitting" @click="submitServiceAuthorization">
+          授权
+        </n-button>
+      </n-space>
+    </template>
+  </n-modal>
   
   <!-- ★★★ 核心修复点 ★★★ -->
   <!-- 2. 否则 (即公共页面)，用 .fullscreen-container 包裹 router-view -->
-  <div v-else class="fullscreen-container">
+  <div v-if="!showMainLayout" class="fullscreen-container">
     <router-view />
   </div>
 
@@ -37,7 +77,10 @@
 <script setup>
 import { ref, watch, onBeforeUnmount, onMounted, computed, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
-import { useDialog, NSpin, useMessage } from 'naive-ui';
+import {
+  useDialog, NSpin, useMessage, NModal, NForm, NFormItem,
+  NInput, NButton, NAlert, NSpace
+} from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import MainLayout from './MainLayout.vue';
 import ThemeEditor from './components/ThemeEditor.vue';
@@ -75,6 +118,15 @@ let statusPollingActive = false;
 let statusFetchInFlight = false;
 const pendingSystemUpdateReload = ref(false);
 const waitingForBackendRecovery = ref(false);
+const serviceAuthorized = ref(true);
+const serviceAuthorizationVisible = ref(false);
+const serviceAuthorizationSubmitting = ref(false);
+const serviceAuthorizationFormRef = ref(null);
+const serviceAuthorizationForm = ref({ url: '', username: '', password: '' });
+const serviceAuthorizationRules = {
+  url: { required: true, message: '请输入 Emby URL', trigger: 'blur' },
+  username: { required: true, message: '请输入管理员用户名', trigger: 'blur' },
+};
 
 const app = document.getElementById('app');
 
@@ -291,9 +343,50 @@ const startStatusPolling = () => {
   fetchStatus();
 };
 
+const checkServiceAuthorization = async () => {
+  if (!authStore.isLoggedIn) return;
+  try {
+    const response = await axios.get('/api/auth/service_status');
+    serviceAuthorized.value = !!response.data.authorized;
+    serviceAuthorizationForm.value.url = response.data.url || '';
+    if (!serviceAuthorized.value) serviceAuthorizationVisible.value = true;
+  } catch (error) {
+    console.error('检查 Emby 服务授权失败:', error);
+  }
+};
+
+const openServiceAuthorization = () => {
+  serviceAuthorizationForm.value.username = '';
+  serviceAuthorizationForm.value.password = '';
+  serviceAuthorizationVisible.value = true;
+};
+
+const submitServiceAuthorization = async () => {
+  try {
+    await serviceAuthorizationFormRef.value?.validate();
+  } catch {
+    return;
+  }
+  serviceAuthorizationSubmitting.value = true;
+  try {
+    const response = await axios.post('/api/auth/reauthorize', serviceAuthorizationForm.value);
+    const authorization = response.data.authorization || {};
+    serviceAuthorized.value = true;
+    serviceAuthorizationVisible.value = false;
+    serviceAuthorizationForm.value.password = '';
+    message.success(response.data.message || 'Emby 服务授权成功');
+    window.dispatchEvent(new CustomEvent('etk-emby-authorization-updated', { detail: authorization }));
+  } catch (error) {
+    message.error(error.response?.data?.message || 'Emby 服务授权失败');
+  } finally {
+    serviceAuthorizationSubmitting.value = false;
+  }
+};
+
 watch(() => authStore.isLoggedIn, (isLoggedIn) => {
   if (isLoggedIn) {
     startStatusPolling();
+    checkServiceAuthorization();
   } else {
     stopStatusPolling();
     pendingSystemUpdateReload.value = false;
@@ -302,6 +395,7 @@ watch(() => authStore.isLoggedIn, (isLoggedIn) => {
 }, { immediate: true });
 
 onMounted(async () => {
+  window.addEventListener('etk-open-emby-authorization', openServiceAuthorization);
   try {
     const response = await axios.get('/api/config');
     if (response.data.custom_theme && Object.keys(response.data.custom_theme).length > 0) {
@@ -321,5 +415,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopStatusPolling();
+  window.removeEventListener('etk-open-emby-authorization', openServiceAuthorization);
 });
 </script>

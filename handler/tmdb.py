@@ -1044,6 +1044,17 @@ def discover_tv_tmdb(api_key: str, params: Dict[str, Any]) -> Optional[Dict[str,
     logger.debug(f"  ➜ TMDb: 发现电视剧 (条件: {params})")
     return _tmdb_request(endpoint, api_key, params, use_default_language=True)
 
+
+def get_person_tv_credits_tmdb(person_id: int, api_key: str) -> Optional[Dict[str, Any]]:
+    """获取人物参与的电视剧演职员表，用于补足 TV Discover 缺失的人员筛选。"""
+    if not person_id or not api_key:
+        return None
+    return _tmdb_request(
+        f"/person/{int(person_id)}/tv_credits",
+        api_key,
+        {"language": DEFAULT_LANGUAGE},
+    )
+
 # --- 获取电影类型列表 ---
 def get_movie_genres_tmdb(api_key: str) -> Optional[List[Dict[str, Any]]]:
     """【新】获取TMDb所有电影类型的官方列表。"""

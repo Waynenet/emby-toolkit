@@ -150,6 +150,7 @@ def init_db():
                         poster_path TEXT,
                         backdrop_path TEXT,
                         metadata_schema_version INTEGER NOT NULL DEFAULT 0,
+                        is_active BOOLEAN NOT NULL DEFAULT FALSE,
                         item_type TEXT DEFAULT 'Movie' NOT NULL,
                         all_tmdb_ids_json JSONB
                     );
@@ -207,6 +208,7 @@ def init_db():
                         release_year INTEGER,
                         last_air_date DATE,
                         poster_path TEXT,
+                        screenshot_hash CHAR(64),
                         backdrop_path TEXT,
                         logo_path TEXT,
                         thumb_path TEXT,
@@ -262,6 +264,23 @@ def init_db():
                         PRIMARY KEY (tmdb_id, item_type)
                     )
                 """)
+
+                logger.trace("  ➜ 正在创建 'media_image_cache' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS media_image_cache (
+                        source_url TEXT PRIMARY KEY,
+                        content_hash CHAR(64) NOT NULL,
+                        relative_path TEXT NOT NULL,
+                        mime_type TEXT NOT NULL,
+                        byte_size BIGINT NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        last_accessed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_media_image_cache_hash "
+                    "ON media_image_cache(content_hash)"
+                )
 
                 logger.trace("  ➜ 正在创建 'subscribe_assistant_state' 表...")
                 cursor.execute("""
@@ -779,6 +798,7 @@ def init_db():
                             "tagline": "TEXT",
                             "logo_path": "TEXT",
                             "thumb_path": "TEXT",
+                            "screenshot_hash": "CHAR(64)",
                             "metadata_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "actors_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "metadata_schema_version": "INTEGER NOT NULL DEFAULT 0",
@@ -798,6 +818,7 @@ def init_db():
                             "poster_path": "TEXT",
                             "backdrop_path": "TEXT",
                             "metadata_schema_version": "INTEGER NOT NULL DEFAULT 0",
+                            "is_active": "BOOLEAN NOT NULL DEFAULT FALSE",
                             "all_tmdb_ids_json": "JSONB",
                             "overview": "TEXT" 
                         },
@@ -840,6 +861,12 @@ def init_db():
                           AND jsonb_typeof(actors_json) = 'array'
                           AND jsonb_array_length(actors_json) > 0
                     """)
+                    cursor.execute("""
+                        UPDATE collections_info
+                        SET is_active = TRUE
+                        WHERE emby_collection_id IS NOT NULL
+                          AND is_active IS NOT TRUE
+                    """)
 
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)
@@ -858,6 +885,7 @@ def init_db():
                     
                     # 3. 【层级关系】查找某部剧的所有季和集 (非常重要！)
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_parent_series ON media_metadata (parent_series_tmdb_id);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_screenshot_hash ON media_metadata (screenshot_hash) WHERE screenshot_hash IS NOT NULL;")
                     
                     # 4. 【订阅系统】查找“想看”或“待发布”的项目
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_subscription_status ON media_metadata (subscription_status) WHERE in_library = FALSE;")

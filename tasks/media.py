@@ -2760,7 +2760,7 @@ def task_fill_missing_video_screenshots(processor):
             media_type_filter='Movie,Episode,Video',
             user_id=processor.emby_user_id,
             library_ids=library_ids,
-            fields='Path,ImageTags',
+            fields='Path,ImageTags,SeriesId,ParentIndexNumber,IndexNumber',
         ) or []
         missing_items = [
             item for item in items
@@ -2801,7 +2801,7 @@ def task_fill_missing_video_screenshots(processor):
                 try:
                     with open(temp_path, 'rb') as image_file:
                         image_data = image_file.read()
-                    return emby.upload_item_image(
+                    success = emby.upload_item_image(
                         processor.emby_url,
                         processor.emby_api_key,
                         item_id,
@@ -2809,7 +2809,41 @@ def task_fill_missing_video_screenshots(processor):
                         content_type='image/jpeg',
                         image_type='Primary',
                         delete_existing=False,
-                    ), item_id, video_path
+                    )
+                    if success and str(item.get('Type') or '').title() == 'Episode':
+                        from database.metadata_provider_db import resolve_metadata_identity_by_path
+                        from handler.media_image_cache import archive_episode_screenshot
+
+                        identity = resolve_metadata_identity_by_path(
+                            video_path,
+                            'Episode',
+                            season_number=item.get('ParentIndexNumber'),
+                            episode_number=item.get('IndexNumber'),
+                        )
+                        if not identity and item.get('SeriesId'):
+                            series = emby.get_emby_item_details(
+                                str(item['SeriesId']),
+                                processor.emby_url,
+                                processor.emby_api_key,
+                                processor.emby_user_id,
+                                fields='ProviderIds',
+                            ) or {}
+                            series_tmdb_id = (series.get('ProviderIds') or {}).get('Tmdb')
+                            if series_tmdb_id:
+                                identity = {
+                                    'tmdb_id': str(series_tmdb_id),
+                                    'season_number': item.get('ParentIndexNumber'),
+                                    'episode_number': item.get('IndexNumber'),
+                                }
+                        if identity:
+                            archive_episode_screenshot(
+                                identity.get('tmdb_id'),
+                                identity.get('season_number'),
+                                identity.get('episode_number'),
+                                image_data,
+                                'image/jpeg',
+                            )
+                    return success, item_id, video_path
                 finally:
                     try:
                         os.remove(temp_path)

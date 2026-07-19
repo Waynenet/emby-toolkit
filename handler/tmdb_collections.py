@@ -36,6 +36,12 @@ def sync_and_subscribe_native_collections(progress_callback=None):
     libraries_to_process = config.get("libraries_to_process", [])
     if libraries_to_process:
         emby_collections = [c for c in emby_collections if c.get('ParentId') in libraries_to_process]
+
+    deactivated = tmdb_collection_db.reconcile_active_native_collections(
+        [c.get('emby_collection_id') for c in emby_collections]
+    )
+    if deactivated:
+        logger.info(f"  ➜ 已取消激活 {deactivated} 个 Emby 中不存在的合集缓存。")
     
     total_collections = len(emby_collections)
     if total_collections == 0:
@@ -115,6 +121,7 @@ def sync_and_subscribe_native_collections(progress_callback=None):
         # C. 写入合集关系表
         tmdb_collection_db.upsert_native_collection({
             'emby_collection_id': emby_collection_id, # 此时有了真正的 Emby ID
+            'is_active': True,
             'name': collection.get('name'),
             'tmdb_collection_id': collection.get('tmdb_collection_id'),
             'poster_path': tmdb_details.get('poster_path'),
@@ -330,133 +337,84 @@ def assemble_all_collection_details() -> List[Dict[str, Any]]:
 
     return all_collections
 
-# --- 实时入库合集处理逻辑 ---
-def check_and_subscribe_collection_from_movie(movie_tmdb_id: str, movie_name: str, movie_emby_id: str = None):
-    """
-    【V3 极速重构版】
-    1. 极速查库：只查本地数据库，如果该电影不属于任何已知合集，直接结束 (0 API 消耗)。
-    2. 查 TMDb：获取合集完整列表 (为了知道缺了哪些电影)。
-    3. 查 Emby API：反查 Emby 是否生成了合集，补全 emby_collection_id 并注入中文简介。
-    4. 执行缺失订阅。
-    """
-    if not movie_tmdb_id: return
+# --- 插件创建 BoxSet 后的激活与订阅处理 ---
+def activate_collection_from_emby(
+    tmdb_collection_id: str,
+    emby_collection_id: str,
+    collection_name: str = "",
+) -> bool:
+    """Activate cached collection metadata after the Emby plugin creates a BoxSet."""
+    tmdb_collection_id = str(tmdb_collection_id or '').strip()
+    emby_collection_id = str(emby_collection_id or '').strip()
+    if not tmdb_collection_id.isdigit() or not emby_collection_id:
+        return False
 
-    logger.info(f"  ➜ 正在检查新入库电影《{movie_name}》的合集状态 ---")
-
-    # ======================================================================
-    # 1. 极速查库：判断是否属于合集 (0 API 消耗)
-    # ======================================================================
-    local_collection = tmdb_collection_db.get_collection_by_movie_tmdb_id(movie_tmdb_id)
-
+    local_collection = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
     if not local_collection:
-        # 前面的流程(实时监控/单项刷新)已经盖棺定论了，本地没查到就是没有，直接拦截！
-        logger.debug(f"  ➜ 电影《{movie_name}》在本地数据库中无合集记录，视为独立成片，跳过处理。")
+        logger.warning(
+            "  ➜ [合集激活] 未找到 TMDb:%s 的未激活元数据缓存。",
+            tmdb_collection_id,
+        )
+        return False
+
+    tmdb_coll_name = collection_name or local_collection.get('name') or tmdb_collection_id
+    if not tmdb_collection_db.upsert_native_collection({
+        'emby_collection_id': emby_collection_id,
+        'is_active': True,
+        'name': tmdb_coll_name,
+        'tmdb_collection_id': tmdb_collection_id,
+        'poster_path': local_collection.get('poster_path'),
+        'backdrop_path': local_collection.get('backdrop_path'),
+        'all_tmdb_ids': local_collection.get('all_tmdb_ids_json') or [],
+        'overview': local_collection.get('overview', ''),
+    }):
+        return False
+
+    logger.info(
+        "  ➜ [合集激活] 已绑定 Emby BoxSet '%s' (Emby:%s, TMDb:%s)。",
+        tmdb_coll_name,
+        emby_collection_id,
+        tmdb_collection_id,
+    )
+    return True
+
+
+def subscribe_missing_for_activated_collection(tmdb_collection_id: str) -> None:
+    """Process missing subscriptions after a collection activation callback."""
+    local_collection = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
+    if not local_collection or not local_collection.get('is_active'):
         return
 
-    tmdb_coll_id = str(local_collection['tmdb_collection_id'])
-    tmdb_coll_name = local_collection['name']
-    emby_coll_id = local_collection.get('emby_collection_id')
-    final_overview = local_collection.get('overview', '')
+    config_settings = settings_db.get_setting('native_collections_config') or {}
+    if not config_settings.get('auto_sub_enabled', False):
+        return
 
-    logger.info(f"  ➜ 发现关联: 《{movie_name}》 属于 TMDb 合集 [{tmdb_coll_name}] (ID: {tmdb_coll_id})")
+    tmdb_coll_name = local_collection.get('name') or str(tmdb_collection_id)
 
-    config = config_manager.APP_CONFIG
-    tmdb_api_key = config.get("tmdb_api_key")
-
-    # ======================================================================
-    # 2. 获取合集详情 (为了拿到 parts 列表用于缺失订阅)
-    # ======================================================================
-    # 这一步是必须的，因为预占位时只存了 ID 列表，没有存每部电影的上映日期和海报，无法构造订阅请求
-    coll_details = tmdb.get_collection_details(tmdb_coll_id, tmdb_api_key, skip_fallback=True)
+    coll_details = tmdb.get_collection_details(
+        tmdb_collection_id,
+        config_manager.APP_CONFIG.get("tmdb_api_key"),
+        skip_fallback=True,
+    )
     if not coll_details or 'parts' not in coll_details:
         logger.error(f"  ➜ 无法获取 TMDb 合集 [{tmdb_coll_name}] 的详细列表。")
         return
 
     all_parts = []
-    all_tmdb_ids = []
     for part in coll_details.get('parts', []):
-        if not part.get('poster_path') or not part.get('release_date'): continue
-        t_id = str(part['id'])
+        if not part.get('poster_path') or not part.get('release_date'):
+            continue
         all_parts.append({
-            'tmdb_id': t_id,
+            'tmdb_id': str(part['id']),
             'title': part['title'],
             'original_title': part.get('original_title'),
             'release_date': part['release_date'],
             'poster_path': part['poster_path'],
             'overview': part.get('overview')
         })
-        all_tmdb_ids.append(t_id)
 
-    # 确保基础电影数据存在 (防报错兜底)
     media_db.batch_ensure_basic_movies(all_parts)
-
-    # ======================================================================
-    # 3. Emby 合集反查与绑定 (处理预占位数据)
-    # ======================================================================
-    if not emby_coll_id and movie_emby_id:
-        logger.debug(f"  ➜ 合集 [{tmdb_coll_name}] 尚未绑定 Emby ID，正在反查 Emby...")
-        try:
-            parent_collections = emby.get_collections_containing_item(
-                item_id=movie_emby_id,
-                base_url=config.get('emby_server_url'),
-                api_key=config.get('emby_api_key'),
-                user_id=config.get('emby_user_id')
-            )
-            
-            for p_coll in parent_collections:
-                p_provider_ids = p_coll.get("ProviderIds", {})
-                if str(p_provider_ids.get("Tmdb", "")) == tmdb_coll_id:
-                    emby_coll_id = p_coll.get('Id')
-                    logger.info(f"  ➜ Emby 已生成 TMDb 合集 '{p_coll.get('Name')}' (ID: {emby_coll_id})，正在绑定...")
-                    
-                    # 更新数据库，补全 Emby ID
-                    tmdb_collection_db.upsert_native_collection({
-                        'emby_collection_id': emby_coll_id,
-                        'name': p_coll.get('Name') or tmdb_coll_name,
-                        'tmdb_collection_id': tmdb_coll_id,
-                        'poster_path': coll_details.get('poster_path'),
-                        'backdrop_path': coll_details.get('backdrop_path'),
-                        'all_tmdb_ids': all_tmdb_ids,
-                        'overview': final_overview
-                    })
-                    
-                    # ★★★ 把 AI 翻译好的简介注入 Emby ★★★
-                    if final_overview:
-                        emby.update_collection_overview(
-                            emby_coll_id,
-                            final_overview,
-                            config.get('emby_server_url'),
-                            config.get('emby_api_key'),
-                            config.get('emby_user_id')
-                        )
-                    break
-            
-            if not emby_coll_id:
-                logger.info(f"  ➜ Emby 尚未生成 TMDb 合集 '{tmdb_coll_name}'，本次仅执行订阅检查。")
-                # 即使没找到 Emby ID，也更新一下 all_tmdb_ids，保持数据最新
-                tmdb_collection_db.upsert_native_collection({
-                    'emby_collection_id': None,
-                    'name': tmdb_coll_name,
-                    'tmdb_collection_id': tmdb_coll_id,
-                    'poster_path': coll_details.get('poster_path'),
-                    'backdrop_path': coll_details.get('backdrop_path'),
-                    'all_tmdb_ids': all_tmdb_ids,
-                    'overview': final_overview
-                })
-
-        except Exception as e:
-            logger.warning(f"  ➜ 尝试反查 Emby 合集失败: {e}")
-    else:
-        # 如果已经有 Emby ID，说明之前绑定过了，顺手更新一下最新列表和时间戳
-        tmdb_collection_db.touch_native_collection_by_child_id(movie_tmdb_id)
-
-    # ======================================================================
-    # 4. 执行缺失订阅
-    # ======================================================================
-    config_settings = settings_db.get_setting('native_collections_config') or {}
-    is_auto_sub_enabled = config_settings.get('auto_sub_enabled', False)
-    if is_auto_sub_enabled:
-        _subscribe_missing_for_single_collection(tmdb_coll_name, all_parts)
+    _subscribe_missing_for_single_collection(tmdb_coll_name, all_parts)
 
 def _subscribe_missing_for_single_collection(collection_name: str, all_parts: List[Dict]):
     """

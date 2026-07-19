@@ -23,6 +23,70 @@ def clean_expired_tokens():
     for t in expired:
         del RECOVERY_TOKENS[t]
 
+
+def _sync_and_start_session(user_info):
+    user_id = user_info.get('Id')
+    try:
+        user_db.upsert_emby_users_batch([user_info])
+    except Exception as e:
+        logger.warning(f"登录时同步用户信息失败: {e}")
+
+    session.clear()
+    session['emby_user_id'] = user_id
+    session['emby_username'] = user_info.get('Name')
+    session['emby_is_admin'] = user_info.get('Policy', {}).get('IsAdministrator', False)
+    session.permanent = True
+
+
+def _authorize_emby_service(url, username, password):
+    normalized_url = str(url or '').strip().rstrip('/')
+    username = str(username or '').strip()
+    if not normalized_url or not username:
+        return None, "Emby URL 和管理员用户名不能为空"
+
+    auth_result = emby.authenticate_emby_user(
+        username,
+        password or '',
+        base_url=normalized_url,
+        device_id="emby-toolkit-service",
+    )
+    if not auth_result:
+        return None, "管理员认证失败，请检查账号、密码和服务器地址"
+
+    access_token = str(auth_result.get('AccessToken') or '').strip()
+    user_info = auth_result.get('User') or {}
+    user_id = str(user_info.get('Id') or '').strip()
+    if not access_token or not user_id:
+        return None, "Emby 认证响应缺少 AccessToken 或用户 ID"
+
+    if not user_info.get('Policy', {}).get('IsAdministrator', False):
+        refreshed_user = emby.get_user_info_from_server(normalized_url, access_token, user_id)
+        if refreshed_user:
+            user_info = refreshed_user
+            auth_result['User'] = user_info
+    if not user_info.get('Policy', {}).get('IsAdministrator', False):
+        return None, "必须使用 Emby 管理员账号完成服务授权"
+
+    test_result = emby.test_connection(normalized_url, access_token)
+    if not test_result.get('success'):
+        return None, f"服务 Token 验证失败: {test_result.get('error')}"
+
+    auth_result['_normalized_url'] = normalized_url
+    return auth_result, None
+
+
+def _save_emby_service_authorization(auth_result):
+    user_info = auth_result['User']
+    new_config = {
+        constants.CONFIG_OPTION_EMBY_SERVER_URL: auth_result['_normalized_url'],
+        constants.CONFIG_OPTION_EMBY_API_KEY: auth_result['AccessToken'],
+        constants.CONFIG_OPTION_EMBY_USER_ID: user_info['Id'],
+        constants.CONFIG_OPTION_EMBY_AUTH_MODE: "user_token",
+    }
+    from web_app import save_config_and_reload
+    save_config_and_reload(new_config)
+
+
 @unified_auth_bp.route('/check_status', methods=['GET'])
 def check_system_status():
     """
@@ -78,19 +142,7 @@ def emby_only_login():
 
     user_info = auth_result.get('User', {})
     user_id = user_info.get('Id')
-    
-    # 同步用户基础信息到本地数据库
-    try:
-        user_db.upsert_emby_users_batch([user_info])
-    except Exception as e:
-        logger.warning(f"登录时同步用户信息失败: {e}")
-
-    # 设置 Session
-    session.clear() 
-    session['emby_user_id'] = user_id
-    session['emby_username'] = user_info.get('Name')
-    session['emby_is_admin'] = user_info.get('Policy', {}).get('IsAdministrator', False)
-    session.permanent = True
+    _sync_and_start_session(user_info)
 
     logger.info(f"Emby 用户 '{session['emby_username']}' 登录成功。")
     
@@ -170,37 +222,77 @@ def save_emby_config():
 
     data = request.json
     url = data.get('url')
-    api_key = data.get('api_key')
+    username = data.get('username')
+    password = data.get('password')
 
-    if not url or not api_key:
-        return jsonify({"status": "error", "message": "URL 和 API Key 不能为空"}), 400
+    auth_result, error = _authorize_emby_service(url, username, password)
+    if error:
+        return jsonify({"status": "error", "message": error}), 400
 
-    # 1. 验证连接有效性
-    logger.info(f"正在测试新的 Emby 配置: {url}")
-    test_result = emby.test_connection(url, api_key) 
-    
-    if not test_result['success']:
-        return jsonify({
-            "status": "error", 
-            "message": f"连接测试失败: {test_result.get('error')}"
-        }), 400
-
-    # 2. 保存配置
-    new_config = {
-        constants.CONFIG_OPTION_EMBY_SERVER_URL: url,
-        constants.CONFIG_OPTION_EMBY_API_KEY: api_key
-    }
     try:
-        config_manager.save_config(new_config)
+        _save_emby_service_authorization(auth_result)
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
         return jsonify({"status": "error", "message": "保存配置失败，请检查日志"}), 500
-    
-    # 3. 清除设置模式标记
-    session.pop('is_setup_mode', None)
-    
-    logger.info("Emby 配置已更新，系统进入正常模式。")
-    return jsonify({"status": "ok", "message": "配置保存成功，请登录"}), 200
+
+    _sync_and_start_session(auth_result['User'])
+    logger.info("Emby 管理员服务授权已保存，账号密码未持久化。")
+    return jsonify({
+        "status": "ok",
+        "message": "Emby 服务授权成功",
+        "user": {
+            "id": session['emby_user_id'],
+            "name": session['emby_username'],
+            "is_admin": True,
+        },
+    }), 200
+
+
+@unified_auth_bp.route('/service_status', methods=['GET'])
+def service_authorization_status():
+    if 'emby_user_id' not in session:
+        return jsonify({"status": "error", "message": "需要先登录"}), 401
+    authorized = config_manager.is_emby_service_authorized()
+    if authorized:
+        test_result = emby.test_connection(
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+        )
+        authorized = bool(test_result.get('success'))
+    return jsonify({
+        "authorized": authorized,
+        "url": config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or "",
+    })
+
+
+@unified_auth_bp.route('/reauthorize', methods=['POST'])
+def reauthorize_emby_service():
+    if 'emby_user_id' not in session:
+        return jsonify({"status": "error", "message": "需要先登录"}), 401
+
+    data = request.json or {}
+    url = data.get('url') or config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+    auth_result, error = _authorize_emby_service(url, data.get('username'), data.get('password'))
+    if error:
+        return jsonify({"status": "error", "message": error}), 400
+
+    try:
+        _save_emby_service_authorization(auth_result)
+    except Exception as e:
+        logger.error(f"重新授权 Emby 服务失败: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": "保存服务授权失败，请检查日志"}), 500
+
+    user_info = auth_result['User']
+    return jsonify({
+        "status": "ok",
+        "message": "Emby 服务授权已更新",
+        "authorization": {
+            "url": auth_result['_normalized_url'],
+            "user_id": user_info['Id'],
+            "user_name": user_info.get('Name') or "",
+            "auth_mode": "user_token",
+        },
+    })
 
 @unified_auth_bp.route('/logout', methods=['POST'])
 def logout():

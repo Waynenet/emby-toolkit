@@ -137,6 +137,12 @@ def _is_same_cached_local_path(old_path, current_path):
     current_normalized = _normalize_cached_local_path(current_path)
     return bool(old_normalized and current_normalized and old_normalized == current_normalized)
 
+
+def _should_keep_cached_title(cached_title, tmdb_title, conflicts_with_authority=False):
+    if not cached_title or conflicts_with_authority:
+        return False
+    return utils.contains_chinese(cached_title) or not utils.contains_chinese(tmdb_title)
+
 P115_APP_LABELS = {
     "web": "网页版",
     "tv": "安卓电视端",
@@ -5776,6 +5782,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             "hide_audio_channels": False,
             "strm_url_fmt": "standard"
         }
+        self.rename_config.setdefault("customization", P115RenameRenderer.DEFAULT_CUSTOMIZATION)
         raw_rules = settings_db.get_setting('p115_sorting_rules')
         self.rules = []
         
@@ -5939,7 +5946,36 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     cached_norm and authoritative_norm and cached_norm != authoritative_norm
                 )
 
-            if cached_title and not cached_title_conflicts_with_authority:
+            raw_title = raw_details.get('title') or raw_details.get('name')
+            tmdb_title = utils.clean_invisible_chars(raw_title)
+            chinese_alias = None
+
+            if not tmdb_title or not utils.contains_chinese(tmdb_title):
+                alt_titles_data = raw_details.get("alternative_titles", {})
+                alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
+                priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
+                best_priority = 99
+
+                for alt in alt_list:
+                    iso_country = alt.get("iso_3166_1", "").upper()
+                    if iso_country not in priority_map:
+                        continue
+                    alt_title = utils.clean_invisible_chars(alt.get("title", ""))
+                    if utils.contains_chinese(alt_title):
+                        current_priority = priority_map[iso_country]
+                        if current_priority < best_priority:
+                            chinese_alias = alt_title
+                            best_priority = current_priority
+                        if best_priority == 1:
+                            break
+
+                tmdb_title = chinese_alias or original_main_title or tmdb_title
+
+            if _should_keep_cached_title(
+                cached_title,
+                tmdb_title,
+                cached_title_conflicts_with_authority,
+            ):
                 logger.info(f"  ➜ [115整理] 命中本地数据库片名: '{cached_title}'，无视 TMDb 最新变动。")
                 current_title = cached_title
                 original_title = cached_original_title or cached_title
@@ -5949,43 +5985,20 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         f"  ➜ [115整理] 权威识别标题 '{authoritative_title_hint}' 与本地数据库片名 '{cached_title}' 冲突，"
                         f"优先使用当前 TMDb 标题。"
                     )
-                # 5.2 本地无缓存 (首次入库)，走 TMDb 提取与清洗流程
-                raw_title = raw_details.get('title') or raw_details.get('name')
-                current_title = utils.clean_invisible_chars(raw_title)
-                
-                if not current_title or not utils.contains_chinese(current_title):
-                    chinese_alias = None
-                    alt_titles_data = raw_details.get("alternative_titles", {})
-                    alt_list = alt_titles_data.get("titles") or alt_titles_data.get("results") or []
-                    
-                    priority_map = {"CN": 1, "SG": 2, "TW": 3, "HK": 4}
-                    best_priority = 99
-                    
-                    for alt in alt_list:
-                        iso_country = alt.get("iso_3166_1", "").upper()
-                        if iso_country not in priority_map:
-                            continue
-                        alt_title = utils.clean_invisible_chars(alt.get("title", ""))
-                        if utils.contains_chinese(alt_title):
-                            current_priority = priority_map[iso_country]
-                            
-                            if current_priority < best_priority:
-                                chinese_alias = alt_title
-                                best_priority = current_priority
-                                
-                            if best_priority == 1:
-                                break 
-                    
-                    if chinese_alias:
-                        logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
-                        current_title = chinese_alias
-                    else:
-                        original_title = original_main_title
-                        logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
-                        current_title = original_title
+                elif cached_title and utils.contains_chinese(tmdb_title):
+                    logger.info(
+                        f"  ➜ [115整理] 本地数据库片名 '{cached_title}' 为非中文，"
+                        f"升级为 TMDb 中文片名 '{tmdb_title}'。"
+                    )
+
+                current_title = tmdb_title
+                original_title = original_main_title
+                if chinese_alias:
+                    logger.info(f"  ➜ [115整理] 发现 TMDb 官方中文别名: '{chinese_alias}'")
+                elif not utils.contains_chinese(current_title):
+                    logger.info(f"  ➜ [115整理] 未找到中文别名，回退到原名: '{original_title}'")
                 else:
-                    # 如果主标题正常，提取原名
-                    original_title = original_main_title
+                    logger.debug(f"  ➜ [115整理] 使用 TMDb 中文主片名: '{current_title}'")
 
             data['title'] = current_title
             data['original_title'] = original_main_title or original_title
@@ -8181,6 +8194,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         else:
                             real_target_cid = final_home_cid
 
+            if ext in known_video_exts and not has_real_info:
+                reason = '无法获取有效媒体流信息(可能是不支持的格式或文件损坏)'
+                logger.warning(f"  ➜ [媒体信息门槛] {file_name} -> {reason}")
+                unqualified_items.append({
+                    'fid': fid,
+                    'name': file_name,
+                    'reason': reason,
+                    'pc': file_item.get('pc') or file_item.get('pick_code'),
+                    'season_num': season_num,
+                })
+                continue
+
             if ext in known_video_exts and version_slots_active:
                 slot_info = file_item.get('_washing_slot')
                 if not slot_info:
@@ -8641,41 +8666,43 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 effective_conflict_mode = 'replace' if (
                     is_ep_active_washing
                     or getattr(self, 'is_shared_transfer_context', False)
-                    or getattr(self, 'is_manual_correct', False)
                 ) else conflict_mode
 
                 # ★ 判断是否享有外挂字幕豁免权
                 has_ext_sub = (s_num, e_num) in episodes_with_ext_subs
 
+                # 手动重组只修正用户选中的文件，不承担洗版职责。
+                # 其他版本无论位于目标目录还是原目录，都不能进入删除集合。
+                if is_vid and getattr(self, 'is_manual_correct', False):
+                    reason = '手动重组仅处理选中版本，保留其他版本'
+                    logger.info(f"  ➜ [手动重组] {new_name}，原因：{reason}")
+                    item['_washing_snapshot'] = _build_washing_snapshot(item, new_name, reason, file_size, has_ext_sub)
+                    valid_items.append(item)
+
                 # 调用阶梯洗版优先级服务
-                if is_vid and effective_conflict_mode == 'replace':
-                    # ★ 核心修复：手动重组拥有最高特权，无视洗版规则直接放行！
-                    if getattr(self, 'is_manual_correct', False):
-                        action = 'REPLACE'
-                        reason = '手动重组，无视洗版规则强制放行'
-                    else:
-                        logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
-                        
-                        video_info = item.get('_video_info') or self._extract_video_info(new_name)
-                        file_sha1 = item.get('sha1') or item.get('sha')
-                        
-                        action, reason, washing_details = WashingService.decide_washing_action(
-                            sha1=file_sha1,
-                            file_name=new_name,
-                            file_size=file_size,
-                            target_cid=target_cid,
-                            media_type=self.media_type,
-                            tmdb_id=self.tmdb_id,
-                            season_num=s_num,
-                            episode_num=e_num,
-                            original_lang=original_lang,
-                            is_active_washing=is_ep_active_washing,
-                            has_external_subtitle=has_ext_sub,
-                            return_details=True,
-                        )
-                        resolved_slot = (washing_details or {}).get('version_slot')
-                        if resolved_slot:
-                            item['_washing_slot'] = resolved_slot
+                elif is_vid and effective_conflict_mode == 'replace':
+                    logger.debug(f"  ➜ [覆盖模式:洗版] 正在调用洗版规则评估文件: {new_name}")
+
+                    video_info = item.get('_video_info') or self._extract_video_info(new_name)
+                    file_sha1 = item.get('sha1') or item.get('sha')
+
+                    action, reason, washing_details = WashingService.decide_washing_action(
+                        sha1=file_sha1,
+                        file_name=new_name,
+                        file_size=file_size,
+                        target_cid=target_cid,
+                        media_type=self.media_type,
+                        tmdb_id=self.tmdb_id,
+                        season_num=s_num,
+                        episode_num=e_num,
+                        original_lang=original_lang,
+                        is_active_washing=is_ep_active_washing,
+                        has_external_subtitle=has_ext_sub,
+                        return_details=True,
+                    )
+                    resolved_slot = (washing_details or {}).get('version_slot')
+                    if resolved_slot:
+                        item['_washing_slot'] = resolved_slot
                     
                     if action == 'REJECT':
                         logger.warning(f"  ➜ [洗版拦截] {new_name} -> {reason}")

@@ -409,28 +409,18 @@ const globalStats = computed(() => {
 });
 
 const handleDeleteCollection = async (collection) => {
-  if (!collection) return;
-  const deleteUrl = collection.emby_collection_id
-    ? `/api/collections/${collection.emby_collection_id}`
-    : collection.tmdb_collection_id
-      ? `/api/collections/tmdb/${collection.tmdb_collection_id}`
-      : null;
-  if (!deleteUrl) {
-    message.error('合集缺少可用的 Emby/TMDb ID，无法删除。');
-    return;
-  }
+  if (!collection || !collection.emby_collection_id) return;
   
   const d = message.loading('正在删除合集，请稍候...', { duration: 0 });
   
   try {
-    await axios.delete(deleteUrl);
+    await axios.delete(`/api/collections/${collection.emby_collection_id}`);
     d.destroy();
     message.success(`合集 "${collection.name}" 删除成功！`);
     
     // 从本地列表中移除，避免需要刷新页面
-    collections.value = collections.value.filter(c => collection.emby_collection_id
-      ? String(c.emby_collection_id || '') !== String(collection.emby_collection_id)
-      : String(c.tmdb_collection_id || '') !== String(collection.tmdb_collection_id)
+    collections.value = collections.value.filter(
+      c => String(c.emby_collection_id || '') !== String(collection.emby_collection_id)
     );
     
   } catch (err) {

@@ -2785,6 +2785,65 @@ def _evaluate_washing_level_for_row(cursor, row, *, only_update_p115=True):
     return stats
 
 
+def recalculate_washing_priority_for_sha1(sha1: str) -> dict:
+    """Recalculate washing priority for library items containing one media SHA1."""
+    sha1_text = str(sha1 or '').strip().upper()
+    stats = {
+        'matched_items': 0,
+        'updated_items': 0,
+        'evaluated_versions': 0,
+        'missing_raw': 0,
+        'missing_identity': 0,
+        'no_priority_rules': 0,
+        'backfilled_target_cid': 0,
+    }
+    if not sha1_text:
+        return stats
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT mm.tmdb_id, mm.item_type, mm.parent_series_tmdb_id,
+                       mm.season_number, mm.episode_number, mm.title,
+                       COALESCE(NULLIF(mm.original_language, ''), NULLIF(parent.original_language, '')) AS original_language,
+                       mm.file_sha1_json, mm.file_pickcode_json,
+                       mm.asset_details_json, mm.washing_snapshot_json
+                FROM media_metadata mm
+                LEFT JOIN LATERAL (
+                    SELECT p.original_language
+                    FROM media_metadata p
+                    WHERE mm.item_type = 'Episode'
+                      AND p.item_type = 'Series'
+                      AND p.tmdb_id = mm.parent_series_tmdb_id
+                      AND NULLIF(p.original_language, '') IS NOT NULL
+                    ORDER BY p.in_library DESC, p.last_updated_at DESC NULLS LAST
+                    LIMIT 1
+                ) parent ON TRUE
+                WHERE mm.in_library = TRUE
+                  AND mm.item_type IN ('Movie', 'Episode')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(
+                          CASE WHEN jsonb_typeof(mm.file_sha1_json) = 'array'
+                               THEN mm.file_sha1_json ELSE '[]'::jsonb END
+                      ) AS sha(value)
+                      WHERE UPPER(sha.value) = %s
+                  )
+            """, (sha1_text,))
+            rows = cursor.fetchall() or []
+            stats['matched_items'] = len(rows)
+
+            for row in rows:
+                item_stats = _evaluate_washing_level_for_row(cursor, dict(row))
+                stats['updated_items'] += 1
+                for key in ('evaluated_versions', 'missing_raw', 'missing_identity', 'no_priority_rules', 'backfilled_target_cid'):
+                    stats[key] += int(item_stats.get(key) or 0)
+
+            conn.commit()
+
+    return stats
+
+
 def _build_washing_priority_scope_filter(affected_scope, allowed_types):
     scope = settings_db.normalize_washing_priority_recalculate_scope(affected_scope)
     clauses = []

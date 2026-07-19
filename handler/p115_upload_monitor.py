@@ -663,7 +663,7 @@ class UploadMonitorRuntime:
             processor.emby_url,
             processor.emby_api_key,
             processor.emby_user_id,
-            fields="Path,ImageTags",
+            fields="Path,ImageTags,SeriesId,ParentIndexNumber,IndexNumber",
         ) or {}
         if (details.get("ImageTags") or {}).get("Primary"):
             logger.debug("  ➜ [115上传监控] Emby Item 已有主图，跳过截图: %s", strm_path)
@@ -696,6 +696,40 @@ class UploadMonitorRuntime:
                     image_type="Primary",
                     delete_existing=False,
                 ):
+                    item_type = str(details.get("Type") or item.get("Type") or "").title()
+                    if item_type == "Episode":
+                        from database.metadata_provider_db import resolve_metadata_identity_by_path
+                        from handler.media_image_cache import archive_episode_screenshot
+
+                        identity = resolve_metadata_identity_by_path(
+                            strm_path,
+                            "Episode",
+                            season_number=details.get("ParentIndexNumber"),
+                            episode_number=details.get("IndexNumber"),
+                        )
+                        if not identity and details.get("SeriesId"):
+                            series = emby.get_emby_item_details(
+                                str(details["SeriesId"]),
+                                processor.emby_url,
+                                processor.emby_api_key,
+                                processor.emby_user_id,
+                                fields="ProviderIds",
+                            ) or {}
+                            series_tmdb_id = (series.get("ProviderIds") or {}).get("Tmdb")
+                            if series_tmdb_id:
+                                identity = {
+                                    "tmdb_id": str(series_tmdb_id),
+                                    "season_number": details.get("ParentIndexNumber"),
+                                    "episode_number": details.get("IndexNumber"),
+                                }
+                        if identity:
+                            archive_episode_screenshot(
+                                identity.get("tmdb_id"),
+                                identity.get("season_number"),
+                                identity.get("episode_number"),
+                                image_data,
+                                "image/jpeg",
+                            )
                     logger.info("  ➜ [115上传监控] 已补齐 Emby 缓存截图: %s", strm_path)
                 else:
                     logger.warning("  ➜ [115上传监控] 上传 Emby 缓存截图失败: %s", strm_path)

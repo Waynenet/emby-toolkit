@@ -2627,6 +2627,8 @@ class MediaProcessor:
                     except Exception as e_dir:
                         logger.warning(f"  ➜ 同步导演信息至数据库时失败: {e_dir}")
 
+                    conn.commit()
+
                 if final_processed_cast is None: raise ValueError("未能生成有效的最终演员列表。")
 
                 # ======================================================================
@@ -2718,7 +2720,7 @@ class MediaProcessor:
                     emby_api_key=self.emby_api_key,
                     user_id_for_ops=self.emby_user_id,
                     replace_all_metadata_param=uses_etk_metadata_provider,
-                    replace_all_images_param=uses_etk_metadata_provider and not specific_episode_ids,
+                    replace_all_images_param=False,
                     item_name_for_log=item_name_for_log
                 )
                 if uses_etk_metadata_provider:
@@ -4046,6 +4048,11 @@ class MediaProcessor:
         return failed_count == 0
 
     def _sync_etk_episode_images(self, aggregated_tmdb_data: Dict[str, Any], item_details: Dict[str, Any], force_overwrite_episodes: Optional[List[str]] = None) -> bool:
+        from handler.media_image_cache import (
+            archive_episode_screenshot,
+            discard_episode_screenshot,
+        )
+
         series_id = str((item_details or {}).get('Id') or '').strip()
         series_path = str((item_details or {}).get('Path') or '').strip()
         if not series_id or not series_path:
@@ -4074,6 +4081,11 @@ class MediaProcessor:
         }
         force_keys = set(force_overwrite_episodes or [])
         enable_ffmpeg_thumb = self.config.get(constants.CONFIG_OPTION_EXTRACT_THUMB, False)
+        series_tmdb_id = str(
+            ((aggregated_tmdb_data or {}).get('series_details') or {}).get('id')
+            or ((item_details or {}).get('ProviderIds') or {}).get('Tmdb')
+            or ''
+        ).strip()
         uploaded_count = 0
         refreshed_count = 0
         removed_local_count = 0
@@ -4120,6 +4132,9 @@ class MediaProcessor:
                             'Primary',
                         ):
                             emby.delete_item_image(self.emby_url, self.emby_api_key, item_id, 'Thumb')
+                            discard_episode_screenshot(
+                                series_tmdb_id, season_number, episode_number
+                            )
                             refreshed_count += 1
                         else:
                             failed_count += 1
@@ -4146,6 +4161,13 @@ class MediaProcessor:
                         image_type='Primary',
                         delete_existing=True,
                     ):
+                        archive_episode_screenshot(
+                            series_tmdb_id,
+                            season_number,
+                            episode_number,
+                            image_data,
+                            'image/jpeg',
+                        )
                         uploaded_count += 1
                     else:
                         failed_count += 1

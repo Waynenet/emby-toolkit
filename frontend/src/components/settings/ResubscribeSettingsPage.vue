@@ -491,10 +491,6 @@ import {
 
 const message = useMessage();
 const emit = defineEmits(['saved']);
-const embyAdminUser = ref('');
-const embyAdminPass = ref('');
-
-const isEmbyAdminConfigured = computed(() => embyAdminUser.value && embyAdminPass.value);
 const loading = ref(true);
 const saving = ref(false);
 const showModal = ref(false);
@@ -580,14 +576,11 @@ const scopeFieldOptions = [
 const loadData = async () => {
   loading.value = true;
   try {
-    const [rulesRes, configRes, libsRes] = await Promise.all([
+    const [rulesRes, libsRes] = await Promise.all([
       axios.get('/api/resubscribe/rules'),
-      axios.get('/api/config'),
       axios.get('/api/config/cover_generator/libraries')
     ]);
     rules.value = rulesRes.data;
-    embyAdminUser.value = configRes.data.emby_admin_user;
-    embyAdminPass.value = configRes.data.emby_admin_pass;
     allEmbyLibraries.value = libsRes.data;
 
     loadExtraOptions();

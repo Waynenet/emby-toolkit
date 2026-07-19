@@ -1,6 +1,6 @@
 # routes/media.py
 
-from flask import Blueprint, request, jsonify, Response, stream_with_context
+from flask import Blueprint, request, jsonify, Response, stream_with_context, send_file
 import logging
 import os
 import json
@@ -177,6 +177,21 @@ def proxy_external_image():
     一个安全的通用外部图片代理。
     【V3 - 代理适配版】增加了对系统全局代理的支持，解决 TMDb 图片连接重置问题。
     """
+    cached_hash = request.args.get('cache')
+    if cached_hash:
+        from handler.media_image_cache import get_cached_image
+
+        cached = get_cached_image(cached_hash)
+        if not cached:
+            return jsonify({"error": "图片缓存不存在"}), 404
+        response = send_file(
+            cached["path"],
+            mimetype=cached.get("mime_type") or "application/octet-stream",
+            conditional=True,
+        )
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return response
+
     external_url = request.args.get('url')
     if not external_url:
         return jsonify({"error": "缺少 'url' 参数"}), 400
@@ -1011,8 +1026,23 @@ def api_save_media_info_for_edit(item_id):
         )
         if result is None:
             return jsonify({"error": "缓存已保存，但写入 Emby 失败，请确认桥接插件已安装"}), 502
+
+        washing_priority = None
+        washing_priority_error = None
+        if settings_db.get_washing_conflict_mode() == 'replace':
+            try:
+                from tasks.p115 import recalculate_washing_priority_for_sha1
+                washing_priority = recalculate_washing_priority_for_sha1(sha1)
+            except Exception as exc:
+                washing_priority_error = str(exc)
+                logger.warning(f"媒体信息已保存，但洗版优先级重算失败: {exc}", exc_info=True)
         
-        return jsonify({"message": "媒体信息已更新并写入 Emby", "result": result})
+        return jsonify({
+            "message": "媒体信息已更新并写入 Emby",
+            "result": result,
+            "washing_priority": washing_priority,
+            "washing_priority_error": washing_priority_error,
+        })
         
     except Exception as e:
         logger.error(f"保存媒体信息失败: {e}", exc_info=True)

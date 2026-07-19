@@ -1486,8 +1486,14 @@ def _quick_deploy_payload(progress=None):
         missing.append("115 授权")
     if not config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL):
         missing.append("Emby URL")
-    if not config.get(constants.CONFIG_OPTION_EMBY_API_KEY):
-        missing.append("Emby API Key")
+    service_authorized = config_manager.is_emby_service_authorized()
+    if service_authorized:
+        service_authorized = emby.test_connection(
+            config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+            config.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+        ).get('success', False)
+    if not service_authorized:
+        missing.append("Emby 服务授权")
     if not config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT):
         missing.append("本地 STRM 根目录")
     etk_server_url = str(config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip()
@@ -1977,6 +1983,8 @@ def _cached_metadata_response(sha1):
     )
     if not payload:
         return jsonify({"error": "metadata cache not found"}), 404
+    from handler.media_image_cache import archive_metadata_images
+    archive_metadata_images(payload, request.host_url)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -2391,7 +2399,8 @@ def handle_rename_config():
             "file_tmdb_fmt": "none",       
             "video_codec_style": "hevc",
             "hide_audio_channels": False,
-            "strm_url_fmt": "standard"
+            "strm_url_fmt": "standard",
+            "customization": P115RenameRenderer.DEFAULT_CUSTOMIZATION
         }
         defaults.update(config)
         defaults.pop("conflict_mode", None)
@@ -2431,7 +2440,8 @@ def _rename_preview_payload(is_tv=False):
             "video_info": {
                 "resolution": "2160p",
                 "source": "WEB-DL",
-                "stream": "NF",
+                "stream": "friDay",
+                "customization": "friDay",
                 "effect": "HDR",
                 "codec": "HEVC",
                 "videoCodec": "HEVC",
@@ -2454,14 +2464,15 @@ def _rename_preview_payload(is_tv=False):
         "tmdb_id": "496243",
         "original_title": "Parasite",
         "safe_title": "寄生虫",
-        "original_name": "Parasite.2019.1080p.BluRay.HDR.AVC.DDP5.1-CMCT.mkv",
+        "original_name": "Parasite.2019.60fps.1080p.BluRay.HDR.AVC.DDP5.1-CMCT.mkv",
         "season_num": None,
         "episode_num": None,
         "file_ext": ".mkv",
         "video_info": {
             "resolution": "1080p",
             "source": "BluRay",
-            "stream": "AMZN",
+            "stream": "60fps",
+            "customization": "60fps",
             "effect": "HDR",
             "codec": "AVC",
             "videoCodec": "AVC",
@@ -2485,6 +2496,13 @@ def preview_rename_config():
     try:
         movie_ctx = _rename_preview_payload(False)
         tv_ctx = _rename_preview_payload(True)
+        customization_rules = config.get("customization", P115RenameRenderer.DEFAULT_CUSTOMIZATION)
+        for ctx in (movie_ctx, tv_ctx):
+            customization = P115RenameRenderer.extract_customization(
+                ctx["original_name"], customization_rules
+            )
+            ctx["video_info"]["customization"] = customization
+            ctx["video_info"]["stream"] = customization
         movie_renderer = P115RenameRenderer(
             movie_ctx["details"],
             movie_ctx["tmdb_id"],

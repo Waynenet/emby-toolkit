@@ -20,12 +20,12 @@ def upsert_native_collection(data: Dict[str, Any]):
                 INSERT INTO collections_info (
                     tmdb_collection_id, emby_collection_id, name, overview,
                     poster_path, backdrop_path, metadata_schema_version,
-                    all_tmdb_ids_json, last_checked_at
+                    is_active, all_tmdb_ids_json, last_checked_at
                 )
                 VALUES (
                     %(tmdb_id)s, %(emby_id)s, %(name)s, %(overview)s,
                     %(poster)s, %(backdrop)s, %(schema_version)s,
-                    %(ids_json)s, NOW()
+                    %(is_active)s, %(ids_json)s, NOW()
                 )
                 ON CONFLICT (tmdb_collection_id) DO UPDATE SET
                     -- 如果新数据里有 emby_id，则更新它；否则保留原有的 emby_id
@@ -35,6 +35,7 @@ def upsert_native_collection(data: Dict[str, Any]):
                     poster_path = EXCLUDED.poster_path,
                     backdrop_path = COALESCE(EXCLUDED.backdrop_path, collections_info.backdrop_path),
                     metadata_schema_version = EXCLUDED.metadata_schema_version,
+                    is_active = collections_info.is_active OR EXCLUDED.is_active,
                     all_tmdb_ids_json = EXCLUDED.all_tmdb_ids_json,
                     last_checked_at = NOW();
             """
@@ -47,6 +48,7 @@ def upsert_native_collection(data: Dict[str, Any]):
                 'poster': data.get('poster_path'),
                 'backdrop': data.get('backdrop_path'),
                 'schema_version': COLLECTION_METADATA_SCHEMA_VERSION,
+                'is_active': bool(data.get('is_active') or data.get('emby_collection_id')),
                 'ids_json': json.dumps(data.get('all_tmdb_ids', []))
             }
             
@@ -62,7 +64,7 @@ def get_all_native_collections() -> List[Dict[str, Any]]:
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM collections_info ORDER BY name")
+            cursor.execute("SELECT * FROM collections_info WHERE is_active IS TRUE ORDER BY name")
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(f"DB: 读取所有原生合集时发生错误: {e}", exc_info=True)
@@ -81,7 +83,8 @@ def get_all_missing_movies_in_collections() -> List[Dict[str, Any]]:
                 name,
                 jsonb_array_elements_text(all_tmdb_ids_json) AS tmdb_id
             FROM collections_info
-            WHERE all_tmdb_ids_json IS NOT NULL
+            WHERE is_active IS TRUE
+              AND all_tmdb_ids_json IS NOT NULL
         ),
         aggregated_names AS (
             -- 2. 聚合：按 tmdb_id 分组，把合集名拼起来
@@ -115,44 +118,64 @@ def get_all_missing_movies_in_collections() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"查询合集缺失电影时发生数据库错误: {e}", exc_info=True)
         return []
-    
-def delete_native_collection_by_emby_id(emby_collection_id: str):
+
+
+def reconcile_active_native_collections(emby_collection_ids: List[str]) -> int:
+    """Deactivate cached metadata whose BoxSet no longer exists in Emby."""
+    active_ids = [str(value) for value in emby_collection_ids if value]
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            if active_ids:
+                cursor.execute(
+                    """
+                    UPDATE collections_info
+                    SET is_active = FALSE, emby_collection_id = NULL, last_checked_at = NOW()
+                    WHERE is_active IS TRUE
+                      AND (emby_collection_id IS NULL OR NOT (emby_collection_id = ANY(%s)))
+                    """,
+                    (active_ids,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE collections_info
+                    SET is_active = FALSE, emby_collection_id = NULL, last_checked_at = NOW()
+                    WHERE is_active IS TRUE
+                    """
+                )
+            updated = cursor.rowcount
+            conn.commit()
+            return updated
+    except Exception as e:
+        logger.error(f"对账原生合集激活状态失败: {e}", exc_info=True)
+        return 0
+
+
+def deactivate_native_collection_by_emby_id(emby_collection_id: str):
     """
-    当 Emby 中删除了合集时，同步删除本地数据库记录。
+    当 Emby 中删除合集时，仅取消激活，保留插件所需的 TMDb 元数据。
     """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "DELETE FROM collections_info WHERE emby_collection_id = %s",
+                """
+                UPDATE collections_info
+                SET emby_collection_id = NULL, is_active = FALSE, last_checked_at = NOW()
+                WHERE emby_collection_id = %s
+                """,
                 (emby_collection_id,)
             )
-            deleted_count = cursor.rowcount
+            updated_count = cursor.rowcount
             conn.commit()
-            if deleted_count > 0:
-                logger.info(f"  ➜ [同步删除] 已从数据库移除原生合集记录 (Emby ID: {emby_collection_id})")
+            if updated_count > 0:
+                logger.info(f"  ➜ [同步删除] 已取消激活原生合集记录 (Emby ID: {emby_collection_id})")
             else:
                 logger.debug(f"  ➜ [同步删除] 数据库中未找到 Emby ID 为 {emby_collection_id} 的合集，无需删除。")
-            return deleted_count > 0
+            return updated_count > 0
     except Exception as e:
-        logger.error(f"删除原生合集记录失败: {e}", exc_info=True)
-        return False
-
-
-def delete_native_collection_by_tmdb_id(tmdb_collection_id: str) -> bool:
-    """Delete an ETK collection cache that has not been created in Emby."""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM collections_info WHERE tmdb_collection_id = %s",
-                (str(tmdb_collection_id),),
-            )
-            deleted_count = cursor.rowcount
-            conn.commit()
-            return deleted_count > 0
-    except Exception as e:
-        logger.error(f"删除 ETK 原生合集记录失败 (TMDb ID: {tmdb_collection_id}): {e}", exc_info=True)
+        logger.error(f"取消激活原生合集记录失败: {e}", exc_info=True)
         return False
 
 def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[str, Any]]:
@@ -190,45 +213,3 @@ def update_native_collection_images(tmdb_collection_id: str, poster_path, backdr
     except Exception as e:
         logger.error(f"更新原生合集图片失败 (TMDb ID: {tmdb_collection_id}): {e}")
         return 0
-
-def touch_native_collection_by_child_id(tmdb_id: str) -> bool:
-    """
-    检查给定的 TMDb ID 是否在某个原生合集中。
-    如果存在，顺便把该合集的 last_checked_at 更新为当前时间。
-    返回: True (存在且已更新) / False (不存在)
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            # 直接尝试更新，如果匹配到了，rowcount 就会 > 0
-            cursor.execute("""
-                UPDATE collections_info
-                SET last_checked_at = NOW()
-                WHERE all_tmdb_ids_json @> %s::jsonb
-            """, (json.dumps([str(tmdb_id)]),))
-            
-            updated = cursor.rowcount > 0
-            conn.commit()
-            return updated
-    except Exception as e:
-        logger.error(f"更新合集时间戳 (Child TMDb ID: {tmdb_id}) 失败: {e}")
-        return False
-    
-def get_collection_by_movie_tmdb_id(movie_tmdb_id: str) -> Optional[Dict[str, Any]]:
-    """
-    【极速反查】根据电影的 TMDb ID，反查它所属的合集信息。
-    利用 JSONB 的 @> 包含操作符，查询速度极快。
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM collections_info
-                WHERE all_tmdb_ids_json @> %s::jsonb
-                LIMIT 1
-            """, (json.dumps([str(movie_tmdb_id)]),))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    except Exception as e:
-        logger.error(f"反查电影所属合集失败: {e}")
-        return None

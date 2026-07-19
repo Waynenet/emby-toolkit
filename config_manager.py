@@ -141,10 +141,9 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_EMBY_PUBLIC_URL: (constants.CONFIG_SECTION_EMBY, 'string', ""),
     constants.CONFIG_OPTION_EMBY_API_KEY: (constants.CONFIG_SECTION_EMBY, 'string', ""),
     constants.CONFIG_OPTION_EMBY_USER_ID: (constants.CONFIG_SECTION_EMBY, 'string', ""),
+    constants.CONFIG_OPTION_EMBY_AUTH_MODE: (constants.CONFIG_SECTION_EMBY, 'string', ""),
     constants.CONFIG_OPTION_EMBY_API_TIMEOUT: (constants.CONFIG_SECTION_EMBY, 'int', 60),
     constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS: (constants.CONFIG_SECTION_EMBY, 'list', []),
-    constants.CONFIG_OPTION_EMBY_ADMIN_USER: (constants.CONFIG_SECTION_EMBY, 'string', ""),
-    constants.CONFIG_OPTION_EMBY_ADMIN_PASS: (constants.CONFIG_SECTION_EMBY, 'password', ""), 
 
     # [ReverseProxy]
     constants.CONFIG_OPTION_PROXY_ENABLED: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', False),
@@ -214,6 +213,8 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS: ("General", 'boolean', True),
     constants.CONFIG_OPTION_KEYWORD_TO_TAGS: ("General", 'boolean', False),
     constants.CONFIG_OPTION_STUDIO_TO_CHINESE: ("General", 'boolean', False),
+    constants.CONFIG_OPTION_MEDIA_IMAGE_ARCHIVE_ENABLED: ("General", 'boolean', False),
+    constants.CONFIG_OPTION_MEDIA_IMAGE_ARCHIVE_PATH: ("General", 'string', ""),
     # [Network] 
     constants.CONFIG_OPTION_NETWORK_PROXY_ENABLED: (constants.CONFIG_SECTION_NETWORK, 'boolean', False),
     constants.CONFIG_OPTION_NETWORK_HTTP_PROXY: (constants.CONFIG_SECTION_NETWORK, 'string', ""),
@@ -453,3 +454,13 @@ def is_system_configured() -> bool:
     key = APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY)
     # 简单的判断：URL和Key都不为空
     return bool(url and key and url.strip() and key.strip())
+
+
+def is_emby_service_authorized() -> bool:
+    """检查后台任务所需的管理员服务授权是否完整。"""
+    return bool(
+        APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_AUTH_MODE) == "user_token"
+        and str(APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or "").strip()
+        and str(APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY) or "").strip()
+        and str(APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID) or "").strip()
+    )

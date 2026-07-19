@@ -264,6 +264,20 @@ def update_cached_image_path(
             )
             updated = cursor.rowcount
         conn.commit()
+    if updated:
+        from handler.media_image_cache import cache_remote_image
+        cache_remote_image(_tmdb_image_url(image_path, "original"))
+    if (
+        updated
+        and requested_type == "Episode"
+        and image_type == "Primary"
+        and season_number is not None
+        and episode_number is not None
+    ):
+        from handler.media_image_cache import discard_episode_screenshot
+        discard_episode_screenshot(
+            str(tmdb_id), int(season_number), int(episode_number)
+        )
     return updated
 
 
@@ -854,6 +868,10 @@ def load_emby_metadata(
     official_ratings = _json_value(row.get("official_rating_json"), {})
     rating = official_ratings.get("US")
     tags, studios = _provider_tags_and_studios(row)
+    screenshot_url = None
+    if requested_type == "Episode" and not row.get("poster_path") and row.get("screenshot_hash"):
+        from handler.media_image_cache import cache_token
+        screenshot_url = cache_token(str(row["screenshot_hash"]))
     return {
         "item_type": requested_type,
         "tmdb_id": str(row.get("tmdb_id") or ""),
@@ -881,11 +899,17 @@ def load_emby_metadata(
         "actors_ready": bool(row.get("actors_ready")),
         "people": sorted(people, key=lambda item: item.get("order", 999)),
         "collections": collections,
+        "_screenshot_hash": str(row.get("screenshot_hash") or ""),
+        "_emby_item_ids": [
+            str(value)
+            for value in _json_value(row.get("emby_item_ids_json"), [])
+            if value
+        ],
         "images": {
-            "primary": _tmdb_image_url(row.get("poster_path"), "original"),
-            "backdrop": _tmdb_image_url(row.get("backdrop_path"), "original"),
+            "primary": _tmdb_image_url(row.get("poster_path"), "original") or screenshot_url,
+            "backdrop": _tmdb_image_url(row.get("backdrop_path"), "original") or screenshot_url,
             "logo": _tmdb_image_url(row.get("logo_path"), "original"),
-            "thumb": _tmdb_image_url(row.get("thumb_path"), "original"),
+            "thumb": _tmdb_image_url(row.get("thumb_path"), "original") or screenshot_url,
         },
     }
 

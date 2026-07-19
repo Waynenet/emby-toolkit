@@ -143,7 +143,7 @@ def get_verified_emby_item_for_cache(
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
-        fields="Path,MediaSources,Chapters,SeriesId,Type,Name",
+        fields="Path,MediaSources,Chapters,SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Type,Name",
         silent_404=True,
     )
     return item if _emby_item_matches_cache(item, sha1, expected_pick_code) else {}
@@ -211,8 +211,15 @@ def sync_intro_from_emby_item(sha1: str, item_id: str, *, expected_pick_code: st
                 logger.debug(f"  ➜ [共享片头] Emby 片头后台上传失败: {sha1[:12]}... -> {e}")
 
         threading.Thread(target=_upload, name=f"intro-upload-{sha1[:8]}", daemon=True).start()
+        series_name = str(item.get("SeriesName") or "").strip()
+        season_number = item.get("ParentIndexNumber")
+        episode_number = item.get("IndexNumber")
+        if series_name and season_number is not None and episode_number is not None:
+            item_label = f"《{series_name}》S{int(season_number):02d}E{int(episode_number):02d}"
+        else:
+            item_label = str(item.get("Name") or f"Emby Item {item_id}").strip()
         logger.info(
-            f"  ➜ [共享片头] 已从 Emby Item {item_id} 回写片头到媒体信息缓存: "
+            f"  ➜ [共享片头] 已从{item_label}回写片头到媒体信息缓存: "
             f"{sha1[:12]}...（{len(chapters)} 个章节）"
         )
     return {"ok": True, "updated": changed, "chapter_count": len(chapters)}
