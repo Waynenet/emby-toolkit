@@ -1486,8 +1486,14 @@ def _quick_deploy_payload(progress=None):
         missing.append("115 授权")
     if not config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL):
         missing.append("Emby URL")
-    if not config.get(constants.CONFIG_OPTION_EMBY_API_KEY):
-        missing.append("Emby API Key")
+    service_authorized = config_manager.is_emby_service_authorized()
+    if service_authorized:
+        service_authorized = emby.test_connection(
+            config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+            config.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+        ).get('success', False)
+    if not service_authorized:
+        missing.append("Emby 服务授权")
     if not config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT):
         missing.append("本地 STRM 根目录")
     etk_server_url = str(config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip()

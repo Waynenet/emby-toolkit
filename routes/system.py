@@ -38,7 +38,6 @@ MASKED_SECRET = "********"
 SENSITIVE_CONFIG_KEYS = {
     constants.CONFIG_OPTION_DB_PASSWORD,
     constants.CONFIG_OPTION_EMBY_API_KEY,
-    constants.CONFIG_OPTION_EMBY_ADMIN_PASS,
     constants.CONFIG_OPTION_TMDB_API_KEY,
     constants.CONFIG_OPTION_GITHUB_TOKEN,
     constants.CONFIG_OPTION_DOUBAN_COOKIE,
@@ -539,6 +538,16 @@ def api_save_config():
         if not new_config_data:
             return jsonify({"error": "请求体中未包含配置数据"}), 400
         new_config_data = _restore_masked_config_values(dict(new_config_data))
+
+        # Emby 服务凭据只能通过管理员重新授权接口更新，避免地址、Token 和用户 ID 不一致。
+        current_config = config_manager.APP_CONFIG or {}
+        for key in (
+            constants.CONFIG_OPTION_EMBY_SERVER_URL,
+            constants.CONFIG_OPTION_EMBY_API_KEY,
+            constants.CONFIG_OPTION_EMBY_USER_ID,
+            constants.CONFIG_OPTION_EMBY_AUTH_MODE,
+        ):
+            new_config_data[key] = current_config.get(key, "")
         
         # User ID 校验 (保留)
         user_id_to_save = new_config_data.get("emby_user_id", "").strip()

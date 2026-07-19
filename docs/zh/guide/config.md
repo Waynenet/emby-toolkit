@@ -27,12 +27,13 @@
 | --- | --- |
 | `emby_server_url` | Emby 服务器地址 |
 | `emby_public_url` | Emby 公网地址 |
-| `emby_api_key` | Emby API Key |
-| `emby_user_id` | Emby 用户 ID |
+| `emby_api_key` | 管理员服务 Token（内部兼容键，不在设置页手工填写） |
+| `emby_user_id` | 服务授权对应的管理员用户 ID（自动获取） |
+| `emby_auth_mode` | 服务授权模式，当前固定为 `user_token` |
 | `emby_api_timeout` | API 超时（秒） |
 | `libraries_to_process` | 处理的媒体库列表 |
-| `emby_admin_user` | 管理员用户名（可选） |
-| `emby_admin_pass` | 管理员密码（可选） |
+
+首次配置和重新授权使用 Emby 管理员账号换取服务 Token。ETK 不保存管理员用户名和密码；未完成服务授权时，管理后台会强制显示授权窗口，一键部署也会拒绝执行。
 
 ## ReverseProxy
 

@@ -354,9 +354,6 @@ def wait_for_server_idle(base_url: str, api_key: str, max_wait_seconds: int = 30
         logger.info(f"  ➜ Emby 负载高 [{reason_str}]，暂停等待中... (已等待 {int(elapsed)}s)")
         time.sleep(10)
 
-# 获取管理员令牌
-_admin_token_cache = {}
-
 class SimpleLogger:
     def info(self, msg): print(f"[EMBY_INFO] {msg}")
     def error(self, msg): print(f"[EMBY_ERROR] {msg}")
@@ -366,63 +363,20 @@ class SimpleLogger:
 _emby_id_cache = {}
 _emby_season_cache = {}
 _emby_episode_cache = {}
-# ★★★ 模拟用户登录以获取临时 AccessToken 的辅助函数 ★★★
-def _login_and_get_token() -> tuple[Optional[str], Optional[str]]:
-    """
-    【私有】执行实际的 Emby 登录操作来获取新的 Token。
-    这个函数不应被外部直接调用。
-    """
-    global _admin_token_cache
-    
-    cfg = config_manager.APP_CONFIG
-    emby_url = cfg.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
-    admin_user = cfg.get(constants.CONFIG_OPTION_EMBY_ADMIN_USER)
-    admin_pass = cfg.get(constants.CONFIG_OPTION_EMBY_ADMIN_PASS)
 
-    if not all([emby_url, admin_user, admin_pass]):
-        logger.error("  ➜ [自动登录] 失败：未在设置中完整配置 Emby 服务器地址和管理员账密。")
-        return None, None
-
-    auth_url = f"{emby_url.rstrip('/')}/Users/AuthenticateByName"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Emby-Authorization': 'Emby Client="Emby Toolkit", Device="Toolkit", DeviceId="d4f3e4b4-9f5b-4b8f-8b8a-5c5c5c5c5c5c", Version="1.0.0"'
-    }
-    payload = {"Username": admin_user, "Pw": admin_pass}
-    
-    try:
-        response = emby_client.post(auth_url, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        access_token = data.get("AccessToken")
-        user_id = data.get("User", {}).get("Id")
-        
-        if access_token and user_id:
-            logger.debug("  ➜ [自动登录] 成功，已获取并缓存了新的管理员 AccessToken。")
-            # 成功获取后，存入缓存
-            _admin_token_cache['access_token'] = access_token
-            _admin_token_cache['user_id'] = user_id
-            return access_token, user_id
-        else:
-            logger.error("  ➜ [自动登录] 登录 Emby 成功，但响应中未找到 AccessToken 或 UserId。")
-            return None, None
-    except Exception as e:
-        logger.error(f"  ➜ [自动登录] 模拟登录 Emby 失败: {e}")
-        return None, None
 
 def get_admin_access_token() -> tuple[Optional[str], Optional[str]]:
-    """
-    【V2 - 缓存版】获取管理员的 AccessToken 和 UserId。
-    优先从内存缓存中读取，如果缓存为空，则自动执行登录并填充缓存。
-    """
-    # 1. 先检查缓存
-    if 'access_token' in _admin_token_cache and 'user_id' in _admin_token_cache:
-        logger.trace("  ➜ [自动登录] 从缓存中成功获取 AccessToken。")
-        return _admin_token_cache['access_token'], _admin_token_cache['user_id']
-    
-    # 2. 缓存未命中，执行登录
-    logger.debug("  ➜ [自动登录] 缓存未命中，正在执行首次登录以获取 AccessToken...")
-    return _login_and_get_token()
+    """返回首次配置或重新授权时持久化的管理员 Token 和 UserId。"""
+    cfg = config_manager.APP_CONFIG
+    if cfg.get(constants.CONFIG_OPTION_EMBY_AUTH_MODE) != "user_token":
+        logger.error("  ➜ [服务授权] 尚未完成 Emby 管理员授权。")
+        return None, None
+    access_token = str(cfg.get(constants.CONFIG_OPTION_EMBY_API_KEY) or "").strip()
+    user_id = str(cfg.get(constants.CONFIG_OPTION_EMBY_USER_ID) or "").strip()
+    if not access_token or not user_id:
+        logger.error("  ➜ [服务授权] 配置缺少管理员 Token 或 UserId。")
+        return None, None
+    return access_token, user_id
 
 # ✨✨✨ 快速获取指定类型的项目总数，不获取项目本身 ✨✨✨
 def get_item_count(base_url: str, api_key: str, user_id: Optional[str], item_type: str, parent_id: Optional[str] = None) -> Optional[int]:
@@ -2978,15 +2932,18 @@ def delete_emby_user(user_id: str) -> bool:
         return False
 
 # --- 认证 Emby 用户 ---
-def authenticate_emby_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+def authenticate_emby_user(
+    username: str,
+    password: str,
+    base_url: Optional[str] = None,
+    device_id: str = "my-emby-toolkit-auth-v4",
+) -> Optional[Dict[str, Any]]:
     """
     【V4 - 终极伪装与日志版】
     - 伪装成一个标准的 Emby Web 客户端，提供更完整的 Header 和 Payload。
     - 增加最关键的失败日志，直接打印 Emby Server 返回的原始错误文本。
     """
-    # 1. 它自己会从全局配置读取 URL，API 端点无需关心
-    cfg = config_manager.APP_CONFIG
-    emby_url = cfg.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+    emby_url = base_url or config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
 
     if not all([emby_url, username]):
         logger.error("  ➜ [用户认证] 失败：缺少服务器地址或用户名。")
@@ -2994,7 +2951,6 @@ def authenticate_emby_user(username: str, password: str) -> Optional[Dict[str, A
 
     auth_url = f"{emby_url.rstrip('/')}/Users/AuthenticateByName"
     
-    device_id = "my-emby-toolkit-auth-v4"
     auth_header = (
         f'Emby Client="Emby Web", '
         f'Device="Chrome", '
