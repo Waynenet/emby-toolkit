@@ -1597,6 +1597,8 @@ def get_emby_metadata_by_path():
     )
     if not payload:
         return jsonify({'error': 'metadata cache not found'}), 404
+    from handler.media_image_cache import archive_metadata_images
+    archive_metadata_images(payload, request.host_url)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response

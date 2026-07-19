@@ -214,6 +214,8 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS: ("General", 'boolean', True),
     constants.CONFIG_OPTION_KEYWORD_TO_TAGS: ("General", 'boolean', False),
     constants.CONFIG_OPTION_STUDIO_TO_CHINESE: ("General", 'boolean', False),
+    constants.CONFIG_OPTION_MEDIA_IMAGE_ARCHIVE_ENABLED: ("General", 'boolean', False),
+    constants.CONFIG_OPTION_MEDIA_IMAGE_ARCHIVE_PATH: ("General", 'string', ""),
     # [Network] 
     constants.CONFIG_OPTION_NETWORK_PROXY_ENABLED: (constants.CONFIG_SECTION_NETWORK, 'boolean', False),
     constants.CONFIG_OPTION_NETWORK_HTTP_PROXY: (constants.CONFIG_SECTION_NETWORK, 'string', ""),

@@ -18,7 +18,7 @@ from collections import defaultdict
 
 import config_manager
 import constants
-from typing import Optional, List, Dict, Any, Generator, Set, Callable
+from typing import Optional, List, Dict, Any, Generator, Set, Callable, Tuple
 import logging
 logger = logging.getLogger(__name__)
 
@@ -1469,7 +1469,6 @@ def download_emby_image(
     if not all([item_id, image_type, save_path, emby_server_url, emby_api_key]):
         logger.error("download_emby_image: 参数不足。")
         return False
-
     image_url = f"{emby_server_url.rstrip('/')}/Items/{item_id}/Images/{image_type}"
     params = {"api_key": emby_api_key}
     if max_width: params["maxWidth"] = max_width
@@ -1497,6 +1496,53 @@ def download_emby_image(
     except Exception as e:
         logger.error(f"  ➜ 保存图片到 '{save_path}' 时发生未知错误: {e}")
         return False
+
+
+def get_emby_item_image_bytes(
+    item_id: str,
+    image_type: str,
+    emby_server_url: str,
+    emby_api_key: str,
+    max_bytes: int = 32 * 1024 * 1024,
+) -> Optional[Tuple[bytes, str]]:
+    """Read an existing Emby image without writing it into a media directory."""
+    if not all([item_id, image_type, emby_server_url, emby_api_key]):
+        return None
+
+    response = None
+    try:
+        response = emby_client.get(
+            f"{emby_server_url.rstrip('/')}/Items/{item_id}/Images/{image_type}",
+            params={"api_key": emby_api_key},
+            stream=True,
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > max_bytes:
+            return None
+
+        chunks = []
+        byte_size = 0
+        for chunk in response.iter_content(chunk_size=128 * 1024):
+            if not chunk:
+                continue
+            byte_size += len(chunk)
+            if byte_size > max_bytes:
+                return None
+            chunks.append(chunk)
+        if not chunks:
+            return None
+        mime_type = str(response.headers.get("Content-Type") or "image/jpeg").split(";", 1)[0]
+        return b"".join(chunks), mime_type
+    except Exception as exc:
+        logger.debug("  ➜ 读取 Emby Item %s 的 %s 图片失败: %s", item_id, image_type, exc)
+        return None
+    finally:
+        if response is not None:
+            response.close()
 
 
 # --- 获取所有工作室 / 播出平台条目 ---

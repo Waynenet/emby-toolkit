@@ -295,6 +295,37 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
+                    <n-form-item-grid-item label="持久化元数据图片" path="media_image_archive_enabled">
+                      <n-switch v-model:value="configModel.media_image_archive_enabled" />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          将最终采用的元数据图片和分集兜底截图保存到 ETK 图片仓库。
+                        </n-text>
+                      </template>
+                    </n-form-item-grid-item>
+                    <n-form-item-grid-item label="图片仓库目录" path="media_image_archive_path">
+                      <n-input-group>
+                        <n-input
+                          v-model:value="configModel.media_image_archive_path"
+                          :disabled="!configModel.media_image_archive_enabled"
+                          placeholder="默认: /config/media_images"
+                          @click="openLocalFolderSelector('media_image_archive_path', false)"
+                        >
+                          <template #prefix><n-icon :component="FolderIcon" /></template>
+                        </n-input>
+                        <n-button
+                          type="primary"
+                          ghost
+                          :disabled="!configModel.media_image_archive_enabled"
+                          @click="openLocalFolderSelector('media_image_archive_path', false)"
+                        >选择</n-button>
+                      </n-input-group>
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          可填写容器内绝对路径；自定义目录请同时配置持久化挂载。
+                        </n-text>
+                      </template>
+                    </n-form-item-grid-item>
                     <n-form-item-grid-item label="为角色名添加前缀" path="actor_role_add_prefix">
                       <n-switch v-model:value="configModel.actor_role_add_prefix" />
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">角色名前加上“饰 ”或“配 ”。</n-text></template>
@@ -2237,6 +2268,7 @@ const tableInfo = {
   'failed_log': { cn: '待复核日志', isSharable: false },
   'custom_collections': { cn: '自建合集', isSharable: false },
   'media_metadata': { cn: '媒体元数据', isSharable: true },
+  'media_image_cache': { cn: '媒体图片缓存', isSharable: false },
   'resubscribe_rules': { cn: '媒体洗版规则', isSharable: false },
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },
