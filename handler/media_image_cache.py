@@ -351,17 +351,79 @@ def archive_episode_screenshot(
     return cached["content_hash"]
 
 
-def _archive_existing_emby_episode_image(payload, emby_item_ids):
-    from handler import emby
+def _read_existing_emby_primary(item_id: str):
+    base_url = str(
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL) or ""
+    ).rstrip("/")
+    api_key = str(
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY) or ""
+    ).strip()
+    user_id = str(
+        config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID) or ""
+    ).strip()
+    if not all([item_id, base_url, api_key, user_id]):
+        return None
 
+    headers = {"X-Emby-Token": api_key}
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            details = session.get(
+                f"{base_url}/Users/{user_id}/Items/{item_id}",
+                params={"api_key": api_key, "Fields": "ImageTags"},
+                headers={**headers, "Accept": "application/json"},
+                timeout=(5, 15),
+            )
+            if details.status_code != 200:
+                logger.debug(
+                    "  ➜ [图片仓库] 跳过读取 Emby Item %s：详情返回 HTTP %s。",
+                    item_id,
+                    details.status_code,
+                )
+                return None
+            if not ((details.json().get("ImageTags") or {}).get("Primary")):
+                return None
+
+            response = session.get(
+                f"{base_url}/Items/{item_id}/Images/Primary",
+                params={"api_key": api_key},
+                headers=headers,
+                stream=True,
+                timeout=(5, 30),
+            )
+            if response.status_code != 200:
+                logger.debug(
+                    "  ➜ [图片仓库] 跳过读取 Emby Item %s 的 Primary：HTTP %s。",
+                    item_id,
+                    response.status_code,
+                )
+                return None
+
+            mime_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0]
+            if not mime_type.startswith("image/"):
+                return None
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                return None
+
+            chunks = []
+            byte_size = 0
+            for chunk in response.iter_content(chunk_size=128 * 1024):
+                if not chunk:
+                    continue
+                byte_size += len(chunk)
+                if byte_size > MAX_IMAGE_BYTES:
+                    return None
+                chunks.append(chunk)
+            return (b"".join(chunks), mime_type) if chunks else None
+    except (ValueError, requests.RequestException) as exc:
+        logger.debug("  ➜ [图片仓库] 读取 Emby Item %s 的现有截图失败: %s", item_id, exc)
+        return None
+
+
+def _archive_existing_emby_episode_image(payload, emby_item_ids):
     for item_id in emby_item_ids or []:
-        result = emby.get_emby_item_image_bytes(
-            str(item_id),
-            "Primary",
-            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
-            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
-            MAX_IMAGE_BYTES,
-        )
+        result = _read_existing_emby_primary(str(item_id))
         if not result:
             continue
         image_data, mime_type = result
