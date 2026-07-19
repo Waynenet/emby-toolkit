@@ -5,15 +5,24 @@ import logging
 #过滤底层日志
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# --- 将 httpx 和 httpcore 提升到 ERROR 或 CRITICAL ---
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+
+# --- 屏蔽 Telegram 机器人框架底层的轮询报错 ---
+logging.getLogger("telegram").setLevel(logging.ERROR)
+logging.getLogger("telegram.ext").setLevel(logging.ERROR)
+
+# --- Telethon 的断连报错也经常是 ERROR 级别 ---
+logging.getLogger("telethon").setLevel(logging.ERROR)
+logging.getLogger("telethon.network").setLevel(logging.CRITICAL)
+
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("docker").setLevel(logging.WARNING)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 logging.getLogger("geventwebsocket").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("watchdog").setLevel(logging.WARNING)
-logging.getLogger("telethon").setLevel(logging.WARNING)
 import os
 import sys
 import shutil
@@ -295,7 +304,6 @@ def ensure_nginx_config():
 
         # 3. 准备替换值
         emby_upstream = emby_url.replace("http://", "").replace("https://", "").rstrip('/')
-        # ★★★ 核心修改 2: Nginx 和 Python 代理在同一容器内，使用 localhost 通信 ★★★
         proxy_upstream = "127.0.0.1:7758" 
 
         if not emby_upstream:
@@ -387,17 +395,6 @@ def health_check():
     """一个简单的健康检查端点，用于 Docker healthcheck。"""
     return jsonify({"status": "ok"}), 200
 
-# --- 兜底路由，必须放最后 ---
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    static_folder_path = app.static_folder 
-
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
-    else:
-        return send_from_directory(static_folder_path, 'index.html')
-    
 # +++ 在应用对象上注册所有蓝图 +++
 app.register_blueprint(watchlist_bp)
 app.register_blueprint(collections_bp)
@@ -418,6 +415,17 @@ app.register_blueprint(webhook_bp)
 app.register_blueprint(unified_auth_bp)
 app.register_blueprint(user_portal_bp)
 app.register_blueprint(discover_bp)
+
+# --- 兜底路由，必须放在所有 API 蓝图注册之后 ---
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    static_folder_path = app.static_folder
+
+    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
+        return send_from_directory(static_folder_path, path)
+    return send_from_directory(static_folder_path, 'index.html')
+
 def main_app_start():
     """将主应用启动逻辑封装成一个函数"""
     global monitor_service_instance # 声明使用全局变量
