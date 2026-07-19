@@ -26,11 +26,11 @@ __pycache__/
 # Node.js / Frontend Specific
 # ----------------------------------------------------------------
 # 依赖目录 (在构建阶段处理)
-emby-actor-ui/node_modules
+frontend/node_modules
 node_modules
 
 # 构建产物 (从构建阶段拷贝，不直接复制)
-emby-actor-ui/dist
+frontend/dist
 
 # ----------------------------------------------------------------
 # IDE & OS Specific
