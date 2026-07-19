@@ -2718,7 +2718,7 @@ class MediaProcessor:
                     emby_api_key=self.emby_api_key,
                     user_id_for_ops=self.emby_user_id,
                     replace_all_metadata_param=uses_etk_metadata_provider,
-                    replace_all_images_param=uses_etk_metadata_provider and not specific_episode_ids,
+                    replace_all_images_param=False,
                     item_name_for_log=item_name_for_log
                 )
                 if uses_etk_metadata_provider:
