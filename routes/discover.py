@@ -133,6 +133,88 @@ def _parse_bool(value, default: bool = False) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _normalize_person_ids(value) -> list:
+    if isinstance(value, (list, tuple, set)):
+        raw_values = value
+    else:
+        raw_values = str(value or '').replace('|', ',').split(',')
+    return [int(item) for item in raw_values if str(item).strip().isdigit()]
+
+
+def _resolve_tv_person_ids(api_key: str, cast_value=None, crew_value=None):
+    """返回同时满足所有演员和导演条件的 TMDb 剧集映射。"""
+    credit_maps = []
+    for raw_value, credit_type in ((cast_value, 'cast'), (crew_value, 'crew')):
+        for person_id in _normalize_person_ids(raw_value):
+            credits = tmdb.get_person_tv_credits_tmdb(person_id, api_key)
+            if credits is None:
+                return None, f"读取 TMDb 人物 {person_id} 的剧集作品失败"
+            credit_maps.append({
+                str(item.get('id')): item
+                for item in credits.get(credit_type, [])
+                if item.get('id') is not None
+            })
+
+    if not credit_maps:
+        return None, None
+    matched_ids = set.intersection(*(set(items) for items in credit_maps))
+    return {
+        tmdb_id: next(items[tmdb_id] for items in credit_maps if tmdb_id in items)
+        for tmdb_id in matched_ids
+    }, None
+
+
+def _filter_tv_credit_items(items: list, data: dict, include_adult: bool) -> list:
+    def _tokens(value):
+        return {token.strip() for token in str(value or '').replace('|', ',').split(',') if token.strip()}
+
+    required_genres = _tokens(data.get('with_genres'))
+    excluded_genres = _tokens(data.get('without_genres'))
+    required_countries = _tokens(data.get('with_origin_country'))
+    required_language = str(data.get('with_original_language') or '').strip()
+    date_gte = str(data.get('first_air_date.gte') or '').strip()
+    date_lte = str(data.get('first_air_date.lte') or '').strip()
+    try:
+        vote_gte = float(data.get('vote_average.gte') or 0)
+    except (TypeError, ValueError):
+        vote_gte = 0
+
+    filtered = []
+    for item in items:
+        genres = {str(value) for value in item.get('genre_ids', [])}
+        countries = {str(value) for value in item.get('origin_country', [])}
+        first_air_date = str(item.get('first_air_date') or '')
+        if not item.get('poster_path'):
+            continue
+        if not include_adult and item.get('adult'):
+            continue
+        if required_genres and not required_genres.issubset(genres):
+            continue
+        if excluded_genres.intersection(genres):
+            continue
+        if required_countries and not required_countries.intersection(countries):
+            continue
+        if required_language and item.get('original_language') != required_language:
+            continue
+        if date_gte and (not first_air_date or first_air_date < date_gte):
+            continue
+        if date_lte and (not first_air_date or first_air_date > date_lte):
+            continue
+        if float(item.get('vote_average') or 0) < vote_gte:
+            continue
+        filtered.append(item)
+
+    sort_by = str(data.get('sort_by') or 'popularity.desc')
+    sort_field, _, direction = sort_by.partition('.')
+    if sort_field not in {'popularity', 'vote_average', 'first_air_date'}:
+        sort_field = 'popularity'
+    filtered.sort(
+        key=lambda item: item.get(sort_field) or ('' if sort_field == 'first_air_date' else 0),
+        reverse=direction != 'asc',
+    )
+    return filtered
+
+
 def _filter_and_enrich_results(tmdb_data: dict, current_user_id: str, db_item_type: str, hide_in_library: bool = False) -> dict:
     """
     辅助函数：过滤 TMDb 结果，并附加数据库中的全局信息。
@@ -219,6 +301,8 @@ def discover_movies():
             'primary_release_date.lte': data.get('primary_release_date.lte', ''),
             'with_original_language': data.get('with_original_language', ''),
             'with_origin_country': data.get('with_origin_country', ''),
+            'with_cast': data.get('with_cast', ''),
+            'with_crew': data.get('with_crew', ''),
         }
         
         # 5. 处理分级筛选 
@@ -347,6 +431,21 @@ def discover_tv_shows():
             return jsonify({"status": "error", "message": "此功能仅对 Emby 用户开放"}), 403
         current_user_id = session['emby_user_id']
         hide_in_library = _parse_bool(data.get('hide_in_library'))
+        person_tv_items, person_error = _resolve_tv_person_ids(
+            api_key,
+            data.get('with_cast'),
+            data.get('with_crew'),
+        )
+        if person_error:
+            return jsonify({"status": "error", "message": person_error}), 502
+        has_person_filter = person_tv_items is not None
+        if has_person_filter and not person_tv_items:
+            return jsonify({
+                "results": [],
+                "page": data.get('page', 1),
+                "total_pages": 0,
+                "total_results": 0,
+            })
 
         # 1. 关键词
         labels = data.get('with_keywords', [])
@@ -403,6 +502,36 @@ def discover_tv_shows():
             rating_params = _get_tmdb_rating_params(rating_label, 'Series')
             tmdb_params.update(rating_params)
 
+        person_tv_ids = set(person_tv_items or {})
+        requires_discover_intersection = bool(k_ids_str or c_ids_str or rating_label)
+        if has_person_filter and not requires_discover_intersection:
+            person_results = _filter_tv_credit_items(
+                list(person_tv_items.values()),
+                data,
+                include_adult=is_adult_search,
+            )
+            target_count = 20
+            frontend_page = max(1, int(data.get('page', 1) or 1))
+            page_block_size = target_count * (3 if hide_in_library else 1)
+            page_start = (frontend_page - 1) * page_block_size
+            page_results = person_results[page_start:page_start + page_block_size]
+            total_pages = (len(person_results) + page_block_size - 1) // page_block_size
+            processed_data = _filter_and_enrich_results(
+                {
+                    "results": page_results,
+                    "page": frontend_page,
+                    "total_pages": total_pages,
+                    "total_results": len(person_results),
+                },
+                current_user_id,
+                'Series',
+                hide_in_library=hide_in_library,
+            )
+            if hide_in_library:
+                processed_data["results"] = processed_data.get("results", [])[:target_count]
+                processed_data["total_results"] = len(processed_data["results"])
+            return jsonify(processed_data)
+
         tmdb_params = {k: v for k, v in tmdb_params.items() if v is not None and v != ''}
 
         # --- 翻页补货逻辑 ---
@@ -411,7 +540,7 @@ def discover_tv_shows():
         target_count = 20
         
         # 同样，因为加了 TV-MA 强过滤，命中率很高，扫 3 页足够
-        max_pages_to_scan = 3 if (is_adult_search or hide_in_library) else 1 
+        max_pages_to_scan = 10 if has_person_filter else (3 if (is_adult_search or hide_in_library) else 1)
         
         frontend_page = data.get('page', 1)
         start_tmdb_page = (frontend_page - 1) * max_pages_to_scan + 1
@@ -434,7 +563,11 @@ def discover_tv_shows():
             total_pages_from_tmdb = tmdb_data.get('total_pages', 0)
             
             # 只过滤海报，不强制过滤 adult=True，保证列表丰富度
-            filtered_batch = [item for item in batch_results if item.get('poster_path')]
+            filtered_batch = [
+                item for item in batch_results
+                if item.get('poster_path')
+                and (not has_person_filter or str(item.get('id')) in person_tv_ids)
+            ]
             
             final_results.extend(filtered_batch)
             

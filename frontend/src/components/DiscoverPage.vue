@@ -22,49 +22,52 @@
                 />
               </div>
 
-              <div class="filter-item">
-                <label class="filter-label">类型:</label>
-                <n-radio-group class="filter-control" v-model:value="mediaType" :disabled="isSearchMode">
-                  <n-radio-button value="movie" label="电影" />
-                  <n-radio-button value="tv" label="电视剧" />
-                </n-radio-group>
-              </div>
+              <div style="display: flex; flex-wrap: wrap; gap: 16px; width: 100%;">
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">类型:</label>
+                  <n-radio-group class="filter-control" v-model:value="mediaType" :disabled="isSearchMode">
+                    <n-radio-button value="movie" label="电影" />
+                    <n-radio-button value="tv" label="电视剧" />
+                  </n-radio-group>
+                </div>
+
               
-              <div class="filter-item">
-                <label class="filter-label">排序:</label>
-                <div class="filter-control sort-buttons">
-                  <n-button 
-                    :type="currentSortField === 'popularity' ? 'primary' : 'default'"
-                    @click="toggleSort('popularity')"
-                    :disabled="isSearchMode"
-                  >
-                    热度
-                    <template #icon v-if="currentSortField === 'popularity'">
-                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
-                    </template>
-                  </n-button>
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">排序:</label>
+                  <div class="filter-control sort-buttons">
+                    <n-button 
+                      :type="currentSortField === 'popularity' ? 'primary' : 'default'"
+                      @click="toggleSort('popularity')"
+                      :disabled="isSearchMode"
+                    >
+                      热度
+                      <template #icon v-if="currentSortField === 'popularity'">
+                        <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                      </template>
+                    </n-button>
 
-                  <n-button 
-                    :type="currentSortField === 'date' ? 'primary' : 'default'"
-                    @click="toggleSort('date')"
-                    :disabled="isSearchMode"
-                  >
-                    上映日期
-                    <template #icon v-if="currentSortField === 'date'">
-                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
-                    </template>
-                  </n-button>
+                    <n-button 
+                      :type="currentSortField === 'date' ? 'primary' : 'default'"
+                      @click="toggleSort('date')"
+                      :disabled="isSearchMode"
+                    >
+                      上映日期
+                      <template #icon v-if="currentSortField === 'date'">
+                        <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                      </template>
+                    </n-button>
 
-                  <n-button 
-                    :type="currentSortField === 'vote_average' ? 'primary' : 'default'"
-                    @click="toggleSort('vote_average')"
-                    :disabled="isSearchMode"
-                  >
-                    评分
-                    <template #icon v-if="currentSortField === 'vote_average'">
-                      <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
-                    </template>
-                  </n-button>
+                    <n-button 
+                      :type="currentSortField === 'vote_average' ? 'primary' : 'default'"
+                      @click="toggleSort('vote_average')"
+                      :disabled="isSearchMode"
+                    >
+                      评分
+                      <template #icon v-if="currentSortField === 'vote_average'">
+                        <n-icon><ArrowUpOutline v-if="currentSortDirection === 'asc'" /><ArrowDownOutline v-else /></n-icon>
+                      </template>
+                    </n-button>
+                  </div>
                 </div>
               </div>
 
@@ -160,6 +163,47 @@
                 />
               </div>
 
+              <div style="display: flex; flex-wrap: wrap; gap: 16px; width: 100%;">
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">演员:</label>
+                  <n-select
+                    class="filter-control"
+                    v-model:value="selectedActors"
+                    :disabled="isSearchMode"
+                    multiple
+                    filterable
+                    remote
+                    clearable
+                    placeholder="搜索演员"
+                    :options="actorOptions"
+                    :loading="personSearchLoading.actors"
+                    label-field="name"
+                    value-field="id"
+                    :render-label="renderPersonLabel"
+                    @search="handleActorSearch"
+                  />
+                </div>
+                <div class="filter-item" style="flex: 1 1 160px; width: auto;">
+                  <label class="filter-label">导演:</label>
+                  <n-select
+                    class="filter-control"
+                    v-model:value="selectedDirectors"
+                    :disabled="isSearchMode"
+                    multiple
+                    filterable
+                    remote
+                    clearable
+                    placeholder="搜索导演"
+                    :options="directorOptions"
+                    :loading="personSearchLoading.directors"
+                    label-field="name"
+                    value-field="id"
+                    :render-label="renderPersonLabel"
+                    @search="handleDirectorSearch"
+                  />
+                </div>
+              </div>
+
               <div class="filter-item">
                 <label class="filter-label">关键词:</label>
                 <n-select
@@ -174,7 +218,6 @@
               </div>
 
               <div style="display: flex; flex-wrap: wrap; gap: 16px; width: 100%;">
-                
                 <div class="filter-item" style="flex: 1 1 160px; width: auto;">
                   <label class="filter-label">评分最低:</label>
                   <n-input-number
@@ -187,7 +230,6 @@
                     placeholder="最低评分"
                   />
                 </div>
-
                 <div class="filter-item" style="flex: 1 1 160px; width: auto;">
                   <label class="filter-label">隐藏已入库:</label>
                   <div class="filter-control" style="display: flex; align-items: center; min-height: 34px;">
@@ -448,14 +490,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, onMounted, onUnmounted, computed } from 'vue';
+import { ref, reactive, watch, onMounted, onUnmounted, computed, h } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
 import { 
   NPageHeader, NCard, NSpace, NRadioGroup, NRadioButton, NSelect,
   NInputNumber, NSpin, NGrid, NGi, NButton, NThing, useMessage, NIcon, 
-  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag, NSwitch
+  NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip, NModal, NTag, NSwitch, NAvatar
 } from 'naive-ui';
 import { 
   Heart, HeartOutline, HourglassOutline, Star as StarIcon, 
@@ -486,6 +528,12 @@ const keywordOptions = ref([]);
 const selectedKeywords = ref([]); 
 const allStudios = ref([]); 
 const selectedStudios = ref([]);
+const selectedActors = ref([]);
+const selectedDirectors = ref([]);
+const actorOptions = ref([]);
+const directorOptions = ref([]);
+const personSearchLoading = reactive({ actors: false, directors: false });
+const personSearchTimers = { actors: null, directors: null };
 // ★ 新增：订阅源状态
 const isMpConfigured = ref(false);
 
@@ -683,6 +731,43 @@ const genreOptions = computed(() => {
     value: item.id    
   }));
 });
+const renderPersonLabel = (option) => h(
+  'div',
+  { style: { display: 'flex', alignItems: 'center', padding: '4px 0' } },
+  [
+    h(NAvatar, {
+      round: true,
+      size: 'small',
+      src: option.profile_path ? `https://image.tmdb.org/t/p/w45${option.profile_path}` : undefined,
+      style: { marginRight: '12px', flexShrink: 0 }
+    }),
+    h('span', option.name)
+  ]
+);
+const searchPerson = (query, targetRef, loadingKey) => {
+  clearTimeout(personSearchTimers[loadingKey]);
+  const normalizedQuery = String(query || '').trim();
+  if (!normalizedQuery) {
+    personSearchLoading[loadingKey] = false;
+    return;
+  }
+
+  personSearchLoading[loadingKey] = true;
+  personSearchTimers[loadingKey] = setTimeout(async () => {
+    try {
+      const response = await axios.get('/api/custom_collections/config/tmdb_search_persons', {
+        params: { q: normalizedQuery }
+      });
+      targetRef.value = Array.isArray(response.data) ? response.data : [];
+    } catch (error) {
+      targetRef.value = [];
+    } finally {
+      personSearchLoading[loadingKey] = false;
+    }
+  }, 500);
+};
+const handleActorSearch = (query) => searchPerson(query, actorOptions, 'actors');
+const handleDirectorSearch = (query) => searchPerson(query, directorOptions, 'directors');
 const fetchGenres = async () => {  
   try {
     const endpoint = mediaType.value === 'movie' 
@@ -758,6 +843,8 @@ const fetchDiscoverData = async () => {
         'with_original_language': selectedLanguage.value,
         'with_keywords': selectedKeywords.value,
         'with_companies': selectedStudios.value,
+        'with_cast': selectedActors.value.join(','),
+        'with_crew': selectedDirectors.value.join(','),
         'with_rating_label': selectedRating.value,
         'hide_in_library': hideInLibrary.value
       };
@@ -1079,7 +1166,7 @@ watch(mediaType, () => {
   resetAndFetch();
 });
 watch(searchQuery, (newValue) => { resetAndFetch(); });
-watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, genreFilterMode, yearFrom, yearTo, selectedRating, hideInLibrary], () => { resetAndFetch(); }, { deep: true });
+watch([() => filters.sort_by, () => filters.vote_average_gte, selectedGenres, selectedRegions, selectedLanguage, selectedKeywords, selectedStudios, selectedActors, selectedDirectors, genreFilterMode, yearFrom, yearTo, selectedRating, hideInLibrary], () => { resetAndFetch(); }, { deep: true });
 let observer = null;
 onMounted(() => {
   checkMobile();
@@ -1101,6 +1188,8 @@ onMounted(() => {
 });
 onUnmounted(() => { 
   window.removeEventListener('resize', checkMobile);
+  clearTimeout(personSearchTimers.actors);
+  clearTimeout(personSearchTimers.directors);
   if (observer) { observer.disconnect(); } 
 });
 </script>
