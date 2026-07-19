@@ -2627,6 +2627,8 @@ class MediaProcessor:
                     except Exception as e_dir:
                         logger.warning(f"  ➜ 同步导演信息至数据库时失败: {e_dir}")
 
+                    conn.commit()
+
                 if final_processed_cast is None: raise ValueError("未能生成有效的最终演员列表。")
 
                 # ======================================================================
