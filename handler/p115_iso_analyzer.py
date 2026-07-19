@@ -499,6 +499,135 @@ def _parse_mpls(data, stream_sizes):
     }
 
 
+def _find_bdmv_dir(iso, root, max_wrapper_depth=4):
+    """Find BDMV at the root or below a small chain of wrapper directories."""
+    current = root
+    path = []
+    for _ in range(max_wrapper_depth + 1):
+        bdmv = iso.find(current, "BDMV")
+        if bdmv:
+            return bdmv, path + ["BDMV"]
+
+        child_dirs = [entry for entry in iso.list_dir(current) if entry.get("flags", 0) & 2]
+        if len(child_dirs) != 1:
+            break
+        current = child_dirs[0]
+        path.append(current["name"])
+    return None, path
+
+
+def _read_file_slice(iso, ranges, offset, length):
+    offset = max(0, int(offset or 0))
+    remaining = max(0, int(length or 0))
+    cursor = 0
+    chunks = []
+    for physical_start, span in ranges:
+        span = int(span or 0)
+        if remaining <= 0:
+            break
+        if offset >= cursor + span:
+            cursor += span
+            continue
+
+        local_start = max(0, offset - cursor)
+        take = min(span - local_start, remaining)
+        if take > 0:
+            chunks.append(iso.read(int(physical_start) + local_start, take))
+            remaining -= take
+            offset += take
+        cursor += span
+    return b"".join(chunks)
+
+
+def _m2ts_pcr_values(data, logical_offset):
+    by_pid = {}
+    packet_size = 192
+    first_packet = (-int(logical_offset or 0)) % packet_size
+    for offset in range(first_packet, len(data) - packet_size + 1, packet_size):
+        packet = data[offset + 4:offset + packet_size]
+        if len(packet) != 188 or packet[0] != 0x47:
+            continue
+        if not (packet[3] & 0x20):
+            continue
+        adaptation_length = packet[4]
+        if adaptation_length < 7 or adaptation_length > 183 or not (packet[5] & 0x10):
+            continue
+
+        pid = ((packet[1] & 0x1f) << 8) | packet[2]
+        base = (
+            (packet[6] << 25)
+            | (packet[7] << 17)
+            | (packet[8] << 9)
+            | (packet[9] << 1)
+            | (packet[10] >> 7)
+        )
+        extension = ((packet[10] & 1) << 8) | packet[11]
+        by_pid.setdefault(pid, []).append(base * 300 + extension)
+    return by_pid
+
+
+def _m2ts_duration_from_pcr(iso, ranges, file_size, sample_size=8 * 1024 * 1024):
+    if not ranges or file_size <= 0:
+        return 0.0
+    sample_size = min(int(sample_size), int(file_size))
+    tail_offset = max(0, int(file_size) - sample_size)
+    head = _read_file_slice(iso, ranges, 0, sample_size)
+    tail = _read_file_slice(iso, ranges, tail_offset, sample_size)
+    head_values = _m2ts_pcr_values(head, 0)
+    tail_values = _m2ts_pcr_values(tail, tail_offset)
+
+    common_pids = set(head_values) & set(tail_values)
+    if not common_pids:
+        return 0.0
+    pid = max(common_pids, key=lambda key: len(head_values[key]) + len(tail_values[key]))
+    first = head_values[pid][0]
+    last = tail_values[pid][-1]
+    wrap = (1 << 33) * 300
+    if last < first:
+        last += wrap
+    duration = (last - first) / 27000000.0
+    return duration if 0 < duration < 24 * 60 * 60 else 0.0
+
+
+def _probe_m2ts_sample(iso, entry, file_size):
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffprobe"):
+        raise RuntimeError("ffprobe 不可用，无法采样 M2TS")
+
+    ranges = iso.physical_ranges_for_file(entry)
+    if not ranges:
+        raise RuntimeError("主 M2TS 没有可读取的物理区段")
+    probe_size = min(int(file_size), 16 * 1024 * 1024)
+    sample = _read_file_slice(iso, ranges, 0, probe_size)
+    if not sample:
+        raise RuntimeError("主 M2TS 采样为空")
+
+    cmd = [
+        "ffprobe", "-hide_banner", "-v", "error", "-f", "mpegts",
+        "-analyzeduration", "20000000", "-probesize", str(probe_size),
+        "-print_format", "json", "-show_streams", "pipe:0",
+    ]
+    proc = subprocess.run(
+        cmd,
+        input=sample,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        error = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(f"M2TS 采样探测失败: {error[:300]}")
+
+    probe_data = json.loads(proc.stdout or b"{}")
+    streams = probe_data.get("streams") or []
+    if not any(stream.get("codec_type") == "video" for stream in streams):
+        raise RuntimeError("M2TS 采样未识别到视频流")
+    duration = _m2ts_duration_from_pcr(iso, ranges, file_size)
+    return streams, duration
+
+
 def _audio_channels(format_rate, codec_name, file_name):
     text = str(file_name or "").lower()
     if re.search(r"(?<!\d)7[._ ]?1(?!\d)", text):
@@ -697,7 +826,7 @@ def probe_bluray_iso(client, file_node, sha1=None):
     iso = _UdfIsoReader(url, ua)
 
     root = iso.root()
-    bdmv = iso.find(root, "BDMV")
+    bdmv, bdmv_path = _find_bdmv_dir(iso, root)
     if not bdmv:
         raise RuntimeError("ISO 内没有 BDMV 目录")
     playlist_dir = iso.find(bdmv, "PLAYLIST")
@@ -710,10 +839,12 @@ def probe_bluray_iso(client, file_node, sha1=None):
     iso.prefetch_file_entries(stream_entries, max_gap=262144, max_chunk=16 * 1024 * 1024)
     stream_sizes = {}
     stream_ads = {}
+    stream_entries_by_name = {}
     for entry in stream_entries:
         fields, ads, _ = iso.entry_info(entry)
         stream_sizes[entry["name"]] = fields["info_len"]
         stream_ads[entry["name"]] = ads
+        stream_entries_by_name[entry["name"]] = entry
     if not stream_sizes:
         raise RuntimeError("BDMV STREAM 目录为空")
 
@@ -727,12 +858,14 @@ def probe_bluray_iso(client, file_node, sha1=None):
         parsed = _parse_mpls(data, stream_sizes)
         if parsed:
             playlists.append({"name": entry["name"], **parsed})
-    if not playlists:
-        raise RuntimeError("未解析到可用 MPLS")
 
-    playlists.sort(key=lambda item: (item["max_clip_size"], item["unique_size"], item["duration"]), reverse=True)
-    main_playlist = playlists[0]
-    main_clip = max({item["clip"] for item in main_playlist["clips"]}, key=lambda clip: stream_sizes.get(clip, 0))
+    main_playlist = None
+    if playlists:
+        playlists.sort(key=lambda item: (item["max_clip_size"], item["unique_size"], item["duration"]), reverse=True)
+        main_playlist = playlists[0]
+        main_clip = max({item["clip"] for item in main_playlist["clips"]}, key=lambda clip: stream_sizes.get(clip, 0))
+    else:
+        main_clip = max(stream_sizes, key=stream_sizes.get)
 
     clpi_name = os.path.splitext(main_clip)[0] + ".clpi"
     clpi_entry = iso.find(clipinf_dir, clpi_name)
@@ -742,13 +875,23 @@ def probe_bluray_iso(client, file_node, sha1=None):
         iso.prefetch_files([clpi_entry], max_gap=0, max_chunk=1024 * 1024)
         clpi_data = iso.file_data(iso.read_file_entry(clpi_entry), clpi_entry["part"])
         streams = _parse_clpi_streams(clpi_data, name)
+    duration = float((main_playlist or {}).get("duration") or 0)
+    fallback = ""
     if not streams:
-        raise RuntimeError(f"未解析到主片流信息: {clpi_name}")
+        main_stream_entry = stream_entries_by_name.get(main_clip)
+        if not main_stream_entry:
+            raise RuntimeError(f"未找到主片 M2TS: {main_clip}")
+        streams, sampled_duration = _probe_m2ts_sample(
+            iso,
+            main_stream_entry,
+            stream_sizes.get(main_clip, 0),
+        )
+        duration = duration or sampled_duration
+        fallback = "m2ts_sample"
 
     _detect_iso_effects(name, streams)
 
     size = _file_size(file_node)
-    duration = float(main_playlist.get("duration") or 0)
     raw_probe = {
         "format": {
             "filename": name,
@@ -760,10 +903,12 @@ def probe_bluray_iso(client, file_node, sha1=None):
         "streams": streams,
         "chapters": [],
         "_iso_probe": {
-            "main_playlist": main_playlist["name"],
+            "main_playlist": (main_playlist or {}).get("name") or "",
             "main_clip": main_clip,
             "main_clip_size": stream_sizes.get(main_clip, 0),
             "playlist_count": len(playlists),
+            "bdmv_path": "/".join(bdmv_path),
+            "fallback": fallback,
             "range_requests": iso.requests,
             "range_bytes": iso.bytes,
             "url_method": url_method,
