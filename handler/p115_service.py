@@ -5776,6 +5776,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             "hide_audio_channels": False,
             "strm_url_fmt": "standard"
         }
+        self.rename_config.setdefault("customization", P115RenameRenderer.DEFAULT_CUSTOMIZATION)
         raw_rules = settings_db.get_setting('p115_sorting_rules')
         self.rules = []
         

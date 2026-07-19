@@ -5,6 +5,7 @@ import os
 import re
 
 from database import settings_db
+from handler.p115_rename import P115RenameRenderer
 from tasks import helpers
 from tasks.helpers import extract_quality_source_from_filename
 import utils
@@ -35,9 +36,19 @@ class P115MediaAnalyzerMixin:
         """
         info_dict = {
             'source': '', 'effect': '', 'resolution': '', 
-            'codec': '', 'audio': '', 'group': '', 'stream': '', 'fps': '' # ★ 新增 fps 字段
+            'codec': '', 'audio': '', 'group': '', 'stream': '', 'fps': '',
+            'customization': ''
         }
         name_upper = filename.upper()
+
+        rename_config = getattr(self, 'rename_config', {})
+        raw_customization = rename_config.get(
+            'customization', P115RenameRenderer.DEFAULT_CUSTOMIZATION
+        ) if isinstance(rename_config, dict) else P115RenameRenderer.DEFAULT_CUSTOMIZATION
+        customization = P115RenameRenderer.extract_customization(filename, raw_customization)
+        info_dict['customization'] = customization
+        # 保留旧模板变量，但不再维护独立的流媒体硬编码列表。
+        info_dict['stream'] = customization
 
         # 1. 来源 (Source)
         quality_source = extract_quality_source_from_filename(filename)
@@ -107,11 +118,6 @@ class P115MediaAnalyzerMixin:
         fps_match = re.search(r'(?<!\d)(\d{2,3}FPS)\b', name_upper)
         if fps_match:
             info_dict['fps'] = fps_match.group(1).lower() # 统一转为小写 60fps
-
-        # 流媒体平台识别 (扩充国内平台与HQ标识)
-        stream_match = re.search(r'\b(NF|AMZN|DSNP|HMAX|HULU|NETFLIX|DISNEY\+|APPLETV\+|B-GLOBAL|ITUNES|IQ|YK|TC|VIU|HQ)\b', name_upper)
-        if stream_match:
-            info_dict['stream'] = stream_match.group(1)
 
         # 6. 发布组 (Group)
         try:

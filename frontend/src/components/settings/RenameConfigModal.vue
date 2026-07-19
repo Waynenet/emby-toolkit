@@ -150,6 +150,22 @@
 
             <n-divider style="margin: 12px 0;" />
 
+            <n-form-item label="自定义占位符">
+              <n-input
+                v-model:value="config.customization"
+                type="textarea"
+                :autosize="{ minRows: 4, maxRows: 10 }"
+                placeholder="每行一条正则表达式"
+              />
+              <template #feedback>
+                <span style="font-size: 12px; color: gray;">
+                  从原文件名提取匹配内容，多项使用 @ 连接；模板中通过 <code v-pre>{{customization}}</code> 使用。
+                </span>
+              </template>
+            </n-form-item>
+
+            <n-divider style="margin: 12px 0;" />
+
             <n-form-item label="STRM 链接格式">
               <n-radio-group v-model:value="config.strm_url_fmt">
                 <n-space vertical>
@@ -246,7 +262,8 @@ const defaultConfig = {
   file_format: ['title_zh', 'sep_dash_space', 'year', 'sep_middot_space', 's_e', 'sep_middot_space', 'resolution', 'sep_middot_space', 'codec', 'sep_middot_space', 'audio_count', 'sep_space', 'audio', 'sep_middot_space', 'group'],
   video_codec_style: 'hevc',
   hide_audio_channels: false,
-  strm_url_fmt: 'standard'
+  strm_url_fmt: 'standard',
+  customization: '(?<!\\w)(Baha|CR|B-Global|ABEMA|MyVideo|AMZN|KKTV|friDay|DSNP|LINETV|Crunchyroll|IQ|Hulu|HQ|60fps|Paramount\\+|LineTV|Linetv|Disney\\+|FriDay|HMAX|MAX|NF|IQY|IQ|TX|WeTV|YT|YK|Migu|Mgtv|Bilibili|Sohu|Xigua|iTunes)(?!\\w)'
 };
 
 const config = ref({ ...defaultConfig });
@@ -283,9 +300,8 @@ const templateBlocks = [
   { label: '中文季集号 (第 1 季 1 集)', snippet: '{{season_episode_zh}}' },
   { label: '分辨率', snippet: '{{resolution}}' },
   { label: '来源 (WEB-DL等)', snippet: '{{source}}' },
-  { label: '流媒体 (NF等)', snippet: '{{stream}}' },
   { label: '特效 (HDR/DV)', snippet: '{{effect}}' },
-  { label: '特效 customization', snippet: '{{customization}}' },
+  { label: '自定义占位符 customization', snippet: '{{customization}}' },
   { label: '视频编码', snippet: '{{codec | upper}}' },
   { label: '音轨数', snippet: '{{audio_count}}' },
   { label: '音频格式', snippet: '{{audio}}' },
@@ -310,7 +326,7 @@ const mockMovie = {
   en_name: 'Parasite',
   title_orig: '기생충',
   name: '寄生虫',
-  original_name: 'Parasite.2019.REMASTERED.1080p',
+  original_name: 'Parasite.2019.60fps.1080p',
   year: '2019',
   year_pure: '2019',
   title_year: '寄生虫 (2019)',
@@ -329,11 +345,11 @@ const mockMovie = {
   resourceType: 'BluRay',
   videoFormat: '1080p',
   resource_term: 'BluRay HDR 1080p',
-  stream: 'AMZN',
-  webSource: 'AMZN',
+  stream: '60fps',
+  webSource: '60fps',
   effect: 'HDR',
   edition: 'BluRay HDR',
-  customization: 'HDR',
+  customization: '60fps',
   codec: 'AVC',
   videoCodec: 'AVC',
   videoBit: '8bit',
@@ -345,7 +361,7 @@ const mockMovie = {
   group: 'CMCT',
   releaseGroup: 'CMCT',
   fileExt: '.mkv',
-  originalFile: 'Parasite.2019.REMASTERED.1080p.BluRay.x264.mkv'
+  originalFile: 'Parasite.2019.60fps.1080p.BluRay.x264.mkv'
 };
 
 const mockTv = {
@@ -356,7 +372,7 @@ const mockTv = {
   en_name: 'Breaking Bad',
   title_orig: 'Breaking Bad',
   name: '绝命毒师',
-  original_name: 'Breaking.Bad.S01E01.2160p.NF.WEB-DL',
+  original_name: 'Breaking.Bad.S01E01.2160p.friDay.WEB-DL',
   year: '2008',
   year_pure: '2008',
   title_year: '绝命毒师 (2008)',
@@ -391,11 +407,11 @@ const mockTv = {
   resourceType: 'WEB-DL',
   videoFormat: '2160p',
   resource_term: 'WEB-DL HDR 2160p',
-  stream: 'NF',
-  webSource: 'NF',
+  stream: 'friDay',
+  webSource: 'friDay',
   effect: 'HDR',
   edition: 'WEB-DL HDR',
-  customization: 'HDR',
+  customization: 'friDay',
   codec: 'HEVC',
   videoCodec: 'HEVC',
   videoBit: '10bit',
@@ -407,7 +423,7 @@ const mockTv = {
   group: 'HHWEB',
   releaseGroup: 'HHWEB',
   fileExt: '.mp4',
-  originalFile: 'Breaking.Bad.S01E01.2160p.WEB-DL.x265.mp4'
+  originalFile: 'Breaking.Bad.S01E01.2160p.friDay.WEB-DL.x265.mp4'
 };
 
 const insertSnippet = (snippet) => {
@@ -681,6 +697,7 @@ watch(
     keep: config.value.keep_original_name,
     codec: config.value.video_codec_style,
     hideAudio: config.value.hide_audio_channels,
+    customization: config.value.customization,
   }),
   scheduleBackendPreview,
   { deep: true }

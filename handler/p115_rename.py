@@ -12,6 +12,8 @@ _JINJA_ENV = SandboxedEnvironment(autoescape=False)
 
 
 class P115RenameRenderer:
+    DEFAULT_CUSTOMIZATION = r"(?<!\w)(Baha|CR|B-Global|ABEMA|MyVideo|AMZN|KKTV|friDay|DSNP|LINETV|Crunchyroll|IQ|Hulu|HQ|60fps|Paramount\+|LineTV|Linetv|Disney\+|FriDay|HMAX|MAX|NF|IQY|IQ|TX|WeTV|YT|YK|Migu|Mgtv|Bilibili|Sohu|Xigua|iTunes)(?!\w)"
+
     _P115_INVALID_NAME_CHAR_TRANSLATION = str.maketrans({
         '\\': '＼',
         '/': '／',
@@ -96,6 +98,32 @@ class P115RenameRenderer:
             return text, text
         value = match.group(0)
         return f"{value}fps", value
+
+    @staticmethod
+    def extract_customization(filename, raw_rules):
+        if isinstance(raw_rules, str):
+            rules = raw_rules.splitlines()
+        elif isinstance(raw_rules, (list, tuple)):
+            rules = raw_rules
+        else:
+            rules = []
+
+        matches = []
+        seen = set()
+        for raw_rule in rules:
+            rule = str(raw_rule or '').strip()
+            if not rule:
+                continue
+            try:
+                for match in re.finditer(rule, str(filename or '')):
+                    value = match.group(0)
+                    if value and value not in seen:
+                        seen.add(value)
+                        matches.append(value)
+            except re.error as e:
+                logger.warning(f"  ➜ [自定义占位符] 忽略无效正则 '{rule}': {e}")
+
+        return '@'.join(matches)
 
     @classmethod
     def sanitize_name_component(cls, text):
@@ -270,7 +298,7 @@ class P115RenameRenderer:
             'webSource': video_info.get('stream') or '',
             'videoBit': video_info.get('videoBit') or video_info.get('video_bit') or '',
             'resource_term': resource_term,
-            'customization': video_info.get('customization') or effect,
+            'customization': video_info.get('customization') or '',
             'edition': edition,
         }
 

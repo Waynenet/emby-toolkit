@@ -344,6 +344,29 @@ class P115RecognitionRuleTests(unittest.TestCase):
         self.assertEqual(ctx["season_fmt"], "S01")
         self.assertEqual(ctx["episode_title"], "第十三集")
         self.assertEqual(ctx["part"], "2")
+        self.assertEqual(ctx["effect"], "HDR10")
+        self.assertEqual(ctx["customization"], "")
+
+    def test_extract_customization_uses_rule_order_and_deduplicates_matches(self):
+        rules = "\\b(?:REMASTERED|EXTENDED)\\b\n\\b(?:friDay|Baha)\\b"
+        result = p115_service.P115RenameRenderer.extract_customization(
+            "Movie.REMASTERED.friDay.REMASTERED.1080p.mkv",
+            rules,
+        )
+        self.assertEqual(result, "REMASTERED@friDay")
+
+    def test_extract_customization_ignores_invalid_or_empty_rules(self):
+        result = p115_service.P115RenameRenderer.extract_customization(
+            "Movie.REMASTERED.mkv",
+            "[invalid\n\n\\bREMASTERED\\b",
+        )
+        self.assertEqual(result, "REMASTERED")
+
+        default_result = p115_service.P115RenameRenderer.extract_customization(
+            "Show.Disney+.Paramount+.friDay.mkv",
+            p115_service.P115RenameRenderer.DEFAULT_CUSTOMIZATION,
+        )
+        self.assertEqual(default_result, "Disney+@Paramount+@friDay")
 
     def test_rename_renderer_applies_display_preferences(self):
         renderer = p115_service.P115RenameRenderer(
