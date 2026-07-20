@@ -49,6 +49,22 @@ def clear_all_strm_cache():
 # ==========================================
 MISSING_ID_PREFIX = "-800000_"
 
+def _build_forward_uri(path, query_bytes, api_key):
+    """
+    安全、精准地拼接带有 api_key 的 Nginx 内部转发路径。
+    """
+    safe_path = quote(path, safe='/')  # 确保保留斜杠
+    query_string = query_bytes.decode('utf-8') if isinstance(query_bytes, bytes) else str(query_bytes or "")
+    
+    if query_string:
+        # 使用 \b (单词边界) 精准匹配独立的 api_key=，避免被 custom_api_key 干扰
+        if not re.search(r'\bapi_key=', query_string):
+            return f"/internal_emby_forward/{safe_path.lstrip('/')}?{query_string}&api_key={api_key}"
+        else:
+            return f"/internal_emby_forward/{safe_path.lstrip('/')}?{query_string}"
+    else:
+        return f"/internal_emby_forward/{safe_path.lstrip('/')}?api_key={api_key}"
+
 def to_missing_item_id(tmdb_id): 
     return f"{MISSING_ID_PREFIX}{tmdb_id}"
 
@@ -203,7 +219,7 @@ def _fetch_items_in_chunks(base_url, api_key, user_id, item_ids, fields):
     def fetch_chunk(chunk):
         params = {'api_key': api_key, 'Ids': ",".join(chunk), 'Fields': fields}
         try:
-            resp = requests.get(target_url, params=params, timeout=20)
+            resp = http_session.get(target_url, params=params, timeout=20)
             resp.raise_for_status()
             return resp.json().get("Items", [])
         except Exception as e:
@@ -242,7 +258,7 @@ def _fetch_sorted_items_via_emby_proxy(user_id, item_ids, sort_by, sort_order, l
                 'SortBy': sort_by, 'SortOrder': sort_order,
                 'StartIndex': offset, 'Limit': limit,
             }
-            resp = requests.get(target_url, params=emby_params, timeout=25)
+            resp = http_session.get(target_url, params=emby_params, timeout=25)
             resp.raise_for_status()
             emby_data = resp.json()
             # 注意：Emby 返回的 TotalRecordCount 是经过权限过滤后的数量
@@ -321,7 +337,7 @@ def handle_get_views():
             headers['Host'] = urlparse(base_url).netloc
             params = request.args.copy()
             params['api_key'] = api_key
-            resp = requests.get(
+            resp = http_session.get(
                 target_url,
                 headers=headers,
                 params=params,
@@ -469,7 +485,7 @@ def handle_get_mimicked_library_image(path):
         params.pop('tag', None)
         params.pop('Tag', None)
         params['api_key'] = api_key
-        resp = requests.get(image_url, headers=headers, stream=True, params=params)
+        resp = http_session.get(image_url, headers=headers, stream=True, params=params)
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_headers]
         return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
@@ -512,7 +528,7 @@ def handle_mimicked_library_metadata_endpoint(path, mimicked_id, params):
         new_params['ParentId'] = real_emby_collection_id
         new_params['api_key'] = api_key
         
-        resp = requests.get(target_url, headers=headers, params=new_params, timeout=15)
+        resp = http_session.get(target_url, headers=headers, params=new_params, timeout=15)
         resp.raise_for_status()
         
         return Response(resp.content, resp.status_code, content_type=resp.headers.get('Content-Type'))
@@ -947,7 +963,7 @@ def handle_get_latest_items(user_id, params):
             forward_headers['Host'] = urlparse(base_url).netloc
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
-            resp = requests.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), stream=True, timeout=30.0)
+            resp = http_session.request(method=request.method, url=target_url, headers=forward_headers, params=forward_params, data=request.get_data(), stream=True, timeout=30.0)
             excluded_resp_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
             response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_resp_headers]
             return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
@@ -969,6 +985,13 @@ def handle_get_latest_items(user_id, params):
 # ==========================================
 # 核心反代入口
 # ==========================================
+
+# 初始化全局反代连接池
+http_session = requests.Session()
+# 适当调大默认连接池大小（默认只有 10），应对高并发反代
+adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=150)
+http_session.mount('http://', adapter)
+http_session.mount('https://', adapter)
 
 proxy_app = Flask(__name__)
 
@@ -1046,7 +1069,7 @@ def proxy_all(path):
                             'PlaySessionId': play_session_id
                         }
                         
-                        pb_resp = requests.get(pb_url, params=pb_params, timeout=10)
+                        pb_resp = http_session.get(pb_url, params=pb_params, timeout=10)
                         if pb_resp.status_code == 200:
                             media_sources = pb_resp.json().get('MediaSources', [])
                             target_source = None
@@ -1078,7 +1101,7 @@ def proxy_all(path):
                                     }
                                     
                                     try:
-                                        strm_resp = requests.get(
+                                        strm_resp = http_session.get(
                                             file_path, 
                                             headers=req_headers, 
                                             allow_redirects=True, 
@@ -1108,25 +1131,13 @@ def proxy_all(path):
             # --- 流回退：交给 Nginx 处理，彻底解放 Python ---
             base_url, api_key = _get_real_emby_url_and_key()
             
-            # 【修复点】保留斜杠，仅对路径中的中文、空格等特殊字符安全编码
-            safe_path = quote(path, safe='/')
-            query_string = request.query_string.decode('utf-8')
-            forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
-            
-            if query_string:
-                if "api_key=" not in query_string:
-                    forward_uri += f"?{query_string}&api_key={api_key}"
-                else:
-                    forward_uri += f"?{query_string}"
-            else:
-                forward_uri += f"?api_key={api_key}"
+            # 使用辅助函数安全拼接
+            forward_uri = _build_forward_uri(path, request.query_string, api_key)
 
             # 构造空响应，仅携带 X-Accel-Redirect 头
             nginx_response = Response(status=200)
             nginx_response.headers['X-Accel-Redirect'] = forward_uri
             
-            # 如果之前有拦截到的 Emby 302 重定向，可以直接抛给客户端
-            # 但这里作为原生流回退，直接让 Nginx 代理即可
             logger.debug(f"[X-Accel-Redirect] 释放视频流压力给 Nginx: {forward_uri}")
             return nginx_response
         
@@ -1201,18 +1212,8 @@ def proxy_all(path):
         
         # 【分支 1】：GET / HEAD 请求（获取数据/图片/流），交给 Nginx 内部重定向，0 性能消耗
         if request.method in ['GET', 'HEAD']:
-            # 【修复点】保留斜杠，仅对路径中的中文、空格等特殊字符安全编码
-            safe_path = quote(path, safe='/')
-            query_string = request.query_string.decode('utf-8')
-            forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
-            
-            if query_string:
-                if 'api_key=' not in query_string:
-                    forward_uri += f"?{query_string}&api_key={api_key}"
-                else:
-                    forward_uri += f"?{query_string}"
-            else:
-                forward_uri += f"?api_key={api_key}"
+            # 使用辅助函数安全拼接
+            forward_uri = _build_forward_uri(path, request.query_string, api_key)
 
             nginx_response = Response(status=200)
             nginx_response.headers['X-Accel-Redirect'] = forward_uri
@@ -1230,7 +1231,7 @@ def proxy_all(path):
             forward_params = request.args.copy()
             forward_params['api_key'] = api_key
             
-            resp = requests.request(
+            resp = http_session.request(
                 method=request.method, 
                 url=target_url, 
                 headers=forward_headers,
