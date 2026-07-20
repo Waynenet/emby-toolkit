@@ -754,6 +754,9 @@ def handle_get_mimicked_library_items(user_id, mimicked_id, params):
                 
                 return Response(json.dumps({"Items": final_items, "TotalRecordCount": reported_total_count}), mimetype='application/json')
 
+            # 🟢 【新增修复点】如果榜单为空（真空壳），直接返回符合 Emby 格式的标准空响应，避免返回 None 导致报错
+            return Response(json.dumps({"Items": [], "TotalRecordCount": 0}), mimetype='application/json')
+
         # --- 场景 B: 筛选/推荐类 (修复灰色占位符) ---
         else:
             if collection_type in ['ai_recommendation', 'ai_recommendation_global']:
