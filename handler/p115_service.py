@@ -3918,7 +3918,8 @@ class P115CacheManager:
         washing_level=None, washing_snapshot_json=None,
     ):
         """专门将文件(fc=1)的 SHA1、PC码、本地相对路径、大小和洗版快照存入本地数据库缓存"""
-        if not fid or not parent_id or not name: return
+        if not fid or not parent_id or not name:
+            return False
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
@@ -3953,8 +3954,10 @@ class P115CacheManager:
                         Json(washing_snapshot_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if washing_snapshot_json else None
                     ))
                     conn.commit()
+                    return True
         except Exception as e:
             logger.error(f"  ➜ 写入 115 文件缓存失败: {e}")
+            return False
 
 
     @staticmethod
@@ -5436,6 +5439,112 @@ class P115RecordManager:
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 整理记录失败: {e}")
+
+    @staticmethod
+    def add_missing_records(records):
+        """批量补充缺失的整理记录，已有记录及其人工修正保持不变。"""
+        if not records:
+            return 0
+
+        values = []
+        for record in records:
+            file_id = str(record.get('file_id') or '').strip()
+            original_name = str(record.get('original_name') or '').strip()
+            if not file_id or not original_name:
+                continue
+            values.append((
+                file_id,
+                str(record.get('pick_code') or '').strip() or None,
+                original_name,
+                str(record.get('sha1') or '').strip().upper() or None,
+                str(record.get('target_cid') or '').strip() or None,
+                str(record.get('category_name') or '').strip() or None,
+                str(record.get('renamed_name') or original_name).strip(),
+                str(record.get('media_type') or '').strip() or None,
+            ))
+
+        if not values:
+            return 0
+
+        try:
+            from psycopg2.extras import execute_values
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    inserted = execute_values(cursor, """
+                        WITH scanned (
+                            file_id, pick_code, original_name, sha1,
+                            target_cid, category_name, renamed_name, rule_media_type
+                        ) AS (VALUES %s)
+                        INSERT INTO p115_organize_records (
+                            file_id, pick_code, original_name, status, tmdb_id, media_type,
+                            target_cid, category_name, renamed_name, processed_at, season_number
+                        )
+                        SELECT
+                            scanned.file_id,
+                            scanned.pick_code,
+                            scanned.original_name,
+                            'success',
+                            CASE
+                                WHEN LOWER(metadata.item_type) = 'movie' THEN metadata.tmdb_id
+                                WHEN LOWER(metadata.item_type) IN ('series', 'season', 'episode')
+                                    THEN COALESCE(metadata.parent_series_tmdb_id, metadata.tmdb_id)
+                                ELSE NULL
+                            END,
+                            COALESCE(
+                                CASE
+                                    WHEN LOWER(metadata.item_type) = 'movie' THEN 'movie'
+                                    WHEN LOWER(metadata.item_type) IN ('series', 'season', 'episode') THEN 'tv'
+                                    ELSE NULL
+                                END,
+                                NULLIF(scanned.rule_media_type, 'all')
+                            ),
+                            scanned.target_cid,
+                            scanned.category_name,
+                            scanned.renamed_name,
+                            NOW(),
+                            metadata.season_number
+                        FROM scanned
+                        LEFT JOIN LATERAL (
+                            SELECT
+                                m.tmdb_id,
+                                m.item_type,
+                                m.parent_series_tmdb_id,
+                                m.season_number
+                            FROM media_metadata m
+                            WHERE (
+                                scanned.pick_code IS NOT NULL
+                                AND m.file_pickcode_json ? scanned.pick_code
+                            ) OR (
+                                scanned.sha1 IS NOT NULL
+                                AND (
+                                    m.file_sha1_json ? scanned.sha1
+                                    OR m.file_sha1_json ? LOWER(scanned.sha1)
+                                )
+                            )
+                            ORDER BY
+                                CASE WHEN scanned.pick_code IS NOT NULL
+                                    AND m.file_pickcode_json ? scanned.pick_code THEN 0 ELSE 1 END,
+                                CASE m.item_type
+                                    WHEN 'Movie' THEN 1
+                                    WHEN 'Episode' THEN 2
+                                    WHEN 'Season' THEN 3
+                                    WHEN 'Series' THEN 4
+                                    ELSE 9
+                                END,
+                                m.in_library DESC,
+                                m.last_updated_at DESC NULLS LAST
+                            LIMIT 1
+                        ) metadata ON TRUE
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    """, values, page_size=500, fetch=True)
+                    conn.commit()
+                    return len(inserted or [])
+        except Exception as e:
+            logger.error(f"  ➜ 批量补充 115 整理记录失败: {e}")
+            return None
+
     @staticmethod
     def delete_records(file_ids):
         """批量删除整理记录 (用于洗版替换时清理旧记录)"""
