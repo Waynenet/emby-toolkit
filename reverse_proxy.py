@@ -1108,8 +1108,8 @@ def proxy_all(path):
             # --- 流回退：交给 Nginx 处理，彻底解放 Python ---
             base_url, api_key = _get_real_emby_url_and_key()
             
-            # 【修复点】对带有中文名/空格的视频路径安全 URL 编码，并阻止 api_key 重叠追加
-            safe_path = quote(path)
+            # 【修复点】保留斜杠，仅对路径中的中文、空格等特殊字符安全编码
+            safe_path = quote(path, safe='/')
             query_string = request.query_string.decode('utf-8')
             forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
             
@@ -1201,8 +1201,8 @@ def proxy_all(path):
         
         # 【分支 1】：GET / HEAD 请求（获取数据/图片/流），交给 Nginx 内部重定向，0 性能消耗
         if request.method in ['GET', 'HEAD']:
-            # 【修复点】同样对兜底路由做路径安全 URL 编码和去重复 api_key 保护
-            safe_path = quote(path)
+            # 【修复点】保留斜杠，仅对路径中的中文、空格等特殊字符安全编码
+            safe_path = quote(path, safe='/')
             query_string = request.query_string.decode('utf-8')
             forward_uri = f"/internal_emby_forward/{safe_path.lstrip('/')}"
             
