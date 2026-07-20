@@ -3520,7 +3520,6 @@ class P115Service:
 class P115CacheManager:
     _rapid_preid_hints = LimitedCache(maxsize=10000)
     _rapid_preid_hints_lock = threading.Lock()
-    _RAW_ETK_BACKFILL_VERSION = 1
 
     @staticmethod
     def _merge_center_intro_before_mediainfo_cache(sha1: str, mediainfo_json):
@@ -4404,7 +4403,7 @@ class P115CacheManager:
             # season_number / episode_number 是媒体身份的一部分，上传到中心后可避免消费端再次从文件名正则猜集号。
             allowed = {
                 "tmdb_id", "type", "original_language", "sha1", "preid",
-                "season_number", "episode_number", "quality_source", "backfill_version",
+                "season_number", "episode_number", "quality_source",
             }
             raw_ffprobe_json["_etk"] = {
                 k: v for k, v in ctx.items()
@@ -5110,15 +5109,16 @@ class P115CacheManager:
                     raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                     ctx = raw_probe.get('_etk') if isinstance(raw_probe.get('_etk'), dict) else {}
-                    has_useful_etk = P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
-                    try:
-                        backfill_version = int(ctx.get('backfill_version') or 0)
-                    except (TypeError, ValueError):
-                        backfill_version = 0
-                    need_backfill = (
-                        not has_useful_etk
-                        or backfill_version < P115CacheManager._RAW_ETK_BACKFILL_VERSION
-                    )
+                    need_backfill = not P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
+
+                    # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / preid / 季集号。
+                    if not ctx.get('original_language') or not ctx.get('sha1') or not P115CacheManager._norm_preid(ctx.get('preid')):
+                        need_backfill = True
+                    if not ctx.get('quality_source'):
+                        need_backfill = True
+                    if str(ctx.get('type') or '').strip().lower() in ('tv', 'series', 'season', 'episode'):
+                        if ctx.get('season_number') in (None, '') or ctx.get('episode_number') in (None, ''):
+                            need_backfill = True
 
                     if need_backfill:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
@@ -5126,9 +5126,9 @@ class P115CacheManager:
                         if quality_source:
                             local_ctx = dict(local_ctx or {})
                             local_ctx['quality_source'] = quality_source
-                        if local_ctx or has_useful_etk:
+                        if local_ctx:
                             clean_ctx = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
-                            if has_useful_etk:
+                            if P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe):
                                 # 已有可用身份时，尊重旧 _etk，仅补齐缺失字段。
                                 merged_ctx = {}
                                 merged_ctx.update(local_ctx)
@@ -5141,14 +5141,7 @@ class P115CacheManager:
 
                             # sha1 必须以当前查询值为准。
                             merged_ctx['sha1'] = sha1
-                            if merged_ctx.get('tmdb_id') and merged_ctx.get('type'):
-                                merged_ctx['backfill_version'] = P115CacheManager._RAW_ETK_BACKFILL_VERSION
-                            merged_ctx = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
-
-                            if merged_ctx == ctx:
-                                return raw_probe
-
-                            raw_probe['_etk'] = merged_ctx
+                            raw_probe['_etk'] = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
                             raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                             cursor.execute(
