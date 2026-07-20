@@ -67,6 +67,71 @@ class SubscribeAssistantManager:
         self.cfg = assistant_config or get_config()
         self._title_cache: Dict[str, str] = {}
 
+    def sync_movie(self, *, tmdb_id: str, movie_name: str = "") -> int:
+        """电影入库后，按本地洗版等级收口对应的 MP 订阅。"""
+        if not self.cfg.enabled:
+            return 0
+
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id:
+            return 0
+
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT title, washing_level
+                        FROM media_metadata
+                        WHERE tmdb_id = %s
+                          AND item_type = 'Movie'
+                          AND in_library = TRUE
+                        LIMIT 1
+                        """,
+                        (tmdb_id,),
+                    )
+                    movie = cursor.fetchone()
+        except Exception as e:
+            logger.warning("  ➜ [订阅助手] 查询电影入库优先级失败：TMDb %s -> %s", tmdb_id, e)
+            return 0
+
+        if not movie:
+            return 0
+
+        title = movie_name or movie.get("title") or tmdb_id
+        washing_level = _safe_int(movie.get("washing_level"))
+        subscriptions = [
+            sub
+            for sub in moviepilot.find_subscriptions(tmdb_id, config=self.app_config)
+            if self._mp_subscription_item_type(sub) == "Movie"
+        ]
+
+        deleted = 0
+        for sub in subscriptions:
+            washing_enabled = _safe_int(sub.get("best_version")) == 1
+            if washing_enabled and washing_level != 1:
+                logger.debug(
+                    "  ➜ [订阅助手] 《%s》MP 洗版订阅继续保留，本地优先级=%s。",
+                    title,
+                    washing_level or "未知",
+                )
+                continue
+
+            subscribe_id = _safe_int(sub.get("id"))
+            if subscribe_id <= 0:
+                logger.warning("  ➜ [订阅助手] 《%s》MP 电影订阅缺少 ID，无法删除。", title)
+                continue
+            if not moviepilot.delete_subscription_by_id(subscribe_id, self.app_config):
+                logger.warning("  ➜ [订阅助手] 《%s》MP 电影订阅删除失败：ID=%s。", title, subscribe_id)
+                continue
+
+            reason = "电影已入库" if not washing_enabled else "电影已入库且优先级达到 1"
+            self._remove_subscription_state(subscribe_id, sub, reason="movie_library_closeout")
+            self._clear_torrents_for_subscription(subscribe_id, reason)
+            logger.info("  ➜ [订阅助手] 《%s》%s，已删除 MP 订阅。", title, reason)
+            deleted += 1
+        return deleted
+
     def sync_series(
         self,
         *,

@@ -1075,6 +1075,13 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
             expected_item_type="Movie",
             log_prefix="Emby事件电影指纹补齐",
         )
+        try:
+            SubscribeAssistantManager(processor.config).sync_movie(
+                tmdb_id=tmdb_id,
+                movie_name=item_name_for_log,
+            )
+        except Exception as e:
+            logger.warning(f"  ➜ [订阅助手] 电影入库收口失败：《{item_name_for_log}》 -> {e}", exc_info=True)
     elif item_type == "Series" and precise_new_episode_ids:
         _repair_webhook_p115_fingerprints_for_emby_ids(
             processor,
