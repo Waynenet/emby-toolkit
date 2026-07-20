@@ -221,7 +221,7 @@ def proxy_emby_image(image_path):
 
             # 没找到则返回一个默认占位海报进行兜底
             from handler.poster_generator import get_missing_poster
-            img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED")
+            img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED", poster_path=None)
             if img_file_path and os.path.exists(img_file_path):
                 resp = send_file(img_file_path, mimetype='image/jpeg')
                 resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
