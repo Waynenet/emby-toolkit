@@ -1694,8 +1694,6 @@ def translate_tmdb_metadata_recursively(
             
             # --- 第 1 步：清洗并检验 TMDb 官方数据的纯洁性 ---
             tmdb_overview = utils.clean_invisible_chars(raw_tmdb_overview)
-            if utils.is_spam_title(tmdb_overview):
-                tmdb_overview = "" # 发现广告，直接击杀，当它不存在
             
             # --- 第 2 步：仲裁逻辑 ---
             if tmdb_overview and utils.contains_chinese(tmdb_overview):
@@ -1728,8 +1726,6 @@ def translate_tmdb_metadata_recursively(
         if translate_title_enabled:
             raw_title = data_dict.get(title_key) or ''
             current_title = utils.clean_invisible_chars(raw_title)
-            if utils.is_spam_title(current_title):
-                current_title = ""
             
             if current_title and utils.contains_chinese(current_title):
                 # TMDb 官方有干净中文，无条件使用
