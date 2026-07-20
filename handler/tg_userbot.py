@@ -9,11 +9,13 @@ import time
 import urllib.parse
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
+from telethon.sessions import SQLiteSession, StringSession
 
 import config_manager
 import constants
 from database import settings_db
 from handler.p115_service import P115Service, P115CacheManager
+from handler.shared_center_client import SharedCenterClient
 from utils import DEFAULT_TG_REGEX
 from handler.tg_media_candidate import (
     build_channel_task_payload,
@@ -41,6 +43,10 @@ class TGUserBotManager:
         self.session_path = os.path.join(config_manager.PERSISTENT_DATA_PATH, 'tg_userbot.session')
         self.session_journal_path = self.session_path + '-journal'
         self.phone_code_hash = None
+        self.pending_login_session = None
+        self.login_handoff_in_progress = False
+        self.client_ready_event = threading.Event()
+        self.client_startup_error = None
 
     @classmethod
     def get_instance(cls):
@@ -53,8 +59,8 @@ class TGUserBotManager:
         cfg = settings_db.get_setting('tg_userbot_config') or {}
         return {
             'enabled': cfg.get('enabled', False),
-            'api_id': cfg.get('api_id', ''),
-            'api_hash': cfg.get('api_hash', ''),
+            'api_id': constants.TELEGRAM_USERBOT_API_ID,
+            'api_hash': constants.TELEGRAM_USERBOT_API_HASH_PLACEHOLDER,
             'phone': cfg.get('phone', ''),
             'password': cfg.get('password', ''),
             'channels': cfg.get('channels', []),
@@ -162,7 +168,7 @@ class TGUserBotManager:
     def start(self):
         """启动后台线程"""
         cfg = self._get_config()
-        if not cfg['enabled'] or not cfg['api_id'] or not cfg['api_hash']:
+        if not cfg['enabled']:
             if self.is_running:
                 logger.info("  ➜ [频道监听] 监听已在配置中关闭，正在停止服务...")
                 self.stop()
@@ -174,95 +180,145 @@ class TGUserBotManager:
         self.stop() 
 
         self.is_running = True
+        self.client_startup_error = None
+        self.client_ready_event.clear()
         self.thread = threading.Thread(target=self._run_loop, daemon=True, name="TG_UserBot_Thread")
         self.thread.start()
 
     def stop(self):
         """停止后台线程"""
         self.is_running = False
-        if self.client and self.loop and self.loop.is_running():
+        self.login_handoff_in_progress = False
+        client = self.client
+        loop = self.loop
+        thread = self.thread
+
+        if client and loop and loop.is_running():
+            async def _disconnect():
+                await client.disconnect()
+
             try:
-                asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(timeout=3)
-            except Exception:
-                pass
-                
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2)
-            
-        self.client = None
-        self.loop = None
+                asyncio.run_coroutine_threadsafe(_disconnect(), loop).result(timeout=15)
+            except Exception as e:
+                logger.warning(f"  ➜ [频道监听] 等待 Telegram 客户端断开时出现异常: {e}")
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=15)
+        if thread and thread.is_alive():
+            raise RuntimeError("Telegram 客户端仍在停止中，请稍后重试")
+
+        if self.client is client:
+            self.client = None
+        if self.loop is loop:
+            self.loop = None
+        if self.thread is thread:
+            self.thread = None
+        self.client_ready_event.clear()
+
+    @staticmethod
+    def _get_telethon_proxy():
+        app_cfg = config_manager.APP_CONFIG
+        if not (
+            app_cfg.get(constants.CONFIG_OPTION_NETWORK_PROXY_ENABLED)
+            and app_cfg.get(constants.CONFIG_OPTION_NETWORK_HTTP_PROXY)
+        ):
+            return None
+
+        from urllib.parse import urlparse
+
+        parsed = urlparse(app_cfg.get(constants.CONFIG_OPTION_NETWORK_HTTP_PROXY))
+        scheme = parsed.scheme.lower()
+        proxy = {
+            'proxy_type': 'socks5' if scheme == 'socks5' else ('socks4' if scheme == 'socks4' else 'http'),
+            'addr': parsed.hostname,
+            'port': parsed.port,
+        }
+        if parsed.username and parsed.password:
+            proxy['username'] = parsed.username
+            proxy['password'] = parsed.password
+        return proxy
 
     def _run_loop(self):
         """在独立线程中运行 asyncio 事件循环"""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        loop = asyncio.new_event_loop()
+        self.loop = loop
+        asyncio.set_event_loop(loop)
+        client = None
         
         cfg = self._get_config()
         try:
-            telethon_proxy = None
-            app_cfg = config_manager.APP_CONFIG
-            if app_cfg.get(constants.CONFIG_OPTION_NETWORK_PROXY_ENABLED) and app_cfg.get(constants.CONFIG_OPTION_NETWORK_HTTP_PROXY):
-                proxy_url = app_cfg.get(constants.CONFIG_OPTION_NETWORK_HTTP_PROXY)
-                try:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(proxy_url)
-                    scheme = parsed.scheme.lower()
-                    p_type = 'socks5' if scheme == 'socks5' else ('socks4' if scheme == 'socks4' else 'http')
-                    telethon_proxy = {
-                        'proxy_type': p_type,
-                        'addr': parsed.hostname,
-                        'port': parsed.port
-                    }
-                    if parsed.username and parsed.password:
-                        telethon_proxy['username'] = parsed.username
-                        telethon_proxy['password'] = parsed.password
-                except Exception as e:
-                    logger.warning(f"  ➜ [频道监听] 解析代理 URL 失败: {e}")
+            try:
+                telethon_proxy = self._get_telethon_proxy()
+            except Exception as e:
+                telethon_proxy = None
+                logger.warning(f"  ➜ [频道监听] 解析代理 URL 失败: {e}")
 
-            self.client = TelegramClient(
+            client = TelegramClient(
                 self.session_path, 
                 int(cfg['api_id']), 
                 cfg['api_hash'], 
-                loop=self.loop,
+                loop=loop,
                 proxy=telethon_proxy
             )
+            self.client = client
             
-            @self.client.on(events.NewMessage())
+            @client.on(events.NewMessage())
             async def handler(event):
                 await self._handle_message(event)
 
             async def _daemon():
-                await self.client.connect()
+                await client.connect()
+                self.client_ready_event.set()
                 
                 try:
-                    is_auth = await self.client.is_user_authorized()
+                    is_auth = await client.is_user_authorized()
                 except AuthKeyUnregisteredError:
                     logger.error("  ➜ [频道监听] 登录凭证已失效 (AuthKeyUnregistered)。已自动清理，请在前端重新登录！")
-                    if self.client:
-                        await self.client.disconnect()
+                    await client.disconnect()
                     if os.path.exists(self.session_path):
                         os.remove(self.session_path)
                     return 
 
                 if is_auth:
                     logger.info("  ➜ [频道监听] 服务已启动，开始监听频道消息...")
-                    await self.client.run_until_disconnected()
+                    await client.run_until_disconnected()
                 else:
                     logger.info("  ➜ [频道监听] Telegram 客户端已连接，等待前端输入验证码授权...")
                     while self.is_running:
-                        if await self.client.is_user_authorized():
+                        if self.login_handoff_in_progress:
+                            await asyncio.sleep(0.2)
+                            continue
+                        if await client.is_user_authorized():
                             logger.info("  ➜ [频道监听] 授权成功，开始监听频道消息...")
-                            await self.client.run_until_disconnected()
+                            await client.run_until_disconnected()
                             break
                         await asyncio.sleep(2)
 
-            self.loop.run_until_complete(_daemon())
+            loop.run_until_complete(_daemon())
             
+        except asyncio.CancelledError as e:
+            self.client_startup_error = e
+            if self.is_running:
+                logger.error("  ➜ [频道监听] Telegram 客户端初始化被取消", exc_info=True)
         except Exception as e:
+            self.client_startup_error = e
             logger.error(f"  ➜ [频道监听] 运行异常: {e}", exc_info=True)
         finally:
             self.is_running = False
-            self.loop.close()
+            self.client_ready_event.set()
+            if client and client.session:
+                try:
+                    client.session.close()
+                except Exception:
+                    pass
+            if not loop.is_closed():
+                loop.close()
+            if self.client is client:
+                self.client = None
+            if self.loop is loop:
+                self.loop = None
+            if self.thread is threading.current_thread():
+                self.thread = None
 
     async def _handle_message(self, event):
         """处理收到的消息 (在 asyncio 线程中运行)"""
@@ -933,6 +989,8 @@ class TGUserBotManager:
     # 以下是供前端 API 调用的登录交互方法 (保持不变)
     # ==========================================
     def get_status(self):
+        if self.login_handoff_in_progress:
+            return {"status": "authorizing"}
         if not self.client or not self.loop:
             return {"status": "stopped", "msg": "服务未启动"}
         
@@ -950,58 +1008,124 @@ class TGUserBotManager:
             raise Exception("未配置手机号")
         if not phone.startswith('+'):
             raise Exception("手机号格式错误，必须以 '+' 号开头，例如: +8613800138000")
-        
-        if not self.is_running or not self.loop or not self.client:
-            logger.info("  ➜ [频道监听] 正在唤醒后台服务以发送验证码...")
-            self.start()
-            import time
-            time.sleep(2.5) 
-            
-        if not self.loop or not self.client:
-            raise Exception("UserBot 服务启动失败，请检查 API ID 和 Hash 是否正确")
 
-        async def _send():
+        self.stop()
+        self.phone_code_hash = None
+        self.pending_login_session = None
+        self.login_handoff_in_progress = True
+
+        async def _create_login_session():
+            login_client = TelegramClient(
+                StringSession(),
+                int(cfg['api_id']),
+                cfg['api_hash'],
+                connection_retries=2,
+                timeout=10,
+                proxy=self._get_telethon_proxy(),
+            )
             try:
-                logger.info(f"  ➜ [频道监听] 正在向 TG 服务器请求发送验证码至 {phone}...")
-                if not self.client.is_connected(): 
-                    await self.client.connect()
-                res = await self.client.send_code_request(phone)
-                self.phone_code_hash = res.phone_code_hash
-                logger.info("  ➜ [频道监听] 验证码发送请求已成功响应！")
-                return True
-            except Exception as e:
-                logger.error(f"  ➜ [频道监听] 发送验证码被 TG 拒绝: {e}")
-                raise e
-            
-        future = asyncio.run_coroutine_threadsafe(_send(), self.loop)
-        
+                await asyncio.wait_for(login_client.connect(), timeout=30)
+                telegram_session = StringSession.save(login_client.session)
+                if not telegram_session:
+                    raise Exception("无法生成 Telegram 登录会话")
+                return telegram_session
+            finally:
+                if login_client.is_connected():
+                    await login_client.disconnect()
+
         try:
-            return future.result(timeout=20)
-        except TimeoutError:
-            logger.warning("  ➜ [频道监听] 请求验证码超时！但后台仍在尝试发送。")
-            return True
+            telegram_session = asyncio.run(_create_login_session())
+            logger.info("  ➜ [频道监听] 正在通过中心服务请求 Telegram 登录验证码...")
+            result = SharedCenterClient().send_telegram_login_code(phone, telegram_session)
+            updated_session = str(result.get('telegram_session') or '').strip()
+            if not updated_session:
+                raise Exception("中心服务未返回更新后的 Telegram 登录会话")
+            phone_code_hash = str(result.get('phone_code_hash') or '').strip()
+            if not phone_code_hash:
+                raise Exception("中心服务未返回 Telegram 登录上下文")
+            self.pending_login_session = updated_session
+            self.phone_code_hash = phone_code_hash
+        except asyncio.TimeoutError as e:
+            self.login_handoff_in_progress = False
+            raise Exception("连接 Telegram 超时，请检查网络后重试") from e
+        except Exception:
+            self.login_handoff_in_progress = False
+            raise
+
+        logger.info("  ➜ [频道监听] Telegram 验证码发送请求已成功响应！")
+        return result
 
     def submit_login_code(self, code):
         cfg = self._get_config()
+        if not self.phone_code_hash or not self.pending_login_session:
+            raise Exception("登录上下文已失效，请重新获取验证码")
+
+        pending_login_session = self.pending_login_session
+        phone_code_hash = self.phone_code_hash
+
         async def _submit():
+            login_client = TelegramClient(
+                StringSession(pending_login_session),
+                int(cfg['api_id']),
+                cfg['api_hash'],
+                connection_retries=2,
+                timeout=10,
+                proxy=self._get_telethon_proxy(),
+            )
             try:
                 logger.info("  ➜ [频道监听] 正在向 TG 服务器提交验证码...")
-                await self.client.sign_in(cfg['phone'], code, phone_code_hash=self.phone_code_hash)
+                await asyncio.wait_for(login_client.connect(), timeout=30)
+                await asyncio.wait_for(
+                    login_client.sign_in(cfg['phone'], code, phone_code_hash=phone_code_hash),
+                    timeout=30,
+                )
                 logger.info("  ➜ [频道监听] 验证码校验通过！")
-                return {"success": True}
             except SessionPasswordNeededError:
                 if not cfg['password']:
                     return {"success": False, "need_2fa": True, "msg": "需要两步验证密码，请在配置中填写后重试"}
                 logger.info("  ➜ [频道监听] 正在提交两步验证密码...")
-                await self.client.sign_in(password=cfg['password'])
+                await asyncio.wait_for(login_client.sign_in(password=cfg['password']), timeout=30)
                 logger.info("  ➜ [频道监听] 两步验证密码校验通过！")
-                return {"success": True}
             except Exception as e:
                 logger.error(f"  ➜ [频道监听] 提交验证码失败: {e}")
-                raise e
-                
-        future = asyncio.run_coroutine_threadsafe(_submit(), self.loop)
-        return future.result(timeout=60)
+                raise
+            finally:
+                if login_client.is_connected():
+                    await login_client.disconnect()
+
+            authorized_session = StringSession.save(login_client.session)
+            if not authorized_session:
+                raise Exception("无法保存 Telegram 授权会话")
+            return {"success": True, "telegram_session": authorized_session}
+
+        try:
+            result = asyncio.run(_submit())
+        except asyncio.TimeoutError as e:
+            raise Exception("连接 Telegram 超时，请稍后重试") from e
+        if not result.get('success'):
+            return result
+
+        authorized_session = StringSession(result.pop('telegram_session'))
+        for path in (self.session_path, self.session_journal_path):
+            if os.path.exists(path):
+                os.remove(path)
+        sqlite_session = SQLiteSession(self.session_path)
+        try:
+            sqlite_session.set_dc(
+                authorized_session.dc_id,
+                authorized_session.server_address,
+                authorized_session.port,
+            )
+            sqlite_session.auth_key = authorized_session.auth_key
+            sqlite_session.save()
+        finally:
+            sqlite_session.close()
+
+        self.phone_code_hash = None
+        self.pending_login_session = None
+        self.login_handoff_in_progress = False
+        self.start()
+        return result
 
     def logout(self):
         async def _logout():
@@ -1014,6 +1138,8 @@ class TGUserBotManager:
     def clear_session_files(self):
         """停止 UserBot 并删除本地 Telegram 登录会话文件。"""
         self.stop()
+        self.phone_code_hash = None
+        self.pending_login_session = None
         deleted = []
         missing = []
         for path in (self.session_path, self.session_journal_path):

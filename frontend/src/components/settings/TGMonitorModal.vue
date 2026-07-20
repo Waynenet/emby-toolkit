@@ -13,14 +13,6 @@
               <n-switch v-model:value="config.enabled" />
             </n-form-item>
 
-            <n-form-item label="API ID" path="api_id">
-              <n-input v-model:value="config.api_id" placeholder="例如: 1234567" />
-            </n-form-item>
-            
-            <n-form-item label="API Hash" path="api_hash">
-              <n-input v-model:value="config.api_hash" type="password" show-password-on="click" />
-            </n-form-item>
-            
             <n-form-item label="手机号" path="phone">
               <n-input v-model:value="config.phone" placeholder="带国家代码，例如: +8613800138000" />
             </n-form-item>
@@ -30,17 +22,13 @@
             </n-form-item>
 
             <n-divider title-placement="left">登录授权</n-divider>
-            <n-alert type="info" :show-icon="true" style="margin-bottom: 16px; font-size: 13px;">
-              修改 API 信息后，请务必先点击右下角的 <b>"保存配置"</b>，然后再获取验证码登录。
-            </n-alert>
-
             <n-form-item label="授权状态">
               <n-space align="center">
                 <n-tag :type="userBotStatus === 'authorized' ? 'success' : 'error'">
                   {{ userBotStatus === 'authorized' ? '已登录 (监听中)' : '未登录' }}
                 </n-tag>
                 
-                <n-button v-if="userBotStatus !== 'authorized'" type="primary" size="small" @click="sendUserBotCode" :loading="isSendingCode">
+                <n-button v-if="userBotStatus !== 'authorized'" type="primary" size="small" @click="sendUserBotCode" :loading="isSendingCode" :disabled="!config.phone">
                   获取验证码
                 </n-button>
                 <n-button v-else type="error" ghost size="small" @click="logoutUserBot">
@@ -256,8 +244,6 @@ const isSaving = ref(false);
 
 const config = ref({
   enabled: false,
-  api_id: '',
-  api_hash: '',
   phone: '',
   password: '',
   channels: [],
@@ -408,9 +394,17 @@ const checkUserBotStatus = async () => {
   } catch (e) {}
 };
 
+const waitForUserBotAuthorized = async () => {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await checkUserBotStatus();
+    if (userBotStatus.value === 'authorized') return;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+};
+
 const sendUserBotCode = async () => {
-  if (!config.value.api_id || !config.value.phone) {
-    return message.warning('请先填写 API ID 和手机号，并保存配置');
+  if (!config.value.phone) {
+    return message.warning('请先填写手机号并保存配置');
   }
   isSendingCode.value = true;
   try {
@@ -436,7 +430,7 @@ const submitUserBotCode = async () => {
     if (res.data.success) {
       message.success(res.data.message);
       showCodeInput.value = false;
-      await checkUserBotStatus();
+      await waitForUserBotAuthorized();
     } else {
       message.error(res.data.message);
     }

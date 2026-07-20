@@ -30,7 +30,7 @@ def get_subscription_status():
 
     tg_cfg = settings_db.get_setting('tg_userbot_config') or {}
     tg_userbot_configured = bool(
-        tg_cfg.get('enabled') and tg_cfg.get('api_id') and tg_cfg.get('api_hash') and tg_cfg.get('channels')
+        tg_cfg.get('enabled') and tg_cfg.get('channels')
     )
     try:
         shared_pool_configured = bool(shared_center_enabled())
@@ -1416,19 +1416,22 @@ def get_tg_config():
     cfg = settings_db.get_setting('tg_userbot_config') or {}
     # 提供默认值
     default_cfg = {
-        'enabled': False, 'api_id': '', 'api_hash': '', 
-        'phone': '', 'password': '', 'channels': [], 'monitor_types': ['movie', 'tv'],
+        'enabled': False, 'phone': '', 'password': '', 'channels': [], 'monitor_types': ['movie', 'tv'],
         'transfer_modes': ['subscribe'], 'transfer_mode_channels': {},
         'transfer_keywords': [], 'block_keywords': []
     }
     default_cfg.update(cfg)
+    default_cfg.pop('api_id', None)
+    default_cfg.pop('api_hash', None)
     return jsonify({"success": True, "data": default_cfg})
 
 @subscription_bp.route('/tg_userbot/config', methods=['POST'])
 @admin_required
 def save_tg_config():
     """保存独立的频道监听配置，并根据状态控制后台进程"""
-    new_cfg = request.json
+    new_cfg = dict(request.json or {})
+    new_cfg.pop('api_id', None)
+    new_cfg.pop('api_hash', None)
     settings_db.save_setting('tg_userbot_config', new_cfg)
     
     manager = TGUserBotManager.get_instance()

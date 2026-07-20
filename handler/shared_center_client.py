@@ -424,6 +424,12 @@ class SharedCenterClient:
     def device_status(self) -> Dict[str, Any]:
         return self._get('/api/v1/devices/status', timeout=12)
 
+    def send_telegram_login_code(self, phone: str, telegram_session: str) -> Dict[str, Any]:
+        return self._post('/api/v1/telegram/send-code', {
+            'phone': str(phone or '').strip(),
+            'telegram_session': str(telegram_session or '').strip(),
+        }, timeout=35)
+
     def stats(self) -> Dict[str, Any]:
         return self._get('/api/v1/stats', timeout=12)
 
