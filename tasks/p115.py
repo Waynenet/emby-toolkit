@@ -1290,7 +1290,7 @@ def task_sync_115_directory_tree(processor=None):
 def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
     """
     【V4 终极上帝视角版】全量生成 STRM 与 同步字幕
-    利用 115 分类目录级全局拉取 (type=4/1) + 动态 API 溯源 + 本地 DB 目录树缓存，实现秒级增量同步！
+    利用 115 分类目录级全局拉取 (type=4/1) + 动态 API 溯源，实现增量同步和缓存对账。
     home_video_only=True 时，仅同步媒体类型为 home_video 的分类规则。
     """
     config = get_config()
@@ -1336,28 +1336,28 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             allowed_exts = known_video_exts | known_sub_exts
         
         if not local_root or not etk_url or not etk_url.startswith('http'):
-            update_progress(100, "错误：请配置 http(s) 开头的 ETK 访问地址。")
-            return
+            raise RuntimeError("请配置 http(s) 开头的 ETK 访问地址")
 
         client = P115Service.get_client()
-        if not client: return
+        if not client:
+            raise RuntimeError("115 客户端未初始化")
 
         raw_rules = settings_db.get_setting('p115_sorting_rules')
-        if not raw_rules: 
-            update_progress(100, "错误：未配置分类规则！")
-            return
+        if not raw_rules:
+            raise RuntimeError("未配置分类规则")
         rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
 
         # 获取重命名配置，用于判断 STRM 直链是否需要带文件名
         rename_config = settings_db.get_setting('p115_rename_config') or {}
 
         # =================================================================
-        # 阶段 1: 加载规则与本地目录树缓存到内存 (耗时: 毫秒级)
+        # 阶段 1: 加载分类规则
         # =================================================================
-        update_progress(5, "  ➜ 正在加载本地目录树缓存到内存...")
+        update_progress(5, "  ➜ 正在加载分类规则...")
         
         cid_to_rel_path = {}
         cid_to_media_type = {}
+        cid_to_category_name = {}
         target_cids = set()   
         
         for r in rules:
@@ -1368,31 +1368,17 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 target_cids.add(cid)
                 cid_to_rel_path[cid] = r.get('category_path') or r.get('dir_name', '未识别')
                 cid_to_media_type[cid] = r.get('media_type') or 'all'
+                cid_to_category_name[cid] = r.get('dir_name') or r.get('category_path') or '未识别'
 
         if not target_cids:
             message = "未配置启用的家庭视频分类，跳过同步。" if home_video_only else "未配置启用且有效的分类规则，跳过同步。"
-            update_progress(100, message)
-            return
-
-        # 加载 DB 中的目录树 (新增提取 local_path)
-        dir_cache = {} 
-        try:
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT id, parent_id, name, local_path FROM p115_filesystem_cache")
-                    for row in cursor.fetchall():
-                        dir_cache[str(row['id'])] = {
-                            'pid': str(row['parent_id']), 
-                            'name': str(row['name']),
-                            'local_path': row['local_path']
-                        }
-        except Exception as e:
-            update_progress(100, f"读取本地目录缓存失败: {e}")
-            return
+            if home_video_only:
+                update_progress(100, message)
+                return
+            raise RuntimeError(message)
 
         # 动态 API 路径缓存池 (防止重复请求 115 接口)
         dynamic_path_cache = {}
-        remote_file_ids = set()
         synced_cache_file_ids = set()
         synced_cache_dir_ids = set()
         successful_target_cids = set()
@@ -1481,7 +1467,6 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 'name': name,
                 'local_path': rel_path.replace('\\', '/')
             }
-            dir_cache[dir_id] = {'pid': parent_id, 'name': name, 'local_path': rel_path}
 
         def remember_ancestor_dirs(ancestors, target_cid, category_name, file_id=None):
             if not isinstance(ancestors, (list, tuple)):
@@ -1531,40 +1516,21 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             if pid in dynamic_path_cache:
                 return dynamic_path_cache[pid]
 
-            # 4. 优先使用数据库缓存，避免每个视频都额外请求 115 推导父目录路径。
-            if pid in dir_cache and dir_cache[pid].get('local_path'):
-                dynamic_path_cache[pid] = dir_cache[pid]['local_path']
-                return dir_cache[pid]['local_path']
-
-            # 5. 尝试在数据库缓存中向上追溯
-            parts = []
-            curr = pid
-            while curr and curr in dir_cache:
-                parts.append(dir_cache[curr]['name'])
-                curr = dir_cache[curr]['pid']
-                
-                if curr in cid_to_rel_path:
-                    parts.append(cid_to_rel_path[curr])
-                    parts.reverse()
-                    resolved_path = os.path.join(*parts)
-                    dynamic_path_cache[pid] = resolved_path # 存入内存池
-                    return resolved_path
-
-            # 6. 缓存缺失时才向 115 请求真实路径兜底。
+            # 4. 本次响应缺少祖先链时，向 115 查询真实路径；旧数据库路径不能作为对账依据。
             try:
                 dir_info = client.fs_files({'cid': pid, 'limit': 1, 'record_open_time': 0, 'count_folders': 0})
+                if not dir_info.get('state'):
+                    raise RuntimeError(f"115 返回异常状态: {dir_info}")
                 path_nodes = dir_info.get('path', [])
-                if path_nodes:
-                    base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
-                    resolved_path = remember_ancestor_dirs(path_nodes, target_cid, base_cat_path)
-                    if resolved_path:
-                        dynamic_path_cache[pid] = resolved_path # 存入内存池，同目录文件不再请求
-                        logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
-                        return resolved_path
+                base_cat_path = cid_to_rel_path.get(target_cid, '未识别')
+                resolved_path = remember_ancestor_dirs(path_nodes, target_cid, base_cat_path)
+                if not resolved_path:
+                    raise RuntimeError(f"115 路径不属于目标分类 cid={target_cid}")
+                dynamic_path_cache[pid] = resolved_path
+                logger.debug(f"  ➜ [API溯源] 成功动态推导路径: {resolved_path}")
+                return resolved_path
             except Exception as e:
-                logger.debug(f"  ➜ 动态查询目录路径失败 (pid: {pid}): {e}")
-
-            return None
+                raise RuntimeError(f"动态查询目录路径失败 (pid={pid}): {e}") from e
 
         def queue_path_anomaly_file(fid, name, reason):
             fid = str(fid or '').strip()
@@ -1578,7 +1544,6 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             path_anomaly_file_id_set.add(fid)
             path_anomaly_file_ids.append(fid)
             path_anomaly_names.append(str(name or fid))
-            remote_file_ids.discard(fid)
             logger.warning(
                 f"  ➜ [全量同步] 发现无法推导路径的 115 文件，已加入待整理移动队列：{name or fid}，原因={reason}"
             )
@@ -1613,7 +1578,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             return moved_count
 
         def process_full_sync_items(items, target_cid, category_name):
-            nonlocal files_generated, subs_downloaded, root_anomaly_skipped
+            nonlocal files_generated, subs_downloaded, root_anomaly_skipped, sync_has_errors
             is_home_video_target = cid_to_media_type.get(str(target_cid)) == 'home_video'
             for item in items:
                 # 兼容 OpenAPI、Cookie 和 p115client 标准化字段
@@ -1626,14 +1591,16 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 # 115 返回的文件数据中，pid/cid/parent_id 代表它所在的父目录 ID
                 pid = first_present(item.get('pid'), item.get('cid'), item.get('parent_id'))
                 fid = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
-                if fid:
-                    remote_file_ids.add(str(fid))
                 ancestors = item.get('ancestors') or item.get('paths') or item.get('path')
                 ancestor_rel_dir = remember_ancestor_dirs(ancestors, target_cid, category_name, fid)
-                if not pc or pid is None:
+                if not pc or pid is None or (ext in known_video_exts and not fid):
+                    logger.error(f"  ➜ [全量同步] 远端文件缺少 PC、父目录或 FID，无法完整写入缓存: {name or fid or '-'}")
+                    sync_has_errors = True
                     continue
                 pid_text = str(pid).strip()
                 if not pid_text:
+                    logger.error(f"  ➜ [全量同步] 远端文件父目录为空，无法完整写入缓存: {name or fid or '-'}")
+                    sync_has_errors = True
                     continue
                 if pid_text == '0' and not item.get('_etk_rel_dir'):
                     fid = first_present(item.get('fid'), item.get('file_id'), item.get('id'))
@@ -1744,13 +1711,31 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
 
                     # 写入本地数据库缓存 (p115_filesystem_cache)
                     if pc and fid:
+                        if not sha1 or safe_file_size <= 0:
+                            logger.error(f"  ➜ [全量同步] 视频缺少 SHA1 或有效大小，无法完整写入缓存: {name}")
+                            sync_has_errors = True
+                            continue
                         file_local_path = os.path.join(rel_dir, name).replace('\\', '/')
-                        synced_cache_file_ids.add(str(fid))
-                        P115CacheManager.save_file_cache(
+                        cache_saved = P115CacheManager.save_file_cache(
                             fid=fid, parent_id=pid, name=name,
                             sha1=sha1, pick_code=pc,
                             local_path=file_local_path, size=file_size
                         )
+                        if not cache_saved:
+                            sync_has_errors = True
+                            continue
+                        synced_cache_file_ids.add(str(fid))
+                        if not is_home_video_target:
+                            pending_organize_records[str(fid)] = {
+                                'file_id': fid,
+                                'pick_code': pc,
+                                'original_name': name,
+                                'renamed_name': name,
+                                'sha1': sha1,
+                                'target_cid': target_cid,
+                                'category_name': cid_to_category_name.get(str(target_cid), category_name),
+                                'media_type': cid_to_media_type.get(str(target_cid)),
+                            }
 
                 # 处理字幕下载
                 elif ext in known_sub_exts and download_subs:
@@ -1783,6 +1768,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
         root_anomaly_skipped = 0
         changed_strm_files = set()
         home_video_strm_paths = set()
+        pending_organize_records = {}
 
         total_targets = len(target_cids)
         
@@ -1801,6 +1787,8 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 offset = 0
                 limit = 1000
                 page = 1
+                received_count = 0
+                reported_total = None
                 
                 while True:
                     if processor and getattr(processor, 'is_stop_requested', lambda: False)(): return
@@ -1809,7 +1797,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                         # ★ 核心：指定 cid 并传入 type，强制 115 在该分类下进行全局递归检索！
                         res = client.fs_files({'cid': target_cid, 'type': f_type, 'limit': limit, 'offset': offset, 'record_open_time': 0})
                         api_label = res.get('_etk_api_label') or '115'
-                        if not res.get('state') and res.get('code'):
+                        if not res.get('state'):
                             logger.error(f"  ➜ API 返回异常状态 (可能触发流控): {res}")
                             sync_has_errors = True
                             break
@@ -1821,13 +1809,35 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                             sync_has_errors = True
                             target_invalid = True
                             break
+                        response_total = res.get('count')
+                        if response_total not in (None, ''):
+                            response_total = int(response_total)
+                            if reported_total is None:
+                                reported_total = response_total
+                            elif reported_total != response_total:
+                                raise RuntimeError(
+                                    f"分页总数发生变化：{reported_total} -> {response_total}"
+                                )
                         data = res.get('data', [])
-                        if not data: break
+                        if not isinstance(data, list):
+                            raise RuntimeError("API data 字段不是列表")
+                        if not data:
+                            if reported_total is not None and received_count != reported_total:
+                                raise RuntimeError(
+                                    f"分页数据不完整：应有 {reported_total} 条，实际收到 {received_count} 条"
+                                )
+                            break
                         
                         logger.info(f"  ➜ [{category_name}] - [{type_name}] 使用 {api_label} 获取第 {page} 页 ({len(data)} 个文件)...")
                         process_full_sync_items(data, target_cid, category_name)
+                        received_count += len(data)
 
-                        if len(data) < limit: break
+                        if len(data) < limit:
+                            if reported_total is not None and received_count != reported_total:
+                                raise RuntimeError(
+                                    f"分页数据不完整：应有 {reported_total} 条，实际收到 {received_count} 条"
+                                )
+                            break
                         offset += limit
                         page += 1
                         
@@ -1840,11 +1850,11 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
             if not target_invalid:
                 successful_target_cids.add(target_cid)
 
-        logger.info(
-            f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, "
-            f"下载字幕: {subs_downloaded} 个。"
-        )
-        moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
+        moved_path_anomaly_count = 0
+        if sync_has_errors and path_anomaly_file_ids:
+            logger.warning("  ➜ [全量同步] 扫描已不完整，跳过路径异常文件移动。")
+        elif path_anomaly_file_ids:
+            moved_path_anomaly_count = move_path_anomaly_files_to_inbox()
         if root_anomaly_skipped:
             sample_names = "、".join(path_anomaly_names[:3])
             if len(path_anomaly_names) > 3:
@@ -1854,31 +1864,60 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                 f"移动到 [{save_name}] {moved_path_anomaly_count} 个，失败 {path_anomaly_move_failed} 个。示例：{sample_names}"
             )
 
+        unresolved_path_anomalies = len(path_anomaly_file_ids) - moved_path_anomaly_count
+        if unresolved_path_anomalies > 0:
+            sync_has_errors = True
+
+        if successful_target_cids != target_cids:
+            sync_has_errors = True
+
+        if sync_has_errors:
+            raise RuntimeError("远端扫描或缓存写入不完整，已中止缓存裁剪")
+
+        organize_records_added = 0
+        if pending_organize_records:
+            organize_records_added = P115RecordManager.add_missing_records(
+                list(pending_organize_records.values())
+            )
+            if organize_records_added is None:
+                raise RuntimeError("补充整理记录失败，已中止缓存裁剪")
+        logger.info(
+            f"  ➜ 增量同步完成！新增/更新 STRM: {files_generated} 个, "
+            f"下载字幕: {subs_downloaded} 个, 补充整理记录: {organize_records_added} 条。"
+        )
+
         # =================================================================
         # 阶段 2.5: 对账并清理 p115_filesystem_cache 与本地 STRM，使其收敛到远端当前状态
         # =================================================================
-        if sync_has_errors:
-            logger.warning("  ➜ [三方对账] 本次远端同步存在异常，跳过缓存与本地 STRM 清理以避免误删。")
-        else:
-            try:
-                target_cid_list = list(successful_target_cids)
-                deleted_cache_files = 0
-                deleted_cache_dirs = 0
-                cleaned_strm_files = 0
+        try:
+            target_cid_list = list(successful_target_cids)
+            deleted_cache_files = 0
+            deleted_cache_dirs = 0
+            cleaned_strm_files = 0
 
-                with get_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        for dir_id, row in remote_dir_cache_rows.items():
-                            cursor.execute("""
-                                INSERT INTO p115_filesystem_cache (id, parent_id, name, local_path)
-                                VALUES (%s, %s, %s, %s)
-                                ON CONFLICT (parent_id, name)
-                                DO UPDATE SET
-                                    id = EXCLUDED.id,
-                                    local_path = EXCLUDED.local_path,
-                                    updated_at = NOW()
-                            """, (dir_id, row['parent_id'], row['name'], row['local_path']))
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for dir_id, row in remote_dir_cache_rows.items():
+                        cursor.execute(
+                            "DELETE FROM p115_filesystem_cache WHERE id = %s",
+                            (dir_id,),
+                        )
+                        cursor.execute("""
+                            INSERT INTO p115_filesystem_cache (id, parent_id, name, local_path)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (parent_id, name)
+                            DO UPDATE SET
+                                id = EXCLUDED.id,
+                                local_path = EXCLUDED.local_path,
+                                sha1 = NULL,
+                                pick_code = NULL,
+                                size = 0,
+                                washing_level = NULL,
+                                washing_snapshot_json = '{}'::jsonb,
+                                updated_at = NOW()
+                        """, (dir_id, row['parent_id'], row['name'], row['local_path']))
 
+                    if home_video_only:
                         if target_cid_list:
                             cursor.execute("""
                                 WITH RECURSIVE managed_tree(id) AS (
@@ -1900,7 +1939,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                                       OR COALESCE(d.sha1, '') <> ''
                                       OR COALESCE(d.size, 0) > 0
                                   )
-                            """, (target_cid_list, target_cid_list, list(remote_file_ids)))
+                            """, (target_cid_list, target_cid_list, list(synced_cache_file_ids)))
                             deleted_cache_files = cursor.rowcount or 0
 
                             while True:
@@ -1931,41 +1970,62 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
                                 if not batch_deleted:
                                     break
                                 deleted_cache_dirs += batch_deleted
+                    else:
+                        valid_cache_ids = synced_cache_file_ids | synced_cache_dir_ids
+                        if valid_cache_ids:
+                            cursor.execute(
+                                "DELETE FROM p115_filesystem_cache WHERE NOT (id = ANY(%s))",
+                                (list(valid_cache_ids),),
+                            )
+                        else:
+                            cursor.execute("DELETE FROM p115_filesystem_cache")
+                        deleted_cache_files = cursor.rowcount or 0
 
-                        conn.commit()
+                        cursor.execute("SELECT id FROM p115_filesystem_cache")
+                        actual_cache_ids = {str(row['id']) for row in cursor.fetchall()}
+                        if actual_cache_ids != valid_cache_ids:
+                            missing_ids = len(valid_cache_ids - actual_cache_ids)
+                            unexpected_ids = len(actual_cache_ids - valid_cache_ids)
+                            raise RuntimeError(
+                                f"缓存完整性校验失败：缺少 {missing_ids} 条，残留 {unexpected_ids} 条"
+                            )
 
-                valid_strm_paths = {p for p in valid_local_files if p.lower().endswith('.strm')}
-                for cid in target_cid_list:
-                    rel_path = cid_to_rel_path.get(cid)
-                    if not rel_path:
-                        continue
-                    target_local_dir = os.path.join(local_root, rel_path)
-                    if not os.path.exists(target_local_dir):
-                        continue
-                    for root_dir, _, files in os.walk(target_local_dir):
-                        for filename in files:
-                            if not filename.lower().endswith('.strm'):
-                                continue
-                            strm_path = os.path.abspath(os.path.join(root_dir, filename))
-                            if strm_path in valid_strm_paths:
-                                continue
-                            if is_virtual_strm_file(strm_path):
-                                logger.debug(f"  ➜ [三方对账] 保留虚拟入库 STRM: {strm_path}")
-                                continue
-                            try:
-                                os.remove(strm_path)
-                                cleaned_strm_files += 1
-                                logger.debug(f"  ➜ [三方对账] 删除远端已不存在的 STRM: {strm_path}")
-                            except Exception as e:
-                                logger.warning(f"  ➜ [三方对账] 删除失效 STRM 失败 {strm_path}: {e}")
+                    conn.commit()
 
-                logger.info(
-                    f"  ➜ [三方对账] 缓存新增/更新目录 {len(remote_dir_cache_rows)} 条，"
-                    f"清理失踪文件缓存 {deleted_cache_files} 条、空目录缓存 {deleted_cache_dirs} 条、"
-                    f"本地失效 STRM {cleaned_strm_files} 个。"
-                )
-            except Exception as e:
-                logger.error(f"  ➜ [三方对账] 缓存/STRM 对账失败: {e}", exc_info=True)
+            valid_strm_paths = {p for p in valid_local_files if p.lower().endswith('.strm')}
+            for cid in target_cid_list:
+                rel_path = cid_to_rel_path.get(cid)
+                if not rel_path:
+                    continue
+                target_local_dir = os.path.join(local_root, rel_path)
+                if not os.path.exists(target_local_dir):
+                    continue
+                for root_dir, _, files in os.walk(target_local_dir):
+                    for filename in files:
+                        if not filename.lower().endswith('.strm'):
+                            continue
+                        strm_path = os.path.abspath(os.path.join(root_dir, filename))
+                        if strm_path in valid_strm_paths:
+                            continue
+                        if is_virtual_strm_file(strm_path):
+                            logger.debug(f"  ➜ [三方对账] 保留虚拟入库 STRM: {strm_path}")
+                            continue
+                        try:
+                            os.remove(strm_path)
+                            cleaned_strm_files += 1
+                            logger.debug(f"  ➜ [三方对账] 删除远端已不存在的 STRM: {strm_path}")
+                        except Exception as e:
+                            logger.warning(f"  ➜ [三方对账] 删除失效 STRM 失败 {strm_path}: {e}")
+
+            cleanup_scope = "家庭视频分类" if home_video_only else "全表"
+            logger.info(
+                f"  ➜ [三方对账] 缓存新增/更新目录 {len(remote_dir_cache_rows)} 条，"
+                f"{cleanup_scope}清理缓存 {deleted_cache_files + deleted_cache_dirs} 条、"
+                f"本地失效 STRM {cleaned_strm_files} 个。"
+            )
+        except Exception as e:
+            logger.error(f"  ➜ [三方对账] 缓存/STRM 对账失败: {e}", exc_info=True)
+            raise RuntimeError(f"缓存/STRM 对账失败: {e}") from e
         # =================================================================
         # 阶段 3: 本地失效文件清理 (耗时: 秒级)
         # =================================================================
@@ -2102,6 +2162,7 @@ def task_full_sync_strm_and_subs(processor=None, *, home_video_only=False):
     except Exception as e:
         logger.error(f"  ➜ 全量同步任务异常: {e}", exc_info=True)
         update_progress(100, f"任务异常结束: {e}")
+        raise
     finally:
         # ★ 任务结束（无论成功失败），务必解除监控队列抑制，恢复处理
         try:

@@ -42,7 +42,8 @@
   border-radius: 8px;
 }
 
-.dashboard-card > .n-card__content {
+.dashboard-card > .n-card__content,
+.dashboard-card > .n-card-content {
   flex-grow: 1 !important;
   display: flex !important;
   flex-direction: column !important;

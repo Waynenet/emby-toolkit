@@ -762,7 +762,7 @@ def _is_related_sidecar_name(video_name, other_name):
 _NOISE_TOKEN_PATTERNS = [
     r'(?i)\b(?:WEB[-_. ]?DL|WEB[-_. ]?RIP|BLU[-_. ]?RAY|BDRIP|BRRIP|REMUX|DVDRIP|HDTV|UHD)\b',
     r'(?i)\b(?:HDR10\+?|HDR|DV|DOVI|DOLBY[.\s_-]*VISION|HLG)\b',
-    r'(?i)\b(?:HEVC|AVC|X265|X264|H265|H264|10BIT|8BIT|AAC\d?(?:\.\d)?|DDP\d?(?:\.\d)?|DD\d?(?:\.\d)?|TRUEHD|ATMOS|DTS(?:[-_. ]?HD)?|FLAC)\b',
+    r'(?i)\b(?:HEVC|AVC|X265|X264|H265|H264|10BIT|8BIT|AAC[.\s_-]*\d?(?:\.\d)?|DDP[.\s_-]*\d?(?:\.\d)?|DD[.\s_-]*\d?(?:\.\d)?|TRUEHD|ATMOS|DTS(?:[-_. ]?HD)?|FLAC)\b',
     r'(?i)\b(?:2160P|1080P|720P|576P|480P|4K)\b',
     r'(?i)\b(?:NF|NETFLIX|AMZN|AMAZON|DSNP|DISNEY|HMAX|MAX|ATVP|APPLE|IQIYI|YOUKU|WEB)\b',
     r'(?i)\b(?:MULTI|DUAL[-_. ]?AUDIO|DUAL|PROPER|REPACK|READNFO|EXTENDED|UNCUT|COMPLETE|FINAL)\b',
@@ -2535,10 +2535,16 @@ class P115Service:
                                 "交给中心调度签名。"
                             )
                             return resp
-                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
+                        if force_openapi or force_cookie:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，固定后端不切换备用接口: {_p115_error_text(resp)}")
+                        else:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
                     except Exception as e:
                         last_err = e
-                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，准备尝试备用接口: {e}")
+                        if force_openapi or force_cookie:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，固定后端不切换备用接口: {e}")
+                        else:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，准备尝试备用接口: {e}")
                         if label == 'Cookie' and _p115_is_severe_failure(e):
                             P115Service.reset_cookie_client()
                     time.sleep(0.3)
@@ -3025,11 +3031,19 @@ class P115Service:
                 - cookie 优先：先走 Cookie/p115client 的上传初始化探测；普通失败再退 OpenAPI。
                 - openapi 优先：维持原 OpenAPI /open/upload/init 优先。
                 - 任一接口返回 status=7 时直接上抛签名需求，不再切备用接口、不再做消费端本机 Holder。
+                - 携带 holder 签名的重试必须固定到产生该签名挑战的原接口。
                 注意：这里只使用本机 CK/Token，不把账号凭据上传中心，也不恢复旧分享表。
                 """
                 payload = dict(payload or {})
                 payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
-                return self._call_api('rapid_upload', payload, normalizer=_p115_normalize_common_response)
+                sign_backend = str(payload.pop('_rapid_sign_backend', '') or '').strip().lower()
+                return self._call_api(
+                    'rapid_upload',
+                    payload,
+                    normalizer=_p115_normalize_common_response,
+                    force_openapi=(sign_backend == 'openapi'),
+                    force_cookie=(sign_backend == 'cookie'),
+                )
 
             def rapid_sign_value(self, payload=None, **kwargs):
                 """Holder 端签名任务：本机按 sha1 找 pick_code，读取 sign_check Range 计算 sign_val。
@@ -3506,6 +3520,7 @@ class P115Service:
 class P115CacheManager:
     _rapid_preid_hints = LimitedCache(maxsize=10000)
     _rapid_preid_hints_lock = threading.Lock()
+    _RAW_ETK_BACKFILL_VERSION = 1
 
     @staticmethod
     def _merge_center_intro_before_mediainfo_cache(sha1: str, mediainfo_json):
@@ -3904,7 +3919,8 @@ class P115CacheManager:
         washing_level=None, washing_snapshot_json=None,
     ):
         """专门将文件(fc=1)的 SHA1、PC码、本地相对路径、大小和洗版快照存入本地数据库缓存"""
-        if not fid or not parent_id or not name: return
+        if not fid or not parent_id or not name:
+            return False
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
@@ -3939,8 +3955,10 @@ class P115CacheManager:
                         Json(washing_snapshot_json, dumps=lambda obj: json.dumps(obj, ensure_ascii=False)) if washing_snapshot_json else None
                     ))
                     conn.commit()
+                    return True
         except Exception as e:
             logger.error(f"  ➜ 写入 115 文件缓存失败: {e}")
+            return False
 
 
     @staticmethod
@@ -4386,7 +4404,7 @@ class P115CacheManager:
             # season_number / episode_number 是媒体身份的一部分，上传到中心后可避免消费端再次从文件名正则猜集号。
             allowed = {
                 "tmdb_id", "type", "original_language", "sha1", "preid",
-                "season_number", "episode_number", "quality_source",
+                "season_number", "episode_number", "quality_source", "backfill_version",
             }
             raw_ffprobe_json["_etk"] = {
                 k: v for k, v in ctx.items()
@@ -5092,16 +5110,15 @@ class P115CacheManager:
                     raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                     ctx = raw_probe.get('_etk') if isinstance(raw_probe.get('_etk'), dict) else {}
-                    need_backfill = not P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
-
-                    # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / preid / 季集号。
-                    if not ctx.get('original_language') or not ctx.get('sha1') or not P115CacheManager._norm_preid(ctx.get('preid')):
-                        need_backfill = True
-                    if not ctx.get('quality_source'):
-                        need_backfill = True
-                    if str(ctx.get('type') or '').strip().lower() in ('tv', 'series', 'season', 'episode'):
-                        if ctx.get('season_number') in (None, '') or ctx.get('episode_number') in (None, ''):
-                            need_backfill = True
+                    has_useful_etk = P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
+                    try:
+                        backfill_version = int(ctx.get('backfill_version') or 0)
+                    except (TypeError, ValueError):
+                        backfill_version = 0
+                    need_backfill = (
+                        not has_useful_etk
+                        or backfill_version < P115CacheManager._RAW_ETK_BACKFILL_VERSION
+                    )
 
                     if need_backfill:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
@@ -5109,9 +5126,9 @@ class P115CacheManager:
                         if quality_source:
                             local_ctx = dict(local_ctx or {})
                             local_ctx['quality_source'] = quality_source
-                        if local_ctx:
+                        if local_ctx or has_useful_etk:
                             clean_ctx = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
-                            if P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe):
+                            if has_useful_etk:
                                 # 已有可用身份时，尊重旧 _etk，仅补齐缺失字段。
                                 merged_ctx = {}
                                 merged_ctx.update(local_ctx)
@@ -5124,7 +5141,14 @@ class P115CacheManager:
 
                             # sha1 必须以当前查询值为准。
                             merged_ctx['sha1'] = sha1
-                            raw_probe['_etk'] = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
+                            if merged_ctx.get('tmdb_id') and merged_ctx.get('type'):
+                                merged_ctx['backfill_version'] = P115CacheManager._RAW_ETK_BACKFILL_VERSION
+                            merged_ctx = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
+
+                            if merged_ctx == ctx:
+                                return raw_probe
+
+                            raw_probe['_etk'] = merged_ctx
                             raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                             cursor.execute(
@@ -5422,6 +5446,112 @@ class P115RecordManager:
                     conn.commit()
         except Exception as e:
             logger.error(f"  ➜ 写入 115 整理记录失败: {e}")
+
+    @staticmethod
+    def add_missing_records(records):
+        """批量补充缺失的整理记录，已有记录及其人工修正保持不变。"""
+        if not records:
+            return 0
+
+        values = []
+        for record in records:
+            file_id = str(record.get('file_id') or '').strip()
+            original_name = str(record.get('original_name') or '').strip()
+            if not file_id or not original_name:
+                continue
+            values.append((
+                file_id,
+                str(record.get('pick_code') or '').strip() or None,
+                original_name,
+                str(record.get('sha1') or '').strip().upper() or None,
+                str(record.get('target_cid') or '').strip() or None,
+                str(record.get('category_name') or '').strip() or None,
+                str(record.get('renamed_name') or original_name).strip(),
+                str(record.get('media_type') or '').strip() or None,
+            ))
+
+        if not values:
+            return 0
+
+        try:
+            from psycopg2.extras import execute_values
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    inserted = execute_values(cursor, """
+                        WITH scanned (
+                            file_id, pick_code, original_name, sha1,
+                            target_cid, category_name, renamed_name, rule_media_type
+                        ) AS (VALUES %s)
+                        INSERT INTO p115_organize_records (
+                            file_id, pick_code, original_name, status, tmdb_id, media_type,
+                            target_cid, category_name, renamed_name, processed_at, season_number
+                        )
+                        SELECT
+                            scanned.file_id,
+                            scanned.pick_code,
+                            scanned.original_name,
+                            'success',
+                            CASE
+                                WHEN LOWER(metadata.item_type) = 'movie' THEN metadata.tmdb_id
+                                WHEN LOWER(metadata.item_type) IN ('series', 'season', 'episode')
+                                    THEN COALESCE(metadata.parent_series_tmdb_id, metadata.tmdb_id)
+                                ELSE NULL
+                            END,
+                            COALESCE(
+                                CASE
+                                    WHEN LOWER(metadata.item_type) = 'movie' THEN 'movie'
+                                    WHEN LOWER(metadata.item_type) IN ('series', 'season', 'episode') THEN 'tv'
+                                    ELSE NULL
+                                END,
+                                NULLIF(scanned.rule_media_type, 'all')
+                            ),
+                            scanned.target_cid,
+                            scanned.category_name,
+                            scanned.renamed_name,
+                            NOW(),
+                            metadata.season_number
+                        FROM scanned
+                        LEFT JOIN LATERAL (
+                            SELECT
+                                m.tmdb_id,
+                                m.item_type,
+                                m.parent_series_tmdb_id,
+                                m.season_number
+                            FROM media_metadata m
+                            WHERE (
+                                scanned.pick_code IS NOT NULL
+                                AND m.file_pickcode_json ? scanned.pick_code
+                            ) OR (
+                                scanned.sha1 IS NOT NULL
+                                AND (
+                                    m.file_sha1_json ? scanned.sha1
+                                    OR m.file_sha1_json ? LOWER(scanned.sha1)
+                                )
+                            )
+                            ORDER BY
+                                CASE WHEN scanned.pick_code IS NOT NULL
+                                    AND m.file_pickcode_json ? scanned.pick_code THEN 0 ELSE 1 END,
+                                CASE m.item_type
+                                    WHEN 'Movie' THEN 1
+                                    WHEN 'Episode' THEN 2
+                                    WHEN 'Season' THEN 3
+                                    WHEN 'Series' THEN 4
+                                    ELSE 9
+                                END,
+                                m.in_library DESC,
+                                m.last_updated_at DESC NULLS LAST
+                            LIMIT 1
+                        ) metadata ON TRUE
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    """, values, page_size=500, fetch=True)
+                    conn.commit()
+                    return len(inserted or [])
+        except Exception as e:
+            logger.error(f"  ➜ 批量补充 115 整理记录失败: {e}")
+            return None
+
     @staticmethod
     def delete_records(file_ids):
         """批量删除整理记录 (用于洗版替换时清理旧记录)"""
@@ -5680,6 +5810,7 @@ class P115DeleteBuffer:
         media_exts = allowed_exts | {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg', 'mp3', 'flac', 'wav', 'ape', 'm4a', 'aac', 'ogg'}
 
         empty_cids_to_delete = []
+        remaining_media_cids = []
 
         for cid in cids:
             if str(cid) in protected_cids:
@@ -5717,6 +5848,8 @@ class P115DeleteBuffer:
             if media_count == 0:
                 empty_cids_to_delete.append(cid)
                 logger.debug(f"  ➜ 判定为空目录，加入待清理队列: CID {cid}")
+            elif check_save and media_count == 1:
+                remaining_media_cids.append(cid)
 
         # 4. 批量删除空目录
         if empty_cids_to_delete:
@@ -5726,6 +5859,17 @@ class P115DeleteBuffer:
                 for cid in success_cids:
                     P115CacheManager.delete_cid(cid)
                 logger.info(f"  ➜ [批量清理] 成功删除了 {len(success_cids)} 个空目录。")
+
+        if remaining_media_cids:
+            logger.info(
+                f"  ➜ [GC补跑] 待整理目录仍有媒体文件，"
+                f"涉及 {len(remaining_media_cids)} 个目录，重新触发 115 整理。"
+            )
+            try:
+                import task_manager
+                task_manager.trigger_115_organize_task(reason='gc_remaining_media')
+            except Exception as e:
+                logger.error(f"  ➜ [GC补跑] 重新触发 115 整理失败: {e}", exc_info=True)
 
     @classmethod
     def flush(cls):
@@ -7122,9 +7266,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             logger.warning(f"  ➜ 扫描目录出错 (CID: {cid}): {e}")
         return all_files
 
-    def _is_junk_file(self, filename):
+    def _get_junk_file_match(self, filename):
         """
-        检查是否为垃圾文件/样本/花絮 (基于 MP 规则)
+        返回命中的垃圾文件/样本/花絮文本 (基于 MP 规则)
         """
         # 垃圾文件正则列表 (合并了通用规则和你提供的 MP 规则)
         junk_patterns = [
@@ -7145,9 +7289,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         ]
 
         for pattern in junk_patterns:
-            if re.search(pattern, filename):
-                return True
-        return False
+            match = re.search(pattern, filename)
+            if match:
+                return match.group(0)
+        return None
     
     def _execute_collection_breakdown(self, root_item, collection_movies, skip_gc=False):
         """内部方法：拆解并独立整理合集包内的文件 (已升级批量模式)"""
@@ -7779,8 +7924,23 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         moved_count = 0
         move_groups = {}
-        unrecognized_fids = [] # ★ 终极垃圾桶：收集所有不符合要求的文件
+        unrecognized_items = [] # ★ 未识别条目：保留每个文件的具体原因
         unqualified_items = [] # ★ 质检不合格垃圾桶
+
+        def _mark_unrecognized(file_item, reason, season_num=None):
+            if not isinstance(file_item, dict):
+                return
+            fid = file_item.get('fid') or file_item.get('file_id')
+            if not fid:
+                return
+            unrecognized_items.append({
+                'fid': fid,
+                'name': file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '未知文件'),
+                'reason': str(reason or '未提供具体原因'),
+                'pc': file_item.get('pc') or file_item.get('pick_code'),
+                'season_num': season_num,
+            })
+
         conflict_mode = settings_db.get_washing_conflict_mode(default='replace')
         skip_scope = settings_db.get_washing_skip_scope(default='directory') if conflict_mode == 'skip' else 'directory'
         washing_config = settings_db.get_washing_priority_config()
@@ -8023,16 +8183,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             
             # 1. 扩展名绝对白名单校验 (最高优先级)
             if ext not in allowed_exts:
-                logger.debug(f"  ➜ 扩展名 .{ext} 不在允许列表中，打入未识别: {file_name}")
-                if fid: unrecognized_fids.append(fid)
+                reason = f"扩展名 .{ext} 不在允许列表中" if ext else "文件没有扩展名"
+                logger.warning(f"  ➜ [扩展名校验] {file_name} -> {reason}")
+                _mark_unrecognized(file_item, reason)
                 if progress_callback: progress_callback()
                 continue
 
             # 2. 垃圾/花絮/样本校验 (仅针对视频)
             if ext in known_video_exts:
-                if self._is_junk_file(file_name) or (0 < file_size < MIN_VIDEO_SIZE):
-                    logger.debug(f"  ➜ 判定为花絮或体积过小，打入未识别: {file_name}")
-                    if fid: unrecognized_fids.append(fid)
+                junk_match = self._get_junk_file_match(file_name)
+                if junk_match or (0 < file_size < MIN_VIDEO_SIZE):
+                    if junk_match:
+                        reason = f"文件名命中花絮/样本排除规则：{junk_match}"
+                    else:
+                        reason = f"视频体积 {file_size / 1024 / 1024:.2f} MB 小于最低门槛 {min_size_mb} MB"
+                    logger.warning(f"  ➜ [垃圾文件校验] {file_name} -> {reason}")
+                    _mark_unrecognized(file_item, reason)
                     if progress_callback: progress_callback()
                     continue
 
@@ -8195,7 +8361,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             real_target_cid = final_home_cid
 
             if ext in known_video_exts and not has_real_info:
-                reason = '无法获取有效媒体流信息(可能是不支持的格式或文件损坏)'
+                file_sha1 = file_item.get('sha1') or file_item.get('sha')
+                if file_sha1:
+                    reason = f"媒体信息结果中未检测到有效视频轨（SHA1: {str(file_sha1)[:12]}...）"
+                else:
+                    reason = '文件缺少 SHA1，无法查询或探测媒体流信息'
                 logger.warning(f"  ➜ [媒体信息门槛] {file_name} -> {reason}")
                 unqualified_items.append({
                     'fid': fid,
@@ -8240,17 +8410,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 elif season_num is not None and episode_num is not None:
                     subtitle_keys = [(season_num, episode_num, part_num), (season_num, episode_num, None)]
                 if any(key in slot_rejected_video_keys for key in subtitle_keys):
-                    logger.info(f"  ➜ [多版本槽位] 同批视频未命中槽位，同步忽略关联字幕: {file_name}")
-                    if fid:
-                        unrecognized_fids.append(fid)
+                    reason = '同批视频未命中多版本槽位，关联字幕不单独入库'
+                    logger.info(f"  ➜ [多版本槽位] {file_name} -> {reason}")
+                    _mark_unrecognized(file_item, reason, season_num)
                     continue
 
             # =================================================================
             # ★★★ 核心修复：严格去重逻辑 (防多版本/洗版残留冲突) ★★★
             # =================================================================
             if new_filename in seen_new_filenames:
-                logger.warning(f"  ➜ [去重丢弃] 发现重复版本: '{file_name}' -> 目标名 '{new_filename}' 已被占用，当作垃圾打入未识别！")
-                if fid: unrecognized_fids.append(fid)
+                reason = f"整理后目标文件名重复：{new_filename}"
+                logger.warning(f"  ➜ [去重丢弃] {file_name} -> {reason}")
+                _mark_unrecognized(file_item, reason, season_num)
                 continue # 直接跳过，绝不重命名，绝不移动，绝不生成 STRM！
             
             # 记录已占用的文件名
@@ -8606,9 +8777,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         valid_items.remove(old_item)
                     except ValueError:
                         pass
-                    old_fid = old_item.get('fid') or old_item.get('file_id') if isinstance(old_item, dict) else None
-                    if old_fid:
-                        unrecognized_fids.append(old_fid)
+                    old_reason = (
+                        f"同批存在更优或同级但体积更大的版本：{_new_name}"
+                        f"（优先级 {old_level} -> {level}）"
+                    )
+                    _mark_unrecognized(old_item, old_reason, old_item.get('_season_num') if isinstance(old_item, dict) else None)
                     batch_washing_best[key] = {
                         'item': _item,
                         'name': _new_name,
@@ -8623,9 +8796,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     )
                     return True
 
-                fid = _item.get('fid') or _item.get('file_id')
-                if fid:
-                    unrecognized_fids.append(fid)
+                skip_reason = (
+                    f"同批已有更优或同级版本：{old_name}"
+                    f"（优先级 {level} -> {old_level}）"
+                )
+                _mark_unrecognized(_item, skip_reason, _item.get('_season_num'))
                 logger.info(
                     f"  ➜ [批内洗版跳过] {_new_name} -> 同批已有更优/同级候选 {old_name}，"
                     f"old_level={old_level}, new_level={level}"
@@ -8649,8 +8824,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     and e_num is not None
                     and (s_num, e_num) in rejected_episodes
                 ):
-                    logger.info(f"  ➜ [关联跳过] 同集视频已被拦截/跳过，同步忽略关联文件: {new_name}")
-                    unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                    reason = '同集视频已被拦截或跳过，关联文件不单独入库'
+                    logger.info(f"  ➜ [关联跳过] {new_name} -> {reason}")
+                    _mark_unrecognized(item, reason, s_num)
                     continue
 
                 # 判断当前文件是否享有洗版特权
@@ -8716,7 +8892,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         continue
                     elif action == 'SKIP':
                         logger.info(f"  ➜ [洗版跳过] {new_name}，原因：{reason}")
-                        unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                        _mark_unrecognized(item, f"洗版规则跳过：{reason}", s_num)
                         # 剧集才按 S/E 记黑名单，电影不能写入 (None, None)。
                         if self.media_type == 'tv' and s_num is not None and e_num is not None:
                             rejected_episodes.add((s_num, e_num))
@@ -8763,8 +8939,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     
                     if is_conflict:
                         if conflict_mode == 'skip':
-                            logger.info(f"  ➜ [覆盖模式:跳过] 目标目录已存在同集/同电影，放弃处理: {new_name}")
-                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            reason = '目标目录已存在同集或同电影，当前覆盖模式为跳过'
+                            logger.info(f"  ➜ [覆盖模式:跳过] {new_name} -> {reason}")
+                            _mark_unrecognized(item, reason, s_num)
                             continue 
                         elif conflict_mode == 'keep_both':
                             logger.info(f"  ➜ [覆盖模式:共存] 目标目录已存在同集/同电影，保留两者: {new_name}")
@@ -8772,8 +8949,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             valid_items.append(item)
                     else:
                         if conflict_mode == 'skip' and skip_scope == 'library' and is_vid and _library_has_same_media(s_num, e_num):
-                            logger.info(f"  ➜ [覆盖模式:跳过/全库] 媒体库已存在同集/同电影，放弃处理: {new_name}")
-                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            reason = '媒体库已存在同集或同电影，当前全库冲突策略为跳过'
+                            logger.info(f"  ➜ [覆盖模式:跳过/全库] {new_name} -> {reason}")
+                            _mark_unrecognized(item, reason, s_num)
                             continue
                         if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
@@ -9247,10 +9425,26 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # =================================================================
         # ★★★ 终极清理：将所有不合规文件移入未识别目录 ★★★
         # =================================================================
-        if unrecognized_fids and unidentified_cid:
-            logger.info(f"  ➜ 发现 {len(unrecognized_fids)} 个不合规文件(扩展名不符/花絮/样本/广告)，正在移入未识别目录...")
-            # 同样传入列表，防止 115 API 报错
+        if unrecognized_items and unidentified_cid:
+            logger.info(f"  ➜ 发现 {len(unrecognized_items)} 个未通过整理校验的文件，正在移入未识别目录...")
+            unrecognized_fids = [item['fid'] for item in unrecognized_items]
             self.client.fs_move(unrecognized_fids, unidentified_cid)
+
+            for item in unrecognized_items:
+                logger.warning(f"  ➜ [未识别原因] {item['name']} -> {item['reason']}")
+                P115RecordManager.add_or_update_record(
+                    file_id=item['fid'],
+                    original_name=item['name'],
+                    status='unrecognized',
+                    tmdb_id=self.tmdb_id,
+                    media_type=self.media_type,
+                    target_cid=target_cid,
+                    category_name="未识别",
+                    renamed_name=None,
+                    pick_code=item['pc'],
+                    season_number=item['season_num'],
+                    fail_reason=item['reason'],
+                )
             
         if unqualified_items and unidentified_cid:
             logger.info(f"  ➜ 发现 {len(unqualified_items)} 个质检不合格文件，正在移入未识别目录...")
@@ -9258,6 +9452,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             self.client.fs_move(unq_fids, unidentified_cid)
             
             for item in unqualified_items:
+                logger.warning(f"  ➜ [质检不合格原因] {item['name']} -> {item['reason']}")
                 P115RecordManager.add_or_update_record(
                     file_id=item['fid'],
                     original_name=item['name'],
@@ -10286,17 +10481,21 @@ class WebhookDeleteBuffer:
     _lock = threading.Lock()
     _pickcodes = set()
     _timer = None
+    _is_flushing = False
 
     @classmethod
     def add(cls, pickcodes):
         if not pickcodes: return
         with cls._lock:
             cls._pickcodes.update(pickcodes)
-            
+
+            if cls._is_flushing:
+                return
+
             # 如果有新任务进来，重置定时器
             if cls._timer is not None:
                 cls._timer.kill()
-            
+
             from gevent import spawn_later
             # 延迟 3 秒，足以收集一键去重/批量删除瞬间发来的所有 Webhook
             cls._timer = spawn_later(3.0, cls._execute_all)
@@ -10304,14 +10503,30 @@ class WebhookDeleteBuffer:
     @classmethod
     def _execute_all(cls):
         with cls._lock:
+            cls._timer = None
+            if cls._is_flushing:
+                return
+
             pickcodes = list(cls._pickcodes)
             cls._pickcodes.clear()
-            cls._timer = None
+            if pickcodes:
+                cls._is_flushing = True
 
         if not pickcodes: return
-        
+
         from gevent import spawn
-        spawn(cls._process_batch, pickcodes)
+        spawn(cls._run_batch, pickcodes)
+
+    @classmethod
+    def _run_batch(cls, pickcodes):
+        try:
+            cls._process_batch(pickcodes)
+        finally:
+            with cls._lock:
+                cls._is_flushing = False
+                if cls._pickcodes and cls._timer is None:
+                    from gevent import spawn_later
+                    cls._timer = spawn_later(3.0, cls._execute_all)
 
     @classmethod
     def _process_batch(cls, pickcodes):

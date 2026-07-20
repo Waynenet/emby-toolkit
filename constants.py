@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "10.8.16"  # 更新版本号
+APP_VERSION = "10.8.20"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -92,6 +92,8 @@ DEFAULT_TELEGRAM_MENU_TASKS = [
 CONFIG_OPTION_TELEGRAM_NOTIFY_TYPES = "telegram_notify_types"      # TG通知类型多选
 DEFAULT_TELEGRAM_NOTIFY_TYPES = ['library_new', 'transfer_success', 'recognize_fail', 'intercept_notify']
 APP_SETTING_TELEGRAM_NOTIFICATION_TEMPLATES = "telegram_notification_templates"
+TELEGRAM_USERBOT_API_ID = 30841166
+TELEGRAM_USERBOT_API_HASH_PLACEHOLDER = "center-managed-login"
 DEFAULT_TELEGRAM_NOTIFICATION_TEMPLATES = {
     "library_new": "{{ media_icon }} {{ title }} {{ notification_title }}\n\n{{ episode_info }}\n{{ media_params }}\n⏰ *时间*: `{{ time }}`\n📝 *剧情*: {{ overview }}\n{{ review_warning }}",
     "transfer_success": "{{ action_title }}\n{{ title }}\n\n{{ episode_info }}\n🕒 *时间*: `{{ time }}`\n🎭 *类别*: {{ type }}\n{{ rating }}\n{{ overview }}",

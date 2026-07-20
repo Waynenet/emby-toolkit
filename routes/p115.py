@@ -17,6 +17,7 @@ from extensions import admin_required, emby_login_required
 from database import settings_db
 from handler import moviepilot, emby
 from handler.p115_service import P115Service, P115CacheManager, get_config
+from handler.etk_plugin_update import is_etk_plugin_installed
 from handler.p115_rename import P115RenameRenderer
 from handler import p115_play_pool
 import constants
@@ -1494,6 +1495,11 @@ def _quick_deploy_payload(progress=None):
         ).get('success', False)
     if not service_authorized:
         missing.append("Emby 服务授权")
+    elif not is_etk_plugin_installed(
+        config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+        config.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+    ):
+        missing.append("ETK MediaInfo Bridge 插件")
     if not config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT):
         missing.append("本地 STRM 根目录")
     etk_server_url = str(config.get(constants.CONFIG_OPTION_ETK_SERVER_URL) or '').strip()

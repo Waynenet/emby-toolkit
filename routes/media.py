@@ -46,7 +46,7 @@ def _available_subscription_sources() -> set:
     except Exception:
         pass
     tg_cfg = settings_db.get_setting('tg_userbot_config') or {}
-    if tg_cfg.get('enabled') and tg_cfg.get('api_id') and tg_cfg.get('api_hash') and tg_cfg.get('channels'):
+    if tg_cfg.get('enabled') and tg_cfg.get('channels'):
         sources.add('tg_channel')
     try:
         if shared_center_enabled():

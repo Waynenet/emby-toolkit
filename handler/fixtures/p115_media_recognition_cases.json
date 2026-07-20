@@ -21,6 +21,17 @@
     }
   },
   {
+    "name": "standard_tv_dotted_audio_channels",
+    "raw": "问心.S01E01.2023 - 2160p.WEB-DL.DV.H265.DDP.2.0.mp4",
+    "expect": {
+      "title": "问心",
+      "year": 2023,
+      "media_type": "tv",
+      "season_number": 1,
+      "episode_number": 1
+    }
+  },
+  {
     "name": "chinese_season_episode",
     "raw": "庆余年 第2季 第03集 4K.mkv",
     "main_dir_name": "庆余年 第2季",

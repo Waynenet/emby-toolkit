@@ -1091,6 +1091,9 @@ def _retry_rapid_with_center_sign(*, client: SharedCenterClient, p115, file_info
     signed_meta = dict(rapid_meta or {})
     signed_meta['sign_key'] = sign_req.get('sign_key')
     signed_meta['sign_val'] = sign_val
+    sign_backend = str(sign_req.get('backend') or '').strip().lower()
+    if sign_backend in ('cookie', 'openapi'):
+        signed_meta['_rapid_sign_backend'] = sign_backend
     logger.debug(
         f"  ➜ [负载均衡签名] 已收到签名，开始秒传："
         f"{file_name}"

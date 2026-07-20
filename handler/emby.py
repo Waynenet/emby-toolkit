@@ -553,25 +553,128 @@ def get_virtual_folders(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     return response.json() or []
 
 
-def _library_options_with_tmdb(collection_type: str) -> Dict[str, Any]:
-    tmdb_fetchers = ['TheMovieDb']
+_ETK_LIBRARY_ITEM_TYPES = {
+    'movies': {'Movie', 'BoxSet'},
+    'tvshows': {'Series', 'Season', 'Episode'},
+    'boxsets': {'BoxSet'},
+    'mixed': {'Movie', 'BoxSet', 'Series', 'Season', 'Episode'},
+}
+
+
+def _etk_item_types_for_library(folder: Dict[str, Any]) -> Set[str]:
+    collection_type = str(folder.get('CollectionType') or '').strip().lower()
+    if not collection_type:
+        collection_type = 'mixed'
+    return _ETK_LIBRARY_ITEM_TYPES.get(collection_type, set())
+
+
+def _apply_etk_library_defaults(options: Dict[str, Any], item_types: Set[str]) -> Dict[str, Any]:
+    updated = dict(options or {})
+    updated['EnableRealtimeMonitor'] = False
+    updated['SaveLocalMetadata'] = False
+    updated['MetadataSavers'] = []
+
+    disabled_readers = list(updated.get('DisabledLocalMetadataReaders') or [])
+    if 'Nfo' not in disabled_readers:
+        disabled_readers.append('Nfo')
+    updated['DisabledLocalMetadataReaders'] = disabled_readers
+    updated['LocalMetadataReaderOrder'] = [
+        value for value in (updated.get('LocalMetadataReaderOrder') or [])
+        if value != 'Nfo'
+    ]
+
+    type_options = []
+    for value in updated.get('TypeOptions') or []:
+        type_option = dict(value or {})
+        if type_option.get('Type') in item_types:
+            type_option['MetadataFetchers'] = ['ETK Metadata']
+            type_option['MetadataFetcherOrder'] = ['ETK Metadata']
+            type_option['ImageFetchers'] = ['ETK Images']
+            type_option['ImageFetcherOrder'] = ['ETK Images']
+        type_options.append(type_option)
+    updated['TypeOptions'] = type_options
+    return updated
+
+
+def configure_etk_library_defaults(base_url: str, api_key: str) -> Dict[str, Any]:
+    """Apply the ETK-only acceleration preset to supported Emby libraries."""
+    updated_count = 0
+    unchanged_count = 0
+    failures = []
+    url = f"{base_url.rstrip('/')}/Library/VirtualFolders/LibraryOptions"
+
+    try:
+        folders = get_virtual_folders(base_url, api_key)
+    except Exception as e:
+        logger.error("  ➜ [媒体库加速配置] 获取 Emby 媒体库失败: %s", e)
+        return {'ok': False, 'updated': 0, 'message': str(e)}
+
+    for folder in folders:
+        item_types = _etk_item_types_for_library(folder)
+        if not item_types:
+            continue
+        folder_id = str(folder.get('Id') or folder.get('ItemId') or '').strip()
+        name = str(folder.get('Name') or folder_id or '未知媒体库')
+        current_options = folder.get('LibraryOptions') or {}
+        updated_options = _apply_etk_library_defaults(current_options, item_types)
+        if updated_options == current_options:
+            unchanged_count += 1
+            continue
+        if not folder_id:
+            failures.append(f'{name}: 缺少媒体库 ID')
+            continue
+        try:
+            response = emby_client.post(
+                url,
+                params={'api_key': api_key},
+                json={'Id': folder_id, 'LibraryOptions': updated_options},
+            )
+            response.raise_for_status()
+            updated_count += 1
+            logger.info("  ➜ [媒体库加速配置] 已更新媒体库《%s》。", name)
+        except Exception as e:
+            failures.append(f'{name}: {e}')
+            logger.error("  ➜ [媒体库加速配置] 更新媒体库《%s》失败: %s", name, e)
+
+    configured_count = updated_count + unchanged_count
+    if failures:
+        return {
+            'ok': False,
+            'updated': updated_count,
+            'configured': configured_count,
+            'failed': len(failures),
+            'message': f"已配置 {configured_count} 个媒体库，{len(failures)} 个失败",
+            'errors': failures,
+        }
+    return {
+        'ok': True,
+        'updated': updated_count,
+        'configured': configured_count,
+        'failed': 0,
+        'message': f'已为 {configured_count} 个媒体库应用 ETK 加速配置',
+    }
+
+
+def _library_options_with_etk(collection_type: str) -> Dict[str, Any]:
+    metadata_fetchers = ['ETK Metadata']
+    image_fetchers = ['ETK Images']
     item_types = ['Movie', 'BoxSet'] if collection_type == 'movies' else ['Series', 'Season', 'Episode']
     return {
         'EnableRealtimeMonitor': False,
-        'SaveLocalMetadata': True,
-        'MetadataSavers': ['Nfo'],
-        'DisabledLocalMetadataReaders': [],
-        'LocalMetadataReaderOrder': ['Nfo'],
+        'SaveLocalMetadata': False,
+        'MetadataSavers': [],
+        'DisabledLocalMetadataReaders': ['Nfo'],
+        'LocalMetadataReaderOrder': [],
         'DisabledSubtitleFetchers': [],
         'DisabledLyricsFetchers': [],
         'SaveLyricsWithMedia': False,
         'TypeOptions': [
             {
                 'Type': item_type,
-                'MetadataFetchers': tmdb_fetchers,
-                'MetadataFetcherOrder': tmdb_fetchers,
-                'ImageFetchers': tmdb_fetchers,
-                'ImageFetcherOrder': tmdb_fetchers,
+                'MetadataFetchers': metadata_fetchers,
+                'MetadataFetcherOrder': metadata_fetchers,
+                'ImageFetchers': image_fetchers,
+                'ImageFetcherOrder': image_fetchers,
             }
             for item_type in item_types
         ],
@@ -615,7 +718,7 @@ def create_library(base_url: str, api_key: str, name: str, collection_type: str,
         'CollectionType': collection_type,
         'Paths': [path],
         'RefreshLibrary': True,
-        'LibraryOptions': _library_options_with_tmdb(collection_type),
+        'LibraryOptions': _library_options_with_etk(collection_type),
     }
     url = f"{base_url.rstrip('/')}/Library/VirtualFolders"
     try:
