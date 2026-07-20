@@ -122,7 +122,7 @@
                         </n-collapse>
                       </n-gi>
 
-                      <n-form-item-grid-item label="Emby媒体库根目录" path="local_strm_root" span="1 m:2" label-width="100">
+                      <n-form-item-grid-item label="Emby媒体库" path="local_strm_root" span="1 m:2" label-width="100">
                         <n-input-group>
                           <n-input
                             v-model:value="configModel.local_strm_root"
