@@ -122,7 +122,7 @@
                         </n-collapse>
                       </n-gi>
 
-                      <n-form-item-grid-item label="STRM 根目录" path="local_strm_root" span="1 m:2" label-width="100">
+                      <n-form-item-grid-item label="Emby媒体库根目录" path="local_strm_root" span="1 m:2" label-width="100">
                         <n-input-group>
                           <n-input
                             v-model:value="configModel.local_strm_root"
@@ -134,7 +134,7 @@
                           <n-button type="primary" ghost @click="openLocalFolderSelector('local_strm_root', false)">选择</n-button>
                         </n-input-group>
                         <template #feedback>
-                          <n-text depth="3" style="font-size:0.8em;">一键部署会在此目录创建本地镜像目录，并把二级分类媒体库指向这些路径。</n-text>
+                          <n-text depth="3" style="font-size:0.8em;">本地媒体库根目录，用于存放STRM文件。</n-text>
                         </template>
                       </n-form-item-grid-item>
 
@@ -274,7 +274,7 @@
                       <n-switch v-model:value="configModel.media_image_archive_enabled" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          将最终采用的元数据图片和分集兜底截图保存到 ETK 图片仓库。
+                          将媒体项图片含分集剧照或截图保存到 ETK 图片仓库。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
@@ -297,7 +297,7 @@
                       </n-input-group>
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          可填写容器内绝对路径；自定义目录请同时配置持久化挂载。
+                          可指定保存图片的目录；不指定默认保存到配置目录。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
