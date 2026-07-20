@@ -241,15 +241,19 @@ html.dark {
   --n-bar-color: rgba(255, 255, 255, 0.5) !important;
   --n-tab-text-color-active: #ffffff !important;
   --n-tab-text-color-hover: #ffffff !important;
-  --n-color: #18a058 !important;
-  --n-color-hover: #18a058 !important;
-  --n-color-focus: #18a058 !important;
-  --n-color-disabled: #18a058 !important;
   --n-ripple-color: #18a058 !important;
-  --n-border: 1px solid #18a058 !important;
-  --n-border-hover: 1px solid #18a058 !important;
-  --n-border-focus: 1px solid #18a058 !important;
-  --n-border-disabled: 1px solid #18a058 !important;
+  --n-border: 1px solid #ffffff00 !important;
+  --n-border-hover: 1px solid #ffffff00 !important;
+  --n-border-focus: 1px solid #ffffff00 !important;
+  --n-border-disabled: 1px solid #ffffff00 !important;
+  --n-box-shadow-active: inset 0 0 0 1px #18a058;
+  --n-box-shadow-focus: inset 0 0 0 1px #18a058, 0 0 0 2px rgba(24, 160, 88, 0.2) !important;
+  --n-box-shadow-hover: inset 0 0 0 1px #18a058 !important;
+  --n-dot-color-active: #18a058 !important;
+  --n-button-border-color-active: #18a058 !important;
+  --n-button-box-shadow-focus: inset 0 0 0 1px #18a058, 0 0 0 2px rgba(24, 160, 88, 0.3) !important;
+  --n-button-text-color-hover: #18a058 !important;
+  --n-button-text-color-active: #18a058 !important;
 }
 
 html, body { 
