@@ -5,7 +5,7 @@
     <!-- 头部问候语模块 -->
     <div class="page-header-module">
       <h1 class="greeting-title">👋 欢迎回来, {{ accountInfo?.name || authStore.username }}</h1>
-      <p class="greeting-subtitle">我帮您整理了最重要的账户状态与下一步建议。</p>
+      <p class="greeting-subtitle">我帮您整理了最重要的账户状态。</p>
     </div>
     
     <!-- 1. 顶部统计数据模块 (响应式网格) -->
