@@ -10365,17 +10365,21 @@ class WebhookDeleteBuffer:
     _lock = threading.Lock()
     _pickcodes = set()
     _timer = None
+    _is_flushing = False
 
     @classmethod
     def add(cls, pickcodes):
         if not pickcodes: return
         with cls._lock:
             cls._pickcodes.update(pickcodes)
-            
+
+            if cls._is_flushing:
+                return
+
             # 如果有新任务进来，重置定时器
             if cls._timer is not None:
                 cls._timer.kill()
-            
+
             from gevent import spawn_later
             # 延迟 3 秒，足以收集一键去重/批量删除瞬间发来的所有 Webhook
             cls._timer = spawn_later(3.0, cls._execute_all)
@@ -10383,14 +10387,30 @@ class WebhookDeleteBuffer:
     @classmethod
     def _execute_all(cls):
         with cls._lock:
+            cls._timer = None
+            if cls._is_flushing:
+                return
+
             pickcodes = list(cls._pickcodes)
             cls._pickcodes.clear()
-            cls._timer = None
+            if pickcodes:
+                cls._is_flushing = True
 
         if not pickcodes: return
-        
+
         from gevent import spawn
-        spawn(cls._process_batch, pickcodes)
+        spawn(cls._run_batch, pickcodes)
+
+    @classmethod
+    def _run_batch(cls, pickcodes):
+        try:
+            cls._process_batch(pickcodes)
+        finally:
+            with cls._lock:
+                cls._is_flushing = False
+                if cls._pickcodes and cls._timer is None:
+                    from gevent import spawn_later
+                    cls._timer = spawn_later(3.0, cls._execute_all)
 
     @classmethod
     def _process_batch(cls, pickcodes):
