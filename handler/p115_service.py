@@ -2535,10 +2535,16 @@ class P115Service:
                                 "交给中心调度签名。"
                             )
                             return resp
-                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
+                        if force_openapi or force_cookie:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，固定后端不切换备用接口: {_p115_error_text(resp)}")
+                        else:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 返回失败，准备尝试备用接口: {_p115_error_text(resp)}")
                     except Exception as e:
                         last_err = e
-                        logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，准备尝试备用接口: {e}")
+                        if force_openapi or force_cookie:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，固定后端不切换备用接口: {e}")
+                        else:
+                            logger.warning(f"  ➜ [115] {label} 接口 {method_name} 异常，准备尝试备用接口: {e}")
                         if label == 'Cookie' and _p115_is_severe_failure(e):
                             P115Service.reset_cookie_client()
                     time.sleep(0.3)
@@ -3025,11 +3031,19 @@ class P115Service:
                 - cookie 优先：先走 Cookie/p115client 的上传初始化探测；普通失败再退 OpenAPI。
                 - openapi 优先：维持原 OpenAPI /open/upload/init 优先。
                 - 任一接口返回 status=7 时直接上抛签名需求，不再切备用接口、不再做消费端本机 Holder。
+                - 携带 holder 签名的重试必须固定到产生该签名挑战的原接口。
                 注意：这里只使用本机 CK/Token，不把账号凭据上传中心，也不恢复旧分享表。
                 """
                 payload = dict(payload or {})
                 payload.update({k: v for k, v in kwargs.items() if v not in (None, '')})
-                return self._call_api('rapid_upload', payload, normalizer=_p115_normalize_common_response)
+                sign_backend = str(payload.pop('_rapid_sign_backend', '') or '').strip().lower()
+                return self._call_api(
+                    'rapid_upload',
+                    payload,
+                    normalizer=_p115_normalize_common_response,
+                    force_openapi=(sign_backend == 'openapi'),
+                    force_cookie=(sign_backend == 'cookie'),
+                )
 
             def rapid_sign_value(self, payload=None, **kwargs):
                 """Holder 端签名任务：本机按 sha1 找 pick_code，读取 sign_check Range 计算 sign_val。
