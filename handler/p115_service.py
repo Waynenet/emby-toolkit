@@ -7122,9 +7122,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             logger.warning(f"  ➜ 扫描目录出错 (CID: {cid}): {e}")
         return all_files
 
-    def _is_junk_file(self, filename):
+    def _get_junk_file_match(self, filename):
         """
-        检查是否为垃圾文件/样本/花絮 (基于 MP 规则)
+        返回命中的垃圾文件/样本/花絮文本 (基于 MP 规则)
         """
         # 垃圾文件正则列表 (合并了通用规则和你提供的 MP 规则)
         junk_patterns = [
@@ -7145,9 +7145,10 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         ]
 
         for pattern in junk_patterns:
-            if re.search(pattern, filename):
-                return True
-        return False
+            match = re.search(pattern, filename)
+            if match:
+                return match.group(0)
+        return None
     
     def _execute_collection_breakdown(self, root_item, collection_movies, skip_gc=False):
         """内部方法：拆解并独立整理合集包内的文件 (已升级批量模式)"""
@@ -7779,8 +7780,23 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         moved_count = 0
         move_groups = {}
-        unrecognized_fids = [] # ★ 终极垃圾桶：收集所有不符合要求的文件
+        unrecognized_items = [] # ★ 未识别条目：保留每个文件的具体原因
         unqualified_items = [] # ★ 质检不合格垃圾桶
+
+        def _mark_unrecognized(file_item, reason, season_num=None):
+            if not isinstance(file_item, dict):
+                return
+            fid = file_item.get('fid') or file_item.get('file_id')
+            if not fid:
+                return
+            unrecognized_items.append({
+                'fid': fid,
+                'name': file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '未知文件'),
+                'reason': str(reason or '未提供具体原因'),
+                'pc': file_item.get('pc') or file_item.get('pick_code'),
+                'season_num': season_num,
+            })
+
         conflict_mode = settings_db.get_washing_conflict_mode(default='replace')
         skip_scope = settings_db.get_washing_skip_scope(default='directory') if conflict_mode == 'skip' else 'directory'
         washing_config = settings_db.get_washing_priority_config()
@@ -8023,16 +8039,22 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             
             # 1. 扩展名绝对白名单校验 (最高优先级)
             if ext not in allowed_exts:
-                logger.debug(f"  ➜ 扩展名 .{ext} 不在允许列表中，打入未识别: {file_name}")
-                if fid: unrecognized_fids.append(fid)
+                reason = f"扩展名 .{ext} 不在允许列表中" if ext else "文件没有扩展名"
+                logger.warning(f"  ➜ [扩展名校验] {file_name} -> {reason}")
+                _mark_unrecognized(file_item, reason)
                 if progress_callback: progress_callback()
                 continue
 
             # 2. 垃圾/花絮/样本校验 (仅针对视频)
             if ext in known_video_exts:
-                if self._is_junk_file(file_name) or (0 < file_size < MIN_VIDEO_SIZE):
-                    logger.debug(f"  ➜ 判定为花絮或体积过小，打入未识别: {file_name}")
-                    if fid: unrecognized_fids.append(fid)
+                junk_match = self._get_junk_file_match(file_name)
+                if junk_match or (0 < file_size < MIN_VIDEO_SIZE):
+                    if junk_match:
+                        reason = f"文件名命中花絮/样本排除规则：{junk_match}"
+                    else:
+                        reason = f"视频体积 {file_size / 1024 / 1024:.2f} MB 小于最低门槛 {min_size_mb} MB"
+                    logger.warning(f"  ➜ [垃圾文件校验] {file_name} -> {reason}")
+                    _mark_unrecognized(file_item, reason)
                     if progress_callback: progress_callback()
                     continue
 
@@ -8195,7 +8217,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             real_target_cid = final_home_cid
 
             if ext in known_video_exts and not has_real_info:
-                reason = '无法获取有效媒体流信息(可能是不支持的格式或文件损坏)'
+                file_sha1 = file_item.get('sha1') or file_item.get('sha')
+                if file_sha1:
+                    reason = f"媒体信息结果中未检测到有效视频轨（SHA1: {str(file_sha1)[:12]}...）"
+                else:
+                    reason = '文件缺少 SHA1，无法查询或探测媒体流信息'
                 logger.warning(f"  ➜ [媒体信息门槛] {file_name} -> {reason}")
                 unqualified_items.append({
                     'fid': fid,
@@ -8240,17 +8266,18 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 elif season_num is not None and episode_num is not None:
                     subtitle_keys = [(season_num, episode_num, part_num), (season_num, episode_num, None)]
                 if any(key in slot_rejected_video_keys for key in subtitle_keys):
-                    logger.info(f"  ➜ [多版本槽位] 同批视频未命中槽位，同步忽略关联字幕: {file_name}")
-                    if fid:
-                        unrecognized_fids.append(fid)
+                    reason = '同批视频未命中多版本槽位，关联字幕不单独入库'
+                    logger.info(f"  ➜ [多版本槽位] {file_name} -> {reason}")
+                    _mark_unrecognized(file_item, reason, season_num)
                     continue
 
             # =================================================================
             # ★★★ 核心修复：严格去重逻辑 (防多版本/洗版残留冲突) ★★★
             # =================================================================
             if new_filename in seen_new_filenames:
-                logger.warning(f"  ➜ [去重丢弃] 发现重复版本: '{file_name}' -> 目标名 '{new_filename}' 已被占用，当作垃圾打入未识别！")
-                if fid: unrecognized_fids.append(fid)
+                reason = f"整理后目标文件名重复：{new_filename}"
+                logger.warning(f"  ➜ [去重丢弃] {file_name} -> {reason}")
+                _mark_unrecognized(file_item, reason, season_num)
                 continue # 直接跳过，绝不重命名，绝不移动，绝不生成 STRM！
             
             # 记录已占用的文件名
@@ -8606,9 +8633,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         valid_items.remove(old_item)
                     except ValueError:
                         pass
-                    old_fid = old_item.get('fid') or old_item.get('file_id') if isinstance(old_item, dict) else None
-                    if old_fid:
-                        unrecognized_fids.append(old_fid)
+                    old_reason = (
+                        f"同批存在更优或同级但体积更大的版本：{_new_name}"
+                        f"（优先级 {old_level} -> {level}）"
+                    )
+                    _mark_unrecognized(old_item, old_reason, old_item.get('_season_num') if isinstance(old_item, dict) else None)
                     batch_washing_best[key] = {
                         'item': _item,
                         'name': _new_name,
@@ -8623,9 +8652,11 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     )
                     return True
 
-                fid = _item.get('fid') or _item.get('file_id')
-                if fid:
-                    unrecognized_fids.append(fid)
+                skip_reason = (
+                    f"同批已有更优或同级版本：{old_name}"
+                    f"（优先级 {level} -> {old_level}）"
+                )
+                _mark_unrecognized(_item, skip_reason, _item.get('_season_num'))
                 logger.info(
                     f"  ➜ [批内洗版跳过] {_new_name} -> 同批已有更优/同级候选 {old_name}，"
                     f"old_level={old_level}, new_level={level}"
@@ -8649,8 +8680,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     and e_num is not None
                     and (s_num, e_num) in rejected_episodes
                 ):
-                    logger.info(f"  ➜ [关联跳过] 同集视频已被拦截/跳过，同步忽略关联文件: {new_name}")
-                    unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                    reason = '同集视频已被拦截或跳过，关联文件不单独入库'
+                    logger.info(f"  ➜ [关联跳过] {new_name} -> {reason}")
+                    _mark_unrecognized(item, reason, s_num)
                     continue
 
                 # 判断当前文件是否享有洗版特权
@@ -8716,7 +8748,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         continue
                     elif action == 'SKIP':
                         logger.info(f"  ➜ [洗版跳过] {new_name}，原因：{reason}")
-                        unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                        _mark_unrecognized(item, f"洗版规则跳过：{reason}", s_num)
                         # 剧集才按 S/E 记黑名单，电影不能写入 (None, None)。
                         if self.media_type == 'tv' and s_num is not None and e_num is not None:
                             rejected_episodes.add((s_num, e_num))
@@ -8763,8 +8795,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     
                     if is_conflict:
                         if conflict_mode == 'skip':
-                            logger.info(f"  ➜ [覆盖模式:跳过] 目标目录已存在同集/同电影，放弃处理: {new_name}")
-                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            reason = '目标目录已存在同集或同电影，当前覆盖模式为跳过'
+                            logger.info(f"  ➜ [覆盖模式:跳过] {new_name} -> {reason}")
+                            _mark_unrecognized(item, reason, s_num)
                             continue 
                         elif conflict_mode == 'keep_both':
                             logger.info(f"  ➜ [覆盖模式:共存] 目标目录已存在同集/同电影，保留两者: {new_name}")
@@ -8772,8 +8805,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             valid_items.append(item)
                     else:
                         if conflict_mode == 'skip' and skip_scope == 'library' and is_vid and _library_has_same_media(s_num, e_num):
-                            logger.info(f"  ➜ [覆盖模式:跳过/全库] 媒体库已存在同集/同电影，放弃处理: {new_name}")
-                            unrecognized_fids.append(item.get('fid') or item.get('file_id'))
+                            reason = '媒体库已存在同集或同电影，当前全库冲突策略为跳过'
+                            logger.info(f"  ➜ [覆盖模式:跳过/全库] {new_name} -> {reason}")
+                            _mark_unrecognized(item, reason, s_num)
                             continue
                         if new_name in existing_names: fids_to_delete.add(existing_names[new_name])
                         valid_items.append(item)
@@ -9247,10 +9281,26 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # =================================================================
         # ★★★ 终极清理：将所有不合规文件移入未识别目录 ★★★
         # =================================================================
-        if unrecognized_fids and unidentified_cid:
-            logger.info(f"  ➜ 发现 {len(unrecognized_fids)} 个不合规文件(扩展名不符/花絮/样本/广告)，正在移入未识别目录...")
-            # 同样传入列表，防止 115 API 报错
+        if unrecognized_items and unidentified_cid:
+            logger.info(f"  ➜ 发现 {len(unrecognized_items)} 个未通过整理校验的文件，正在移入未识别目录...")
+            unrecognized_fids = [item['fid'] for item in unrecognized_items]
             self.client.fs_move(unrecognized_fids, unidentified_cid)
+
+            for item in unrecognized_items:
+                logger.warning(f"  ➜ [未识别原因] {item['name']} -> {item['reason']}")
+                P115RecordManager.add_or_update_record(
+                    file_id=item['fid'],
+                    original_name=item['name'],
+                    status='unrecognized',
+                    tmdb_id=self.tmdb_id,
+                    media_type=self.media_type,
+                    target_cid=target_cid,
+                    category_name="未识别",
+                    renamed_name=None,
+                    pick_code=item['pc'],
+                    season_number=item['season_num'],
+                    fail_reason=item['reason'],
+                )
             
         if unqualified_items and unidentified_cid:
             logger.info(f"  ➜ 发现 {len(unqualified_items)} 个质检不合格文件，正在移入未识别目录...")
@@ -9258,6 +9308,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
             self.client.fs_move(unq_fids, unidentified_cid)
             
             for item in unqualified_items:
+                logger.warning(f"  ➜ [质检不合格原因] {item['name']} -> {item['reason']}")
                 P115RecordManager.add_or_update_record(
                     file_id=item['fid'],
                     original_name=item['name'],

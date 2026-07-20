@@ -335,8 +335,9 @@ const columns = computed(() => {
           h(NText, { strong: !row.isGroup, type: row.status === 'success' ? 'primary' : 'default', style: 'font-size: 13px; display: flex; align-items: center;' }, { default: () => [!row.isGroup ? h(NTag, { size: 'tiny', type: row.status === 'success' ? 'success' : (row.status === 'unqualified' ? 'error' : 'warning'), bordered: false, style: 'margin-right: 8px; flex-shrink: 0;' }, { default: () => '新' }) : null, h(NEllipsis, { tooltip: true, style: 'max-width: 100%;' }, { default: () => row.renamed_name || '等待分配 TMDb ID 手动整理...' })] })
         );
         
-        if (row.status === 'unqualified' && row.fail_reason) {
-          children.push(h(NTag, { type: 'error', size: 'small', bordered: false, style: 'margin-top: 4px; width: fit-content;' }, { default: () => `退回原因: ${row.fail_reason}` }));
+        if (['unqualified', 'unrecognized'].includes(row.status) && row.fail_reason) {
+          const reasonLabel = row.status === 'unqualified' ? '退回原因' : '未识别原因';
+          children.push(h(NTag, { type: row.status === 'unqualified' ? 'error' : 'warning', size: 'small', bordered: false, style: 'margin-top: 4px; width: fit-content;' }, { default: () => `${reasonLabel}: ${row.fail_reason}` }));
         }
         
         return h('div', { style: `display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: ${nameMinWidth}; ${childStyle}` }, children);
