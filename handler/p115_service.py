@@ -5694,6 +5694,7 @@ class P115DeleteBuffer:
         media_exts = allowed_exts | {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg', 'mp3', 'flac', 'wav', 'ape', 'm4a', 'aac', 'ogg'}
 
         empty_cids_to_delete = []
+        remaining_media_cids = []
 
         for cid in cids:
             if str(cid) in protected_cids:
@@ -5731,6 +5732,8 @@ class P115DeleteBuffer:
             if media_count == 0:
                 empty_cids_to_delete.append(cid)
                 logger.debug(f"  ➜ 判定为空目录，加入待清理队列: CID {cid}")
+            elif check_save and media_count == 1:
+                remaining_media_cids.append(cid)
 
         # 4. 批量删除空目录
         if empty_cids_to_delete:
@@ -5740,6 +5743,17 @@ class P115DeleteBuffer:
                 for cid in success_cids:
                     P115CacheManager.delete_cid(cid)
                 logger.info(f"  ➜ [批量清理] 成功删除了 {len(success_cids)} 个空目录。")
+
+        if remaining_media_cids:
+            logger.info(
+                f"  ➜ [GC补跑] 待整理目录仍有媒体文件，"
+                f"涉及 {len(remaining_media_cids)} 个目录，重新触发 115 整理。"
+            )
+            try:
+                import task_manager
+                task_manager.trigger_115_organize_task(reason='gc_remaining_media')
+            except Exception as e:
+                logger.error(f"  ➜ [GC补跑] 重新触发 115 整理失败: {e}", exc_info=True)
 
     @classmethod
     def flush(cls):
