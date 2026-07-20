@@ -177,10 +177,19 @@ def task_generate_all_custom_collection_covers(processor):
             task_manager.update_status_from_thread(progress, f"({i+1}/{total}) 正在处理: {collection_name}")
             
             try:
-                # a. 获取完整的Emby合集详情，这是封面生成器需要的
-                emby_collection_details = emby.get_emby_item_details(
-                    emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id
-                )
+                # === 如果是纯虚拟合集，直接伪造本地详情，避开 Emby 请求并生成本地封面 ===
+                if emby_collection_id and str(emby_collection_id).startswith("virtual_only"):
+                    emby_collection_details = {
+                        "Id": emby_collection_id,
+                        "Name": collection_name,
+                        "Type": "BoxSet"
+                    }
+                else:
+                    # 原有向 Emby 请求详情的逻辑
+                    emby_collection_details = emby.get_emby_item_details(
+                        emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id
+                    )
+
                 if not emby_collection_details:
                     logger.warning(f"无法获取合集 '{collection_name}' (Emby ID: {emby_collection_id}) 的详情，跳过。")
                     continue

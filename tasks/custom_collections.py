@@ -337,9 +337,19 @@ def task_process_all_custom_collections(processor):
                 custom_collection_db.update_custom_collection_sync_results(collection_id, update_data)
 
                 # 3. 封面生成
-                if cover_service and emby_collection_id and not str(emby_collection_id).startswith("virtual_only"):
+                # === 移除对 virtual_only 的直接过滤判定，允许进入流程 ===
+                if cover_service and emby_collection_id:
                     try:
-                        library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
+                        # === 如果是纯虚拟合集，直接伪造本地详情，避免向 Emby 提交接口请求 ===
+                        if str(emby_collection_id).startswith("virtual_only"):
+                            library_info = {
+                                "Id": emby_collection_id,
+                                "Name": collection_name,
+                                "Type": "BoxSet"
+                            }
+                        else:
+                            library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
+
                         if library_info:
                             # 重新获取一次最新的 info 以确保 count 准确
                             latest_collection_info = custom_collection_db.get_custom_collection_by_id(collection_id)
@@ -672,9 +682,30 @@ def process_single_custom_collection(processor, custom_collection_id: int):
         # 7. 封面生成
         try:
             cover_config = settings_db.get_setting('cover_generator_config') or {}
-            if cover_config.get("enabled") and emby_collection_id and not str(emby_collection_id).startswith("virtual_only"):
+            # === 允许虚拟合集也进入封面生成流程 ===
+            if cover_config.get("enabled") and emby_collection_id:
                 cover_service = CoverGeneratorService(config=cover_config)
-                library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
+                
+                # === 如果是虚拟合集，直接伪造本地详情，不向 Emby 发送请求 ===
+                if str(emby_collection_id).startswith("virtual_only"):
+                    library_info = {
+                        "Id": emby_collection_id,
+                        "Name": collection_name,
+                        "Type": "BoxSet"
+                    }
+                else:
+                    library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
+
+                if library_info:
+                    latest_collection_info = custom_collection_db.get_custom_collection_by_id(custom_collection_id)
+                    item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
+                    cover_service.generate_for_library(
+                        emby_server_id='main_emby', 
+                        library=library_info,
+                        item_count=item_count_to_pass, 
+                        content_types=definition.get('item_type', ['Movie']),
+                        custom_collection_data=latest_collection_info 
+                    )
                 if library_info:
                     latest_collection_info = custom_collection_db.get_custom_collection_by_id(custom_collection_id)
                     item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
