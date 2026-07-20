@@ -337,7 +337,7 @@ def task_process_all_custom_collections(processor):
                 custom_collection_db.update_custom_collection_sync_results(collection_id, update_data)
 
                 # 3. 封面生成
-                if cover_service and emby_collection_id and emby_collection_id != "virtual_only":
+                if cover_service and emby_collection_id and not str(emby_collection_id).startswith("virtual_only"):
                     try:
                         library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
                         if library_info:
@@ -672,7 +672,7 @@ def process_single_custom_collection(processor, custom_collection_id: int):
         # 7. 封面生成
         try:
             cover_config = settings_db.get_setting('cover_generator_config') or {}
-            if cover_config.get("enabled") and emby_collection_id and emby_collection_id != "virtual_only":
+            if cover_config.get("enabled") and emby_collection_id and not str(emby_collection_id).startswith("virtual_only"):
                 cover_service = CoverGeneratorService(config=cover_config)
                 library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
                 if library_info:
