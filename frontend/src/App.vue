@@ -225,7 +225,7 @@ html.dark {
   --tint-red-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 99, 132, 0.45) 100%);
 }
 
-/* ★ 终极兜底：强制接管 Naive UI 基础文字 CSS 变量，确保无遗漏灰色字 */
+/* ★ 终极兜底：强制接管 Naive UI 基础 CSS 变量 */
 :root, [class^="n-"] {
   --n-text-color: rgba(255, 255, 255, 0.95) !important;
   --n-text-color-hover: #ffffff !important;
@@ -235,6 +235,21 @@ html.dark {
   --n-title-text-color: #ffffff !important;
   --n-icon-color: rgba(255, 255, 255, 0.9) !important;
   --n-placeholder-color: rgba(255, 255, 255, 0.5) !important;
+  --n-close-icon-color: rgba(255, 255, 255, 0.95) !important;
+  --n-close-icon-color-hover: #ffffff !important;
+  --n-close-icon-color-pressed: rgba(255, 255, 255, 0.8) !important;
+  --n-bar-color: rgba(255, 255, 255, 0.5) !important;
+  --n-tab-text-color-active: #ffffff !important;
+  --n-tab-text-color-hover: #ffffff !important;
+  --n-color: #18a058 !important;
+  --n-color-hover: #18a058 !important;
+  --n-color-focus: #18a058 !important;
+  --n-color-disabled: #18a058 !important;
+  --n-ripple-color: #18a058 !important;
+  --n-border: 1px solid #18a058 !important;
+  --n-border-hover: 1px solid #18a058 !important;
+  --n-border-focus: 1px solid #18a058 !important;
+  --n-border-disabled: 1px solid #18a058 !important;
 }
 
 html, body { 
