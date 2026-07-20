@@ -457,7 +457,7 @@
               
               <n-divider style="margin: 12px 0;" />
               
-              <!-- 调整为合理的响应式间距以容纳三个开关 -->
+              <!-- 调整为合理的响应式间距以容纳四个开关 -->
               <n-space :size="[24, 12]" align="center">
                 <n-form-item :show-label="false" style="margin-bottom: 0;">
                    <n-checkbox v-model:checked="currentCollection.definition.show_in_latest">
@@ -472,6 +472,12 @@
                 <n-form-item :show-label="false" style="margin-bottom: 0;">
                    <n-checkbox v-model:checked="currentCollection.definition.auto_subscribe_missing">
                      自动订阅缺失媒体
+                   </n-checkbox>
+                </n-form-item>
+                <!-- === 新增：纯虚拟库开关 === -->
+                <n-form-item :show-label="false" style="margin-bottom: 0;">
+                   <n-checkbox v-model:checked="currentCollection.definition.virtual_only">
+                     开启纯虚拟库模式 (跳过在Emby中创建实体)
                    </n-checkbox>
                 </n-form-item>
               </n-space>
@@ -1140,7 +1146,8 @@ const getInitialFormModel = () => ({
     dynamic_logic: 'AND', 
     dynamic_rules: [], 
     show_in_latest: false,
-    auto_subscribe_missing: false // 新增自动订阅缺失开关默认值
+    auto_subscribe_missing: false,
+    virtual_only: false
   }
 });
 const currentCollection = ref(getInitialFormModel());
@@ -1154,7 +1161,8 @@ watch(() => currentCollection.value.type, (newType) => {
     dynamic_logic: 'AND', 
     dynamic_rules: [], 
     show_in_latest: false,
-    auto_subscribe_missing: false // 新增到类型切换的初始预设
+    auto_subscribe_missing: false,
+    virtual_only: false
   };
   if (newType === 'filter') {
     currentCollection.value.definition = { ...sharedProps, logic: 'AND', rules: [{ field: null, operator: null, value: '' }], target_library_ids: [], default_sort_by: 'none' };
@@ -1406,6 +1414,9 @@ const handleEditClick = (row) => {
   if (typeof rowCopy.definition.show_in_latest === 'undefined') rowCopy.definition.show_in_latest = false;
   // 编辑老数据时，如果发现缺失该属性，提供安全默认值
   if (typeof rowCopy.definition.auto_subscribe_missing === 'undefined') rowCopy.definition.auto_subscribe_missing = false;
+  // === 老数据编辑兼容，默认将其初始化为 false ===
+  if (typeof rowCopy.definition.virtual_only === 'undefined') rowCopy.definition.virtual_only = false;
+  
   if (!rowCopy.definition.default_sort_by) rowCopy.definition.default_sort_by = 'none';
   if (!rowCopy.definition.default_sort_order) rowCopy.definition.default_sort_order = 'Ascending';
   currentCollection.value = rowCopy;

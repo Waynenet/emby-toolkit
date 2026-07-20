@@ -157,9 +157,15 @@ def _build_mimicked_library_view(coll, mimicked_id, collection_type, real_server
     real_emby_collection_id = coll.get("emby_collection_id")
     identity = _stable_virtual_library_token(db_id, "identity")
     image_tags = {}
-    if real_emby_collection_id:
+    if real_emby_collection_id and real_emby_collection_id != "virtual_only":
         image_tags["Primary"] = _stable_virtual_library_token(
             f"{db_id}:{real_emby_collection_id}",
+            "primary-image"
+        )
+    else:
+        # === 为纯虚拟库生成稳定的虚拟 Primary 封面标识 ===
+        image_tags["Primary"] = _stable_virtual_library_token(
+            f"{db_id}:virtual_only",
             "primary-image"
         )
 
@@ -375,7 +381,16 @@ def handle_get_views():
         for coll in collections:
             # 物理检查：库在Emby里有实体吗？
             real_emby_collection_id = coll.get('emby_collection_id')
-            if not real_emby_collection_id:
+            
+            # === 支持纯虚拟库通过物理检查 ===
+            definition = coll.get('definition_json') or {}
+            if isinstance(definition, str):
+                try: definition = json.loads(definition)
+                except: definition = {}
+            
+            is_virtual_only = definition.get('virtual_only', False) or (real_emby_collection_id == 'virtual_only')
+            
+            if not real_emby_collection_id and not is_virtual_only:
                 continue
 
             # 权限检查：如果设置了 allowed_user_ids，则检查
@@ -474,7 +489,26 @@ def handle_get_mimicked_library_image(path):
         real_db_id = from_mimicked_id(item_id_match.group(1))
         coll = custom_collection_db.get_custom_collection_by_id(real_db_id)
         real_emby_collection_id = coll.get('emby_collection_id') if coll else None
-        if not real_emby_collection_id:
+        # === 处理纯虚拟库的封面请求 ===
+        if not real_emby_collection_id or real_emby_collection_id == 'virtual_only':
+            if coll:
+                raw_list_json = coll.get('generated_media_info_json')
+                raw_list = json.loads(raw_list_json) if isinstance(raw_list_json, str) else (raw_list_json or [])
+                # 寻找合集中第一个有 TMDb ID 且已缓存海报的项，将其海报作为媒体库封面
+                for item in raw_list:
+                    tid = item.get('tmdb_id')
+                    if tid:
+                        meta = queries_db.get_best_metadata_by_tmdb_id(str(tid))
+                        poster_path = meta.get('poster_path')
+                        if poster_path:
+                            img_file_path = get_missing_poster(tmdb_id=str(tid), status="SUBSCRIBED", poster_path=poster_path)
+                            if img_file_path and os.path.exists(img_file_path):
+                                return send_file(img_file_path, mimetype='image/jpeg')
+            
+            # 如果合集为空，使用一张默认占位图
+            img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED")
+            if img_file_path and os.path.exists(img_file_path):
+                return send_file(img_file_path, mimetype='image/jpeg')
             return "Not Found", 404
 
         base_url, api_key = _get_real_emby_url_and_key()
@@ -518,6 +552,11 @@ def handle_mimicked_library_metadata_endpoint(path, mimicked_id, params):
             return Response(empty_response, mimetype='application/json')
 
         real_emby_collection_id = collection_info.get('emby_collection_id')
+
+        # === 如果是纯虚拟库，直接返回空响应，避免 404 ===
+        if not real_emby_collection_id or real_emby_collection_id == 'virtual_only':
+            return Response(empty_response, mimetype='application/json')
+
         base_url, api_key = _get_real_emby_url_and_key()
         target_url = f"{base_url}/{path}"
         
