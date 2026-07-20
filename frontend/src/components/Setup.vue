@@ -13,25 +13,33 @@
         </div>
 
         <div class="intro-text">
-          <p>请配置 Emby 服务器连接信息。</p>
-          <p class="tip">这是系统运行的基础，请确保信息正确。</p>
+          <p>请使用 Emby 管理员账号完成服务授权。</p>
+          <p class="tip">ETK 只保存授权 Token，不会保存账号密码。</p>
         </div>
 
         <n-form ref="formRef" :model="formModel" :rules="rules" size="large">
           <n-form-item label="服务器地址 (URL)" path="url">
-            <n-input 
+            <n-input
               v-model:value="formModel.url" 
               placeholder="例如: http://192.168.1.10:8096" 
               @keydown.enter="handleSave"
             />
           </n-form-item>
           
-          <n-form-item label="API 密钥 (API Key)" path="api_key">
-            <n-input 
-              v-model:value="formModel.api_key" 
+          <n-form-item label="管理员用户名" path="username">
+            <n-input
+              v-model:value="formModel.username"
+              placeholder="Emby 管理员用户名"
+              @keydown.enter="handleSave"
+            />
+          </n-form-item>
+
+          <n-form-item label="管理员密码" path="password">
+            <n-input
+              v-model:value="formModel.password"
               type="password" 
               show-password-on="mousedown"
-              placeholder="在 Emby 控制台 -> 高级 -> API 密钥 中生成" 
+              placeholder="无密码账号可留空"
               @keydown.enter="handleSave"
             />
           </n-form-item>
@@ -52,20 +60,23 @@ import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { NCard, NForm, NFormItem, NInput, NButton, NSpace, useMessage } from 'naive-ui';
 import axios from 'axios';
+import { useAuthStore } from '../stores/auth';
 
 const router = useRouter();
 const message = useMessage();
+const authStore = useAuthStore();
 const loading = ref(false);
 const formRef = ref(null);
 
 const formModel = ref({
   url: '',
-  api_key: ''
+  username: '',
+  password: ''
 });
 
 const rules = {
   url: { required: true, message: '请输入服务器地址', trigger: 'blur' },
-  api_key: { required: true, message: '请输入 API 密钥', trigger: 'blur' }
+  username: { required: true, message: '请输入管理员用户名', trigger: 'blur' }
 };
 
 async function handleSave() {
@@ -76,13 +87,12 @@ async function handleSave() {
     const response = await axios.post('/api/auth/setup', formModel.value);
     
     if (response.data.status === 'ok') {
-      message.success('配置成功！即将跳转登录页...');
-      setTimeout(() => {
-        router.push({ name: 'Login' });
-      }, 1500);
+      await authStore.checkAuthStatus();
+      message.success('Emby 服务授权成功');
+      router.replace({ name: 'DatabaseStats' });
     }
   } catch (error) {
-    const msg = error.response?.data?.message || '连接测试失败，请检查 URL 和密钥';
+    const msg = error.response?.data?.message || '授权失败，请检查服务器地址和管理员账号';
     message.error(msg);
   } finally {
     loading.value = false;
@@ -104,6 +114,7 @@ async function handleSave() {
   height: 100%;
   width: 100%;
   padding: 20px;
+ box-sizing: border-box;
 }
 
 .setup-card {
