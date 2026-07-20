@@ -62,13 +62,47 @@ class CoverGeneratorService:
         if not image_data_b64:
             logger.error(f"  ➜ 为媒体库 '{library['Name']}' 生成封面图片失败。")
             return False
+
+        # === 识别虚拟库并保存至本地 /tmdb/covers/ ===
+        library_id = library.get("Id") or library.get("ItemId")
+        is_virtual = False
+        collection_id = None
+
+        if custom_collection_data:
+            collection_id = custom_collection_data.get('id')
+            definition = custom_collection_data.get('definition_json') or {}
+            if isinstance(definition, str):
+                try:
+                    definition = json.loads(definition)
+                except Exception:
+                    pass
             
-        success = self.__set_library_image(emby_server_id, library, image_data_b64)
-        if success:
-            logger.info(f"  ➜ 成功更新媒体库 '{library['Name']}' 的封面！")
+            # 判断是否启用了虚拟模式
+            db_emby_id = str(custom_collection_data.get('emby_collection_id') or '')
+            if definition.get('virtual_only') or db_emby_id.startswith('virtual_only') or str(library_id).startswith('virtual_only'):
+                is_virtual = True
+
+        if is_virtual and collection_id:
+            try:
+                save_dir = Path("/tmdb/covers")
+                save_dir.mkdir(parents=True, exist_ok=True)
+                save_path = save_dir / f"virtual_{collection_id}.jpg"
+                
+                with open(save_path, "wb") as f:
+                    f.write(base64.b64decode(image_data_b64))
+                logger.info(f"  ➜ 纯虚拟合集 '{library['Name']}' 封面已成功生成并保存在本地：{save_path}")
+                return True
+            except Exception as e:
+                logger.error(f"  ➜ 纯虚拟合集本地保存封面失败: {e}", exc_info=True)
+                return False
         else:
-            logger.error(f"  ➜ 上传封面到媒体库 '{library['Name']}' 失败。")
-        return success
+            # 原始的原生合集上传逻辑
+            success = self.__set_library_image(emby_server_id, library, image_data_b64)
+            if success:
+                logger.info(f"  ➜ 成功更新媒体库 '{library['Name']}' 的封面！")
+            else:
+                logger.error(f"  ➜ 上传封面到媒体库 '{library['Name']}' 失败。")
+            return success
 
     def __generate_image_data(self, server_id: str, library: Dict[str, Any], item_count: Optional[int] = None, content_types: Optional[List[str]] = None, custom_collection_data: Optional[Dict] = None) -> str:
         library_name = library['Name']

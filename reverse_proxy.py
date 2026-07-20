@@ -486,9 +486,17 @@ def handle_get_mimicked_library_image(path):
         item_id_match = re.search(r'/Items/((?:-\d+|19\d{8}|8\d{18}))/Images/', f"/{path.lstrip('/')}")
         if not item_id_match:
             return "Bad Request", 400
-        real_db_id = from_mimicked_id(item_id_match.group(1))
+        real_db_id = from_mimicked_id(item_id_match.group(1)) # 这里的 real_db_id 就是合集的自增 ID (如 12)
         coll = custom_collection_db.get_custom_collection_by_id(real_db_id)
         real_emby_collection_id = coll.get('emby_collection_id') if coll else None
+
+        # === 如果本地存在该虚拟库生成的精美封面，客户端请求时直接返回它 ===
+        local_cover_path = f"/tmdb/covers/virtual_{real_db_id}.jpg"
+        if os.path.exists(local_cover_path):
+            resp = send_file(local_cover_path, mimetype='image/jpeg')
+            resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            return resp
+
         # === 处理纯虚拟库的封面请求 ===
         if not real_emby_collection_id or real_emby_collection_id == 'virtual_only':
             if coll:

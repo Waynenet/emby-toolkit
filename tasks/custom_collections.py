@@ -309,10 +309,11 @@ def task_process_all_custom_collections(processor):
                 # 1. 更新 Emby 实体合集 (用于封面)     
                 # === 支持纯虚拟库模式 ===
                 is_virtual_only = definition.get('virtual_only', False)
-                
+
                 if is_virtual_only:
                     logger.info(f"  ➜ 合集 '{collection_name}' 已开启纯虚拟库模式，跳过在 Emby 中创建实体合集。")
-                    emby_collection_id = "virtual_only"
+                    # 动态写入，如 virtual_only_12，这样前端卡片和反代就可以准确定位具体文件了
+                    emby_collection_id = f"virtual_only_{collection_id}"
                 else:
                     should_allow_empty = (collection_type in ['list', 'ai_recommendation_global'])
                     emby_collection_id = emby.create_or_update_collection_with_emby_ids(
@@ -644,7 +645,7 @@ def process_single_custom_collection(processor, custom_collection_id: int):
             # 虚拟库模式：更新一个更贴切的进度，并直接赋值占位 ID
             task_manager.update_status_from_thread(60, "正在同步虚拟库数据...")
             logger.info(f"  ➜ 合集 '{collection_name}' 已开启纯虚拟库模式，跳过在 Emby 中创建实体合集。")
-            emby_collection_id = "virtual_only"
+            emby_collection_id = f"virtual_only_{collection_id}"
         else:
             # 实体合集模式：保留原有的进度提示和变量定义
             task_manager.update_status_from_thread(60, "正在Emby中创建/更新合集...")

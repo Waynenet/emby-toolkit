@@ -14,6 +14,9 @@ from database import custom_collection_db, media_db, user_db, request_db, settin
 import handler.moviepilot as moviepilot
 from extensions import admin_required, processor_ready_required
 from urllib.parse import urlparse
+import re
+import os
+from flask import send_file
 
 # --- 蓝图 1：用于所有 /api/... 的路由 ---
 media_api_bp = Blueprint('media_api', __name__, url_prefix='/api')
@@ -201,6 +204,29 @@ def proxy_emby_image(image_path):
     【V2 - 完整修复版】确保 api_key 作为 URL 参数传递，适用于所有图片类型。
     """
     try:
+        # === 拦截虚拟库图片的代理请求，返回本地自制带角标封面 ===
+        # 匹配如: Items/virtual_only_12/Images/Primary 或 Items/virtual_only/Images/Primary 
+        virtual_match = re.search(r'Items/virtual_only(?:_(\d+))?/Images/Primary', image_path, re.IGNORECASE)
+        if virtual_match:
+            collection_id = virtual_match.group(1)
+            local_cover = None
+            if collection_id:
+                local_cover = f"/tmdb/covers/virtual_{collection_id}.jpg"
+
+            # 尝试返回对应的自制加工封面
+            if local_cover and os.path.exists(local_cover):
+                resp = send_file(local_cover, mimetype='image/jpeg')
+                resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                return resp
+
+            # 没找到则返回一个默认占位海报进行兜底
+            from handler.poster_generator import get_missing_poster
+            img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED")
+            if img_file_path and os.path.exists(img_file_path):
+                resp = send_file(img_file_path, mimetype='image/jpeg')
+                resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                return resp
+
         emby_url = extensions.media_processor_instance.emby_url.rstrip('/')
         emby_api_key = extensions.media_processor_instance.emby_api_key
 
