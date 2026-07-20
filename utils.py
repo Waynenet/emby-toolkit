@@ -31,7 +31,7 @@ def clean_character_name_static(character_name: Optional[str]) -> str:
     """
     统一格式化角色名：
     - 去除括号内容、前后缀如“饰、配、配音、as”
-    - 中外对照时仅保留中文部分
+    - 中外对照时仅保留中文部分，彻底洗刷拼音、外文、尾部噪点、空格及标点
     - 如果仅为“饰 Kevin”这种格式，清理前缀后保留英文，待后续翻译
     """
     if not character_name:
@@ -39,37 +39,56 @@ def clean_character_name_static(character_name: Optional[str]) -> str:
 
     name = str(character_name).strip()
 
-    # 移除括号和中括号的内容
+    # 1. 移除括号和中括号的内容
     name = re.sub(r'\(.*?\)|\[.*?\]|（.*?）|【.*?】', '', name).strip()
 
-    # 移除 as 前缀（如 "as Kevin"）
+    # 2. 移除 as 前缀（如 "as Kevin"）
     name = re.sub(r'^(as\s+)', '', name, flags=re.IGNORECASE).strip()
 
-    # 清理前缀中的“饰演/饰/配音/配”（不加判断，直接清理）
+    # 3. 清理前缀中的“饰演/饰/配音/配”（不加判断，直接清理）
     prefix_pattern = r'^((?:饰演|饰|扮演|扮|配音|配|as\b)\s*)+'
     name = re.sub(prefix_pattern, '', name, flags=re.IGNORECASE).strip()
 
-    # 清理后缀中的“饰演/饰/配音/配”
+    # 4. 清理后缀中的“饰演/饰/配音/配”
     suffix_pattern = r'(\s*(?:饰演|饰|配音|配))+$'
     name = re.sub(suffix_pattern, '', name).strip()
 
-    # 处理中外对照：“中文+英文” 或 “英文+中文” 形式，只保留中文部分
-    if re.search(r'[\u4e00-\u9fa5]', name) and re.search(r'[a-zA-Z]', name):
-        # 1. 优先尝试按常见分隔符 (/, |) 拆分 (例如 "ShenWang/王忱")
+    # 5. 核心优化：若包含中文，则进行中外混排、拼音残留、变音符号及尾部标点噪点的终极清洗
+    if contains_chinese(name):
+        # A. 优先尝试按常见分隔符 (/, |) 拆分，只保留包含中文的部分 (例如 "Peter J. / 姚立杰")
         if '/' in name or '|' in name:
             parts = re.split(r'[/|]', name)
+            cleaned_parts = []
             for part in parts:
-                # 找到包含中文的那一部分
-                if re.search(r'[\u4e00-\u9fa5]', part):
-                    # 提取出中文部分后，剔除可能残留的英文字母，并清理首尾空格
-                    return re.sub(r'[a-zA-Z]', '', part).strip()
-        
-        # 2. 如果没有明显分隔符 (例如 "ShenWang王忱" 或 "王忱 ShenWang")
-        # 直接暴力剔除所有英文字母，并压缩多余的空格
-        clean_name = re.sub(r'[a-zA-Z]', '', name)
-        return re.sub(r'\s+', ' ', clean_name).strip()
+                if contains_chinese(part):
+                    cleaned_parts.append(part.strip())
+            if cleaned_parts:
+                name = " / ".join(cleaned_parts)
 
-    # 如果只有外文，或清理后是英文，保留原值，等待后续翻译流程
+        # B. 将 Unicode 字符规范化分解（例如将 á 分解为 a 与结合音标符号），随后过滤掉 [a-zA-Z] 和结合音标
+        nfkd_form = unicodedata.normalize('NFKD', name)
+        filtered_chars = []
+        for c in nfkd_form:
+            # 剔除基础英文字母
+            if re.match(r'[a-zA-Z]', c):
+                continue
+            # 剔除结合变音符号 (combining diacritics)
+            if unicodedata.combining(c):
+                continue
+            filtered_chars.append(c)
+        
+        name = "".join(filtered_chars)
+        # 重新构建回 NFC 标准格式
+        name = unicodedata.normalize('NFC', name)
+
+        # C. 压缩多余的连续空格
+        name = re.sub(r'\s+', ' ', name).strip()
+
+        # D. 去除首尾因剥离拉丁字母后遗留下来的无用标点、斜杠和噪声符号（保留中间的 · 或是 / 等有效连接符）
+        junk_pattern = r'[\s\-\.,，。：:\?？!！_#\*\/\|\\\+]+'
+        name = re.sub(f'^{junk_pattern}', '', name)
+        name = re.sub(f'{junk_pattern}$', '', name)
+
     return name.strip()
 
 def generate_search_url(provider: str, title: str, year: Optional[int] = None) -> str:
