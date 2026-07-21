@@ -238,7 +238,7 @@ const processedTableData = computed(() => {
 
   tableData.value.forEach(item => {
     if (item.media_type === 'tv' && item.tmdb_id && item.status === 'success') {
-      const seasonNum = item.season_number || 'unknown';
+      const seasonNum = item.season_number ?? 'unknown';
       const key = `tv_${item.tmdb_id}_${item.target_cid}_${seasonNum}`;
       if (!groups[key]) groups[key] = [];
       groups[key].push(item);
@@ -251,7 +251,9 @@ const processedTableData = computed(() => {
     const children = groups[key];
     if (children.length > 1) {
       const first = children[0];
-      const seasonText = first.season_number ? `第 ${first.season_number} 季` : '未知季';
+      const seasonText = first.season_number === 0
+        ? '特别篇'
+        : (first.season_number != null ? `第 ${first.season_number} 季` : '未知季');
       const seriesName = getSeriesName(first.renamed_name || first.original_name);
       
       const markedChildren = children.sort((a, b) => a.original_name.localeCompare(b.original_name)).map(child => ({
@@ -447,7 +449,7 @@ const handleEmptyUnrecognized = () => {
 const openEditModal = (row) => {
   let ids = [row.id];
   let name = row.original_name;
-  let defaultSeason = row.season_number || null;
+  let defaultSeason = row.season_number ?? null;
   
   if (row.isGroup) {
     ids = row.children.map(c => c.id);
