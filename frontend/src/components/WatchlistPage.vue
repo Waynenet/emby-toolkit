@@ -243,7 +243,7 @@
                       <n-space align="center" :wrap="false">
                         <!-- 已完结视图 (聚合卡片) -->
                         <template v-if="currentView === 'completed'">
-                          <n-tag round size="small" :bordered="false" :type="getSeriesStatusUI(item).type">
+                          <n-tag type="success" round size="small" :bordered="false" :type="getSeriesStatusUI(item).type">
                             <template #icon><n-icon :component="getSeriesStatusUI(item).icon" /></template>
                             {{ getSeriesStatusUI(item).text }}
                           </n-tag>

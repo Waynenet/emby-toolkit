@@ -627,7 +627,9 @@ body {
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
 
 .n-tag--default-type {
-  background-color: #55ff9c !important;
+  background: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: #ffffff !important;
 }
 .n-tag--info-type {
   background-color: #2080f0 !important;
@@ -640,6 +642,9 @@ body {
 }
 .n-tag--error-type {
   background-color: #d03050 !important;
+}
+.n-tag--cyan-type {
+  background-color: #55ff9c !important;
 }
 .n-tag--closable {
   background: rgba(255, 255, 255, 0.15) !important;

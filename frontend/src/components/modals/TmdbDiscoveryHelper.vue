@@ -52,7 +52,7 @@
             设置后将忽略下方的年份筛选。例如设置 7 天，将筛选从明天开始一周内首播的内容。
           </n-text>
         </template>
-        <div style="margin-top: 8px; font-size: 12px; color: #666; background: #f5f5f5; padding: 8px; border-radius: 4px; width: 100%;">
+        <div style="margin-top: 8px; font-size: 12px; padding: 8px; border-radius: 4px; width: 100%;">
           <span v-if="params.next_days > 0">
             🔍 筛选范围: 
             <strong>{{ calculatedDateRange.start }}</strong> 至 
