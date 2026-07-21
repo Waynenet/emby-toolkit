@@ -2138,8 +2138,17 @@ def _prepare_deep_delete_response(sha1, expected_pick_code=''):
     if not anchor_pick_code:
         cache_row = P115CacheManager.get_file_cache_by_sha1(sha1) or {}
         anchor_pick_code = str(cache_row.get('pick_code') or '').strip()
-    if not pickcodes or (anchor_pick_code and anchor_pick_code.lower() not in {pc.lower() for pc in pickcodes}):
+    matched_anchor_pick_code = next(
+        (pc for pc in pickcodes if pc.lower() == anchor_pick_code.lower()),
+        '',
+    ) if anchor_pick_code else ''
+    if not pickcodes or not matched_anchor_pick_code:
         return jsonify({'ok': False, 'error': 'delete scope identity mismatch'}), 409
+    if actual_type in {'Movie', 'Episode'}:
+        pickcodes = [matched_anchor_pick_code]
+        delete_scope = '精确版本'
+    else:
+        delete_scope = '层级展开'
 
     now = time.time()
     token = secrets.token_urlsafe(24)
@@ -2161,8 +2170,8 @@ def _prepare_deep_delete_response(sha1, expected_pick_code=''):
         _deep_delete_snapshots[token] = snapshot
 
     logger.info(
-        '  ➜ [ETK 深度删除] 已准备删除：%s（类型=%s，EmbyID=%s，PickCode=%s 个）。',
-        snapshot['item_name'], actual_type, root_item_id, len(pickcodes),
+        '  ➜ [ETK 深度删除] 已准备删除：%s（类型=%s，范围=%s，EmbyID=%s，PickCode=%s 个）。',
+        snapshot['item_name'], actual_type, delete_scope, root_item_id, len(pickcodes),
     )
     return jsonify({'ok': True, 'token': token, 'pickcode_count': len(pickcodes)})
 
