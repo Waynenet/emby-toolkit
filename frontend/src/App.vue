@@ -492,6 +492,32 @@ body::before {
   background: var(--glass-bg-hover) !important;
   border-color: var(--glass-border-light) !important;
 }
+.n-button--info-type {
+  background: #2080f0 !important;
+  border-color: #2080f0 !important;
+}
+.n-button--info-type:hover {
+  background: #2080f0 !important;
+  border-color: #2080f0 !important;
+}
+.n-button--warning-type {
+  background: #f0a020 !important;
+  border-color: #f0a020 !important;
+  color: #ffffff !important;
+}
+.n-button--warning-type:hover {
+  background: #f0a020 !important;
+  border-color: #f0a020 !important;
+}
+.n-button--error-type {
+  background: #d03050 !important;
+  border-color: #d03050 !important;
+  color: #ffffff !important;
+}
+.n-button--error-type:hover {
+  background: #d03050 !important;
+  border-color: #d03050 !important;
+}
 
 /* 4. 覆盖 Tag 标签 */
 .n-tag {
@@ -600,6 +626,19 @@ body {
 .n-alert.n-alert--success-type { border-left: 4px solid #18a058 !important; }
 .n-alert.n-alert--warning-type { border-left: 4px solid #f0a020 !important; }
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
+
+.n-tag--info-type {
+  background-color: #2080f0 !important;
+}
+.n-tag--success-type {
+  background-color: #18a058 !important;
+}
+.n-tag--warning--type {
+  background-color: #f0a020 !important;
+}
+.n-tag--error-type {
+  background-color: #d03050 !important;
+}
 
 .n-alert .n-alert-body__title,
 .n-alert .n-alert-body__content,
