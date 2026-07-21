@@ -717,16 +717,6 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                         content_types=definition.get('item_type', ['Movie']),
                         custom_collection_data=latest_collection_info 
                     )
-                if library_info:
-                    latest_collection_info = custom_collection_db.get_custom_collection_by_id(custom_collection_id)
-                    item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
-                    cover_service.generate_for_library(
-                        emby_server_id='main_emby', 
-                        library=library_info,
-                        item_count=item_count_to_pass, 
-                        content_types=definition.get('item_type', ['Movie']),
-                        custom_collection_data=latest_collection_info 
-                    )
         except Exception as e_cover:
             logger.error(f"为合集 '{collection_name}' 生成封面时发生错误: {e_cover}", exc_info=True)
         
