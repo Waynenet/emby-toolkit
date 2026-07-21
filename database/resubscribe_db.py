@@ -436,13 +436,13 @@ def fetch_all_active_movies_for_analysis() -> List[Dict[str, Any]]:
 def fetch_all_active_series_for_analysis() -> List[Dict[str, Any]]:
     """
     获取所有在库剧集基本信息。
-    返回字段: tmdb_id, title, item_type, original_language, watching_status, rating, watchlist_is_airing
+    返回字段: tmdb_id, title, item_type, original_language, watching_status, rating
     """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT tmdb_id, title, item_type, original_language, watching_status, rating, watchlist_is_airing
+                SELECT tmdb_id, title, item_type, original_language, watching_status, rating
                 FROM media_metadata 
                 WHERE item_type = 'Series' AND in_library = TRUE
             """)

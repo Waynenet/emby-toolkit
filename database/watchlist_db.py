@@ -198,7 +198,6 @@ def remove_item_from_watchlist(tmdb_id: str) -> bool:
             watchlist_tmdb_status = NULL,
             watchlist_next_episode_json = NULL,
             watchlist_missing_info_json = NULL,
-            watchlist_is_airing = FALSE,
             -- 同时重置订阅状态，防止残留
             subscription_status = 'NONE',
             subscription_sources_json = '[]'::jsonb,
@@ -248,7 +247,6 @@ def batch_force_end_watchlist_items(tmdb_ids: List[str]) -> int:
                 SET watching_status = 'Completed',
                     force_ended = TRUE,
                     paused_until = NULL,
-                    watchlist_is_airing = FALSE,
                     watchlist_last_checked_at = NOW()
                 WHERE tmdb_id = ANY(%s)
                   AND item_type = 'Season'
@@ -311,7 +309,6 @@ def batch_update_watchlist_status(item_ids: list, new_status: str) -> int:
                     SET watching_status = 'Watching',
                         force_ended = FALSE,
                         paused_until = NULL,
-                        watchlist_is_airing = TRUE,
                         watchlist_last_checked_at = NOW()
                     WHERE parent_series_tmdb_id = ANY(%s)
                       AND item_type = 'Season'
@@ -401,7 +398,6 @@ def batch_remove_from_watchlist(tmdb_ids: List[str]) -> int:
                     watchlist_tmdb_status = NULL,
                     watchlist_next_episode_json = NULL,
                     watchlist_missing_info_json = NULL,
-                    watchlist_is_airing = FALSE,
                     
                     -- 2. ★★★ 关键：同时重置订阅状态，斩草除根 ★★★
                     subscription_status = 'NONE',
@@ -547,14 +543,6 @@ def sync_seasons_watching_status(parent_tmdb_id: str, active_season_numbers: Lis
                      AND COALESCE(l.local_count, 0) >= s.total_episodes
                     THEN 'Completed'
                     ELSE 'Watching'
-                END,
-                watchlist_is_airing = CASE
-                    WHEN COALESCE(s0.force_ended, FALSE)
-                    THEN FALSE
-                    WHEN COALESCE(s.total_episodes, 0) > 0
-                     AND COALESCE(l.local_count, 0) >= s.total_episodes
-                    THEN FALSE
-                    ELSE TRUE
                 END
                 FROM media_metadata s0
                 LEFT JOIN local_counts l ON l.season_number = s0.season_number
@@ -1021,7 +1009,6 @@ def update_watchlist_metadata(tmdb_id: str, updates: Dict[str, Any]):
                 updates['watching_status'] = 'Completed'
                 updates['force_ended'] = True
                 updates['paused_until'] = None
-                updates['watchlist_is_airing'] = False
 
             # 自动补充最后检查时间
             updates['watchlist_last_checked_at'] = 'NOW()'

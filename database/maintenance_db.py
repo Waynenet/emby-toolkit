@@ -515,7 +515,6 @@ def prepare_for_library_rebuild() -> Dict[str, Dict]:
                         watching_status = 'NONE',
                         paused_until = NULL,
                         force_ended = FALSE,
-                        watchlist_is_airing = FALSE,
                         watchlist_next_episode_json = NULL,
                         watchlist_missing_info_json = NULL,
                         

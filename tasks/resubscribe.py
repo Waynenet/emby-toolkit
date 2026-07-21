@@ -378,19 +378,14 @@ def task_update_resubscribe_cache(processor):
                                 status_calculated = 'needed'
                                 reason_calculated = upgrade_reason
 
-                        # 3. 一致性检查
-                        is_airing = series.get('watchlist_is_airing', False)
-                        
+                        # 3. 活跃追剧已在前面排除，其余项目执行一致性检查。
                         if status_calculated == 'ok' and rule.get('consistency_check_enabled'):
-                            if not is_airing:
-                                needs_fix, fix_reason = _check_season_consistency(eps_in_season, rule)
-                                if needs_fix:
-                                    status_calculated = 'needed'
-                                    reason_calculated = fix_reason
-                            else:
-                                # 可选：打印调试日志
-                                # logger.debug(f"  ➜ [一致性检查] 《{series['title']}》正在连载中，跳过一致性检查。")
-                                pass
+                            expected_episode_count = 0
+                            try:
+                                if season_total_episodes_locked and season_total_episodes:
+                                    expected_episode_count = int(season_total_episodes)
+                            except Exception:
+                                expected_episode_count = 0
 
                         item_key_tuple = (tmdb_id, "Season", int(season_num))
                         existing_status = current_statuses.get(item_key_tuple)

@@ -7,7 +7,7 @@
           <n-space align="center">
             <span>智能追剧列表</span>
             <n-tag v-if="filteredWatchlist.length > 0" type="info" round :bordered="false" size="small">
-              {{ filteredWatchlist.length }} 部
+              {{ filteredWatchlist.length }} 季
             </n-tag>
           </n-space>
         </template>

@@ -265,7 +265,6 @@ def init_db():
                         watchlist_tmdb_status TEXT,
                         watchlist_next_episode_json JSONB,
                         watchlist_missing_info_json JSONB,
-                        watchlist_is_airing BOOLEAN DEFAULT FALSE,
                         last_episode_to_air_json JSONB,
                         total_episodes INTEGER DEFAULT 0,
                         total_episodes_locked BOOLEAN DEFAULT FALSE,
@@ -595,6 +594,9 @@ def init_db():
                         else:
                             logger.warning(f"    ➜ [数据库升级] 检查表 '{table}' 时发现该表不存在，跳过升级。")
 
+                    # 一次性迁移：该字段可由 watching_status 完全推导，删除后避免双状态不同步。
+                    cursor.execute("ALTER TABLE media_metadata DROP COLUMN IF EXISTS watchlist_is_airing;")
+
                 except Exception as e_alter:
                     logger.error(f"  ➜ [数据库升级] 检查或添加新字段时出错: {e_alter}", exc_info=True)
                 
@@ -652,9 +654,7 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_rating_desc ON media_metadata (rating DESC);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_release_date_desc ON media_metadata (release_date DESC);")
 
-                    # 11. 【跟播系统】加速“正在连载”剧集的筛选
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
-
+                    # 11. 【目录缓存】从目录树缓存反查文件身份
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_media ON subscribe_assistant_snapshots (tmdb_id, item_type, season_number);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_snapshots_checked ON subscribe_assistant_snapshots (last_checked_at);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sas_delete_records_expires ON subscribe_assistant_delete_records (expires_at);")
