@@ -494,14 +494,14 @@ body::before {
 }
 
 /* 4. 覆盖 Tag 标签 */
-/* .n-tag {
+.n-tag {
   background: rgba(255, 255, 255, 0.15) !important;
   border: 1px solid var(--glass-border) !important;
   color: #ffffff !important;
 }
 .n-tag__close:hover {
   color: #ff4d4f !important;
-} */
+}
 
 /* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
 

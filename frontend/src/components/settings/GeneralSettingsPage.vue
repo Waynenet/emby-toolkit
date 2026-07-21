@@ -189,7 +189,7 @@
                       </n-form-item-grid-item>
 
                       <n-form-item-grid-item label="服务授权" label-width="100">
-                        <n-tag :type="embyServiceAuthorized ? 'success' : 'error'" :bordered="false">
+                        <n-tag :type="embyServiceAuthorized ? 'success' : 'error'" :bordered="false" class="auth-tag">
                           {{ embyServiceAuthorized ? '已授权' : '需要授权' }}
                         </n-tag>
                       </n-form-item-grid-item>
@@ -1688,6 +1688,17 @@ onUnmounted(() => {
 /* 给当前页面所有卡片的内容区顶部增加一点内边距，使其远离标题分割线 */
 :deep(.n-card__content) {
   padding-top: 16px !important;
+}
+
+/* 自定义授权标签颜色，重写全局的半透明标签样式 */
+:deep(.auth-tag.n-tag--success-type) {
+  background-color: #18a058 !important;
+  color: #ffffff !important;
+}
+
+:deep(.auth-tag.n-tag--error-type) {
+  background-color: #d03050 !important;
+  color: #ffffff !important;
 }
 
 .ai-settings-wrapper {
