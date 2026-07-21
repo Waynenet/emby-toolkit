@@ -4472,39 +4472,6 @@ class P115CacheManager:
         return _norm(detected)
 
     @staticmethod
-    def _quality_source_from_filesystem_cache(cursor, sha1):
-        sha1 = str(sha1 or '').strip().upper()
-        if not sha1:
-            return ''
-        try:
-            cursor.execute(
-                """
-                SELECT
-                    COALESCE(NULLIF(por.original_name, ''), pfc.name) AS source_name
-                FROM p115_filesystem_cache pfc
-                LEFT JOIN p115_organize_records por
-                  ON por.file_id = pfc.id
-                  OR (
-                      NULLIF(por.pick_code, '') IS NOT NULL
-                      AND por.pick_code = pfc.pick_code
-                  )
-                WHERE UPPER(pfc.sha1) = %s
-                ORDER BY
-                    CASE WHEN NULLIF(por.original_name, '') IS NOT NULL THEN 0 ELSE 1 END,
-                    por.processed_at DESC NULLS LAST,
-                    pfc.updated_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                (sha1,),
-            )
-            row = cursor.fetchone()
-            return P115CacheManager._extract_quality_source_from_context(
-                file_name=(row or {}).get('source_name') if row else ''
-            )
-        except Exception:
-            return ''
-
-    @staticmethod
     def _ensure_preid_column():
         """兼容旧调用；p115_filesystem_cache.preid 已废弃。"""
         return
@@ -5072,10 +5039,6 @@ class P115CacheManager:
                     raw_probe = row.get('raw_ffprobe_json')
                     if not raw_probe:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
-                        quality_source = P115CacheManager._quality_source_from_filesystem_cache(cursor, sha1)
-                        if quality_source:
-                            local_ctx = dict(local_ctx or {})
-                            local_ctx['quality_source'] = quality_source
                         if not local_ctx:
                             return None
 
@@ -5114,18 +5077,12 @@ class P115CacheManager:
                     # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / preid / 季集号。
                     if not ctx.get('original_language') or not ctx.get('sha1') or not P115CacheManager._norm_preid(ctx.get('preid')):
                         need_backfill = True
-                    if not ctx.get('quality_source'):
-                        need_backfill = True
                     if str(ctx.get('type') or '').strip().lower() in ('tv', 'series', 'season', 'episode'):
                         if ctx.get('season_number') in (None, '') or ctx.get('episode_number') in (None, ''):
                             need_backfill = True
 
                     if need_backfill:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
-                        quality_source = P115CacheManager._quality_source_from_filesystem_cache(cursor, sha1)
-                        if quality_source:
-                            local_ctx = dict(local_ctx or {})
-                            local_ctx['quality_source'] = quality_source
                         if local_ctx:
                             clean_ctx = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
                             if P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe):
@@ -5401,6 +5358,46 @@ class P115CacheManager:
 # ★★★ 115 整理记录 DB 管理器 ★★★
 # ======================================================================
 class P115RecordManager:
+    @staticmethod
+    def find_in_library_sha1s(sha1_values):
+        """返回已经绑定到在库媒体项的 SHA1 集合。查询失败时放行整理流程。"""
+        normalized = {
+            str(value or '').strip().upper()
+            for value in sha1_values or []
+            if str(value or '').strip()
+        }
+        if not normalized:
+            return set()
+
+        lookup_values = sorted(normalized | {value.lower() for value in normalized})
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT UPPER(sha.sha1) AS sha1
+                        FROM media_metadata m
+                        CROSS JOIN LATERAL jsonb_array_elements_text(
+                            CASE
+                                WHEN jsonb_typeof(m.file_sha1_json) = 'array'
+                                THEN m.file_sha1_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS sha(sha1)
+                        WHERE COALESCE(m.in_library, FALSE) = TRUE
+                          AND m.file_sha1_json ?| %s::text[]
+                        """,
+                        (lookup_values,),
+                    )
+                    return {
+                        str(row.get('sha1') or '').strip().upper()
+                        for row in cursor.fetchall()
+                        if str(row.get('sha1') or '').strip().upper() in normalized
+                    }
+        except Exception as e:
+            logger.warning(f"  ➜ [SHA1去重] 查询在库 SHA1 失败，继续正常整理: {e}")
+            return set()
+
     @staticmethod
     def add_or_update_record(file_id, original_name, status, tmdb_id=None, media_type=None, target_cid=None, category_name=None, renamed_name=None, pick_code=None, season_number=None, fail_reason=None):
         """添加或更新整理记录（基于 file_id 和 pick_code 唯一约束，智能继承原名）"""
@@ -7981,6 +7978,28 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                     file_item['sha1'] = sha1
                         except Exception:
                             pass
+
+        # 自动整理发现相同 SHA1 已经在库时，直接交给现有未识别搬运链路。
+        # 手动重组处理的本来就是在库文件，必须跳过去重才能修正目录和媒体身份。
+        if not getattr(self, 'is_manual_correct', False):
+            in_library_sha1s = P115RecordManager.find_in_library_sha1s(
+                file_item.get('sha1') or file_item.get('sha')
+                for file_item in candidates
+            )
+            if in_library_sha1s:
+                pending_candidates = []
+                for file_item in candidates:
+                    file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+                    ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+                    file_sha1 = str(file_item.get('sha1') or file_item.get('sha') or '').strip().upper()
+                    if ext in known_video_exts and file_sha1 in in_library_sha1s:
+                        logger.info(f"  ➜ [SHA1去重] {file_name} -> 已存在")
+                        _mark_unrecognized(file_item, '已存在')
+                        if progress_callback:
+                            progress_callback()
+                        continue
+                    pending_candidates.append(file_item)
+                candidates = pending_candidates
 
         # 确保 allowed_exts 有兜底，防止用户清空列表导致报错
         if not allowed_exts:
