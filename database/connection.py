@@ -244,7 +244,6 @@ def init_db():
                         watchlist_tmdb_status TEXT,
                         watchlist_next_episode_json JSONB,
                         watchlist_missing_info_json JSONB,
-                        watchlist_is_airing BOOLEAN DEFAULT FALSE,
                         last_episode_to_air_json JSONB,
                         total_episodes INTEGER DEFAULT 0,
                         total_episodes_locked BOOLEAN DEFAULT FALSE, 
@@ -853,6 +852,9 @@ def init_db():
                         else:
                             logger.warning(f"    ➜ [数据库升级] 检查表 '{table}' 时发现该表不存在，跳过升级。")
 
+                    # 一次性迁移：该字段可由 watching_status 完全推导，删除后避免双状态不同步。
+                    cursor.execute("ALTER TABLE media_metadata DROP COLUMN IF EXISTS watchlist_is_airing;")
+
                     cursor.execute("""
                         UPDATE media_metadata
                         SET metadata_ready = TRUE,
@@ -932,10 +934,7 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_rating_desc ON media_metadata (rating DESC);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_release_date_desc ON media_metadata (release_date DESC);")
 
-                    # 11. 【跟播系统】加速“正在连载”剧集的筛选
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
-
-                    # 12. 【115 目录缓存】加速本地目录树查找
+                    # 11. 【115 目录缓存】加速本地目录树查找
                     # 加速 "列出某目录下的所有文件"
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_parent_id ON p115_filesystem_cache (parent_id);")
                     # 加速 "全局搜索某个文件"

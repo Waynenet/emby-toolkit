@@ -258,7 +258,7 @@ class WatchlistProcessor:
         subscription_triggering_episode_ids: Optional[List[str]] = None,
         skip_logical_share_dispatch: bool = False,
     ):
-        """核心任务启动器，只处理活跃剧集。"""
+        """核心任务启动器，只处理包含追剧中 Season 的剧集。"""
         self.progress_callback = progress_callback
         task_name = "并发追剧更新"
         if tmdb_id: task_name = f"单项追剧更新 (TMDb ID: {tmdb_id})"
@@ -283,10 +283,18 @@ class WatchlistProcessor:
         self.progress_callback(0, "准备检查待更新剧集...")
         try:
             where_clause = ""
-            if not tmdb_id: 
-                today_str = datetime.now().date().isoformat()
+            if not tmdb_id:
                 where_clause = f"""
-                    WHERE watching_status IN ('{STATUS_WATCHING}', '{STATUS_PENDING}', '{STATUS_PAUSED}')
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM media_metadata AS season
+                        WHERE season.parent_series_tmdb_id = media_metadata.tmdb_id
+                          AND season.item_type = 'Season'
+                          AND season.season_number > 0
+                          AND season.watching_status IN (
+                              '{STATUS_WATCHING}', '{STATUS_PAUSED}', '{STATUS_PENDING}'
+                          )
+                    )
                 """
 
             active_series = self._get_series_to_process(where_clause, tmdb_id=tmdb_id)
@@ -915,7 +923,6 @@ class WatchlistProcessor:
                 'episode_count_pending_virtual': bool(source == 'pending_virtual'),
                 'watching_status': season_status,
                 'watchlist_tmdb_status': series.get('status') or '',
-                'watchlist_is_airing': season_status in (STATUS_WATCHING, STATUS_PAUSED),
                 'metadata_source': 'watchlist_processor',
             })
         for ep in episodes or []:
@@ -3615,9 +3622,7 @@ class WatchlistProcessor:
             paused_until_date = None
             logger.warning(f"  ➜ [强制完结] 已按手动设置将最终状态改为“已完结”。")
 
-        # 只有当内部状态是“追剧中”或“已暂停”时，才认为它在“连载中”
-        is_truly_airing = final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING]
-        airing_text = "仍在连载" if is_truly_airing else "已经完结"
+        airing_text = "仍在连载" if final_status in [STATUS_WATCHING, STATUS_PAUSED, STATUS_PENDING] else "已经完结"
         logger.info(f"  ➜ [追剧判定] 《{item_name}》最终状态：{airing_text}，当前标记为“{translate_internal_status(final_status)}”。")
 
         # ======================================================================
@@ -3661,8 +3666,7 @@ class WatchlistProcessor:
             "watchlist_tmdb_status": new_tmdb_status, 
             "watchlist_next_episode_json": json.dumps(real_next_episode_to_air) if real_next_episode_to_air else None,
             "watchlist_missing_info_json": json.dumps(missing_info),
-            "last_episode_to_air_json": json.dumps(last_episode_to_air) if last_episode_to_air else None,
-            "watchlist_is_airing": is_truly_airing
+            "last_episode_to_air_json": json.dumps(last_episode_to_air) if last_episode_to_air else None
         }
         
         # ★ 将标志位合入数据库更新字典
