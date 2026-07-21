@@ -391,17 +391,27 @@ class WatchlistProcessor:
 
                 # --- 4. 复活判定逻辑 ---
                 
-                # 💡 新增：自愈查询该剧集是否启用了 MoviePilot 自动订阅开关
-                enable_mp_subscribe = True
+                # 💡 核心修复：以兼容 dict 和 tuple 的形式实时拉取开关，防止底层列限制导致字段失效
+                enable_mp_subscribe = False
                 try:
                     with connection.get_db_connection() as conn:
                         with conn.cursor() as cursor:
-                            cursor.execute("SELECT enable_mp_subscribe FROM media_metadata WHERE tmdb_id = %s AND item_type = 'Series' LIMIT 1", (str(tmdb_id),))
+                            cursor.execute("""
+                                SELECT enable_mp_subscribe 
+                                FROM media_metadata 
+                                WHERE tmdb_id = %s AND item_type = 'Series' 
+                                LIMIT 1
+                            """, (str(tmdb_id),))
                             row = cursor.fetchone()
-                            if row and row.get('enable_mp_subscribe') is not None:
-                                enable_mp_subscribe = row.get('enable_mp_subscribe')
-                except Exception:
-                    pass
+                            if row:
+                                if isinstance(row, dict):
+                                    if row.get('enable_mp_subscribe') is not None:
+                                        enable_mp_subscribe = row.get('enable_mp_subscribe')
+                                elif isinstance(row, (tuple, list)):
+                                    if row[0] is not None:
+                                        enable_mp_subscribe = row[0]
+                except Exception as e_db:
+                    logger.warning(f"  ➜ 完结复活查询订阅开关出错: {e_db}")
 
                 # 计算本地已有的最大季号，以及该季的本地集数
                 local_max_season = 0
@@ -1573,9 +1583,29 @@ class WatchlistProcessor:
         # ======================================================================
         # ★★★ MP 状态接管与同步 (自动待定 & 自动暂停) ★★★
         # ======================================================================
-        enable_mp_subscribe = series_data.get('enable_mp_subscribe')
-        if enable_mp_subscribe is None:
-            enable_mp_subscribe = True # 默认缺省值为 True
+        # 💡 核心修复：由于底层 get_series_by_dynamic_condition 使用了显式列查询，
+        # series_data 中无法包含新字段 'enable_mp_subscribe'。
+        # 我们在此处直接执行原生 SQL 查询，确保能拿到数据库中最新的、最准确的配置。
+        enable_mp_subscribe = False
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT enable_mp_subscribe 
+                        FROM media_metadata 
+                        WHERE tmdb_id = %s AND item_type = 'Series' 
+                        LIMIT 1
+                    """, (str(tmdb_id),))
+                    row = cursor.fetchone()
+                    if row:
+                        if isinstance(row, dict):
+                            if row.get('enable_mp_subscribe') is not None:
+                                enable_mp_subscribe = row.get('enable_mp_subscribe')
+                        elif isinstance(row, (tuple, list)):
+                            if row[0] is not None:
+                                enable_mp_subscribe = row[0]
+        except Exception as e_db:
+            logger.warning(f"  ➜ 实时查询 enable_mp_subscribe 失败，默认关闭: {e_db}")
 
         if enable_mp_subscribe:
             self._sync_status_to_moviepilot(

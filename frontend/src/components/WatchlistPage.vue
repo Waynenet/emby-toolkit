@@ -367,13 +367,13 @@
                         <n-button 
                           quaternary 
                           circle 
-                          :type="item.enable_mp_subscribe !== false ? 'primary' : 'default'" 
-                          @click.stop="() => saveMpSubscribe(item, item.enable_mp_subscribe === false)"
+                          :type="item.enable_mp_subscribe === true ? 'primary' : 'default'" 
+                          @click.stop="() => saveMpSubscribe(item, item.enable_mp_subscribe !== true)"
                         >
                           <template #icon><n-icon :component="PaperPlaneIcon" /></template>
                         </n-button>
                       </template>
-                      {{ item.enable_mp_subscribe !== false ? 'MoviePilot 自动订阅：已开启 (点击关闭)' : 'MoviePilot 自动订阅：已关闭 (点击开启)' }}
+                      {{ item.enable_mp_subscribe === true ? 'MoviePilot 自动订阅：已开启 (点击关闭)' : 'MoviePilot 自动订阅：已关闭 (点击开启)' }}
                     </n-tooltip>
 
                     <!-- A. 追剧中视图：显示强制完结按钮 -->
