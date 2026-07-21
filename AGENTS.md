@@ -151,6 +151,92 @@ ssh unraid "docker exec emby-toolkit curl -sI http://localhost:5257/assets/index
 - 静态资源验证时，`/assets/index-*.js` 必须返回 `Content-Type: text/javascript`。如果返回 `text/html`，优先检查 `/app/static/assets` 目录权限。
 - 如需回退，使用第 4 步输出的 `/tmp/etk-hotfix-backup/<timestamp>` 目录，把备份文件 `docker cp` 回容器后重启。
 
+## GitHub 发版操作备查
+
+ETK 与 ETK MediaInfo Bridge 的 GitHub Release 会触发 Telegram 发版通知。TG 会原样转发 GitHub Release 正文；一旦正式发布，错误通知通常无法通过编辑 Release 自动修复。因此必须先创建草稿、完成正文和资产校验，最后才转为正式发布。
+
+### 强制流程
+
+1. 完成测试、版本号修改、提交、标签和推送。
+2. 创建 `draft=true` 的草稿 Release。禁止直接创建正式 Release。
+3. 使用 UTF-8 字节提交 Release 正文，随后从 GitHub API 回读正文并做逐字校验。
+4. 有发布资产时，在草稿状态上传资产，并核对 GitHub `digest`、文件大小、程序集版本和本地 SHA-256。
+5. 所有校验通过后，才把 `draft` 改为 `false`。这一步会触发 TG 通知，属于不可逆的最终发布动作。
+6. 正式发布后从公开下载地址重新下载一次，复核 SHA-256 和程序集依赖；发现问题必须升新版本，不能只原地替换同版本资产，因为已安装错误版本的用户不会触发自动更新。
+
+### PowerShell 中文编码规则
+
+- 中文正文必须使用单引号 here-string（`@' ... '@`），避免反引号、`$变量` 和 Markdown 内容被 PowerShell 插值或转义。
+- `ConvertTo-Json` 的结果必须显式转换为 UTF-8 字节，并使用 `application/json; charset=utf-8` 提交。
+- 禁止用 Windows PowerShell 直接执行 `Invoke-RestMethod -Body $json -ContentType 'application/json'` 提交中文正文；该写法可能在发送前把中文替换成 `?`。
+- 不在命令输出中打印 GitHub Token。Token 只允许在当前进程内从 Git Credential Manager 或安全环境变量读取。
+
+创建草稿 Release 的安全模板：
+
+```powershell
+$body = @'
+## 修复
+
+- 中文发布说明。
+'@
+
+$payload = @{
+  tag_name = $tag
+  target_commitish = 'main'
+  name = $tag
+  body = $body
+  draft = $true
+  prerelease = $false
+  generate_release_notes = $false
+} | ConvertTo-Json -Depth 10 -Compress
+
+$release = Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://api.github.com/repos/$owner/$repo/releases" `
+  -Headers $headers `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+```
+
+回读正文时必须比较规范化后的完整文本，不能只看 HTTP 成功：
+
+```powershell
+$fresh = Invoke-RestMethod `
+  -Uri "https://api.github.com/repos/$owner/$repo/releases/$($release.id)" `
+  -Headers $headers
+
+$expected = ($body -replace "`r`n", "`n").Trim()
+$actual = ($fresh.body -replace "`r`n", "`n").Trim()
+if ($actual -cne $expected) { throw 'Release body UTF-8 verification failed' }
+if ($actual -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') {
+  throw 'Release body contains control characters'
+}
+```
+
+上传 DLL 后必须在发布前校验 GitHub 返回的摘要：
+
+```powershell
+$asset = Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://uploads.github.com/repos/$owner/$repo/releases/$($release.id)/assets?name=ETKMediaInfoBridge.dll" `
+  -Headers $headers `
+  -ContentType 'application/octet-stream' `
+  -InFile $dllPath
+
+$localDigest = 'sha256:' + (Get-FileHash -Algorithm SHA256 -LiteralPath $dllPath).Hash.ToLowerInvariant()
+if ($asset.state -ne 'uploaded' -or $asset.digest -ne $localDigest) {
+  throw 'Release asset digest verification failed'
+}
+```
+
+插件发布还必须使用目标 Emby 版本的真实服务端程序集执行干净构建，不能使用默认 NuGet 引用代替：
+
+```powershell
+& $dotnet build -c Release -t:Rebuild -p:EmbyReferencePath=$embyReferencePath
+```
+
+构建后检查 `ETKMediaInfoBridge.dll` 的程序集版本、`MediaBrowser.*` 引用版本和全部类型加载结果。草稿发布完成上述检查后，才用同样的 UTF-8 字节方式提交 `@{ draft = $false }`，转为正式 Release。
+
 ## MP-MCP 连接备查
 
 MoviePilot 内置 Streamable HTTP MCP，可直接通过 HTTP JSON-RPC 调用。
