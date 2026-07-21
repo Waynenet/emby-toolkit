@@ -27,7 +27,7 @@
               <n-tooltip trigger="hover">
                 <template #trigger>
                   <div style="display: flex; align-items: center;">
-                    <n-text style="margin-right: 8px; font-size: 12px;">自动发现合集</n-text>
+                    <n-text style="margin-right: 8px; font-size: 18px;">自动发现合集</n-text>
                     <n-switch 
                       :value="autoCompleteEnabled" 
                       @update:value="handleAutoCompleteChange" 
@@ -46,7 +46,7 @@
               <n-tooltip trigger="hover">
                 <template #trigger>
                   <div style="display: flex; align-items: center;">
-                    <n-text style="margin-right: 8px; font-size: 12px;">自动订阅缺失</n-text>
+                    <n-text style="margin-right: 8px; font-size: 18px;">自动订阅缺失</n-text>
                     <n-switch 
                       :value="autoSubEnabled" 
                       @update:value="handleAutoSubChange" 
@@ -128,7 +128,7 @@
                     <div class="card-delete-btn">
                       <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
                         <template #trigger>
-                          <n-button text type="error" circle size="small" title="删除合集" @click.stop>
+                          <n-button text type="default" circle size="small" title="删除合集" @click.stop>
                             <template #icon><n-icon :component="TrashIcon" /></template>
                           </n-button>
                         </template>

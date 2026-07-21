@@ -230,7 +230,7 @@
                     
                     <n-popconfirm @positive-click="() => removeFromWatchlist(item.parent_tmdb_id, item.item_name)" @click.stop>
                       <template #trigger>
-                        <n-button text type="error" size="small" @click.stop>
+                        <n-button text type="default" size="small" @click.stop>
                           <template #icon><n-icon :component="TrashIcon" /></template>
                         </n-button>
                       </template>
