@@ -2792,6 +2792,7 @@ def get_organize_records():
     search = request.args.get('search', '')
     status = request.args.get('status', 'all')
     cid = request.args.get('cid', '')
+    fail_reason = str(request.args.get('fail_reason') or '').strip()
     
     offset = (page - 1) * per_page
     
@@ -2813,6 +2814,10 @@ def get_organize_records():
                 if cid:
                     where_clauses.append("target_cid = %s")
                     params.append(str(cid))
+
+                if fail_reason:
+                    where_clauses.append("fail_reason = %s")
+                    params.append(fail_reason)
                     
                 where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
                 
@@ -2845,10 +2850,20 @@ def get_organize_records():
                 cursor.execute("SELECT COUNT(*) as this_week FROM p115_organize_records WHERE processed_at >= NOW() - INTERVAL '7 days'")
                 stat_week = cursor.fetchone()['this_week']
 
+                cursor.execute("""
+                    SELECT fail_reason, COUNT(*) AS count
+                    FROM p115_organize_records
+                    WHERE NULLIF(BTRIM(fail_reason), '') IS NOT NULL
+                    GROUP BY fail_reason
+                    ORDER BY count DESC, fail_reason
+                """)
+                fail_reasons = cursor.fetchall()
+
                 return jsonify({
                     "success": True,
                     "items": items,
                     "total": total,
+                    "fail_reasons": fail_reasons,
                     "stats": {
                         "total": stat_total,
                         "success": stat_success,

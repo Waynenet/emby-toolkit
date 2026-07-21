@@ -36,6 +36,7 @@
           </n-input>
           <n-select class="toolbar-status-select" v-model:value="statusFilter" :options="statusOptions" @update:value="handleFilter" />
           <n-select class="toolbar-category-select" v-model:value="categoryFilter" :options="categoryOptions" placeholder="所有分类" clearable @update:value="handleFilter" />
+          <n-select class="toolbar-reason-select" v-model:value="failReasonFilter" :options="failReasonOptions" placeholder="全部失败原因" clearable filterable @update:value="handleFilter" />
         </n-space>
         
         <n-space class="toolbar-right">
@@ -187,6 +188,7 @@ const checkedRowKeys = ref([]);
 const searchQuery = ref('');
 const statusFilter = ref('all');
 const categoryFilter = ref(null);
+const failReasonFilter = ref(null);
 const stats = ref({ total: 0, success: 0, unrecognized: 0, thisWeek: 0 });
 
 // 选项数据
@@ -197,6 +199,7 @@ const statusOptions = [
   { label: '质检不合格', value: 'unqualified' }
 ];
 const categoryOptions = ref([{ label: '所有分类', value: null }]);
+const failReasonOptions = ref([]);
 
 // 模态框数据
 const showEditModal = ref(false);
@@ -389,9 +392,13 @@ const fetchRecords = async () => {
   loading.value = true;
   checkedRowKeys.value = [];
   try {
-    const res = await axios.get('/api/p115/records', { params: { page: 1, per_page: 5000, search: searchQuery.value, status: statusFilter.value, cid: categoryFilter.value } });
+    const res = await axios.get('/api/p115/records', { params: { page: 1, per_page: 5000, search: searchQuery.value, status: statusFilter.value, cid: categoryFilter.value, fail_reason: failReasonFilter.value } });
     tableData.value = res.data.items;
     stats.value = res.data.stats;
+    failReasonOptions.value = (res.data.fail_reasons || []).map(item => ({
+      label: `${item.fail_reason} (${item.count})`,
+      value: item.fail_reason
+    }));
     paginationReactive.page = 1;
   } catch (error) { message.error('获取整理记录失败'); } finally { loading.value = false; }
 };
@@ -599,6 +606,7 @@ onBeforeUnmount(() => {
 .toolbar-search { width: 300px; }
 .toolbar-status-select { width: 140px; }
 .toolbar-category-select { width: 160px; }
+.toolbar-reason-select { width: 240px; }
 .records-table { width: 100%; }
 .mobile-row-meta { margin-bottom: 2px; }
 :deep(.is-child-row td) { background-color: rgba(0, 0, 0, 0.015) !important; }
