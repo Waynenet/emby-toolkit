@@ -325,6 +325,28 @@ def api_delete_custom_collection(collection_id):
         )
 
         if db_success:
+            # === 物理清理本地精美封面与生成器缓存目录 ===
+            from pathlib import Path
+            import shutil
+            
+            # 1. 清理本地生成的虚拟合集带角标封面
+            local_cover = Path(f"/tmdb/covers/virtual_{collection_id}.jpg")
+            if local_cover.exists():
+                try:
+                    local_cover.unlink()
+                    logger.info(f"  ➜ [文件清理] 已成功物理删除本地合集封面：{local_cover}")
+                except Exception as e_del:
+                    logger.error(f"物理删除本地合集封面失败: {e_del}")
+                    
+            # 2. 清理封面生成器下载的原始素材海报目录
+            try:
+                cache_dir = Path(config_manager.PERSISTENT_DATA_PATH) / "cover_generator" / "covers" / collection_name
+                if cache_dir.exists() and cache_dir.is_dir():
+                    shutil.rmtree(cache_dir)
+                    logger.info(f"  ➜ [文件清理] 已成功物理删除合集封面生成素材目录：{cache_dir}")
+            except Exception as e_del_cache:
+                logger.error(f"物理删除合集封面生成素材目录失败: {e_del_cache}")
+
             from handler.poster_generator import cleanup_placeholder
             for tid in tmdb_to_clean:
                 cleanup_placeholder(tid) 
