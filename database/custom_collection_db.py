@@ -79,6 +79,9 @@ def update_custom_collection(collection_id: int, name: str, type: str, definitio
             conn.commit()
             return cursor.rowcount > 0
     except psycopg2.Error as e:
+        # 如果是重名冲突（IntegrityError），直接抛出给路由，不在此处打印庞大的堆栈报错 ===
+        if isinstance(e, psycopg2.IntegrityError):
+            raise
         logger.error(f"更新自定义合集 ID {collection_id} 时出错: {e}", exc_info=True)
         return False
 

@@ -248,6 +248,11 @@ def api_update_custom_collection(collection_id):
         else:
             return jsonify({"error": "数据库操作失败，未找到或无法更新该合集"}), 404
             
+    # === 新增对重名冲突的专属拦截，不打 Traceback，向前端输出友好中文 ===
+    except psycopg2.IntegrityError:
+        logger.warning(f"  ➜ 更新合集失败：名为 '{name}' 的合集已存在，拒绝保存。")
+        return jsonify({"error": f"更新失败：名为 '{name}' 的自建合集已存在。"}), 409
+        
     except Exception as e:
         logger.error(f"  ➜ 更新自定义合集 '{name}' 时发生严重错误: {e}", exc_info=True)
         return jsonify({"error": "服务器内部错误，请检查后端日志"}), 500
