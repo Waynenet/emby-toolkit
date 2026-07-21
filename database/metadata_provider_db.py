@@ -608,6 +608,7 @@ def resolve_metadata_identity_by_path(
                 ) AS asset(value)
                 WHERE m.item_type=ANY(%s)
                   AND asset.value->>'path' IS NOT NULL
+                  AND btrim(asset.value->>'path') <> ''
                   AND (
                       lower(asset.value->>'path')=lower(%s)
                       OR lower(asset.value->>'path') LIKE lower(%s)
