@@ -2468,7 +2468,20 @@ class MediaProcessor:
                     merged_actor["name"] = emby_actor.get("Name")
                 else:
                     merged_actor["name"] = tmdb_match.get("name")
-                merged_actor["character"] = emby_actor.get("Role") or ""
+                emby_role = emby_actor.get("Role") or ""
+                tmdb_role = tmdb_match.get("character") or ""
+                
+                # 智能角色名合并/选择：
+                # 如果 TMDb 中包含“导演”或“主创”等核心幕后标记，而 Emby 的现有角色中没有，则进行合并，防止导演身份被演员身份抹除
+                if any(x in tmdb_role for x in ["导演", "主创"]) and not any(x in emby_role for x in ["导演", "主创"]):
+                    if emby_role and emby_role != tmdb_role:
+                        clean_emby = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', emby_role).strip()
+                        prefix = "导演" if "导演" in tmdb_role else "主创"
+                        merged_actor["character"] = f"{prefix} / {clean_emby}"
+                    else:
+                        merged_actor["character"] = tmdb_role
+                else:
+                    merged_actor["character"] = emby_role if emby_role else tmdb_role
                 final_cast_list.append(merged_actor)
                 used_tmdb_ids.add(tmdb_id_str)
 
@@ -2560,10 +2573,14 @@ class MediaProcessor:
                     # 【核心集成点】使用 actor_utils.select_best_role 智能对比角色名优先级
                     best_role = actor_utils.select_best_role(current_char, valid_d_role or "")
                     
-                    # 保护导演标记
-                    is_tmdb_director = l_actor.get('_is_crew', False) and '导演' in current_char
-                    if is_tmdb_director and '导演' not in best_role:
-                        l_actor["character"] = f"导演 / {best_role}"
+                    # 保护导演/主创标记
+                    is_tmdb_director = l_actor.get('_is_crew', False) and any(x in current_char for x in ['导演', '主创'])
+                    if is_tmdb_director:
+                        prefix = '导演' if '导演' in current_char else '主创'
+                        if prefix not in best_role:
+                            l_actor["character"] = f"{prefix} / {best_role}"
+                        else:
+                            l_actor["character"] = best_role
                     else:
                         l_actor["character"] = best_role
                             
