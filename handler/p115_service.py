@@ -9866,6 +9866,29 @@ def _clean_rule_title(text):
     value = os.path.splitext(value)[0]
     value = re.sub(r'[？?！!：:；;，,、]+', ' ', value)
 
+    # 标题只取第一个明确元数据字段之前的部分，避免清理中间字段后把发布组拼回标题。
+    cutoff_patterns = [
+        r'(?i)\b(?:s\d{1,4}[ .\-_]*e\d{1,4}|season[ .\-_]*\d{1,4}|ep(?:isode)?[ .\-_]*\d{1,4})\b',
+        r'第\s*[一二三四五六七八九十百零\d]+\s*[季集话話回]',
+        r'(?<!\d)(?:19|20)\d{2}(?!\d)',
+        r'(?i)\b(?:part|pt|cd)[ .\-_]*\d{1,2}\b',
+        r'(?i)\b(?:tmdb|tmdbid)[=\-_ ]*\d+\b',
+        r'(?i)\b(?:specials?|ova|oad|sp|extra(?:s)?|collection|complete)\b',
+        r'(?i)\b(?:h[ ._-]?26[45]|x26[45])\b',
+        r'(?i)\b(?:flac|aac|ddp|dd|dts|truehd|atmos)[ ._-]*\d(?:\.\d)?\b',
+        *_NOISE_TOKEN_PATTERNS,
+    ]
+    cutoffs = []
+    for pattern in cutoff_patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+        prefix = value[:match.start()].strip(' ._-')
+        if prefix:
+            cutoffs.append((match.start(), prefix))
+    if cutoffs:
+        value = min(cutoffs, key=lambda item: item[0])[1]
+
     for pattern in _NOISE_TOKEN_PATTERNS:
         value = re.sub(pattern, ' ', value)
 
