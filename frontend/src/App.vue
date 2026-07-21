@@ -245,6 +245,7 @@ html.dark {
   --n-border: 1px solid #ffffff00 !important;
   --n-border-hover: 1px solid #ffffff00 !important;
   --n-border-focus: 1px solid #ffffff00 !important;
+  --n-border-checked: 1px solid #ffffff00 !important;
   --n-border-disabled: 1px solid #ffffff00 !important;
   --n-box-shadow-active: inset 0 0 0 1px #18a058;
   --n-box-shadow-focus: inset 0 0 0 1px #18a058, 0 0 0 2px rgba(24, 160, 88, 0.2) !important;
@@ -781,8 +782,9 @@ body {
   border-color: #ffffff !important;
 }
 
-/* 3. 选中时恢复正常的颜色（比如绿色，如果不加这句选中时可能也会变透明） */
-.poster-checkbox-wrap .n-checkbox.n-checkbox--checked .n-checkbox-box {
+/* 3. 选中时恢复正常的颜色 */
+.n-checkbox.n-checkbox--checked .n-checkbox-box,
+.n-checkbox.n-checkbox--indeterminate .n-checkbox-box {
   background-color: #18a058 !important;
   border-color: #18a058 !important;
 }
