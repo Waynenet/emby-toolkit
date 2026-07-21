@@ -627,8 +627,7 @@ body {
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
 
 .n-tag--default-type {
-  background: var(--glass-bg) !important;
-  border: 1px solid var(--glass-border) !important;
+  background-color: var(--glass-bg) !important;
   color: #ffffff !important;
 }
 .n-tag--info-type {
