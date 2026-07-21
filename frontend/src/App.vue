@@ -255,6 +255,7 @@ html.dark {
   --n-button-box-shadow-focus: inset 0 0 0 1px #18a058, 0 0 0 2px rgba(24, 160, 88, 0.3) !important;
   --n-button-text-color-hover: #18a058 !important;
   --n-button-text-color-active: #18a058 !important;
+  --n-check-mark-color: #FFF !important;
 }
 
 html, body { 
@@ -493,14 +494,14 @@ body::before {
 }
 
 /* 4. 覆盖 Tag 标签 */
-.n-tag {
+/* .n-tag {
   background: rgba(255, 255, 255, 0.15) !important;
   border: 1px solid var(--glass-border) !important;
   color: #ffffff !important;
 }
 .n-tag__close:hover {
   color: #ff4d4f !important;
-}
+} */
 
 /* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
 

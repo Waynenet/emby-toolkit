@@ -386,7 +386,7 @@
                     </template>
                     <template #header-extra>
                       <n-space align="center" justify="end" :size="8">
-                        <n-button size="tiny" type="info" ghost @click="openPromptModal">配置提示词</n-button>
+                        <n-button size="tiny" type="primary" ghost @click="openPromptModal">配置提示词</n-button>
                         <n-button size="tiny" type="primary" ghost @click="testAI" :loading="isTestingAI" :disabled="!configModel.ai_api_key">测试</n-button>
                       </n-space>
                     </template>
