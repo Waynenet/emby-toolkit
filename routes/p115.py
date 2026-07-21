@@ -1990,7 +1990,7 @@ def _cached_metadata_response(sha1):
     if not payload:
         return jsonify({"error": "metadata cache not found"}), 404
     from handler.media_image_cache import archive_metadata_images
-    archive_metadata_images(payload, request.host_url)
+    archive_metadata_images(payload, request.host_url, archive_sources=False)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -2138,8 +2138,17 @@ def _prepare_deep_delete_response(sha1, expected_pick_code=''):
     if not anchor_pick_code:
         cache_row = P115CacheManager.get_file_cache_by_sha1(sha1) or {}
         anchor_pick_code = str(cache_row.get('pick_code') or '').strip()
-    if not pickcodes or (anchor_pick_code and anchor_pick_code.lower() not in {pc.lower() for pc in pickcodes}):
+    matched_anchor_pick_code = next(
+        (pc for pc in pickcodes if pc.lower() == anchor_pick_code.lower()),
+        '',
+    ) if anchor_pick_code else ''
+    if not pickcodes or not matched_anchor_pick_code:
         return jsonify({'ok': False, 'error': 'delete scope identity mismatch'}), 409
+    if actual_type in {'Movie', 'Episode'}:
+        pickcodes = [matched_anchor_pick_code]
+        delete_scope = '精确版本'
+    else:
+        delete_scope = '层级展开'
 
     now = time.time()
     token = secrets.token_urlsafe(24)
@@ -2161,8 +2170,8 @@ def _prepare_deep_delete_response(sha1, expected_pick_code=''):
         _deep_delete_snapshots[token] = snapshot
 
     logger.info(
-        '  ➜ [ETK 深度删除] 已准备删除：%s（类型=%s，EmbyID=%s，PickCode=%s 个）。',
-        snapshot['item_name'], actual_type, root_item_id, len(pickcodes),
+        '  ➜ [ETK 深度删除] 已准备删除：%s（类型=%s，范围=%s，EmbyID=%s，PickCode=%s 个）。',
+        snapshot['item_name'], actual_type, delete_scope, root_item_id, len(pickcodes),
     )
     return jsonify({'ok': True, 'token': token, 'pickcode_count': len(pickcodes)})
 
@@ -2783,6 +2792,7 @@ def get_organize_records():
     search = request.args.get('search', '')
     status = request.args.get('status', 'all')
     cid = request.args.get('cid', '')
+    fail_reason = str(request.args.get('fail_reason') or '').strip()
     
     offset = (page - 1) * per_page
     
@@ -2804,6 +2814,10 @@ def get_organize_records():
                 if cid:
                     where_clauses.append("target_cid = %s")
                     params.append(str(cid))
+
+                if fail_reason:
+                    where_clauses.append("fail_reason = %s")
+                    params.append(fail_reason)
                     
                 where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
                 
@@ -2836,10 +2850,20 @@ def get_organize_records():
                 cursor.execute("SELECT COUNT(*) as this_week FROM p115_organize_records WHERE processed_at >= NOW() - INTERVAL '7 days'")
                 stat_week = cursor.fetchone()['this_week']
 
+                cursor.execute("""
+                    SELECT fail_reason, COUNT(*) AS count
+                    FROM p115_organize_records
+                    WHERE NULLIF(BTRIM(fail_reason), '') IS NOT NULL
+                    GROUP BY fail_reason
+                    ORDER BY count DESC, fail_reason
+                """)
+                fail_reasons = cursor.fetchall()
+
                 return jsonify({
                     "success": True,
                     "items": items,
                     "total": total,
+                    "fail_reasons": fail_reasons,
                     "stats": {
                         "total": stat_total,
                         "success": stat_success,

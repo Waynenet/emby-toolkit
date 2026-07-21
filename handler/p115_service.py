@@ -3520,7 +3520,6 @@ class P115Service:
 class P115CacheManager:
     _rapid_preid_hints = LimitedCache(maxsize=10000)
     _rapid_preid_hints_lock = threading.Lock()
-    _RAW_ETK_BACKFILL_VERSION = 1
 
     @staticmethod
     def _merge_center_intro_before_mediainfo_cache(sha1: str, mediainfo_json):
@@ -4404,7 +4403,7 @@ class P115CacheManager:
             # season_number / episode_number 是媒体身份的一部分，上传到中心后可避免消费端再次从文件名正则猜集号。
             allowed = {
                 "tmdb_id", "type", "original_language", "sha1", "preid",
-                "season_number", "episode_number", "quality_source", "backfill_version",
+                "season_number", "episode_number", "quality_source",
             }
             raw_ffprobe_json["_etk"] = {
                 k: v for k, v in ctx.items()
@@ -4471,39 +4470,6 @@ class P115CacheManager:
         ).strip()
         detected = extract_quality_source_from_filename(name)
         return _norm(detected)
-
-    @staticmethod
-    def _quality_source_from_filesystem_cache(cursor, sha1):
-        sha1 = str(sha1 or '').strip().upper()
-        if not sha1:
-            return ''
-        try:
-            cursor.execute(
-                """
-                SELECT
-                    COALESCE(NULLIF(por.original_name, ''), pfc.name) AS source_name
-                FROM p115_filesystem_cache pfc
-                LEFT JOIN p115_organize_records por
-                  ON por.file_id = pfc.id
-                  OR (
-                      NULLIF(por.pick_code, '') IS NOT NULL
-                      AND por.pick_code = pfc.pick_code
-                  )
-                WHERE UPPER(pfc.sha1) = %s
-                ORDER BY
-                    CASE WHEN NULLIF(por.original_name, '') IS NOT NULL THEN 0 ELSE 1 END,
-                    por.processed_at DESC NULLS LAST,
-                    pfc.updated_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                (sha1,),
-            )
-            row = cursor.fetchone()
-            return P115CacheManager._extract_quality_source_from_context(
-                file_name=(row or {}).get('source_name') if row else ''
-            )
-        except Exception:
-            return ''
 
     @staticmethod
     def _ensure_preid_column():
@@ -5073,10 +5039,6 @@ class P115CacheManager:
                     raw_probe = row.get('raw_ffprobe_json')
                     if not raw_probe:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
-                        quality_source = P115CacheManager._quality_source_from_filesystem_cache(cursor, sha1)
-                        if quality_source:
-                            local_ctx = dict(local_ctx or {})
-                            local_ctx['quality_source'] = quality_source
                         if not local_ctx:
                             return None
 
@@ -5110,25 +5072,20 @@ class P115CacheManager:
                     raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                     ctx = raw_probe.get('_etk') if isinstance(raw_probe.get('_etk'), dict) else {}
-                    has_useful_etk = P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
-                    try:
-                        backfill_version = int(ctx.get('backfill_version') or 0)
-                    except (TypeError, ValueError):
-                        backfill_version = 0
-                    need_backfill = (
-                        not has_useful_etk
-                        or backfill_version < P115CacheManager._RAW_ETK_BACKFILL_VERSION
-                    )
+                    need_backfill = not P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe)
+
+                    # 即使已有 _etk，也允许补齐缺失的 original_language / sha1 / preid / 季集号。
+                    if not ctx.get('original_language') or not ctx.get('sha1') or not P115CacheManager._norm_preid(ctx.get('preid')):
+                        need_backfill = True
+                    if str(ctx.get('type') or '').strip().lower() in ('tv', 'series', 'season', 'episode'):
+                        if ctx.get('season_number') in (None, '') or ctx.get('episode_number') in (None, ''):
+                            need_backfill = True
 
                     if need_backfill:
                         local_ctx = P115CacheManager._build_etk_context_from_media_metadata(cursor, sha1)
-                        quality_source = P115CacheManager._quality_source_from_filesystem_cache(cursor, sha1)
-                        if quality_source:
-                            local_ctx = dict(local_ctx or {})
-                            local_ctx['quality_source'] = quality_source
-                        if local_ctx or has_useful_etk:
+                        if local_ctx:
                             clean_ctx = {k: v for k, v in ctx.items() if v not in [None, '', [], {}]}
-                            if has_useful_etk:
+                            if P115CacheManager._raw_ffprobe_has_useful_etk(raw_probe):
                                 # 已有可用身份时，尊重旧 _etk，仅补齐缺失字段。
                                 merged_ctx = {}
                                 merged_ctx.update(local_ctx)
@@ -5141,14 +5098,7 @@ class P115CacheManager:
 
                             # sha1 必须以当前查询值为准。
                             merged_ctx['sha1'] = sha1
-                            if merged_ctx.get('tmdb_id') and merged_ctx.get('type'):
-                                merged_ctx['backfill_version'] = P115CacheManager._RAW_ETK_BACKFILL_VERSION
-                            merged_ctx = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
-
-                            if merged_ctx == ctx:
-                                return raw_probe
-
-                            raw_probe['_etk'] = merged_ctx
+                            raw_probe['_etk'] = {k: v for k, v in merged_ctx.items() if v not in [None, '', [], {}]}
                             raw_probe = P115CacheManager._sanitize_raw_ffprobe_for_cache(raw_probe)
 
                             cursor.execute(
@@ -5408,6 +5358,46 @@ class P115CacheManager:
 # ★★★ 115 整理记录 DB 管理器 ★★★
 # ======================================================================
 class P115RecordManager:
+    @staticmethod
+    def find_in_library_sha1s(sha1_values):
+        """返回已经绑定到在库媒体项的 SHA1 集合。查询失败时放行整理流程。"""
+        normalized = {
+            str(value or '').strip().upper()
+            for value in sha1_values or []
+            if str(value or '').strip()
+        }
+        if not normalized:
+            return set()
+
+        lookup_values = sorted(normalized | {value.lower() for value in normalized})
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT UPPER(sha.sha1) AS sha1
+                        FROM media_metadata m
+                        CROSS JOIN LATERAL jsonb_array_elements_text(
+                            CASE
+                                WHEN jsonb_typeof(m.file_sha1_json) = 'array'
+                                THEN m.file_sha1_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS sha(sha1)
+                        WHERE COALESCE(m.in_library, FALSE) = TRUE
+                          AND m.file_sha1_json ?| %s::text[]
+                        """,
+                        (lookup_values,),
+                    )
+                    return {
+                        str(row.get('sha1') or '').strip().upper()
+                        for row in cursor.fetchall()
+                        if str(row.get('sha1') or '').strip().upper() in normalized
+                    }
+        except Exception as e:
+            logger.warning(f"  ➜ [SHA1去重] 查询在库 SHA1 失败，继续正常整理: {e}")
+            return set()
+
     @staticmethod
     def add_or_update_record(file_id, original_name, status, tmdb_id=None, media_type=None, target_cid=None, category_name=None, renamed_name=None, pick_code=None, season_number=None, fail_reason=None):
         """添加或更新整理记录（基于 file_id 和 pick_code 唯一约束，智能继承原名）"""
@@ -7989,6 +7979,28 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                         except Exception:
                             pass
 
+        # 自动整理发现相同 SHA1 已经在库时，直接交给现有未识别搬运链路。
+        # 手动重组处理的本来就是在库文件，必须跳过去重才能修正目录和媒体身份。
+        if not getattr(self, 'is_manual_correct', False):
+            in_library_sha1s = P115RecordManager.find_in_library_sha1s(
+                file_item.get('sha1') or file_item.get('sha')
+                for file_item in candidates
+            )
+            if in_library_sha1s:
+                pending_candidates = []
+                for file_item in candidates:
+                    file_name = file_item.get('fn') or file_item.get('n') or file_item.get('file_name', '')
+                    ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+                    file_sha1 = str(file_item.get('sha1') or file_item.get('sha') or '').strip().upper()
+                    if ext in known_video_exts and file_sha1 in in_library_sha1s:
+                        logger.info(f"  ➜ [SHA1去重] {file_name} -> 已存在")
+                        _mark_unrecognized(file_item, '已存在')
+                        if progress_callback:
+                            progress_callback()
+                        continue
+                    pending_candidates.append(file_item)
+                candidates = pending_candidates
+
         # 确保 allowed_exts 有兜底，防止用户清空列表导致报错
         if not allowed_exts:
             allowed_exts = known_video_exts | {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
@@ -9853,6 +9865,29 @@ def _clean_rule_title(text):
     value = os.path.basename(value.strip())
     value = os.path.splitext(value)[0]
     value = re.sub(r'[？?！!：:；;，,、]+', ' ', value)
+
+    # 标题只取第一个明确元数据字段之前的部分，避免清理中间字段后把发布组拼回标题。
+    cutoff_patterns = [
+        r'(?i)\b(?:s\d{1,4}[ .\-_]*e\d{1,4}|season[ .\-_]*\d{1,4}|ep(?:isode)?[ .\-_]*\d{1,4})\b',
+        r'第\s*[一二三四五六七八九十百零\d]+\s*[季集话話回]',
+        r'(?<!\d)(?:19|20)\d{2}(?!\d)',
+        r'(?i)\b(?:part|pt|cd)[ .\-_]*\d{1,2}\b',
+        r'(?i)\b(?:tmdb|tmdbid)[=\-_ ]*\d+\b',
+        r'(?i)\b(?:specials?|ova|oad|sp|extra(?:s)?|collection|complete)\b',
+        r'(?i)\b(?:h[ ._-]?26[45]|x26[45])\b',
+        r'(?i)\b(?:flac|aac|ddp|dd|dts|truehd|atmos)[ ._-]*\d(?:\.\d)?\b',
+        *_NOISE_TOKEN_PATTERNS,
+    ]
+    cutoffs = []
+    for pattern in cutoff_patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+        prefix = value[:match.start()].strip(' ._-')
+        if prefix:
+            cutoffs.append((match.start(), prefix))
+    if cutoffs:
+        value = min(cutoffs, key=lambda item: item[0])[1]
 
     for pattern in _NOISE_TOKEN_PATTERNS:
         value = re.sub(pattern, ' ', value)

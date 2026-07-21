@@ -5890,9 +5890,6 @@ def _center_display_meta_bundle_for_candidate(candidate: Dict[str, Any]) -> Dict
                 value = row.get(src_key) if row.get(src_key) not in (None, '', [], {}) else candidate.get(src_key)
                 if value not in (None, '', [], {}):
                     meta[dst_key] = value
-            season_status = str(meta.get('watching_status') or '').strip()
-            if season_status:
-                meta['watchlist_is_airing'] = season_status in ('Watching', 'Paused')
         if include_series_fields:
             meta.update({
                 'rating': row.get('rating'),

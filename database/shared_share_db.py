@@ -1398,7 +1398,7 @@ def list_unregistered_airing_episode_candidates(limit: int = 500) -> List[Dict[s
     - 候选来自 media_metadata.Episode 且 in_library=true；
     - 只信同一父剧同一季的 Season 行 watching_status；
     - 只有 Season.watching_status IN ('Watching', 'Paused') 才视为追更季；
-    - 不再参考 Series.watching_status / Episode.watching_status / watchlist_is_airing，
+    - 不再参考 Series.watching_status / Episode.watching_status，
       避免某一季连载时把同剧已完结旧季重新拉出来“鞭尸”；
     - 排除已经有效登记到中心的 episode 源。
     """

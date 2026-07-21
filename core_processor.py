@@ -2723,9 +2723,6 @@ class MediaProcessor:
                     replace_all_images_param=False,
                     item_name_for_log=item_name_for_log
                 )
-                if uses_etk_metadata_provider:
-                    self._restore_missing_etk_root_images(item_details_from_emby)
-
                 restore_target_ids = [item_id]
                 if item_type == 'Series':
                     restore_target_ids = [str(x) for x in (specific_episode_ids or []) if x]
@@ -3991,62 +3988,6 @@ class MediaProcessor:
             return bool((item or {}).get('BackdropImageTags'))
         return bool(((item or {}).get('ImageTags') or {}).get(image_type))
 
-    def _restore_missing_etk_root_images(self, item_details: Dict[str, Any]) -> bool:
-        item_id = str((item_details or {}).get('Id') or '').strip()
-        item_type = str((item_details or {}).get('Type') or '').strip()
-        if not item_id or item_type not in {'Movie', 'Series'}:
-            return True
-
-        current = emby.get_emby_item_details(
-            item_id,
-            self.emby_url,
-            self.emby_api_key,
-            self.emby_user_id,
-            fields='ImageTags,BackdropImageTags',
-        ) or item_details
-        restored_count = 0
-        failed_count = 0
-        for image_type in ('Primary', 'Backdrop', 'Logo', 'Thumb'):
-            if self._emby_item_has_image(current, image_type):
-                continue
-            if emby.download_remote_item_image(
-                self.emby_url,
-                self.emby_api_key,
-                item_id,
-                image_type,
-            ):
-                restored_count += 1
-            else:
-                failed_count += 1
-
-        if item_type == 'Series':
-            seasons = emby.get_series_children(
-                series_id=item_id,
-                base_url=self.emby_url,
-                api_key=self.emby_api_key,
-                user_id=self.emby_user_id,
-                include_item_types='Season',
-                fields='Id,Name,Path,IndexNumber,ImageTags',
-            ) or []
-            for season in seasons:
-                if self._emby_item_has_image(season, 'Primary'):
-                    continue
-                if emby.download_remote_item_image(
-                    self.emby_url,
-                    self.emby_api_key,
-                    str(season.get('Id') or ''),
-                    'Primary',
-                ):
-                    restored_count += 1
-                else:
-                    failed_count += 1
-
-        logger.info(
-            f"  ➜ [ETK图片] {item_type} 与季海报恢复完成："
-            f"成功 {restored_count}，失败 {failed_count}。"
-        )
-        return failed_count == 0
-
     def _sync_etk_episode_images(self, aggregated_tmdb_data: Dict[str, Any], item_details: Dict[str, Any], force_overwrite_episodes: Optional[List[str]] = None) -> bool:
         from handler.media_image_cache import (
             archive_episode_screenshot,
@@ -4058,8 +3999,6 @@ class MediaProcessor:
         if not series_id or not series_path:
             logger.warning("  ➜ [ETK分集图片] 缺少 Series ID 或路径，无法同步。")
             return False
-
-        self._restore_missing_etk_root_images(item_details)
 
         children = emby.get_series_children(
             series_id=series_id,

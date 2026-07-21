@@ -32,6 +32,28 @@
     }
   },
   {
+    "name": "standard_tv_discards_trailing_release_group",
+    "raw": "小芳.S01E11.2026.2160p.WEB-DL.DV.H265.DDP.2.0-HiveWeb.mp4",
+    "expect": {
+      "title": "小芳",
+      "year": 2026,
+      "media_type": "tv",
+      "season_number": 1,
+      "episode_number": 11
+    }
+  },
+  {
+    "name": "standard_tv_discards_trailing_release_group_after_year",
+    "raw": "Overdo.2026.S01E09.2160p.WEB-DL.50fps.AAC.HDR.H265-HiVEWeb.mp4",
+    "expect": {
+      "title": "Overdo",
+      "year": 2026,
+      "media_type": "tv",
+      "season_number": 1,
+      "episode_number": 9
+    }
+  },
+  {
     "name": "chinese_season_episode",
     "raw": "庆余年 第2季 第03集 4K.mkv",
     "main_dir_name": "庆余年 第2季",
