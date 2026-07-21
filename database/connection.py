@@ -281,6 +281,22 @@ def init_db():
                     "ON media_image_cache(content_hash)"
                 )
 
+                logger.trace("  ➜ 正在创建 'media_image_policy_cache' 表...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS media_image_policy_cache (
+                        item_type TEXT NOT NULL,
+                        tmdb_id TEXT NOT NULL,
+                        season_number INTEGER NOT NULL DEFAULT -1,
+                        episode_number INTEGER NOT NULL DEFAULT -1,
+                        policy_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        PRIMARY KEY (
+                            item_type, tmdb_id, season_number, episode_number
+                        )
+                    )
+                """)
+
                 logger.trace("  ➜ 正在创建 'subscribe_assistant_state' 表...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS subscribe_assistant_state (

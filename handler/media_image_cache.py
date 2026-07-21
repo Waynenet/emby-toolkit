@@ -520,7 +520,62 @@ def _archive_url(source_url: str, base_url: str):
     return _cached_url(cached["content_hash"], base_url)
 
 
-def archive_metadata_images(payload, base_url: str):
+def archive_policy_images(images, base_url: str):
+    values = [dict(item) for item in images or [] if isinstance(item, dict)]
+    sources = {
+        str(item.get("source_url") or "").strip()
+        for item in values
+        if item.get("source_url")
+    }
+    cached_by_source = {}
+    if image_archive_enabled() and sources:
+        with ThreadPoolExecutor(max_workers=min(4, len(sources))) as executor:
+            futures = {
+                source: executor.submit(cache_remote_image, source)
+                for source in sources
+            }
+            for source, future in futures.items():
+                try:
+                    cached_by_source[source] = future.result()
+                except Exception as exc:
+                    logger.warning("  ➜ [图片仓库] 缓存策略图片失败: %s", exc)
+
+    for item in values:
+        source = str(item.get("source_url") or "").strip()
+        cached = cached_by_source.get(source)
+        if cached:
+            item["content_hash"] = cached["content_hash"]
+        content_hash = str(item.get("content_hash") or "").strip().lower()
+        if content_hash and get_cached_image(content_hash):
+            item["url"] = _cached_url(content_hash, base_url)
+            item["thumbnail_url"] = item["url"]
+        else:
+            item.pop("content_hash", None)
+            item["url"] = source
+            item["thumbnail_url"] = item.get("thumbnail_source_url") or source
+    return values
+
+
+def discard_unreferenced_policy_sources(source_urls):
+    from database.image_policy_db import source_is_referenced
+
+    for source_url in {str(value or "").strip() for value in source_urls if value}:
+        if source_is_referenced(source_url):
+            continue
+        record = _source_record(source_url, require_file=False)
+        if not record:
+            continue
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM media_image_cache WHERE source_url=%s",
+                    (source_url,),
+                )
+            conn.commit()
+        _delete_file_if_unreferenced(record.get("content_hash"))
+
+
+def archive_metadata_images(payload, base_url: str, *, archive_sources: bool = True):
     if not isinstance(payload, dict):
         return payload
     screenshot_hash = str(payload.pop("_screenshot_hash", "") or "").strip()
@@ -535,7 +590,10 @@ def archive_metadata_images(payload, base_url: str):
         for key, value in images.items()
         if key in {"primary", "backdrop", "logo", "thumb"}
         and value
-        and (image_archive_enabled() or str(value).startswith(CACHE_TOKEN_PREFIX))
+        and (
+            str(value).startswith(CACHE_TOKEN_PREFIX)
+            or (archive_sources and image_archive_enabled())
+        )
     }
     if targets:
         with ThreadPoolExecutor(max_workers=min(4, len(targets))) as executor:

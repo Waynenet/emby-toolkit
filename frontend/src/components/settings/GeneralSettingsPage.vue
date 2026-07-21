@@ -2244,6 +2244,7 @@ const tableInfo = {
   'custom_collections': { cn: '自建合集', isSharable: false },
   'media_metadata': { cn: '媒体元数据', isSharable: true },
   'media_image_cache': { cn: '媒体图片缓存', isSharable: false },
+  'media_image_policy_cache': { cn: '媒体图片策略缓存', isSharable: false },
   'resubscribe_rules': { cn: '媒体洗版规则', isSharable: false },
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },

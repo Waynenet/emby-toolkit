@@ -85,7 +85,7 @@ def api_get_collection_provider_metadata(tmdb_collection_id):
     if not payload:
         return jsonify({'error': 'collection metadata not found'}), 404
     from handler.media_image_cache import archive_metadata_images
-    archive_metadata_images(payload, request.host_url)
+    archive_metadata_images(payload, request.host_url, archive_sources=False)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response

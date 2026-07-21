@@ -1585,7 +1585,7 @@ def get_emby_metadata_by_path():
     if not payload:
         return jsonify({'error': 'metadata cache not found'}), 404
     from handler.media_image_cache import archive_metadata_images
-    archive_metadata_images(payload, request.host_url)
+    archive_metadata_images(payload, request.host_url, archive_sources=False)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -1830,11 +1830,11 @@ def refresh_emby_metadata_images():
 @webhook_bp.route('/api/emby/metadata/images/search', methods=['GET'])
 def search_emby_metadata_images():
     from database.metadata_provider_db import (
-        build_image_language_priority,
-        get_cached_original_language,
-        preferred_image_candidates,
         resolve_metadata_identity_by_path,
-        sort_image_candidates,
+    )
+    from handler.media_image_policy import (
+        ImagePolicySyncError,
+        get_live_image_candidates,
     )
 
     requested_type = str(request.args.get('item_type') or '').strip().title()
@@ -1859,18 +1859,6 @@ def search_emby_metadata_images():
         if not tmdb_id.isdigit():
             return jsonify({'error': 'invalid collection tmdb id'}), 400
         media_type = 'movie'
-        collection_details = tmdb.get_collection_details(
-            int(tmdb_id),
-            api_key,
-            skip_fallback=True,
-            apply_image_preference=False,
-        )
-        parts = (collection_details or {}).get('parts') or []
-        original_language = next((
-            str(item.get('original_language') or '').strip()
-            for item in parts
-            if isinstance(item, dict) and item.get('original_language')
-        ), '')
     else:
         identity = resolve_metadata_identity_by_path(
             path,
@@ -1884,63 +1872,79 @@ def search_emby_metadata_images():
         media_type = str(identity['media_type'])
         season_number = identity.get('season_number')
         episode_number = identity.get('episode_number')
-        original_language = get_cached_original_language(tmdb_id, media_type)
-
-    raw = tmdb.get_item_images_tmdb(
-        requested_type,
-        int(tmdb_id),
-        api_key,
-        season_number=season_number,
-        episode_number=episode_number,
-    )
-    if raw is None:
-        return jsonify({'error': 'tmdb image search failed'}), 502
-
-    preference = config_manager.APP_CONFIG.get(
-        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh'
-    )
-    priorities = build_image_language_priority(original_language, preference)
     include_all_languages = str(
         request.args.get('include_all_languages') or ''
     ).strip().lower() in {'1', 'true', 'yes', 'on'}
-    candidates = []
-
-    def _append(values, image_type):
-        selected = (
-            sort_image_candidates(values, priorities)
-            if include_all_languages
-            else preferred_image_candidates(values, priorities)
+    try:
+        candidates = get_live_image_candidates(
+            requested_type,
+            tmdb_id,
+            media_type,
+            season_number=season_number,
+            episode_number=episode_number,
+            include_all_languages=include_all_languages,
         )
-        for item in selected:
-            path_value = str(item.get('file_path') or '')
-            if not path_value:
-                continue
-            candidates.append({
-                'type': image_type,
-                'url': f"https://image.tmdb.org/t/p/original/{path_value.lstrip('/')}",
-                'thumbnail_url': f"https://image.tmdb.org/t/p/w500/{path_value.lstrip('/')}",
-                # When Emby asks for one language, ETK already applied its own priority.
-                # Mark it neutral so Emby does not filter it again using the library language.
-                'language': item.get('iso_639_1') if include_all_languages else None,
-                'width': item.get('width'),
-                'height': item.get('height'),
-                'community_rating': item.get('vote_average'),
-                'vote_count': item.get('vote_count'),
-            })
-
-    if requested_type in {'Movie', 'Series', 'Boxset'}:
-        _append(raw.get('posters'), 'Primary')
-        _append(raw.get('backdrops'), 'Backdrop')
-        if requested_type != 'Boxset':
-            _append(raw.get('logos'), 'Logo')
-            _append(raw.get('backdrops'), 'Thumb')
-    elif requested_type == 'Season':
-        _append(raw.get('posters'), 'Primary')
-    else:
-        _append(raw.get('stills'), 'Primary')
-        _append(raw.get('stills'), 'Thumb')
+    except ImagePolicySyncError as exc:
+        return jsonify({'error': str(exc)}), 502
 
     response = jsonify({'images': candidates})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@webhook_bp.route('/api/emby/metadata/images/sync', methods=['POST'])
+def sync_emby_metadata_images():
+    from database.metadata_provider_db import resolve_metadata_identity_by_path
+    from handler.media_image_policy import ImagePolicySyncError, sync_image_policy
+
+    requested_type = str(request.args.get('item_type') or '').strip().title()
+    path = str(request.args.get('path') or '').strip()
+    tmdb_id = str(request.args.get('tmdb_id') or '').strip()
+    if requested_type not in {'Movie', 'Series', 'Season', 'Episode', 'Boxset'}:
+        return jsonify({'error': 'invalid image sync request'}), 400
+
+    def _number(name):
+        value = request.args.get(name)
+        try:
+            return int(value) if value not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _number('season_number')
+    episode_number = _number('episode_number')
+    if requested_type == 'Boxset':
+        if not tmdb_id.isdigit():
+            return jsonify({'error': 'invalid collection tmdb id'}), 400
+        media_type = 'movie'
+    else:
+        identity = resolve_metadata_identity_by_path(
+            path,
+            requested_type,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if not identity or not identity.get('tmdb_id'):
+            return jsonify({'error': 'metadata path identity not found'}), 404
+        tmdb_id = str(identity['tmdb_id'])
+        media_type = str(identity['media_type'])
+        season_number = identity.get('season_number')
+        episode_number = identity.get('episode_number')
+
+    data = request.get_json(silent=True) or {}
+    try:
+        images = sync_image_policy(
+            requested_type,
+            tmdb_id,
+            media_type,
+            data.get('rules') or [],
+            request.host_url,
+            season_number=season_number,
+            episode_number=episode_number,
+            force=bool(data.get('force')),
+        )
+    except ImagePolicySyncError as exc:
+        return jsonify({'error': str(exc)}), 502
+    response = jsonify({'ok': True, 'images': images})
     response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -2400,6 +2404,17 @@ def emby_webhook():
             season_number=identity.get("season_number"),
             episode_number=identity.get("episode_number"),
         )
+        from handler.media_image_policy import update_manual_policy_image
+        policy_updated = update_manual_policy_image(
+            original_item_type,
+            identity["tmdb_id"],
+            image_type,
+            f"https://image.tmdb.org/t/p/original/{image_path.lstrip('/')}",
+            request.host_url,
+            season_number=identity.get("season_number"),
+            episode_number=identity.get("episode_number"),
+        )
+        updated = max(updated, policy_updated)
         logger.info(
             "  ➜ [图片更新] 已将 '%s' 手动选择的 %s 图片写入 ETK 缓存，更新 %s 条记录。",
             original_item_name, image_type, updated,
