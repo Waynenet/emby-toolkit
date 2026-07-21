@@ -519,16 +519,6 @@ body::before {
   border-color: #d03050 !important;
 }
 
-/* 4. 覆盖 Tag 标签 */
-.n-tag {
-  background: rgba(255, 255, 255, 0.15) !important;
-  border: 1px solid var(--glass-border) !important;
-  color: #ffffff !important;
-}
-.n-tag__close:hover {
-  color: #ff4d4f !important;
-}
-
 /* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
 
 /* ★ 补全了所有可能会在顶层弹出的组件（弹窗、日历、提示、抽屉等） */
@@ -638,6 +628,14 @@ body {
 }
 .n-tag--error-type {
   background-color: #d03050 !important;
+}
+.n-tag--closable {
+  background: rgba(255, 255, 255, 0.15) !important;
+  border: 1px solid var(--glass-border) !important;
+  color: #ffffff !important;
+}
+.n-tag__close:hover {
+  color: #ff4d4f !important;
 }
 
 .n-alert .n-alert-body__title,
