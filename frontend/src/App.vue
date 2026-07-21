@@ -518,6 +518,15 @@ body::before {
   background: #d03050 !important;
   border-color: #d03050 !important;
 }
+.n-button--transparent-type {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: #ffffff !important;
+}
+.n-button--transparent-type:hover {
+  background: transparent !important;
+  border-color: transparent !important;
+}
 
 /* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
 
@@ -617,6 +626,9 @@ body {
 .n-alert.n-alert--warning-type { border-left: 4px solid #f0a020 !important; }
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
 
+.n-tag--default-type {
+  background-color: #55ff9c !important;
+}
 .n-tag--info-type {
   background-color: #2080f0 !important;
 }

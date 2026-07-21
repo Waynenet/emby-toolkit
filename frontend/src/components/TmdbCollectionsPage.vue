@@ -6,14 +6,14 @@
         <template #title>原生合集</template>
         <template #footer>
           <n-space align="center" size="large">
-            <n-tag :bordered="false" round>共 {{ globalStats.totalCollections }} 合集</n-tag>
-            <n-tag v-if="globalStats.totalMissingMovies > 0" type="warning" :bordered="false" round>
+            <n-tag :bordered="false" type="default" round>共 {{ globalStats.totalCollections }} 合集</n-tag>
+            <n-tag v-if="globalStats.totalMissingMovies > 0" type="error" :bordered="false" round>
               {{ globalStats.collectionsWithMissing }} 合集缺失 {{ globalStats.totalMissingMovies }} 部
             </n-tag>
             <n-tag v-if="globalStats.totalUnreleased > 0" type="info" :bordered="false" round>
               {{ globalStats.totalUnreleased }} 部未上映
             </n-tag>
-            <n-tag v-if="globalStats.totalSubscribed > 0" type="default" :bordered="false" round>
+            <n-tag v-if="globalStats.totalSubscribed > 0" type="warning" :bordered="false" round>
               {{ globalStats.totalSubscribed }} 部已订阅
             </n-tag>
             <n-tag v-if="globalStats.totalMissingMovies === 0 && globalStats.totalCollections > 0" type="success" :bordered="false" round>
@@ -27,7 +27,7 @@
               <n-tooltip trigger="hover">
                 <template #trigger>
                   <div style="display: flex; align-items: center;">
-                    <n-text style="margin-right: 8px; font-size: 18px;">自动发现合集</n-text>
+                    <n-text style="margin-right: 8px; font-size: 16px;">自动发现合集</n-text>
                     <n-switch 
                       :value="autoCompleteEnabled" 
                       @update:value="handleAutoCompleteChange" 
@@ -46,7 +46,7 @@
               <n-tooltip trigger="hover">
                 <template #trigger>
                   <div style="display: flex; align-items: center;">
-                    <n-text style="margin-right: 8px; font-size: 18px;">自动订阅缺失</n-text>
+                    <n-text style="margin-right: 8px; font-size: 16px;">自动订阅缺失</n-text>
                     <n-switch 
                       :value="autoSubEnabled" 
                       @update:value="handleAutoSubChange" 
@@ -128,7 +128,7 @@
                     <div class="card-delete-btn">
                       <n-popconfirm @positive-click="handleDeleteCollection(item)" @click.stop>
                         <template #trigger>
-                          <n-button text type="default" circle size="small" title="删除合集" @click.stop>
+                          <n-button text type="transparent" circle size="small" title="删除合集" @click.stop>
                             <template #icon><n-icon :component="TrashIcon" /></template>
                           </n-button>
                         </template>

@@ -25,6 +25,7 @@
                 <n-tooltip v-for="v in item.vars" :key="v.name" placement="top" trigger="hover">
                   <template #trigger>
                     <n-tag 
+                      type="default"
                       size="small" 
                       round 
                       class="clickable-tag"
