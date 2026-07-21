@@ -923,7 +923,8 @@ def process_subscription_items_and_update_db(
 
     logger.info(f"  ➜ [通用订阅] 开始处理 {len(tmdb_items)} 个媒体条目...")
     target_status = str(target_status or 'WANTED').strip().upper()
-    if target_status not in {'WANTED', 'SUBSCRIBED'}:
+    # === 允许 'NONE' 作为合法的 target_status 传入 ===
+    if target_status not in {'WANTED', 'SUBSCRIBED', 'NONE'}:
         target_status = 'WANTED'
 
     # 1. 提前加载所有在库的“季”的信息 (用于精准判断季是否存在)
@@ -1109,7 +1110,7 @@ def process_subscription_items_and_update_db(
             item_type='Series',
             media_info_list=list(parent_series_to_ensure_exist.values())
         )
-
+    # 嵌套子函数定义
     def group_and_update(items_list, status):
         if not items_list: return
         logger.info(f"  -> [通用订阅] 将 {len(items_list)} 个缺失媒体设为 '{status}'...")
@@ -1127,11 +1128,19 @@ def process_subscription_items_and_update_db(
                 request_db.set_media_status_subscribed(ids, itype, media_info_list=requests, source=subscription_source)
             elif status == 'PENDING_RELEASE':
                 request_db.set_media_status_pending_release(ids, itype, media_info_list=requests, source=subscription_source)
-
+            # === 让子函数内部支持 'NONE' 状态写入 ===
+            elif status == 'NONE':
+                request_db.set_media_status_none(ids, itype, media_info_list=requests)
+    # === 主函数最外层，调用子函数时的分流判定 ===
     if target_status == 'SUBSCRIBED':
         if parent_series_to_ensure_exist:
             group_and_update(list(parent_series_to_ensure_exist.values()), 'SUBSCRIBED')
         group_and_update(missing_released_items, 'SUBSCRIBED')
+    elif target_status == 'NONE':
+        if parent_series_to_ensure_exist:
+            group_and_update(list(parent_series_to_ensure_exist.values()), 'NONE')
+        group_and_update(missing_released_items, 'NONE')
+        group_and_update(missing_unreleased_items, 'NONE')
     else:
         group_and_update(missing_released_items, 'WANTED')
         group_and_update(missing_unreleased_items, 'PENDING_RELEASE')
