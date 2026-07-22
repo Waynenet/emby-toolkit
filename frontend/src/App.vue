@@ -1,6 +1,6 @@
 <!-- src/App.vue -->
 <template>
-  <!-- ★ 把 canvas 用 Teleport 直接挂到 body，脱离 #app 的层叠上下文 -->
+  <!-- 将画布使用 Teleport 挂载到 body，避免层叠上下文冲突 -->
   <Teleport to="body">
     <canvas
       v-if="isDarkTheme"
@@ -8,7 +8,13 @@
     />
   </Teleport>
 
-  <n-config-provider :theme="isDarkTheme ? darkTheme : undefined" :theme-overrides="currentNaiveTheme" :locale="zhCN" :date-locale="dateZhCN">
+  <!-- Naive UI 配置提供者 -->
+  <n-config-provider 
+    :theme="isDarkTheme ? darkTheme : undefined" 
+    :theme-overrides="currentNaiveTheme" 
+    :locale="zhCN" 
+    :date-locale="dateZhCN"
+  >
     <n-message-provider placement="bottom-right">
       <n-dialog-provider>
         <AppContent />
@@ -22,10 +28,10 @@ import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui';
 import AppContent from './AppContent.vue';
 
+// ========== 主题与全局状态 ==========
 const isDarkTheme = ref(localStorage.getItem('isDark') === 'true');
 
-// ========== 1. 终极优化：全局底层主题覆盖 ==========
-// 通过 JS 层接管 Naive UI 的默认颜色，防止底层组件渲染出白色背景或灰色字体
+// 全局底层主题覆盖：通过 JS 变量接管 Naive UI 的核心背景与文本色，防止组件默认渲染白底
 const baseThemeOverrides = {
   common: {
     textColor1: 'rgba(255, 255, 255, 0.95)',
@@ -35,20 +41,26 @@ const baseThemeOverrides = {
     placeholderColor: 'rgba(255, 255, 255, 0.5)',
     placeholderColorDisabled: 'rgba(255, 255, 255, 0.3)',
     iconColor: 'rgba(255, 255, 255, 0.9)',
-    popoverColor: 'transparent', // 让浮层默认透明，交给 CSS 毛玻璃处理
+    popoverColor: 'transparent', // 设为透明，以便 CSS 接管实现毛玻璃效果
     modalColor: 'transparent',
     cardColor: 'transparent',
     bodyColor: 'transparent'
   }
 };
 
-// 初始化当前主题，默认合并我们的基础毛玻璃主题
+// 当前生效的主题变量
 const currentNaiveTheme = ref({ ...baseThemeOverrides });
 
-// ========== 星空逻辑 ==========
-let animFrameId = null; // 用于取消 requestAnimationFrame
+// ========== 星空 Canvas 背景逻辑 ==========
+let animFrameId = null;     // 保存 requestAnimationFrame 的 ID
+let resizeHandler = null;   // 保存窗口尺寸变化监听函数，用于注销事件防止泄漏
 
+/**
+ * 初始化并启动星空 Canvas 动效
+ */
 function setupStarfield() {
+  destroyStarfield(); // 初始化前先清理旧的实例
+
   const canvas = document.getElementById('starfield');
   if (!canvas) return;
 
@@ -61,22 +73,40 @@ function setupStarfield() {
   function randomChance(p) { return Math.random() * 1000 < p * 10; }
   function randomRange(min, max) { return Math.random() * (max - min) + min; }
 
+  // 粒子星星类
   class Star {
     constructor() { this.reset(); }
     reset() {
       this.isGiant = randomChance(3);
       this.isComet = !this.isGiant && !initialBurst && randomChance(20);
-      this.x = randomRange(0, width); this.y = randomRange(0, height);
+      this.x = randomRange(0, width); 
+      this.y = randomRange(0, height);
       this.size = randomRange(1.1, 2.6);
       this.dx = randomRange(0.05, 0.3) + (this.isComet ? randomRange(2.5, 6) : 0.05);
       this.dy = -randomRange(0.05, 0.3) - (this.isComet ? randomRange(2.5, 6) : 0.05);
-      this.opacity = 0; this.opacityTarget = randomRange(0.2, this.isComet ? 0.6 : 1);
+      this.opacity = 0; 
+      this.opacityTarget = randomRange(0.2, this.isComet ? 0.6 : 1);
       this.fadeSpeed = randomRange(0.0005, 0.002) + (this.isComet ? 0.001 : 0);
-      this.fadingIn = true; this.fadingOut = false;
+      this.fadingIn = true; 
+      this.fadingOut = false;
     }
-    fadeIn() { if (this.fadingIn) { this.opacity += this.fadeSpeed; if (this.opacity >= this.opacityTarget) this.fadingIn = false; } }
-    fadeOut() { if (this.fadingOut) { this.opacity -= this.fadeSpeed / 2; if (this.opacity <= 0) this.reset(); } }
-    move() { this.x += this.dx; this.y += this.dy; if (!this.fadingOut && (this.x > width - width / 4 || this.y < 0)) this.fadingOut = true; }
+    fadeIn() { 
+      if (this.fadingIn) { 
+        this.opacity += this.fadeSpeed; 
+        if (this.opacity >= this.opacityTarget) this.fadingIn = false; 
+      } 
+    }
+    fadeOut() { 
+      if (this.fadingOut) { 
+        this.opacity -= this.fadeSpeed / 2; 
+        if (this.opacity <= 0) this.reset(); 
+      } 
+    }
+    move() { 
+      this.x += this.dx; 
+      this.y += this.dy; 
+      if (!this.fadingOut && (this.x > width - width / 4 || this.y < 0)) this.fadingOut = true; 
+    }
     draw() {
       ctx.beginPath();
       if (this.isGiant) {
@@ -97,15 +127,20 @@ function setupStarfield() {
         ctx.fillStyle = `rgba(${COLORS.star},${this.opacity})`;
         ctx.fillRect(this.x, this.y, this.size, this.size);
       }
-      ctx.closePath(); ctx.fill();
+      ctx.closePath(); 
+      ctx.fill();
     }
   }
 
+  // 自适应调整画布大小
   function resizeCanvas() {
-    width = window.innerWidth; height = window.innerHeight;
-    canvas.width = width; canvas.height = height;
+    width = window.innerWidth; 
+    height = window.innerHeight;
+    canvas.width = width; 
+    canvas.height = height;
   }
 
+  // 帧动画循环
   function update() {
     ctx.clearRect(0, 0, width, height);
     ctx.globalCompositeOperation = 'lighter';
@@ -120,14 +155,23 @@ function setupStarfield() {
     setTimeout(() => initialBurst = false, 50);
   }
 
-  window.addEventListener('resize', resizeCanvas);
+  // 监听缩放事件，并保存引用以备销毁
+  resizeHandler = resizeCanvas;
+  window.addEventListener('resize', resizeHandler);
   init();
 }
 
+/**
+ * 销毁 Canvas 星空动画与相关全局事件监听
+ */
 function destroyStarfield() {
   if (animFrameId) {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
+  }
+  if (resizeHandler) {
+    window.removeEventListener('resize', resizeHandler);
+    resizeHandler = null;
   }
 }
 
@@ -141,25 +185,32 @@ watch(isDarkTheme, async (val) => {
   }
 }, { immediate: false });
 
-// ========== 生命周期 ==========
+// ========== 自定义事件处理器定义 ==========
+const handleThemeUpdate = (event) => {
+  currentNaiveTheme.value = {
+    ...baseThemeOverrides,
+    ...event.detail,
+    common: {
+      ...baseThemeOverrides.common,
+      ...(event.detail?.common || {})
+    }
+  };
+};
+
+const handleDarkModeUpdate = (event) => {
+  isDarkTheme.value = event.detail;
+};
+
+// ========== 生命周期钩子 ==========
+let appElement = null;
+
 onMounted(() => {
-  const app = document.getElementById('app');
+  appElement = document.getElementById('app');
 
-  app.addEventListener('update-naive-theme', (event) => {
-    // 深度合并外部传入的主题与我们的基础主题
-    currentNaiveTheme.value = {
-      ...baseThemeOverrides,
-      ...event.detail,
-      common: {
-        ...baseThemeOverrides.common,
-        ...(event.detail?.common || {})
-      }
-    };
-  });
-
-  app.addEventListener('update-dark-mode', (event) => {
-    isDarkTheme.value = event.detail;
-  });
+  if (appElement) {
+    appElement.addEventListener('update-naive-theme', handleThemeUpdate);
+    appElement.addEventListener('update-dark-mode', handleDarkModeUpdate);
+  }
 
   if (isDarkTheme.value) {
     setupStarfield();
@@ -168,11 +219,17 @@ onMounted(() => {
 
 onUnmounted(() => {
   destroyStarfield();
+  if (appElement) {
+    appElement.removeEventListener('update-naive-theme', handleThemeUpdate);
+    appElement.removeEventListener('update-dark-mode', handleDarkModeUpdate);
+  }
 });
 </script>
 
 <style>
-/* ==================== 1. 动态主题变量 ==================== */
+/* ==========================================================================
+   1. 全局设计变量与主题 (CSS Variables)
+   ========================================================================== */
 :root {
   --global-bg-image: url('https://60s.748541.xyz/v2/bing?encoding=image'); 
   --global-bg-color: #4a6b82;
@@ -184,9 +241,9 @@ onUnmounted(() => {
   --glass-blur: blur(12px); 
   --text-primary: rgba(255, 255, 255, 0.95); 
   --text-secondary: rgba(255, 255, 255, 0.75);
-  
   --overlay-color: rgba(0, 0, 0, 0.4);
 
+  /* 主题卡片渐变过渡色 */
   --tint-blue: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(54, 162, 235, 0.45) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(54, 162, 235, 0.55) 100%);
   --tint-green: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(75, 192, 192, 0.45) 100%);
@@ -210,9 +267,9 @@ html.dark {
   --glass-blur: blur(0px); 
   --text-primary: rgba(255, 255, 255, 0.95);
   --text-secondary: rgba(255, 255, 255, 0.65);
-  
   --overlay-color: transparent;
 
+  /* 暗黑模式下微调的渐变 */
   --tint-blue: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(112,192,232,0.08) 100%);
   --tint-blue-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(54, 162, 235, 0.45) 100%);
   --tint-green: linear-gradient(135deg, rgba(20,25,35,0.15) 0%, rgba(99,226,183,0.08) 100%);
@@ -225,7 +282,7 @@ html.dark {
   --tint-red-hover: linear-gradient(135deg, rgba(30,35,45,0.3) 0%, rgba(255, 99, 132, 0.45) 100%);
 }
 
-/* ★ 终极兜底：强制接管 Naive UI 基础 CSS 变量 */
+/* 强制接管 Naive UI 内部组件生成的基准 CSS 变量 */
 :root, [class^="n-"] {
   --n-text-color: rgba(255, 255, 255, 0.95) !important;
   --n-text-color-hover: #ffffff !important;
@@ -258,6 +315,9 @@ html.dark {
   --n-check-mark-color: #FFF !important;
 }
 
+/* ==========================================================================
+   2. 基础容器与底层复位 (Body & Container)
+   ========================================================================== */
 html, body { 
   height: 100vh; 
   margin: 0; 
@@ -270,10 +330,11 @@ html, body {
   background-position: center;
   background-attachment: fixed;
   color: var(--text-primary);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   transition: background-image 0.5s ease, color 0.3s ease;
 }
 
-/* 背景遮罩 */
+/* 背景虚化与遮罩层 */
 body::before {
   content: '';
   position: fixed;
@@ -301,11 +362,32 @@ body::before {
 }
 
 .fullscreen-container { 
-  display: flex; justify-content: center; align-items: center; 
-  height: 100vh; width: 100%; background: transparent; 
+  display: flex; 
+  justify-content: center; 
+  align-items: center; 
+  height: 100vh; 
+  width: 100%; 
+  background: transparent; 
 }
 
-/* ==================== 弹窗内所有 n-card 毛玻璃化 ==================== */
+/* 隐藏所有内置的全局滚动条 */
+* { 
+  scrollbar-width: none !important; 
+  -ms-overflow-style: none !important; 
+}
+::-webkit-scrollbar { 
+  display: none !important; 
+  width: 0 !important; 
+  height: 0 !important; 
+}
+.n-scrollbar-rail { 
+  display: none !important; 
+}
+
+/* ==========================================================================
+   3. 毛玻璃效果核心重写 (Cards & Panels)
+   ========================================================================== */
+/* 通用卡片毛玻璃化 */
 .n-card {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
@@ -327,16 +409,13 @@ body::before {
   background: rgba(255, 255, 255, 0.05) !important;
 }
 
-/* ==================== 2. 全局卡片 (毛玻璃) ==================== */
+/* 仪表盘主交互卡片 */
 .n-card.dashboard-card {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
   -webkit-backdrop-filter: var(--glass-blur) !important;
-  
-  /* 删除会导致漏光的物理 border，改用 inset(内阴影) 完美描边 */
-  border: none !important;
+  border: none !important; /* 隐藏实体边框防止锯齿与白边 */
   box-shadow: inset 0 0 0 1px var(--glass-border), var(--glass-shadow) !important;
-  
   color: var(--text-primary) !important;
   border-radius: 16px !important;
   transition: transform 0.2s, box-shadow 0.2s, background 0.2s !important;
@@ -344,27 +423,25 @@ body::before {
   display: flex !important;
   flex-direction: column !important;
   font-size: 14px;
-
-  /* 用 background-clip 限制背景溢出，利用 outline 消除抗锯齿白边 */
   background-clip: padding-box !important;
   outline: 1px solid transparent !important;
 }
 
-/* 卡片悬浮状态 */
+/* 主面板交互态悬浮 */
 .n-card.dashboard-card:hover {
   background: var(--glass-bg-hover) !important;
-  /* 悬浮时的边框高亮也同步改用 inset box-shadow */
   box-shadow: inset 0 0 0 1px var(--glass-border-light), 0 8px 24px 0 rgba(0, 0, 0, 0.2) !important;
   transform: translateY(-2px) !important;
 }
 
-/* 禁用悬浮动画的卡片兜底 */
+/* 静态免悬浮态卡片 */
 .n-card.dashboard-card.no-hover:hover {
   transform: none !important;
   box-shadow: inset 0 0 0 1px var(--glass-border), var(--glass-shadow) !important;
   background: var(--glass-bg) !important;
 }
 
+/* 卡片过渡变色样式 */
 .n-card.dashboard-card.tint-blue { background: var(--tint-blue) !important; }
 .n-card.dashboard-card.tint-blue:hover { background: var(--tint-blue-hover) !important; }
 .n-card.dashboard-card.tint-green { background: var(--tint-green) !important; }
@@ -394,10 +471,28 @@ body::before {
   font-size: 1.1rem;
 }
 
-.n-card.dashboard-card.series-card { flex-direction: row !important; height: auto !important; }
-.n-card.dashboard-card.series-card > .n-card__content { flex-direction: row !important; justify-content: flex-start !important; padding: 12px !important; gap: 16px !important; overflow: hidden; }
-.card-poster-container { flex-shrink: 0; width: 120px !important; height: 180px !important; overflow: hidden; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+/* 剧集/海报专栏卡片 */
+.n-card.dashboard-card.series-card { 
+  flex-direction: row !important; 
+  height: auto !important; 
+}
+.n-card.dashboard-card.series-card > .n-card__content { 
+  flex-direction: row !important; 
+  justify-content: flex-start !important; 
+  padding: 12px !important; 
+  gap: 16px !important; 
+  overflow: hidden; 
+}
+.card-poster-container { 
+  flex-shrink: 0; 
+  width: 120px !important; 
+  height: 180px !important; 
+  overflow: hidden; 
+  border-radius: 8px; 
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+}
 
+/* 精简弹窗卡片背景 */
 .modal-card-lite {
   background: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
@@ -408,14 +503,10 @@ body::before {
   color: var(--text-primary) !important;
 }
 
-/* ==================== 3. 彻底隐藏滚动条 ==================== */
-* { scrollbar-width: none !important; -ms-overflow-style: none !important; }
-::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
-.n-scrollbar-rail { display: none !important; }
-
-/* ==================== 4. 表单与交互组件毛玻璃化 ==================== */
-
-/* 1. 覆盖 Input, Select 等输入框 */
+/* ==========================================================================
+   4. 表单与交互输入类组件 (Forms & Controls)
+   ========================================================================== */
+/* 输入框、多选下拉框的毛玻璃复位 */
 .n-input, 
 .n-base-selection {
   background-color: var(--glass-bg) !important;
@@ -430,13 +521,12 @@ body::before {
   border-color: var(--glass-border-light) !important;
 }
 
-/* 透明化内部的 label 和 tags 容器 */
 .n-base-selection-label,
 .n-base-selection-tags {
   background-color: transparent !important;
 }
 
-/* 移除原生状态边框层 */
+/* 隐藏 Naive 原有的过渡状态实线边框（避免重合白线） */
 .n-base-selection__border,
 .n-base-selection__state-border,
 .n-input__border,
@@ -445,7 +535,6 @@ body::before {
   display: none !important; 
 }
 
-/* 输入框内文字颜色 */
 .n-input__input-el, 
 .n-input__placeholder,
 .n-base-selection-input__content,
@@ -453,7 +542,7 @@ body::before {
   color: rgba(255, 255, 255, 0.7) !important;
 }
 
-/* 2. 覆盖 Radio Button */
+/* 单选按钮 (Radio Button) */
 .n-radio-button {
   background-color: var(--glass-bg) !important;
   color: rgba(255, 255, 255, 0.7) !important;
@@ -482,7 +571,7 @@ body::before {
   box-shadow: none !important; 
 }
 
-/* 3. 覆盖普通按钮 */
+/* 基础交互按键适配 */
 .n-button--default-type {
   background: var(--glass-bg) !important;
   border: 1px solid var(--glass-border) !important;
@@ -528,9 +617,9 @@ body::before {
   border-color: transparent !important;
 }
 
-/* ==================== 5. 弹窗/浮层彻底毛玻璃化 ==================== */
-
-/* ★ 补全了所有可能会在顶层弹出的组件（弹窗、日历、提示、抽屉等） */
+/* ==========================================================================
+   5. 悬浮、下拉、弹窗与抽屉覆盖 (Overlay & Modals)
+   ========================================================================== */
 .n-popover,
 .n-dropdown-menu,
 .n-base-select-menu,
@@ -560,18 +649,17 @@ body::before {
   color: #ffffff !important;
 }
 
-/* ==================== 退出登录/下拉菜单悬浮高亮变绿 (破解伪元素遮挡) ==================== */
-/* 必须穿透 ::before 伪元素，才能防止白底盖住绿色 */
+/* 穿透下拉选择和悬浮按钮的伪元素干扰，使其 hover 统一呈现绿色主题 */
 .n-dropdown-option-body:hover::before,
 .n-dropdown-option-body--pending::before,
 .n-base-select-option:hover::before,
 .n-base-select-option--pending::before,
 .n-menu-popover .n-menu-item-content:hover::before {
-  background-color: #18a058 !important; /* 强制覆盖悬浮层为绿色 */
+  background-color: #18a058 !important;
   opacity: 1 !important;
 }
 
-/* 确保悬浮时内部的文字和图标变成纯白色，防止看不清 */
+/* 下拉菜单 hover 时，高亮文字与图标 */
 .n-dropdown-option-body:hover .n-dropdown-option-body__label,
 .n-dropdown-option-body--pending .n-dropdown-option-body__label,
 .n-dropdown-option-body:hover .n-dropdown-option-body__icon,
@@ -581,23 +669,21 @@ body::before {
   color: #ffffff !important;
 }
 
-/* ==================== 侧边栏折叠/展开箭头强制纯白 (破解 div 拼接原理) ==================== */
-/* 因为 Naive UI 的 bar 箭头是由两个 div 拼出来的，必须改它们的 background-color */
+/* 侧边栏折叠把手（多部分 div 拼接构成）纯白微光覆盖 */
 .n-layout-toggle-bar__top,
 .n-layout-toggle-bar__bottom {
   background-color: rgba(255, 255, 255, 0.5) !important;
-  box-shadow: 0 0 2px rgba(255,255,255,0.9) !important; /* 增加一点微光防暗 */
+  box-shadow: 0 0 2px rgba(255,255,255,0.9) !important;
 }
 
-/* 悬浮时的箭头状态更亮更粗 */
 .n-layout-toggle-bar:hover .n-layout-toggle-bar__top,
 .n-layout-toggle-bar:hover .n-layout-toggle-bar__bottom {
   background-color: #ffffff !important;
   box-shadow: 0 0 6px rgba(255,255,255,1) !important;
-  width: 3px !important; /* 原本可能是 2px，稍微加粗更醒目 */
+  width: 3px !important;
 }
 
-/* 兜底：如果是 button 形态的图标 */
+/* 兜底处理侧边栏按钮图标样式 */
 .n-layout-toggle-button .n-base-icon,
 .n-layout-toggle-button svg,
 .n-layout-toggle-button path {
@@ -605,13 +691,10 @@ body::before {
   fill: #ffffff !important;
 }
 
-/* 文字增加一点阴影防白底看不清 */
-body {
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-}
-
-/* ==================== 6. n-alert / n-table 毛玻璃化 ==================== */
-
+/* ==========================================================================
+   6. 基础提示、表格及展示性组件 (Data Display)
+   ========================================================================== */
+/* 通用提示 (Alert) */
 .n-alert {
   background-color: var(--glass-bg) !important;
   backdrop-filter: var(--glass-blur) !important;
@@ -626,25 +709,17 @@ body {
 .n-alert.n-alert--warning-type { border-left: 4px solid #f0a020 !important; }
 .n-alert.n-alert--error-type   { border-left: 4px solid #d03050 !important; }
 
+/* 徽章与标签 (Tag) */
 .n-tag--default-type {
   background-color: var(--glass-bg) !important;
   color: #ffffff !important;
 }
-.n-tag--info-type {
-  background-color: #2080f0 !important;
-}
-.n-tag--success-type {
-  background-color: #18a058 !important;
-}
-.n-tag--warning--type {
-  background-color: #f0a020 !important;
-}
-.n-tag--error-type {
-  background-color: #d03050 !important;
-}
-.n-tag-cyan {
-  background-color: #55ff9c !important;
-}
+.n-tag--info-type { background-color: #2080f0 !important; }
+.n-tag--success-type { background-color: #18a058 !important; }
+.n-tag--warning--type { background-color: #f0a020 !important; }
+.n-tag--error-type { background-color: #d03050 !important; }
+.n-tag-cyan { background-color: #55ff9c !important; }
+
 .n-tag--closable {
   background: rgba(255, 255, 255, 0.15) !important;
   border: 1px solid var(--glass-border) !important;
@@ -660,35 +735,28 @@ body {
 .n-alert li {
   color: var(--text-primary) !important;
 }
-
 .n-alert .n-base-icon { opacity: 0.9; }
+.n-text { color: var(--text-primary) !important; }
 
-.n-text {
-  color: var(--text-primary) !important;
-}
-
+/* 基础表格 (Simple Table) */
 .n-table {
   background: transparent !important;
 }
-
 .n-table th {
   background: rgba(255, 255, 255, 0.08) !important;
   color: var(--text-primary) !important;
   border-color: var(--glass-border) !important;
 }
-
 .n-table td {
   background: transparent !important;
   color: var(--text-primary) !important;
   border-color: var(--glass-border) !important;
 }
-
 .n-table tr:hover td {
   background: var(--glass-bg-hover) !important;
 }
 
-/* ==================== 7. 高级表格 (n-data-table) 毛玻璃化 ==================== */
-/* 强制穿透清除 Naive UI 高级表格自带的各种白底容器 */
+/* 高级数据表格 (Data Table) */
 .n-data-table,
 .n-data-table-wrapper,
 .n-data-table-base-table {
@@ -725,7 +793,6 @@ body {
   background-color: var(--glass-bg-hover) !important;
 }
 
-/* 表头的排序、过滤等功能按钮 */
 .n-data-table-th__sort, 
 .n-data-table-th__filter {
   color: var(--text-primary) !important;
@@ -735,7 +802,7 @@ body {
   background: rgba(255, 255, 255, 0.2) !important;
 }
 
-/* ==================== 8. 分页器 (Pagination) 毛玻璃化 ==================== */
+/* 分页器 (Pagination) */
 .n-pagination .n-pagination-item {
   background: var(--glass-bg) !important;
   border: 1px solid var(--glass-border) !important;
@@ -748,7 +815,6 @@ body {
   border-color: rgba(255, 255, 255, 0.4) !important;
 }
 
-/* 当前选中页码高亮 */
 .n-pagination .n-pagination-item--active {
   background: rgba(255, 255, 255, 0.2) !important;
   border-color: rgba(255, 255, 255, 0.5) !important;
@@ -756,13 +822,12 @@ body {
   font-weight: bold;
 }
 
-/* 如果分页器里有下拉选择框 (比如 10条/页) */
 .n-pagination .n-select .n-base-selection {
   background: var(--glass-bg) !important;
   border-color: var(--glass-border) !important;
 }
 
-/* ==================== 9. Tabs (标签页) 毛玻璃化 ==================== */
+/* 标签页 (Tabs) */
 .n-tabs-nav { 
   background-color: transparent !important; 
 }
@@ -777,15 +842,15 @@ body {
 .n-tabs-rail { 
   background-color: transparent !important; 
 }
-
 .n-tabs-capsule {
   background-color: #18a058 !important;
   border-color: #18a058 !important;
 }
 
-/* ==================== 10. 终极修复：交互组件变紫/卡色问题 ==================== */
-
-/* 1. 强行覆盖 Naive UI 默认的 transition: all，只对明确的属性做动画，防止浏览器插值计算卡在紫色 */
+/* ==========================================================================
+   7. 交互组件细节优化与抗闪烁微调 (Interaction Details)
+   ========================================================================== */
+/* 避免 transition: all 导致的色彩差值过渡错误 */
 .n-button,
 .n-switch,
 .n-radio-button,
@@ -797,7 +862,7 @@ body {
   transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, opacity 0.3s ease, box-shadow 0.3s ease !important;
 }
 
-/* 2. 彻底禁用按钮点击时产生的波纹 (Ripple) 阴影层，防止产生紫色的幽灵边框 */
+/* 禁用原生点击波纹扩散动效，避免形成幽灵杂色边框 */
 .n-base-wave {
   display: none !important;
   animation: none !important;
@@ -807,7 +872,7 @@ body {
   box-shadow: none !important;
 }
 
-/* 3. 为 Primary (主操作) 按钮兜底，确保无论是日间还是夜间，它的基调始终是绿色系，不会被意外污染 */
+/* 主类型按钮（Primary）色彩兜底，确保全场景显示绿色 */
 .n-button--primary-type {
   background-color: #18a058 !important;
   border-color: #18a058 !important;
@@ -819,31 +884,28 @@ body {
   border-color: #36ad6a !important;
 }
 
-/* 4. 确保 Switch 开关在激活状态下必定是绿色 */
+/* 激活状态下的开关（Switch）确保始终为绿色 */
 .n-switch.n-switch--active .n-switch__rail {
   background-color: #18a058 !important;
 }
 
-/* ==================== 消除海报复选框未选中时的纯白底色 ==================== */
-/* 1. 把未选中时的小方块变成透明，并加粗一点白色边框以便看清 */
+/* 移除海报多选框（Checkbox）未选中时的纯白底色，提高视觉透射度 */
 .poster-checkbox-wrap .n-checkbox .n-checkbox-box {
   background-color: transparent !important;
   border: 1.5px solid rgba(255, 255, 255, 0.75) !important;
 }
 
-/* 2. 鼠标悬停时边框高亮 */
 .poster-checkbox-wrap .n-checkbox:hover .n-checkbox-box {
   border-color: #ffffff !important;
 }
 
-/* 3. 选中时恢复正常的颜色 */
 .n-checkbox.n-checkbox--checked .n-checkbox-box,
 .n-checkbox.n-checkbox--indeterminate .n-checkbox-box {
   background-color: #18a058 !important;
   border-color: #18a058 !important;
 }
 
-/* 隐藏自带的白底状态遮罩层（防止悬停时闪烁白光） */
+/* 隐藏部分内置的状态背景层，防 Hover 过程白光闪烁 */
 .poster-checkbox-wrap .n-checkbox .n-checkbox-box__border,
 .poster-checkbox-wrap .n-checkbox .n-checkbox-box__state-border {
   display: none !important;
