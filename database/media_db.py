@@ -8,6 +8,238 @@ from .connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+
+def _as_json_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (TypeError, ValueError):
+            return []
+    return []
+
+
+def _normalized_asset_path(value: Any) -> str:
+    return str(value or '').strip().replace('\\', '/').rstrip('/').casefold()
+
+
+def rebind_emby_item_by_fingerprint(
+    *,
+    item_id: str,
+    item_type: str,
+    item_path: str,
+    sha1: str,
+    pick_code: str = '',
+    tmdb_id: str = '',
+    series_id: str = '',
+    season_id: str = '',
+) -> Dict[str, Any]:
+    """Lightweight ItemID repair for a verified bridge callback.
+
+    The bridge has already verified that the new Emby item points to this
+    PickCode/SHA1.  Keep the array positions intact so multi-version assets
+    remain aligned with their fingerprints.
+    """
+    item_id = str(item_id or '').strip()
+    item_type = str(item_type or '').strip().title()
+    raw_item_path = str(item_path or '').strip()
+    item_path = _normalized_asset_path(raw_item_path)
+    sha1 = str(sha1 or '').strip().upper()
+    pick_code = str(pick_code or '').strip().casefold()
+    tmdb_id = str(tmdb_id or '').strip()
+    if not item_id or item_type not in {'Movie', 'Episode'} or not (sha1 or pick_code):
+        return {'updated': False, 'reason': 'invalid_identity'}
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT tmdb_id, item_type, title, parent_series_tmdb_id, season_number,
+                           emby_item_ids_json, asset_details_json,
+                           file_sha1_json, file_pickcode_json
+                    FROM media_metadata
+                    WHERE item_type = %s
+                      AND (
+                          (%s <> '' AND file_sha1_json @> %s::jsonb)
+                          OR (
+                              %s <> ''
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements_text(COALESCE(file_pickcode_json, '[]'::jsonb)) AS pc(value)
+                                  WHERE lower(pc.value) = lower(%s)
+                              )
+                          )
+                      )
+                    FOR UPDATE
+                    """,
+                    (
+                        item_type,
+                        sha1, json.dumps([sha1]),
+                        pick_code, pick_code,
+                    ),
+                )
+                matches = []
+                for row in cursor.fetchall() or []:
+                    row = dict(row)
+                    assets = _as_json_list(row.get('asset_details_json'))
+                    sha1s = [str(value or '').strip().upper() for value in _as_json_list(row.get('file_sha1_json'))]
+                    pick_codes = [str(value or '').strip().casefold() for value in _as_json_list(row.get('file_pickcode_json'))]
+                    for index in range(max(len(assets), len(sha1s), len(pick_codes))):
+                        asset = assets[index] if index < len(assets) and isinstance(assets[index], dict) else {}
+                        path_matches = bool(item_path and _normalized_asset_path(asset.get('path')) == item_path)
+                        sha1_matches = bool(sha1 and index < len(sha1s) and sha1s[index] == sha1)
+                        pick_matches = bool(pick_code and index < len(pick_codes) and pick_codes[index] == pick_code)
+                        if path_matches and (sha1_matches or pick_matches):
+                            matches.append((0, row, index, assets))
+                        elif (pick_matches and (not sha1 or sha1_matches)) or (not pick_code and sha1_matches):
+                            matches.append((1, row, index, assets))
+
+                restored_identity = False
+                if not matches and tmdb_id:
+                    cursor.execute(
+                        """
+                        SELECT tmdb_id, item_type, title, parent_series_tmdb_id, season_number,
+                               emby_item_ids_json, asset_details_json,
+                               file_sha1_json, file_pickcode_json
+                        FROM media_metadata
+                        WHERE tmdb_id=%s AND item_type=%s
+                        FOR UPDATE
+                        """,
+                        (tmdb_id, item_type),
+                    )
+                    fallback_row = cursor.fetchone()
+                    if fallback_row:
+                        row = dict(fallback_row)
+                        assets = _as_json_list(row.get('asset_details_json'))
+                        matched_index = next((
+                            index for index, asset in enumerate(assets)
+                            if isinstance(asset, dict)
+                            and item_path
+                            and _normalized_asset_path(asset.get('path')) == item_path
+                        ), None)
+                        if matched_index is None:
+                            matched_index = max(
+                                len(_as_json_list(row.get('emby_item_ids_json'))),
+                                len(assets),
+                                len(_as_json_list(row.get('file_sha1_json'))),
+                                len(_as_json_list(row.get('file_pickcode_json'))),
+                            )
+                        matches.append((0, row, matched_index, assets))
+                        restored_identity = True
+                if not matches:
+                    return {'updated': False, 'reason': 'asset_not_found'}
+                matches.sort(key=lambda value: value[0])
+                best_score = matches[0][0]
+                best_matches = [value for value in matches if value[0] == best_score]
+                if len(best_matches) != 1:
+                    return {'updated': False, 'reason': 'ambiguous_asset'}
+
+                _, row, index, assets = best_matches[0]
+                emby_ids = [str(value or '').strip() for value in _as_json_list(row.get('emby_item_ids_json'))]
+                sha1s = [str(value or '').strip().upper() for value in _as_json_list(row.get('file_sha1_json'))]
+                pick_codes = [str(value or '').strip().casefold() for value in _as_json_list(row.get('file_pickcode_json'))]
+                while len(emby_ids) <= index:
+                    asset_id = ''
+                    if len(assets) > len(emby_ids) and isinstance(assets[len(emby_ids)], dict):
+                        asset_id = str(assets[len(emby_ids)].get('emby_item_id') or '').strip()
+                    emby_ids.append(asset_id)
+                while len(assets) <= index:
+                    assets.append({})
+                while len(sha1s) <= index:
+                    sha1s.append('')
+                while len(pick_codes) <= index:
+                    pick_codes.append('')
+                if item_id in emby_ids and emby_ids[index] != item_id:
+                    return {'updated': False, 'reason': 'item_id_conflict'}
+
+                changed = emby_ids[index] != item_id
+                emby_ids[index] = item_id
+                if not isinstance(assets[index], dict):
+                    assets[index] = {}
+                changed = changed or str(assets[index].get('emby_item_id') or '').strip() != item_id
+                assets[index]['emby_item_id'] = item_id
+                if item_path and not assets[index].get('path'):
+                    assets[index]['path'] = raw_item_path
+                    changed = True
+                if restored_identity:
+                    if sha1 and sha1s[index] != sha1:
+                        sha1s[index] = sha1
+                        changed = True
+                    if pick_code and pick_codes[index] != pick_code:
+                        pick_codes[index] = pick_code
+                        changed = True
+
+                # The bridge callback follows ETK's own media refresh.  Advance
+                # the incremental-sync baseline even when the ItemID was already
+                # current, otherwise Emby's refresh timestamp requeues the item.
+                cursor.execute(
+                    """
+                    UPDATE media_metadata
+                    SET emby_item_ids_json=%s::jsonb,
+                        asset_details_json=%s::jsonb,
+                        file_sha1_json=%s::jsonb,
+                        file_pickcode_json=%s::jsonb,
+                        in_library=TRUE,
+                        last_synced_at=NOW(),
+                        last_updated_at=NOW()
+                    WHERE tmdb_id=%s AND item_type=%s
+                    """,
+                    (
+                        json.dumps(emby_ids, ensure_ascii=False),
+                        json.dumps(assets, ensure_ascii=False),
+                        json.dumps(sha1s, ensure_ascii=False),
+                        json.dumps(pick_codes, ensure_ascii=False),
+                        row['tmdb_id'], row['item_type'],
+                    ),
+                )
+
+                parent_updates = 0
+                if item_type == 'Episode' and row.get('parent_series_tmdb_id'):
+                    parent_series_tmdb_id = str(row['parent_series_tmdb_id'])
+                    if series_id:
+                        cursor.execute(
+                            """
+                            UPDATE media_metadata
+                            SET emby_item_ids_json=%s::jsonb, in_library=TRUE,
+                                last_synced_at=NOW(), last_updated_at=NOW()
+                            WHERE tmdb_id=%s AND item_type='Series'
+                              AND emby_item_ids_json IS DISTINCT FROM %s::jsonb
+                            """,
+                            (json.dumps([str(series_id)]), parent_series_tmdb_id, json.dumps([str(series_id)])),
+                        )
+                        parent_updates += cursor.rowcount
+                    if season_id and row.get('season_number') is not None:
+                        cursor.execute(
+                            """
+                            UPDATE media_metadata
+                            SET emby_item_ids_json=%s::jsonb, in_library=TRUE,
+                                last_synced_at=NOW(), last_updated_at=NOW()
+                            WHERE parent_series_tmdb_id=%s AND item_type='Season' AND season_number=%s
+                              AND emby_item_ids_json IS DISTINCT FROM %s::jsonb
+                            """,
+                            (
+                                json.dumps([str(season_id)]), parent_series_tmdb_id,
+                                row['season_number'], json.dumps([str(season_id)]),
+                            ),
+                        )
+                        parent_updates += cursor.rowcount
+
+            conn.commit()
+    except Exception as e:
+        logger.error('DB: 插件自动重绑 Emby ItemID 失败: %s', e, exc_info=True)
+        return {'updated': False, 'reason': 'database_error'}
+
+    return {
+        'updated': changed,
+        'parent_updates': parent_updates,
+        'tmdb_id': str(row['tmdb_id']),
+        'title': str(row.get('title') or ''),
+        'identity_restored': restored_identity,
+    }
+
 # 获取媒体库中 TMDb ID 对应的 Emby ID 映射
 def check_tmdb_ids_in_library(tmdb_ids: List[str], item_type: str) -> Dict[str, str]:
     """

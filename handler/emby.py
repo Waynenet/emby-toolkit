@@ -2547,6 +2547,28 @@ def delete_item(item_id: str, emby_server_url: str, emby_api_key: str, user_id: 
         logger.error(f"  ➜ 使用临时令牌删除 Emby 媒体项 ID: {item_id} 时发生未知错误: {e}")
         return False    
     
+def delete_item_with_token(
+    item_id: str,
+    emby_server_url: str,
+    emby_api_key: str,
+    user_id: str,
+) -> bool:
+    """Delete an Emby item with the configured administrator user token."""
+    if not all([item_id, emby_server_url, emby_api_key, user_id]):
+        return False
+    try:
+        response = emby_client.post(
+            f"{emby_server_url.rstrip('/')}/Items/{item_id}/Delete",
+            headers={'X-Emby-Token': emby_api_key},
+            params={'UserId': user_id},
+        )
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error("  ➜ 使用管理员令牌删除 Emby 项目 %s 失败: %s", item_id, e)
+        return False
+
+
 # --- 删除媒体项神医接口 (带自动回退) ---    
 def delete_item_sy(item_id: str, emby_server_url: str, emby_api_key: str, user_id: str) -> bool:
     """

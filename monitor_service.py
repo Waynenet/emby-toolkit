@@ -378,7 +378,7 @@ def enqueue_emby_binding(file_path: str, mediainfo: Optional[Dict[str, Any]] = N
 
 
 def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pick_code: str = '') -> Dict[str, Any]:
-    """Accept a bridge-reported Item only while its local STRM is pending binding."""
+    """Accept bridge binding callbacks for both ETK imports and Emby rescans."""
     import extensions
 
     processor = extensions.media_processor_instance
@@ -412,7 +412,26 @@ def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pi
                 matched_path = path
                 break
     if not matched_path:
-        return {'ok': True, 'skipped': True, 'reason': 'not_pending'}
+        from database import media_db
+
+        rebound = media_db.rebind_emby_item_by_fingerprint(
+            item_id=item_id,
+            item_type=item.get('Type'),
+            item_path=item.get('Path'),
+            sha1=sha1,
+            pick_code=expected_pick_code,
+            tmdb_id=((item.get('ProviderIds') or {}).get('Tmdb')),
+            series_id=item.get('SeriesId'),
+            season_id=item.get('SeasonId'),
+        )
+        if rebound.get('updated') or rebound.get('parent_updates'):
+            logger.info(
+                '  ➜ [自动重绑] %s 已绑定新的 Emby ItemID: %s',
+                rebound.get('title') or item.get('Name') or item_id,
+                item_id,
+            )
+            return {'ok': True, 'rebound': True, **rebound}
+        return {'ok': True, 'skipped': True, **rebound}
 
     normalized = emby._normalize_emby_media_path(matched_path)
     with EMBY_BIND_CONDITION:

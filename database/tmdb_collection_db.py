@@ -194,6 +194,32 @@ def get_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[s
         logger.error(f"查询原生合集 (TMDb ID: {tmdb_collection_id}) 失败: {e}")
 
 
+def delete_native_collection_by_tmdb_id(tmdb_collection_id: str) -> Optional[Dict[str, Any]]:
+    """Delete metadata for a collection confirmed missing from TMDb."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM collections_info
+                    WHERE tmdb_collection_id=%s
+                    RETURNING *
+                    """,
+                    (str(tmdb_collection_id),),
+                )
+                row = cursor.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(
+            "DB: 删除已失效的 TMDb 合集 %s 失败: %s",
+            tmdb_collection_id,
+            e,
+            exc_info=True,
+        )
+        return None
+
+
 def update_native_collection_images(tmdb_collection_id: str, poster_path, backdrop_path) -> int:
     """Update only the cached collection image paths."""
     try:

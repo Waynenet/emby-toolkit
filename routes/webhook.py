@@ -1895,7 +1895,11 @@ def search_emby_metadata_images():
 @webhook_bp.route('/api/emby/metadata/images/sync', methods=['POST'])
 def sync_emby_metadata_images():
     from database.metadata_provider_db import resolve_metadata_identity_by_path
-    from handler.media_image_policy import ImagePolicySyncError, sync_image_policy
+    from handler.media_image_policy import (
+        ImagePolicyCollectionNotFound,
+        ImagePolicySyncError,
+        sync_image_policy,
+    )
 
     requested_type = str(request.args.get('item_type') or '').strip().title()
     path = str(request.args.get('path') or '').strip()
@@ -1942,6 +1946,13 @@ def sync_emby_metadata_images():
             episode_number=episode_number,
             force=bool(data.get('force')),
         )
+    except ImagePolicyCollectionNotFound:
+        from database import tmdb_collection_db
+        from routes.tmdb_collections import _schedule_missing_collection_cleanup
+
+        row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_id)
+        _schedule_missing_collection_cleanup(tmdb_id, row)
+        return jsonify({'error': 'tmdb collection no longer exists'}), 410
     except ImagePolicySyncError as exc:
         return jsonify({'error': str(exc)}), 502
     response = jsonify({'ok': True, 'images': images})

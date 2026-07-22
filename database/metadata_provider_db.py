@@ -4,6 +4,9 @@ from typing import Any, Dict, Optional
 
 from psycopg2.extras import Json
 
+import config_manager
+import constants
+import utils
 from database.connection import get_db_connection
 
 
@@ -702,9 +705,6 @@ def _mapped_labels(values, mapping, id_field):
 
 
 def _provider_tags_and_studios(row):
-    import config_manager
-    import constants
-    import utils
     from database import settings_db
 
     keywords = _json_value(row.get("keywords_json"), [])
@@ -733,6 +733,25 @@ def _provider_tags_and_studios(row):
         studios = _source_names(networks + companies)
 
     return tags, studios
+
+
+def _format_actor_role_for_emby(role: Any, row: Dict[str, Any]) -> str:
+    clean_role = utils.strip_character_role_display_prefix(role)
+    if (
+        not clean_role
+        or clean_role in {"演员", "配音"}
+        or not config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_ACTOR_ROLE_ADD_PREFIX, False)
+    ):
+        return clean_role
+
+    genres = _json_value(row.get("genres_json"), [])
+    genre_names = {
+        str(item.get("name") if isinstance(item, dict) else item).strip()
+        for item in genres
+        if item
+    }
+    is_voice_role = bool(genre_names & {"Animation", "动画", "Documentary", "纪录", "记录"})
+    return f"{'配' if is_voice_role else '饰'} {clean_role}"
 
 
 def load_emby_metadata(
@@ -850,7 +869,7 @@ def load_emby_metadata(
                     if actor:
                         people.append({
                             "name": actor.get("primary_name"),
-                            "role": link.get("character"),
+                            "role": _format_actor_role_for_emby(link.get("character"), row),
                             "type": "Actor",
                             "tmdb_id": str(actor.get("tmdb_person_id")),
                             "image_url": _tmdb_image_url(actor.get("profile_path"), "w500"),

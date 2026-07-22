@@ -871,6 +871,56 @@ def init_db():
                     # 一次性迁移：该字段可由 watching_status 完全推导，删除后避免双状态不同步。
                     cursor.execute("ALTER TABLE media_metadata DROP COLUMN IF EXISTS watchlist_is_airing;")
 
+                    # 一次性迁移：角色名前缀属于 Emby 展示策略，数据库只保留干净角色名。
+                    role_prefix_migration_key = 'migration_clean_actor_role_prefix_v1'
+                    cursor.execute(
+                        "SELECT 1 FROM app_settings WHERE setting_key = %s",
+                        (role_prefix_migration_key,),
+                    )
+                    if not cursor.fetchone():
+                        cursor.execute("""
+                            UPDATE media_metadata AS media
+                            SET actors_json = (
+                                SELECT jsonb_agg(
+                                    CASE
+                                        WHEN jsonb_typeof(actor) = 'object'
+                                             AND actor ? 'character'
+                                             AND jsonb_typeof(actor->'character') = 'string'
+                                        THEN jsonb_set(
+                                            actor,
+                                            '{character}',
+                                            to_jsonb(regexp_replace(
+                                                actor->>'character',
+                                                '^([饰配][[:space:]　]+)+',
+                                                ''
+                                            )),
+                                            false
+                                        )
+                                        ELSE actor
+                                    END
+                                    ORDER BY ordinal
+                                )
+                                FROM jsonb_array_elements(media.actors_json)
+                                     WITH ORDINALITY AS entry(actor, ordinal)
+                            )
+                            WHERE jsonb_typeof(media.actors_json) = 'array'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements(media.actors_json) AS entry(actor)
+                                  WHERE jsonb_typeof(actor) = 'object'
+                                    AND actor ? 'character'
+                                    AND jsonb_typeof(actor->'character') = 'string'
+                                    AND actor->>'character' ~ '^([饰配][[:space:]　]+)+'
+                              )
+                        """)
+                        cleaned_rows = cursor.rowcount
+                        cursor.execute("""
+                            INSERT INTO app_settings (setting_key, value_json, last_updated_at)
+                            VALUES (%s, 'true'::jsonb, NOW())
+                            ON CONFLICT (setting_key) DO NOTHING
+                        """, (role_prefix_migration_key,))
+                        logger.info("  ➜ [数据库迁移] 已清洗 %s 条媒体记录中的角色名前缀。", cleaned_rows)
+
                     cursor.execute("""
                         UPDATE media_metadata
                         SET metadata_ready = TRUE,

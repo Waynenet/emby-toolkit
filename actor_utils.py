@@ -173,28 +173,19 @@ def format_and_complete_cast_list(
     - 'manual': 手动编辑流程。以传入列表的顺序为基准，并将通用角色排到末尾。
     """
     processed_cast = []
-    add_role_prefix = config.get(constants.CONFIG_OPTION_ACTOR_ROLE_ADD_PREFIX, False)
     generic_roles = {"演员", "配音"}
 
-    logger.trace(f"  ➜ 格式化演员列表，调用模式: '{mode}' (前缀开关: {'开' if add_role_prefix else '关'})")
+    logger.trace(f"  ➜ 格式化演员列表，调用模式: '{mode}'（角色前缀延迟到 Emby 元数据输出层）")
     # --- 阶段1: 统一的角色名格式化 (所有模式通用) ---
     for idx, actor in enumerate(cast_list):
         new_actor = actor.copy()
         
         # (角色名处理逻辑保持不变)
-        character_name = new_actor.get("character")
-        final_role = character_name.strip() if character_name else ""
+        final_role = utils.strip_character_role_display_prefix(new_actor.get("character"))
         if utils.contains_chinese(final_role):
             final_role = final_role.replace(" ", "").replace("　", "")
-        if add_role_prefix:
-            if final_role and final_role not in generic_roles:
-                prefix = "配 " if is_animation else "饰 "
-                final_role = f"{prefix}{final_role}"
-            elif not final_role:
-                final_role = "配音" if is_animation else "演员"
-        else:
-            if not final_role:
-                final_role = "配音" if is_animation else "演员"
+        if not final_role:
+            final_role = "配音" if is_animation else "演员"
         new_actor["character"] = final_role
         
         # 为 'manual' 模式记录原始顺序

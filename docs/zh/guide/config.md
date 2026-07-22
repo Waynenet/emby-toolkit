@@ -41,6 +41,7 @@
 | --- | --- |
 | `proxy_enabled` | 是否启用反向代理 |
 | `proxy_port` | 反向代理端口 |
+| `proxy_allow_transcoding` | 是否允许 Emby 转码；转码时不走 302，播放并发控制、小号播放、复制播放和虚拟播放均失效 |
 | `proxy_merge_native_libraries` | 是否合并原生库 |
 | `proxy_native_view_selection` | 原生库筛选 |
 | `proxy_native_view_order` | 原生库排列顺序 |

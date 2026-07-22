@@ -2,7 +2,7 @@
 
 from flask import Blueprint, request, jsonify
 import logging
-from gevent import spawn_later
+from gevent import spawn, spawn_later
 # 导入需要的模块
 from database import custom_collection_db, tmdb_collection_db, settings_db
 from extensions import admin_required, DELETING_COLLECTIONS
@@ -15,6 +15,7 @@ from handler import emby
 collections_bp = Blueprint('collections', __name__, url_prefix='/api/collections')
 
 logger = logging.getLogger(__name__)
+_MISSING_COLLECTION_CLEANUPS = set()
 
 
 def _collection_image_url(path):
@@ -66,6 +67,101 @@ def _persist_collection_details(details, existing=None):
     return tmdb_collection_db.get_native_collection_by_tmdb_id(details.get('id'))
 
 
+def _find_matching_emby_collection_ids(tmdb_collection_id, row):
+    app_config = config_manager.APP_CONFIG
+    base_url = app_config.get(constants.CONFIG_OPTION_EMBY_SERVER_URL)
+    api_key = app_config.get(constants.CONFIG_OPTION_EMBY_API_KEY)
+    user_id = app_config.get(constants.CONFIG_OPTION_EMBY_USER_ID)
+    if not all([base_url, api_key, user_id]):
+        return [], base_url, api_key, user_id
+
+    candidate_ids = []
+    if (row or {}).get('emby_collection_id'):
+        candidate_ids.append(str(row['emby_collection_id']))
+    for collection in emby.get_all_native_collections_from_emby(base_url, api_key, user_id):
+        if str(collection.get('tmdb_collection_id') or '') == tmdb_collection_id:
+            candidate_ids.append(str(collection.get('emby_collection_id') or ''))
+
+    verified_ids = []
+    for collection_id in dict.fromkeys(value for value in candidate_ids if value):
+        item = emby.get_emby_item_details(
+            collection_id,
+            base_url,
+            api_key,
+            user_id,
+            fields='Type,ProviderIds,Name',
+            silent_404=True,
+        )
+        provider_tmdb_id = str(((item or {}).get('ProviderIds') or {}).get('Tmdb') or '')
+        if (item or {}).get('Type') == 'BoxSet' and provider_tmdb_id == tmdb_collection_id:
+            verified_ids.append((collection_id, item))
+    return verified_ids, base_url, api_key, user_id
+
+
+def _cleanup_missing_collection(tmdb_collection_id, row):
+    try:
+        matches, base_url, api_key, user_id = _find_matching_emby_collection_ids(
+            tmdb_collection_id,
+            row,
+        )
+        if not all([base_url, api_key, user_id]):
+            logger.warning(
+                "  ➜ [合集清理] Emby 配置不完整，暂未删除 TMDb:%s 对应的 BoxSet。",
+                tmdb_collection_id,
+            )
+        for collection_id, item in matches:
+            DELETING_COLLECTIONS.add(collection_id)
+            spawn_later(10, DELETING_COLLECTIONS.discard, collection_id)
+            emby.empty_collection_in_emby(collection_id, base_url, api_key, user_id)
+            remaining = emby.get_emby_item_details(
+                collection_id,
+                base_url,
+                api_key,
+                user_id,
+                fields='Type',
+                silent_404=True,
+            )
+            deleted = not remaining or emby.delete_item_with_token(
+                collection_id,
+                base_url,
+                api_key,
+                user_id,
+            )
+            if deleted:
+                logger.info(
+                    "  ➜ [合集清理] 已从 Emby 删除失效合集《%s》(TMDb:%s, Emby:%s)。",
+                    item.get('Name') or (row or {}).get('name') or tmdb_collection_id,
+                    tmdb_collection_id,
+                    collection_id,
+                )
+
+        from database import image_policy_db
+        from handler.media_image_cache import discard_unreferenced_policy_sources
+
+        images = image_policy_db.delete_image_policy('BoxSet', tmdb_collection_id)
+        deleted_row = tmdb_collection_db.delete_native_collection_by_tmdb_id(tmdb_collection_id)
+        source_urls = [item.get('source_url') for item in images if isinstance(item, dict)]
+        collection_row = deleted_row or row or {}
+        source_urls.extend([
+            _collection_image_url(collection_row.get('poster_path')),
+            _collection_image_url(collection_row.get('backdrop_path')),
+        ])
+        discard_unreferenced_policy_sources(source_urls)
+        logger.info(
+            "  ➜ [合集清理] TMDb 合集 %s 已不存在，ETK 元数据和图片缓存已清理。",
+            tmdb_collection_id,
+        )
+    finally:
+        _MISSING_COLLECTION_CLEANUPS.discard(tmdb_collection_id)
+
+
+def _schedule_missing_collection_cleanup(tmdb_collection_id, row):
+    if tmdb_collection_id in _MISSING_COLLECTION_CLEANUPS:
+        return
+    _MISSING_COLLECTION_CLEANUPS.add(tmdb_collection_id)
+    spawn(_cleanup_missing_collection, tmdb_collection_id, row)
+
+
 @collections_bp.route('/provider/metadata/<tmdb_collection_id>', methods=['GET'])
 def api_get_collection_provider_metadata(tmdb_collection_id):
     tmdb_collection_id = str(tmdb_collection_id or '').strip()
@@ -75,17 +171,26 @@ def api_get_collection_provider_metadata(tmdb_collection_id):
     row = tmdb_collection_db.get_native_collection_by_tmdb_id(tmdb_collection_id)
     schema_version = int((row or {}).get('metadata_schema_version') or 0)
     if not row or schema_version < tmdb_collection_db.COLLECTION_METADATA_SCHEMA_VERSION:
-        details = tmdb.get_collection_details(
-            int(tmdb_collection_id),
-            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
-        )
+        try:
+            details = tmdb.get_collection_details(
+                int(tmdb_collection_id),
+                config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY),
+                raise_not_found=True,
+            )
+        except tmdb.TmdbNotFoundError:
+            logger.warning(
+                "  ➜ [合集清理] TMDb 合集 %s 已返回 404，开始清理 ETK 与 Emby 中的失效合集。",
+                tmdb_collection_id,
+            )
+            _schedule_missing_collection_cleanup(tmdb_collection_id, row)
+            return jsonify({'error': 'tmdb collection no longer exists'}), 410
         if details:
             row = _persist_collection_details(details, existing=row)
     payload = _collection_provider_payload(row)
     if not payload:
         return jsonify({'error': 'collection metadata not found'}), 404
     from handler.media_image_cache import archive_metadata_images
-    archive_metadata_images(payload, request.host_url, archive_sources=False)
+    archive_metadata_images(payload, request.host_url, archive_sources=True)
     response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-store'
     return response

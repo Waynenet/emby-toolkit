@@ -139,9 +139,17 @@ def _emby_item_changed_since_sync(item: Dict[str, Any], db_state: Optional[Dict[
         return True
     emby_modified = _parse_timestamp(item.get("DateModified"))
     last_synced = _parse_timestamp(db_state.get("last_synced_at"))
+    last_updated = _parse_timestamp(db_state.get("last_updated_at"))
     if not last_synced:
+        # Automatic ItemID rebinding updates the local row before the bridge
+        # callback can advance last_synced_at.  Treat that callback timestamp
+        # as the baseline when Emby did not modify the item afterwards.
+        if last_updated and emby_modified and emby_modified <= last_updated + timedelta(seconds=30):
+            return False
         return True
     if not emby_modified:
+        return False
+    if last_updated and last_updated > last_synced and emby_modified <= last_updated + timedelta(seconds=30):
         return False
     return emby_modified > last_synced
 
@@ -768,7 +776,7 @@ def task_populate_metadata_cache(
             
             # A. 预加载映射
             cursor.execute("""
-                SELECT tmdb_id, item_type, last_synced_at, asset_details_json,
+                SELECT tmdb_id, item_type, last_synced_at, last_updated_at, asset_details_json,
                        jsonb_array_elements_text(emby_item_ids_json) as eid
                 FROM media_metadata 
                 WHERE item_type IN ('Movie', 'Series')
@@ -783,12 +791,13 @@ def task_populate_metadata_cache(
                         'tmdb_id': t_id,
                         'item_type': i_type,
                         'last_synced_at': row.get('last_synced_at'),
+                        'last_updated_at': row.get('last_updated_at'),
                         'asset_details_json': row.get('asset_details_json')
                     }
 
             # B. 获取在线状态 (★ 修复：无论是否全量更新，都必须获取在线状态，否则无法检测离线)
             cursor.execute("""
-                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at, asset_details_json,
+                SELECT tmdb_id, item_type, parent_series_tmdb_id, last_synced_at, last_updated_at, asset_details_json,
                        jsonb_array_elements_text(emby_item_ids_json) AS emby_id
                 FROM media_metadata 
                 WHERE in_library = TRUE
@@ -801,6 +810,7 @@ def task_populate_metadata_cache(
                     'item_type': row.get('item_type'),
                     'parent_series_tmdb_id': row.get('parent_series_tmdb_id'),
                     'last_synced_at': row.get('last_synced_at'),
+                    'last_updated_at': row.get('last_updated_at'),
                     'asset_details_json': row.get('asset_details_json')
                 }
 
