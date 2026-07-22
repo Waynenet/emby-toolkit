@@ -191,13 +191,24 @@
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
 
-                      <!-- 3. 缺失占位符 (占满一行，因为说明文字较长) -->
-                      <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" span="1 m:2" label-width="100">
+                      <!-- 3. 缺失占位符 -->
+                      <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" label-width="100">
                          <n-space align="center">
                             <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                             <n-text depth="3" style="font-size: 0.8em;">在榜单中显示未入库海报</n-text>
                          </n-space>
                       </n-form-item-grid-item>
+
+                      <!-- 4. 允许 Emby 转码 -->
+                      <n-form-item-grid-item label="允许转码" path="proxy_allow_transcoding" label-width="100">
+                        <n-switch v-model:value="configModel.proxy_allow_transcoding" :disabled="!configModel.proxy_enabled" />
+                      </n-form-item-grid-item>
+
+                      <n-gi span="1 m:2">
+                        <n-alert type="warning" :show-icon="true">
+                          开启允许转码后，转码播放不走 302，播放并发控制、小号播放、复制播放和虚拟播放均失效；非转码播放不受影响。
+                        </n-alert>
+                      </n-gi>
 
                       <!-- 5. 合并原生库 -->
                       <n-form-item-grid-item label="合并原生库" path="proxy_merge_native_libraries" label-width="100">
