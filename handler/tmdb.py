@@ -568,7 +568,8 @@ def aggregate_full_series_data_from_tmdb(
     tasks = []
     for season in series_details.get("seasons", []):
         season_number = season.get("season_number")
-        if season_number is not None and season_number > 0:
+        # Season 0 是 TMDb 的正式特别篇，必须与普通季一起获取完整分集元数据。
+        if season_number is not None and season_number >= 0:
             tasks.append(("season", tv_id, season_number))
 
     if not tasks:

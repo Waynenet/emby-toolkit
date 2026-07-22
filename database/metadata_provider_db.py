@@ -496,7 +496,20 @@ def needs_metadata_backfill(tmdb_id: str, media_type: str) -> bool:
                 """
                 SELECT 1 FROM media_metadata
                 WHERE tmdb_id=%s AND item_type=%s AND in_library IS TRUE
-                  AND metadata_schema_version < %s
+                  AND (
+                      metadata_schema_version < %s
+                      OR (
+                          item_type='Series'
+                          AND EXISTS (
+                              SELECT 1 FROM media_metadata episode
+                              WHERE episode.parent_series_tmdb_id=media_metadata.tmdb_id
+                                AND episode.item_type='Episode'
+                                AND episode.in_library IS TRUE
+                                AND episode.season_number=0
+                                AND episode.tmdb_id LIKE media_metadata.tmdb_id || '-S0E%%'
+                          )
+                      )
+                  )
                 LIMIT 1
                 """,
                 (str(tmdb_id), item_type, MEDIA_METADATA_SCHEMA_VERSION),

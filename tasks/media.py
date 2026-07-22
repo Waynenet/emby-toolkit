@@ -24,7 +24,10 @@ import handler.tmdb as tmdb
 import handler.emby as emby
 import handler.telegram as telegram
 from database import connection, settings_db, media_db, queries_db, maintenance_db
-from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
+from database.metadata_provider_db import (
+    MEDIA_METADATA_SCHEMA_VERSION,
+    needs_metadata_backfill,
+)
 from .helpers import parse_full_asset_details, translate_tmdb_metadata_recursively
 from extensions import UPDATING_METADATA
 
@@ -819,7 +822,20 @@ def task_populate_metadata_cache(
                     SELECT tmdb_id, item_type, parent_series_tmdb_id
                     FROM media_metadata
                     WHERE in_library = TRUE
-                      AND metadata_schema_version < %s
+                      AND (
+                          metadata_schema_version < %s
+                          OR (
+                              item_type='Series'
+                              AND EXISTS (
+                                  SELECT 1 FROM media_metadata episode
+                                  WHERE episode.parent_series_tmdb_id=media_metadata.tmdb_id
+                                    AND episode.item_type='Episode'
+                                    AND episode.in_library IS TRUE
+                                    AND episode.season_number=0
+                                    AND episode.tmdb_id LIKE media_metadata.tmdb_id || '-S0E%%'
+                              )
+                          )
+                      )
                 """, (MEDIA_METADATA_SCHEMA_VERSION,))
                 for row in cursor.fetchall():
                     if row['item_type'] == 'Movie' and is_valid_tmdb_id(row['tmdb_id']):
@@ -1870,7 +1886,7 @@ def task_backfill_single_media_metadata(processor, tmdb_id: str, media_type: str
         if not row:
             task_manager.update_status_from_thread(100, "目标媒体已不在库，跳过补齐。")
             return
-        if int(row.get('metadata_schema_version') or 0) >= MEDIA_METADATA_SCHEMA_VERSION:
+        if not needs_metadata_backfill(tmdb_id, media_type):
             task_manager.update_status_from_thread(100, "目标媒体元数据已是当前结构版本。")
             return
 

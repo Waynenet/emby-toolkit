@@ -17,7 +17,7 @@ import psycopg2
 from handler.custom_collection import RecommendationEngine
 import config_manager
 from database.connection import get_db_connection
-from database import media_db, settings_db
+from database import media_db, settings_db, watchlist_db
 from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
 import handler.emby as emby
 import handler.tmdb as tmdb
@@ -1305,6 +1305,15 @@ class MediaProcessor:
                 
                 # ★★★ 4. 处理分集 (Episode) ★★★
                 raw_episodes = source_data_package.get("episodes_details", {})
+                if (
+                    isinstance(raw_episodes, dict)
+                    and not is_pending
+                    and series_details.get('id')
+                ):
+                    # TMDb 后续补齐真实分集 ID 时，先迁移旧占位记录的在库资产关联。
+                    watchlist_db.transfer_dummy_episode_assets(
+                        str(series_details.get('id')), raw_episodes
+                    )
                 # 兼容字典(S1E1: data)和列表两种格式
                 episodes_details = list(raw_episodes.values()) if isinstance(raw_episodes, dict) else (raw_episodes if isinstance(raw_episodes, list) else [])
                 
