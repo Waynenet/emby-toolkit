@@ -642,7 +642,7 @@ body {
 .n-tag--error-type {
   background-color: #d03050 !important;
 }
-.n-tag--cyan-type {
+.n-tag-cyan {
   background-color: #55ff9c !important;
 }
 .n-tag--closable {

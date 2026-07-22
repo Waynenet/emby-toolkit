@@ -6,7 +6,7 @@
         <template #title>原生合集</template>
         <template #footer>
           <n-space align="center" size="large">
-            <n-tag type="cyan" :bordered="false" round>共 {{ globalStats.totalCollections }} 合集</n-tag>
+            <n-tag class="n-tag-cyan" :bordered="false" round>共 {{ globalStats.totalCollections }} 合集</n-tag>
             <n-tag v-if="globalStats.totalMissingMovies > 0" type="error" :bordered="false" round>
               {{ globalStats.collectionsWithMissing }} 合集缺失 {{ globalStats.totalMissingMovies }} 部
             </n-tag>
