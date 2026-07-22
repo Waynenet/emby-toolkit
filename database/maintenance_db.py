@@ -991,75 +991,67 @@ def export_tables_data(tables_to_export: List[str]) -> Dict[str, List[Dict]]:
 
 def prepare_for_library_rebuild() -> Dict[str, Dict]:
     """
-    【高危 - 修复版】执行为 Emby 媒体库重建做准备的所有数据库操作。
-    1. 清空 Emby 专属数据表 (用户、播放状态、缓存)。
-    2. 重置核心元数据表中的 Emby 关联字段 (ID、资产详情、在库状态、指纹信息)。
-    3. 重置追剧状态。
-    """
-    # 1. 需要被 TRUNCATE (清空) 的表
-    tables_to_truncate = [
-        'emby_users', 
-        'emby_users_extended', 
-        'user_media_data', 
-        'collections_info', 
-        'resubscribe_index', 
-        'cleanup_index' 
-    ]
+    为 Emby 媒体库重建解除旧的 ItemID 关联。
 
-    results = {"truncated_tables": [], "updated_rows": {}}
+    只清理 Emby 运行时关联和派生索引，保留 ETK 授权、Emby 用户、媒体源
+    指纹/资产、元数据、图片缓存以及订阅状态。这样重建后可以由同步任务或
+    插件自动重新绑定，而不会把当前管理员会话一并删除。
+    """
+    # 这些表是 Emby 关联的派生缓存，不包含 ETK 授权或核心媒体元数据。
+    tables_to_truncate = ['user_media_data', 'resubscribe_index', 'cleanup_index']
+
+    results = {
+        "truncated_tables": [],
+        "updated_rows": {},
+        "preserved_tables": ["emby_users", "emby_users_extended", "app_settings"],
+    }
     
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                logger.info("第一步：开始清空 Emby 专属数据表...")
+                logger.info("第一步：清理 Emby 运行时缓存...")
                 for table_name in tables_to_truncate:
                     # 检查表是否存在，防止报错
                     cursor.execute("SELECT to_regclass(%s)", (table_name,))
                     result = cursor.fetchone()
                     if result and result.get('to_regclass'):
                         logger.warning(f"  ➜ 正在清空表: {table_name}")
-                        query = sql.SQL("TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;").format(table=sql.Identifier(table_name))
+                        query = sql.SQL("TRUNCATE TABLE {table} RESTART IDENTITY;").format(table=sql.Identifier(table_name))
                         cursor.execute(query)
                         results["truncated_tables"].append(table_name)
                     else:
                         logger.warning(f"  ➜ 表 {table_name} 不存在，跳过清空。")
 
-                logger.info("第二步：重置 media_metadata 表中的 Emby 关联字段...")
-                # ★★★ 核心修复：将所有指纹和资产字段加入 WHERE 检查，彻底扫除幽灵数据 ★★★
+                logger.info("第二步：解除 media_metadata 中的旧 Emby ItemID 关联...")
                 cursor.execute("""
                     UPDATE media_metadata
                     SET 
-                        -- 1. 核心关联字段
                         in_library = FALSE,
-                        emby_item_ids_json = '[]'::jsonb,  
-                        file_sha1_json = '[]'::jsonb,      
-                        file_pickcode_json = '[]'::jsonb,  
-                        asset_details_json = NULL,         
-                        washing_level = NULL,
-                        washing_snapshot_json = '{}'::jsonb,
+                        emby_item_ids_json = '[]'::jsonb,
                         date_added = NULL,
-                        
-                        -- 2. 追剧状态重置
-                        watching_status = 'NONE',
-                        paused_until = NULL,
-                        force_ended = FALSE,
-                        watchlist_next_episode_json = NULL,
-                        watchlist_missing_info_json = NULL,
-                        
-                        -- 3. 更新时间戳
+                        last_synced_at = NULL,
                         last_updated_at = NOW()
                     WHERE 
-                        in_library = TRUE 
-                        OR emby_item_ids_json::text != '[]'
-                        OR file_sha1_json::text != '[]'
-                        OR file_pickcode_json::text != '[]'
-                        OR asset_details_json IS NOT NULL
-                        OR watching_status != 'NONE';
+                        in_library = TRUE
+                        OR (
+                            jsonb_typeof(emby_item_ids_json) = 'array'
+                            AND jsonb_array_length(emby_item_ids_json) > 0
+                        );
                 """)
                 results["updated_rows"]["media_metadata"] = cursor.rowcount
                 logger.info(f"  ➜ media_metadata 表重置完成，影响了 {cursor.rowcount} 行。")
 
-                logger.info("第三步：重置 自建合集表 (custom_collections)...")
+                logger.info("第三步：停用旧的 Emby 原生合集关联，保留合集元数据...")
+                cursor.execute("""
+                    UPDATE collections_info
+                    SET emby_collection_id = NULL,
+                        is_active = FALSE,
+                        last_checked_at = NOW()
+                    WHERE emby_collection_id IS NOT NULL OR is_active IS TRUE;
+                """)
+                results["updated_rows"]["collections_info"] = cursor.rowcount
+
+                logger.info("第四步：重置自建合集的 Emby 关联...")
                 cursor.execute("""
                     UPDATE custom_collections 
                     SET 
