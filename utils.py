@@ -27,6 +27,16 @@ def contains_chinese(text: Optional[str]) -> bool:
             return True
     return False
 
+_CHARACTER_ROLE_DISPLAY_PREFIX_RE = re.compile(r'^(?:(?:饰|配)[\s\u3000]+)+')
+
+
+def strip_character_role_display_prefix(character_name: Optional[str]) -> str:
+    """Remove ETK's optional display-only role prefix from a character name."""
+    if not character_name:
+        return ""
+    return _CHARACTER_ROLE_DISPLAY_PREFIX_RE.sub('', str(character_name).strip()).strip()
+
+
 def clean_character_name_static(character_name: Optional[str]) -> str:
     """
     统一格式化角色名：

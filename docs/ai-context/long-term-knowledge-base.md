@@ -241,6 +241,8 @@ Emby 事件由 ETK MediaInfo Bridge 直接监听并通过 `/api/emby/events` 上
 
 `media_metadata.metadata_schema_version` 用于追踪字段集合迭代。新入库或成功完成 TMDb 聚合的 Movie/Series/Season/Episode 写当前版本；旧记录和未来新增字段后的落后记录由“补齐媒体元数据”任务选择性重新处理。批量补齐保留第一版已有的人物表，不再扫描、翻译或重写人物和角色。合法缺失的 Logo、简介等字段在成功尝试后同样升级版本，避免每轮重复请求。ETK 任务中心可直接运行，桥接插件也会注册 Emby 计划任务，通过有效 STRM 的 pick code/SHA1 接口触发同一后端任务。Emby 手动刷新单项时，元数据 Provider 的 GET 请求会检测根 Movie/Series 的结构版本；版本落后时只提交对应 Emby ItemID 的单项完整处理，延迟 5 秒等待当前刷新收尾，写库后再按既有流程刷新该 Item，不扫描全库。
 
+演员角色名的持久化值不包含“饰 / 配”展示前缀。核心处理器写入 `actors_json.character` 前会清理旧前缀，Emby 元数据接口按当前 `actor_role_add_prefix` 和动画/纪录片判定动态生成最终 `PersonInfo.Role`；切换开关后刷新 Emby 即可生效，无需重新翻译或运行核心处理器。启动迁移 `migration_clean_actor_role_prefix_v1` 通过 `app_settings` 标记只执行一次，用于清洗历史 `actors_json`。
+
 插件元数据接口必须复用 ETK 的关键词和工作室映射配置：对应中文化开关开启时只返回命中 ID/英文名映射的中文标签，未映射原始值直接丢弃。中文分级标签仅供 ETK 分类和筛选；Emby 家长控制不读取 ETK `emby_value`，因此 `OfficialRating` 必须返回 `official_rating_json.US` 中的美国分级代码。
 
 TMDb 合集不再受 ETK 独立开关控制。电影处理可把所属合集元数据写入 `collections_info`，但默认保持未激活，仅供 ETK Movie 元数据接口和插件读取；插件只在电影所属 Emby 媒体库开启 `LibraryOptions.ImportCollections` 且满足 `MinCollectionItems` 时按 TMDb 合集 ID 创建或加入 BoxSet。插件创建 BoxSet 成功后主动调用 ETK 激活接口绑定 Emby ID，主入库流程不延迟、不反查 Emby；合集页面、统计和缺失订阅只读取激活记录，Emby 删除 BoxSet 时记录退回未激活而不删除元数据缓存。Emby 单项刷新在元数据无变化时可能既不调用 Provider 也不触发 `ItemUpdated`，因此插件通过 Harmony 拦截 `Emby.Api.ItemRefreshService.Post(RefreshItem)`，取得 ItemID 后沿用 3 秒延迟回补流程恢复媒体流、缺图和合集关系。
