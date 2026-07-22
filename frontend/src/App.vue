@@ -718,7 +718,7 @@ body::before {
 .n-tag--success-type { background-color: #18a058 !important; }
 .n-tag--warning--type { background-color: #f0a020 !important; }
 .n-tag--error-type { background-color: #d03050 !important; }
-.n-tag-cyan { background-color: #55ff9c2d !important; }
+.n-tag-cyan { background-color: #55ff9c1f !important; }
 
 .n-tag--closable {
   background: rgba(255, 255, 255, 0.15) !important;
