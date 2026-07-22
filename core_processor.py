@@ -3993,6 +3993,7 @@ class MediaProcessor:
             archive_episode_screenshot,
             discard_episode_screenshot,
         )
+        from database.image_policy_db import invalidate_image_policy
 
         series_id = str((item_details or {}).get('Id') or '').strip()
         series_path = str((item_details or {}).get('Path') or '').strip()
@@ -4026,7 +4027,8 @@ class MediaProcessor:
             or ''
         ).strip()
         uploaded_count = 0
-        refreshed_count = 0
+        removed_emby_count = 0
+        discarded_screenshot_count = 0
         removed_local_count = 0
         failed_count = 0
 
@@ -4062,19 +4064,31 @@ class MediaProcessor:
                 image_tags = child.get('ImageTags') or {}
 
                 if episode_data.get('still_path'):
-                    needs_refresh = ep_key in force_keys or local_thumb_removed or not image_tags.get('Primary')
-                    if needs_refresh:
-                        if emby.download_remote_item_image(
-                            self.emby_url,
-                            self.emby_api_key,
-                            item_id,
-                            'Primary',
+                    replaces_screenshot = (
+                        ep_key in force_keys
+                        or local_thumb_removed
+                    )
+                    if replaces_screenshot:
+                        screenshot_discarded = discard_episode_screenshot(
+                            series_tmdb_id, season_number, episode_number
+                        )
+                        discarded_screenshot_count += int(screenshot_discarded)
+                        invalidate_image_policy(
+                            'Episode', series_tmdb_id,
+                            season_number, episode_number,
+                        )
+                    if replaces_screenshot and image_tags.get('Primary'):
+                        if emby.delete_item_image(
+                            self.emby_url, self.emby_api_key, item_id, 'Primary'
                         ):
-                            emby.delete_item_image(self.emby_url, self.emby_api_key, item_id, 'Thumb')
-                            discard_episode_screenshot(
-                                series_tmdb_id, season_number, episode_number
-                            )
-                            refreshed_count += 1
+                            removed_emby_count += 1
+                        else:
+                            failed_count += 1
+                    if replaces_screenshot and image_tags.get('Thumb'):
+                        if emby.delete_item_image(
+                            self.emby_url, self.emby_api_key, item_id, 'Thumb'
+                        ):
+                            removed_emby_count += 1
                         else:
                             failed_count += 1
                     continue
@@ -4118,7 +4132,8 @@ class MediaProcessor:
 
         logger.info(
             "  ➜ [ETK分集图片] Emby缓存同步完成："
-            f"截图上传 {uploaded_count}，TMDb正式剧照刷新 {refreshed_count}，"
+            f"截图上传 {uploaded_count}，清理 Emby 截图 {removed_emby_count}，"
+            f"清理图片仓库截图 {discarded_screenshot_count}，"
             f"清理媒体目录旧截图 {removed_local_count}，失败 {failed_count}。"
         )
         return failed_count == 0

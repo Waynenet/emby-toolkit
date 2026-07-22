@@ -70,6 +70,23 @@ def replace_image_policy(
     return previous
 
 
+def invalidate_image_policy(item_type, tmdb_id, season_number=None, episode_number=None):
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE media_image_policy_cache
+                SET policy_json='[]'::jsonb, updated_at=NOW()
+                WHERE item_type=%s AND tmdb_id=%s
+                  AND season_number=%s AND episode_number=%s
+                """,
+                _key(item_type, tmdb_id, season_number, episode_number),
+            )
+            updated = cursor.rowcount
+        conn.commit()
+    return updated
+
+
 def source_is_referenced(source_url):
     value = json.dumps([{"source_url": str(source_url or "").strip()}])
     with get_db_connection() as conn:

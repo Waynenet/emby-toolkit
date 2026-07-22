@@ -1222,7 +1222,7 @@ class WatchlistProcessor:
             if str(val).strip().lower() in ['none', 'null', '']: return True
             return False
 
-        force_download_eps = []
+        formal_still_eps = []
         episodes_to_update_in_db = []
 
         for ep_key, new_ep_data in unified_episodes_dict.items():
@@ -1230,9 +1230,9 @@ class WatchlistProcessor:
             old_poster = old_data.get('poster_path')
             new_poster = new_ep_data.get('still_path')
             
-            # 如果旧的没图，新的有图，加入强制下载列表
+            # 如果旧的没图、新的有图，记录为正式剧照接管截图。
             if _is_empty_val(old_poster) and not _is_empty_val(new_poster):
-                force_download_eps.append(ep_key)
+                formal_still_eps.append(ep_key)
                 # 收集需要更新数据库的记录
                 episodes_to_update_in_db.append((
                     new_poster, 
@@ -1243,8 +1243,8 @@ class WatchlistProcessor:
                     new_ep_data.get('episode_number')
                 ))
                 
-        if force_download_eps:
-            logger.info(f"  ➜ 发现 {len(force_download_eps)} 个分集在 TMDb 上有了新图片，将替换 Emby 缓存截图。")
+        if formal_still_eps:
+            logger.info(f"  ➜ 发现 {len(formal_still_eps)} 个分集在 TMDb 上有了正式剧照，将更新图片 URL 并清理缓存截图。")
             try:
                 with connection.get_db_connection() as conn:
                     with conn.cursor() as cursor:
@@ -1258,9 +1258,10 @@ class WatchlistProcessor:
                             episodes_to_update_in_db,
                         )
                     conn.commit()
-                logger.debug(f"  ➜ 已在 Emby 图片刷新前写入 {len(episodes_to_update_in_db)} 个分集剧照。")
+                logger.debug(f"  ➜ 已在清理缓存截图前写入 {len(episodes_to_update_in_db)} 个分集剧照 URL。")
             except Exception as e:
                 logger.warning(f"  ➜ 提前写入分集剧照失败: {e}")
+                formal_still_eps = []
         # ======================================================================
         # ★★★ 老六专属：无简介笑话占位功能 (追剧刷新) ★★★
         # ======================================================================
@@ -1406,13 +1407,13 @@ class WatchlistProcessor:
                     )
 
                 # 1. 补全图片
-                logger.debug(f"  ➜ 正在检查并下载 '{item_name}' 缺失的图片(含最新分集)...")
+                logger.debug(f"  ➜ 正在同步 '{item_name}' 的分集图片状态...")
                 extensions.media_processor_instance.download_images_from_tmdb(
                     tmdb_id=tmdb_id,
                     item_type='Series',
                     aggregated_tmdb_data=aggregated_data,
                     item_details=current_item_details,
-                    force_overwrite_episodes=force_download_eps, # ★ 传入强制覆盖列表
+                    force_overwrite_episodes=formal_still_eps,
                     allow_etk_episode_images=True,
                 )
 
