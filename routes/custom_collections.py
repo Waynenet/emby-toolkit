@@ -278,13 +278,12 @@ def api_update_custom_collections_order():
         logger.error(f"更新自定义合集顺序时出错: {e}", exc_info=True)
         return jsonify({"error": "服务器内部错误"}), 500
 
-# --- 联动删除Emby合集 ---
+# --- 联动删除Emby合集路由重构 ---
 @custom_collections_bp.route('/<int:collection_id>', methods=['DELETE'])
 @admin_required
 def api_delete_custom_collection(collection_id):
-    """【V8 - 最终决战版】通过清空所有成员来联动删除Emby合集"""
+    """【纯虚拟库版】直接删除本地配置与缓存文件"""
     try:
-        # 步骤 1: 获取待删除合集的完整信息
         collection_to_delete = custom_collection_db.get_custom_collection_by_id(collection_id)
         if not collection_to_delete:
             return jsonify({"error": "未找到要删除的合集"}), 404
@@ -297,32 +296,10 @@ def api_delete_custom_collection(collection_id):
                 tmdb_to_clean = [str(i['tmdb_id']) for i in items if i.get('tmdb_id')]
             except: pass
 
-        emby_id_to_empty = collection_to_delete.get('emby_collection_id')
         collection_name = collection_to_delete.get('name')
 
-        # 步骤 2: 如果存在关联的Emby ID，则调用Emby Handler，清空其内容
-        if emby_id_to_empty:
-            logger.info(f"  ➜ 正在删除合集 '{collection_name}' (Emby ID: {emby_id_to_empty})...")
-            
-            # ★★★ 核心修改：加入“免打扰名单” ★★★
-            # ==================================================================
-            DELETING_COLLECTIONS.add(emby_id_to_empty)
-            
-            # 20秒后移除标记 (自建合集涉及大量成员移除，Webhook可能会飞一会儿，给长一点时间)
-            def _clear_flag():
-                DELETING_COLLECTIONS.discard(emby_id_to_empty)
-            spawn_later(20, _clear_flag)
-            emby.empty_collection_in_emby(
-                collection_id=emby_id_to_empty,
-                base_url=config_manager.APP_CONFIG.get('emby_server_url'),
-                api_key=config_manager.APP_CONFIG.get('emby_api_key'),
-                user_id=config_manager.APP_CONFIG.get('emby_user_id')
-            )
-
-        # 步骤 3: 无论Emby端是否成功，都删除本地数据库中的记录
-        db_success = custom_collection_db.delete_custom_collection(
-            collection_id=collection_id
-        )
+        # 数据库删除记录
+        db_success = custom_collection_db.delete_custom_collection(collection_id=collection_id)
 
         if db_success:
             # === 物理清理本地精美封面与生成器缓存目录 ===
@@ -345,12 +322,13 @@ def api_delete_custom_collection(collection_id):
                     shutil.rmtree(cache_dir)
                     logger.info(f"  ➜ [文件清理] 已成功物理删除合集封面生成素材目录：{cache_dir}")
             except Exception as e_del_cache:
-                logger.error(f"物理删除合集封面生成素材目录失败: {e_del_cache}")
+                logger.error(f"清理合集封面生成素材目录失败: {e_del_cache}")
 
             from handler.poster_generator import cleanup_placeholder
             for tid in tmdb_to_clean:
                 cleanup_placeholder(tid) 
-            return jsonify({"message": f"自定义合集 '{collection_name}' 已成功联动删除。"}), 200
+                
+            return jsonify({"message": f"自定义合集 '{collection_name}' 已成功删除。"}), 200
         else:
             return jsonify({"error": "数据库删除操作失败，请查看日志。"}), 500
 

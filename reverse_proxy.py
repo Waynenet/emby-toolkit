@@ -154,20 +154,12 @@ def _stable_virtual_library_token(db_id, purpose):
 def _build_mimicked_library_view(coll, mimicked_id, collection_type, real_server_id):
     db_id = coll["id"]
     name = coll["name"]
-    real_emby_collection_id = coll.get("emby_collection_id")
     identity = _stable_virtual_library_token(db_id, "identity")
-    image_tags = {}
-    if real_emby_collection_id and real_emby_collection_id != "virtual_only":
-        image_tags["Primary"] = _stable_virtual_library_token(
-            f"{db_id}:{real_emby_collection_id}",
-            "primary-image"
-        )
-    else:
-        # === 为纯虚拟库生成稳定的虚拟 Primary 封面标识 ===
-        image_tags["Primary"] = _stable_virtual_library_token(
-            f"{db_id}:virtual_only",
-            "primary-image"
-        )
+    
+    # === 纯虚拟库模式：无需检查 real_emby_collection_id，直接生成稳定的虚拟封面 Tag ===
+    image_tags = {
+        "Primary": _stable_virtual_library_token(f"{db_id}:virtual_only", "primary-image")
+    }
 
     view = {
         "Name": name,
@@ -379,39 +371,21 @@ def handle_get_views():
         fake_views_items = []
         
         for coll in collections:
-            # 物理检查：库在Emby里有实体吗？
-            real_emby_collection_id = coll.get('emby_collection_id')
-            
-            # === 支持纯虚拟库通过物理检查 ===
-            definition = coll.get('definition_json') or {}
-            if isinstance(definition, str):
-                try: definition = json.loads(definition)
-                except: definition = {}
-            
-            is_virtual_only = definition.get('virtual_only', False) or (real_emby_collection_id == 'virtual_only')
-            
-            if not real_emby_collection_id and not is_virtual_only:
-                continue
-
             # 权限检查：如果设置了 allowed_user_ids，则检查
             allowed_users = coll.get('allowed_user_ids')
             if allowed_users and isinstance(allowed_users, list):
                 if user_id not in allowed_users:
                     continue
             
-            # 生成虚拟库对象
+            # 直接将所有活跃自建合集伪造为虚拟库
             db_id = coll['id']
             mimicked_id = to_mimicked_id(db_id)
             definition = coll.get('definition_json') or {}
             
             if isinstance(definition, str):
-                try:
-                    definition = json.loads(definition)
-                except Exception:
-                    definition = {}
+                try: definition = json.loads(definition)
+                except Exception: definition = {}
 
-            # Emby Web keeps the generic view to avoid native-only tabs.
-            # All other clients receive the actual media-library type.
             collection_type = _virtual_library_collection_type(definition, client_signature)
 
             fake_views_items.append(_build_mimicked_library_view(
@@ -486,51 +460,36 @@ def handle_get_mimicked_library_image(path):
         item_id_match = re.search(r'/Items/((?:-\d+|19\d{8}|8\d{18}))/Images/', f"/{path.lstrip('/')}")
         if not item_id_match:
             return "Bad Request", 400
-        real_db_id = from_mimicked_id(item_id_match.group(1)) # 这里的 real_db_id 就是合集的自增 ID (如 12)
+        real_db_id = from_mimicked_id(item_id_match.group(1)) # 对应合集自增 ID
         coll = custom_collection_db.get_custom_collection_by_id(real_db_id)
-        real_emby_collection_id = coll.get('emby_collection_id') if coll else None
 
-        # === 如果本地存在该虚拟库生成的精美封面，客户端请求时直接返回它 ===
+        # 1. 优先读取 /tmdb/covers/ 下合成的精美带角标封面
         local_cover_path = f"/tmdb/covers/virtual_{real_db_id}.jpg"
         if os.path.exists(local_cover_path):
             resp = send_file(local_cover_path, mimetype='image/jpeg')
             resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
             return resp
 
-        # === 处理纯虚拟库的封面请求 ===
-        if not real_emby_collection_id or real_emby_collection_id == 'virtual_only':
-            if coll:
-                raw_list_json = coll.get('generated_media_info_json')
-                raw_list = json.loads(raw_list_json) if isinstance(raw_list_json, str) else (raw_list_json or [])
-                # 寻找合集中第一个有 TMDb ID 且已缓存海报的项，将其海报作为媒体库封面
-                for item in raw_list:
-                    tid = item.get('tmdb_id')
-                    if tid:
-                        meta = queries_db.get_best_metadata_by_tmdb_id(str(tid))
-                        poster_path = meta.get('poster_path')
-                        if poster_path:
-                            img_file_path = get_missing_poster(tmdb_id=str(tid), status="SUBSCRIBED", poster_path=poster_path)
-                            if img_file_path and os.path.exists(img_file_path):
-                                return send_file(img_file_path, mimetype='image/jpeg')
-            
-            # 如果合集为空，使用一张默认占位图
-            img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED")
-            if img_file_path and os.path.exists(img_file_path):
-                return send_file(img_file_path, mimetype='image/jpeg')
-            return "Not Found", 404
+        # 2. 没找到合成封面，尝试取列表第一张海报
+        if coll:
+            raw_list_json = coll.get('generated_media_info_json')
+            raw_list = json.loads(raw_list_json) if isinstance(raw_list_json, str) else (raw_list_json or [])
+            for item in raw_list:
+                tid = item.get('tmdb_id')
+                if tid:
+                    meta = queries_db.get_best_metadata_by_tmdb_id(str(tid))
+                    poster_path = meta.get('poster_path')
+                    if poster_path:
+                        img_file_path = get_missing_poster(tmdb_id=str(tid), status="SUBSCRIBED", poster_path=poster_path)
+                        if img_file_path and os.path.exists(img_file_path):
+                            return send_file(img_file_path, mimetype='image/jpeg')
 
-        base_url, api_key = _get_real_emby_url_and_key()
-        image_url = f"{base_url}/Items/{real_emby_collection_id}/Images/Primary"
-        headers = {key: value for key, value in request.headers if key.lower() != 'host'}
-        headers['Host'] = urlparse(base_url).netloc
-        params = request.args.copy()
-        params.pop('tag', None)
-        params.pop('Tag', None)
-        params['api_key'] = api_key
-        resp = http_session.get(image_url, headers=headers, stream=True, params=params)
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        response_headers = [(name, value) for name, value in resp.raw.headers.items() if name.lower() not in excluded_headers]
-        return Response(resp.iter_content(chunk_size=8192), resp.status_code, response_headers)
+        # 3. 终极占位图兜底
+        img_file_path = get_missing_poster(tmdb_id="placeholder", status="WANTED", poster_path=None)
+        if img_file_path and os.path.exists(img_file_path):
+            return send_file(img_file_path, mimetype='image/jpeg')
+            
+        return "Not Found", 404
     except Exception as e:
         return "Internal Proxy Error", 500
 

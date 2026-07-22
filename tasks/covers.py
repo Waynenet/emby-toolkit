@@ -135,86 +135,63 @@ def task_generate_all_covers(processor):
 # ★★★ 只为所有自建合集生成封面的后台任务 ★★★
 def task_generate_all_custom_collection_covers(processor):
     """
-    后台任务：为所有已启用、且已在Emby中创建的自定义合集生成封面。
+    后台任务：为所有已启用的自定义合集在本地生成精美封面。
     """
     task_name = "一键生成所有自建合集封面"
     logger.trace(f"--- 开始执行 '{task_name}' 任务 ---")
     
     try:
-        # 1. 读取封面生成器的配置
         cover_config = settings_db.get_setting('cover_generator_config') or {}
         if not cover_config.get("enabled"):
             logger.info("  ➜ 封面生成器未启用，跳过自建合集封面生成任务。")
             task_manager.update_status_from_thread(100, "任务跳过：封面生成器未启用。")
             return
 
-        # 2. 从数据库获取所有已启用的自定义合集
         task_manager.update_status_from_thread(5, "正在获取所有已启用的自建合集...")
-        all_active_collections = custom_collection_db.get_all_active_custom_collections()
-        
-        # 3. 筛选出那些已经在Emby中成功创建的合集
-        collections_to_process = [
-            c for c in all_active_collections if c.get('emby_collection_id')
-        ]
+        collections_to_process = custom_collection_db.get_all_active_custom_collections()
         
         total = len(collections_to_process)
         if total == 0:
-            task_manager.update_status_from_thread(100, "任务完成：没有找到已在Emby中创建的自建合集。")
+            task_manager.update_status_from_thread(100, "任务完成：没有可处理的自建合集。")
             return
             
-        logger.info(f"  ➜ 将为 {total} 个自建合集生成封面。")
-        
-        # 4. 实例化服务并循环处理
+        logger.info(f"  ➜ 将为 {total} 个自建合集在本地生成封面。")
         cover_service = CoverGeneratorService(config=cover_config)
         
         for i, collection_db_info in enumerate(collections_to_process):
             if processor.is_stop_requested(): break
             
+            collection_id = collection_db_info.get('id')
             collection_name = collection_db_info.get('name')
-            emby_collection_id = collection_db_info.get('emby_collection_id')
+            emby_collection_id = f"virtual_only_{collection_id}"
             
             progress = 10 + int((i / total) * 90)
             task_manager.update_status_from_thread(progress, f"({i+1}/{total}) 正在处理: {collection_name}")
             
             try:
-                # === 如果是纯虚拟合集，直接伪造本地详情，避开 Emby 请求并生成本地封面 ===
-                if emby_collection_id and str(emby_collection_id).startswith("virtual_only"):
-                    emby_collection_details = {
-                        "Id": emby_collection_id,
-                        "Name": collection_name,
-                        "Type": "BoxSet"
-                    }
-                else:
-                    # 原有向 Emby 请求详情的逻辑
-                    emby_collection_details = emby.get_emby_item_details(
-                        emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id
-                    )
+                # 统一本地构造伪造的合集详情字典
+                emby_collection_details = {
+                    "Id": emby_collection_id,
+                    "Name": collection_name,
+                    "Type": "BoxSet"
+                }
 
-                if not emby_collection_details:
-                    logger.warning(f"无法获取合集 '{collection_name}' (Emby ID: {emby_collection_id}) 的详情，跳过。")
-                    continue
-
-                # 1. 从数据库记录中获取合集定义
                 definition = collection_db_info.get('definition_json', {})
                 content_types = definition.get('item_type', ['Movie'])
-
-                # 2. 直接将当前循环中的合集信息传递给辅助函数
                 item_count_to_pass = _get_cover_badge_text_for_collection(collection_db_info)
 
-                # 3. 调用封面生成服务
                 cover_service.generate_for_library(
                     emby_server_id='main_emby',
                     library=emby_collection_details,
-                    item_count=item_count_to_pass, # <-- 使用计算好的角标参数
+                    item_count=item_count_to_pass,
                     content_types=content_types,
-                    # ★★★ 修复：传入 custom_collection_data，激活策略 A/B ★★★
                     custom_collection_data=collection_db_info
                 )
             except Exception as e_gen:
                 logger.error(f"为自建合集 '{collection_name}' 生成封面时发生错误: {e_gen}", exc_info=True)
                 continue
         
-        final_message = "所有自建合集封面已处理完毕！"
+        final_message = "所有自建合集本地封面已生成完毕！"
         if processor.is_stop_requested(): final_message = "任务已中止。"
         task_manager.update_status_from_thread(100, final_message)
 

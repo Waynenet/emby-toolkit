@@ -1,5 +1,5 @@
 # tasks/custom_collections.py
-# 自建合集任务模块 (V5 - 实时架构适配版)
+# 自建合集任务模块 (纯虚拟库极简版)
 
 import json
 import logging
@@ -101,7 +101,7 @@ def _get_cover_badge_text_for_collection(collection_db_info: Dict[str, Any]) -> 
     
     return item_count_to_pass
 
-# ★★★ 一键生成所有合集的后台任务 (重构版) ★★★
+# ★★★ 一键生成所有合集的后台任务 ★★★
 def task_process_all_custom_collections(processor):
     """
     一键生成所有合集的后台任务 (轻量化版 - 仅刷新外部数据源)。
@@ -131,13 +131,8 @@ def task_process_all_custom_collections(processor):
         # 2. 加载全量映射 (用于匹配本地媒体)
         task_manager.update_status_from_thread(12, "正在从本地数据库加载全量媒体映射...")
         tmdb_to_emby_item_map = media_db.get_tmdb_to_emby_map(library_ids=None)
-        
-        # 3. 获取现有合集列表 (用于 Emby 实体合集同步)
-        task_manager.update_status_from_thread(15, "正在从Emby获取现有合集列表...")
-        all_emby_collections = emby.get_all_collections_from_emby_generic(base_url=processor.emby_url, api_key=processor.emby_api_key, user_id=processor.emby_user_id) or []
-        prefetched_collection_map = {coll.get('Name', '').lower(): coll for coll in all_emby_collections}
 
-        # 4. 初始化封面生成器
+        # 3. 初始化封面生成器
         cover_service = None
         try:
             cover_config = settings_db.get_setting('cover_generator_config') or {}
@@ -169,43 +164,21 @@ def task_process_all_custom_collections(processor):
                     importer = ListImporter(processor.tmdb_api_key)
                     raw_tmdb_items, _ = importer.process(definition)
                 else:
-                    # ai_recommendation_global
                     from handler.custom_collection import RecommendationEngine
                     rec_engine = RecommendationEngine(processor.tmdb_api_key)
                     raw_tmdb_items = rec_engine.generate(definition)
 
-                # ==============================================================================
-                # ★★★ 新增逻辑：如果源数据为空，则删除合集并跳过 ★★★
-                # ==============================================================================
                 if not raw_tmdb_items:
-                    logger.info(f"  ➜ 合集 '{collection_name}' 的外部源未返回任何数据 (真空壳)。")
-                    logger.info(f"  ➜ 正在尝试从 Emby 中移除该合集 (如果存在)...")
-                    
-                    # 调用 Emby 模块删除合集
-                    is_deleted = emby.delete_collection_by_name(
-                        collection_name=collection_name,
-                        base_url=processor.emby_url,
-                        api_key=processor.emby_api_key,
-                        user_id=processor.emby_user_id
-                    )
-                    
-                    # 更新数据库状态为 0
+                    logger.info(f"  ➜ 合集 '{collection_name}' 的外部源未返回任何数据，清理数据库缓存...")
                     update_data = {
-                        "emby_collection_id": None, # ID 置空
+                        "emby_collection_id": f"virtual_only_{collection_id}",
                         "last_synced_at": datetime.now(pytz.utc),
                         "in_library_count": 0,
                         "generated_media_info_json": json.dumps([], ensure_ascii=False)
                     }
                     custom_collection_db.update_custom_collection_sync_results(collection_id, update_data)
-                    
-                    if is_deleted:
-                        logger.info(f"  ➜ 合集 '{collection_name}' 已清理完毕。")
-                    else:
-                        logger.info(f"  ➜ 合集 '{collection_name}' 在 Emby 中不存在，无需清理。")
-                        
-                    continue # 跳过本次循环，处理下一个合集
+                    continue
 
-                # 应用修正
                 raw_tmdb_items, corrected_id_to_original_id_map = _apply_id_corrections(raw_tmdb_items, definition, collection_name)
                 
                 # 映射 Emby ID
@@ -219,48 +192,35 @@ def task_process_all_custom_collections(processor):
                         item['season'] = 1
                         logger.debug(f"  ➜ [全局推荐] 剧集《{item.get('title')}》未指定季，默认按第 1 季处理。")
                     
-                    # ★★★ 新增：如果是 Series 且没有指定季，尝试拆解 ★★★
-                    if media_type == 'Series' and 'season' not in item:
-                        # 尝试获取详情以拆解季
+                    # 如果是 Series 且没有指定季，尝试拆解
+
+                    if media_type == 'Series' and 'season' not in item and collection_type == 'list':
                         try:
-                            # 只有当它是榜单类时才拆解，AI推荐类通常不需要这么细
-                            if collection_type == 'list':
-                                series_details = tmdb.get_tv_details(tmdb_id, processor.tmdb_api_key)
-                                if series_details and 'seasons' in series_details:
-                                    seasons = series_details['seasons']
-                                    series_name = series_details.get('name')
+                            series_details = tmdb.get_tv_details(tmdb_id, processor.tmdb_api_key)
+                            if series_details and 'seasons' in series_details:
+                                seasons = series_details['seasons']
+                                series_name = series_details.get('name')
+                                added_season = False
+                                for season in seasons:
+                                    s_num = season.get('season_number')
+                                    if s_num is None or s_num == 0: continue
+                                    s_id = str(season.get('id'))
+                                    emby_id = None
+                                    key = f"{s_id}_Season"
+                                    if key in tmdb_to_emby_item_map:
+                                        emby_id = tmdb_to_emby_item_map[key]['Id']
                                     
-                                    # 标记是否已添加至少一个季
-                                    added_season = False
-                                    
-                                    for season in seasons:
-                                        s_num = season.get('season_number')
-                                        if s_num is None or s_num == 0: continue
-                                        
-                                        s_id = str(season.get('id'))
-                                        
-                                        # 检查该季是否在库
-                                        emby_id = None
-                                        key = f"{s_id}_Season"
-                                        if key in tmdb_to_emby_item_map:
-                                            emby_id = tmdb_to_emby_item_map[key]['Id']
-                                        
-                                        # 构造季条目
-                                        season_item = {
-                                            'tmdb_id': tmdb_id,
-                                            'media_type': 'Series',
-                                            'emby_id': emby_id,
-                                            'title': series_name,
-                                            'season': s_num
-                                        }
-                                        tmdb_items.append(season_item)
-                                        if emby_id: global_ordered_emby_ids.append(emby_id)
-                                        added_season = True
-                                    
-                                    if added_season:
-                                        continue # 如果成功拆解了季，就跳过原始 Series 条目
+                                    season_item = {
+                                        'tmdb_id': tmdb_id, 'media_type': 'Series',
+                                        'emby_id': emby_id, 'title': series_name, 'season': s_num
+                                    }
+                                    tmdb_items.append(season_item)
+                                    if emby_id: global_ordered_emby_ids.append(emby_id)
+                                    added_season = True
+                                
+                                if added_season: continue
                         except Exception as e_split:
-                            logger.warning(f"拆解剧集 {tmdb_id} 失败，将保留原条目: {e_split}")
+                            logger.warning(f"拆解剧集 {tmdb_id} 失败，保留原条目: {e_split}")
                     emby_id = item.get('emby_id')
                     
                     if not emby_id and tmdb_id:
@@ -311,62 +271,31 @@ def task_process_all_custom_collections(processor):
                         target_status=target_status # <--- 传入智能决定的状态
                     )
 
-                # 后续处理
-                # 1. 更新 Emby 实体合集 (用于封面)     
-                # === 支持纯虚拟库模式 ===
-                is_virtual_only = definition.get('virtual_only', False)
 
-                if is_virtual_only:
-                    logger.info(f"  ➜ 合集 '{collection_name}' 已开启纯虚拟库模式，跳过在 Emby 中创建实体合集。")
-                    # 动态写入，如 virtual_only_12，这样前端卡片和反代就可以准确定位具体文件了
-                    emby_collection_id = f"virtual_only_{collection_id}"
-                else:
-                    should_allow_empty = (collection_type in ['list', 'ai_recommendation_global'])
-                    emby_collection_id = emby.create_or_update_collection_with_emby_ids(
-                        collection_name=collection_name, 
-                        emby_ids_in_library=global_ordered_emby_ids,
-                        base_url=processor.emby_url, 
-                        api_key=processor.emby_api_key, 
-                        user_id=processor.emby_user_id,
-                        prefetched_collection_map=prefetched_collection_map,
-                        allow_empty=should_allow_empty  
-                    )
+                # 极简分配纯虚拟 ID，不与 Emby 进行物理互动
+                emby_collection_id = f"virtual_only_{collection_id}"
 
-                # 2. 更新数据库状态
+                # 更新数据库状态
                 update_data = {
                     "emby_collection_id": emby_collection_id,
                     "item_type": json.dumps(definition.get('item_type', ['Movie'])),
                     "last_synced_at": datetime.now(pytz.utc),
-                    "in_library_count": total_count, # 保存真实总数
+                    "in_library_count": total_count,
                     "generated_media_info_json": json.dumps(items_for_db, ensure_ascii=False)
                 }
                 custom_collection_db.update_custom_collection_sync_results(collection_id, update_data)
 
-                # 3. 封面生成
-                # === 移除对 virtual_only 的直接过滤判定，允许进入流程 ===
-                if cover_service and emby_collection_id:
+                # 封面生成：直接使用 Mock 详情生成本地图片
+                if cover_service:
                     try:
-                        # === 如果是纯虚拟合集，直接伪造本地详情，避免向 Emby 提交接口请求 ===
-                        if str(emby_collection_id).startswith("virtual_only"):
-                            library_info = {
-                                "Id": emby_collection_id,
-                                "Name": collection_name,
-                                "Type": "BoxSet"
-                            }
-                        else:
-                            library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
-
-                        if library_info:
-                            # 重新获取一次最新的 info 以确保 count 准确
-                            latest_collection_info = custom_collection_db.get_custom_collection_by_id(collection_id)
-                            item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
-                            cover_service.generate_for_library(
-                                emby_server_id='main_emby', 
-                                library=library_info,
-                                item_count=item_count_to_pass, 
-                                content_types=definition.get('item_type', ['Movie']),
-                                custom_collection_data=latest_collection_info  
-                            )
+                        library_info = {"Id": emby_collection_id, "Name": collection_name, "Type": "BoxSet"}
+                        latest_collection_info = custom_collection_db.get_custom_collection_by_id(collection_id)
+                        item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
+                        cover_service.generate_for_library(
+                            emby_server_id='main_emby', library=library_info,
+                            item_count=item_count_to_pass, content_types=definition.get('item_type', ['Movie']),
+                            custom_collection_data=latest_collection_info  
+                        )
                     except Exception as e_cover:
                         logger.error(f"为合集 '{collection_name}' 生成封面时出错: {e_cover}", exc_info=True)
 
@@ -376,16 +305,14 @@ def task_process_all_custom_collections(processor):
                 urls = raw_url if isinstance(raw_url, list) else [str(raw_url)]
                 for u in urls:
                     if isinstance(u, str) and u.startswith('maoyan://'):
-                        is_maoyan = True
-                        break
-                if collection_type == 'list' and is_maoyan:
-                    time.sleep(10)
+                        is_maoyan = True; break
+                if collection_type == 'list' and is_maoyan: time.sleep(10)
                 
             except Exception as e_coll:
                 logger.error(f"处理合集 '{collection_name}' (ID: {collection_id}) 时发生错误: {e_coll}", exc_info=True)
                 continue
         
-        final_message = "所有外部源合集(List/Global AI)均已处理完毕！"
+        final_message = "所有外部源自建合集处理完毕！"
         if processor.is_stop_requested(): final_message = "任务已中止。"
         
         try:
@@ -467,37 +394,18 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                 rec_engine = RecommendationEngine(processor.tmdb_api_key)
                 raw_tmdb_items = rec_engine.generate(definition)
 
-            # ==============================================================================
-            # ★★★ 新增逻辑：如果源数据为空，则删除合集并跳过 ★★★
-            # ==============================================================================
             if not raw_tmdb_items:
-                logger.info(f"  ➜ 合集 '{collection_name}' 的外部源未返回任何数据 (真空壳)。")
-                logger.info(f"  ➜ 正在尝试从 Emby 中移除该合集 (如果存在)...")
-                
-                emby.delete_collection_by_name(
-                    collection_name=collection_name,
-                    base_url=processor.emby_url,
-                    api_key=processor.emby_api_key,
-                    user_id=processor.emby_user_id
-                )
-                
-                # 更新数据库
                 update_data = {
-                    "emby_collection_id": None,
+                    "emby_collection_id": f"virtual_only_{custom_collection_id}",
                     "last_synced_at": datetime.now(pytz.utc),
                     "in_library_count": 0,
                     "generated_media_info_json": json.dumps([], ensure_ascii=False)
                 }
                 custom_collection_db.update_custom_collection_sync_results(custom_collection_id, update_data)
-                
-                task_manager.update_status_from_thread(100, f"源数据为空，合集 '{collection_name}' 已清理。")
-                return # 结束任务
+                task_manager.update_status_from_thread(100, f"源数据为空，合集 '{collection_name}' 缓存已重置。")
+                return
 
             raw_tmdb_items, corrected_id_to_original_id_map = _apply_id_corrections(raw_tmdb_items, definition, collection_name)
-            
-            # 映射 Emby ID (需要全量映射表)
-            task_manager.update_status_from_thread(15, "正在加载媒体映射表...")
-            # 放弃使用 get_emby_ids_for_items，改用批量任务同款函数
             tmdb_to_emby_item_map = media_db.get_tmdb_to_emby_map()
 
             tmdb_items = []
@@ -516,16 +424,12 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                         if series_details and 'seasons' in series_details:
                             seasons = series_details['seasons']
                             series_name = series_details.get('name')
-                            
                             added_season = False
-                            
                             for season in seasons:
                                 s_num = season.get('season_number')
                                 # 跳过特别篇 (Season 0)
                                 if s_num is None or s_num == 0: continue
-                                
                                 s_id = str(season.get('id'))
-                                
                                 # 检查该季是否在库
                                 emby_id = None
                                 key = f"{s_id}_Season"
@@ -547,9 +451,9 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                             if added_season:
                                 continue # 如果成功拆解了季，就跳过原始 Series 条目，进入下一次循环
                     except Exception as e_split:
-                        logger.warning(f"拆解剧集 {tmdb_id} 失败，将保留原条目: {e_split}")
-                emby_id = None
+                        logger.warning(f"拆解剧集 {tmdb_id} 失败: {e_split}")
                 
+                emby_id = None
                 # 统一使用 key 匹配
                 key = f"{tmdb_id}_{media_type}"
                 if key in tmdb_to_emby_item_map:
@@ -571,16 +475,6 @@ def process_single_custom_collection(processor, custom_collection_id: int):
             total_count = len(global_ordered_emby_ids)
 
             if collection_type in ['list', 'ai_recommendation_global']:
-                tmdb_to_emby_map_full = tmdb_to_emby_item_map
-
-                missing_count = sum(1 for x in tmdb_items if not x.get('emby_id'))
-                in_library_count = sum(1 for x in tmdb_items if x.get('emby_id'))
-
-                logger.info(
-                    f"  ➜ [订阅检查] 合集《{collection_name}》类型={collection_type}，"
-                    f"候选 {len(tmdb_items)} 部，在库 {in_library_count} 部，缺失 {missing_count} 部。"
-                )
-
                 # 读取前端配置的自动订阅缺失媒体开关，默认 True 保持向后兼容
                 auto_subscribe_missing = definition.get('auto_subscribe_missing', True)
                 
@@ -589,7 +483,6 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                     "id": custom_collection_id,
                     "name": collection_name
                 }
-
                 # === 如果关闭了自动订阅，目标状态设为 NONE (仅入库元数据缓存，不触发 MP 订阅) ===
                 target_status = 'WANTED' if auto_subscribe_missing else 'NONE'
                 if auto_subscribe_missing:
@@ -597,12 +490,10 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                 else:
                     logger.info("  ➜ 检测到已关闭自动订阅，仅入库元数据缓存，不进行订阅推送。")
 
-                processed_active_ids = process_subscription_items_and_update_db(
-                    tmdb_items=tmdb_items,
-                    tmdb_to_emby_item_map=tmdb_to_emby_map_full,
-                    subscription_source=subscription_source,
-                    tmdb_api_key=processor.tmdb_api_key,
-                    target_status=target_status # <--- 传入智能决定的状态
+                process_subscription_items_and_update_db(
+                    tmdb_items=tmdb_items, tmdb_to_emby_item_map=tmdb_to_emby_item_map,
+                    subscription_source=subscription_source, tmdb_api_key=processor.tmdb_api_key,
+                    target_status=target_status
                 )
 
                 logger.info(
@@ -654,33 +545,11 @@ def process_single_custom_collection(processor, custom_collection_id: int):
             items_for_db = [{'emby_id': item['Id']} for item in sample_items]
             total_count = 0 # 个人推荐类在后台任务中不计总数
 
-        if not global_ordered_emby_ids and collection_type != 'ai_recommendation':
-             # 如果没找到任何东西，且不是AI推荐（AI推荐允许空），则清空 Emby 实体合集
-             # 但为了封面生成器不报错，我们还是走正常流程，只是列表为空
-             pass
+        # 直接给合集分配虚拟 ID
+        emby_collection_id = f"virtual_only_{custom_collection_id}"
+        task_manager.update_status_from_thread(60, "正在同步虚拟库数据...")
 
-        # 5. 在 Emby 中创建/更新合集
-        is_virtual_only = definition.get('virtual_only', False)
-        
-        if is_virtual_only:
-            # 虚拟库模式：更新一个更贴切的进度，并直接赋值占位 ID
-            task_manager.update_status_from_thread(60, "正在同步虚拟库数据...")
-            logger.info(f"  ➜ 合集 '{collection_name}' 已开启纯虚拟库模式，跳过在 Emby 中创建实体合集。")
-            emby_collection_id = f"virtual_only_{custom_collection_id}"
-        else:
-            # 实体合集模式：保留原有的进度提示和变量定义
-            task_manager.update_status_from_thread(60, "正在Emby中创建/更新合集...")
-            should_allow_empty = (collection_type in ['list', 'ai_recommendation', 'ai_recommendation_global'])
-            emby_collection_id = emby.create_or_update_collection_with_emby_ids(
-                collection_name=collection_name, 
-                emby_ids_in_library=global_ordered_emby_ids, 
-                base_url=processor.emby_url, 
-                api_key=processor.emby_api_key, 
-                user_id=processor.emby_user_id,
-                allow_empty=should_allow_empty 
-            )
-
-        # 6. 更新数据库状态
+        # 5. 更新数据库状态
         update_data = {
             "emby_collection_id": emby_collection_id,
             "item_type": json.dumps(definition.get('item_type', ['Movie'])),
@@ -690,33 +559,19 @@ def process_single_custom_collection(processor, custom_collection_id: int):
         }
         custom_collection_db.update_custom_collection_sync_results(custom_collection_id, update_data)
 
-        # 7. 封面生成
+        # 封面生成：直接伪造本地详情，生成本地自制封面
         try:
             cover_config = settings_db.get_setting('cover_generator_config') or {}
-            # === 允许虚拟合集也进入封面生成流程 ===
-            if cover_config.get("enabled") and emby_collection_id:
+            if cover_config.get("enabled"):
                 cover_service = CoverGeneratorService(config=cover_config)
-                
-                # === 如果是虚拟合集，直接伪造本地详情，不向 Emby 发送请求 ===
-                if str(emby_collection_id).startswith("virtual_only"):
-                    library_info = {
-                        "Id": emby_collection_id,
-                        "Name": collection_name,
-                        "Type": "BoxSet"
-                    }
-                else:
-                    library_info = emby.get_emby_item_details(emby_collection_id, processor.emby_url, processor.emby_api_key, processor.emby_user_id)
-
-                if library_info:
-                    latest_collection_info = custom_collection_db.get_custom_collection_by_id(custom_collection_id)
-                    item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
-                    cover_service.generate_for_library(
-                        emby_server_id='main_emby', 
-                        library=library_info,
-                        item_count=item_count_to_pass, 
-                        content_types=definition.get('item_type', ['Movie']),
-                        custom_collection_data=latest_collection_info 
-                    )
+                library_info = {"Id": emby_collection_id, "Name": collection_name, "Type": "BoxSet"}
+                latest_collection_info = custom_collection_db.get_custom_collection_by_id(custom_collection_id)
+                item_count_to_pass = _get_cover_badge_text_for_collection(latest_collection_info)
+                cover_service.generate_for_library(
+                    emby_server_id='main_emby', library=library_info,
+                    item_count=item_count_to_pass, content_types=definition.get('item_type', ['Movie']),
+                    custom_collection_data=latest_collection_info 
+                )
         except Exception as e_cover:
             logger.error(f"为合集 '{collection_name}' 生成封面时发生错误: {e_cover}", exc_info=True)
         
