@@ -496,11 +496,6 @@ def process_single_custom_collection(processor, custom_collection_id: int):
                     target_status=target_status
                 )
 
-                logger.info(
-                    f"  ➜ [订阅检查] 合集《{collection_name}》状态同步处理完成，"
-                    f"活跃候选 {len(processed_active_ids)} 个。"
-                )
-
         # ==================================================================
         # 分支 C: 个人推荐类 (AI) - 封面快车道 (遵守前端定义的库和类型)
         # ==================================================================
