@@ -87,6 +87,24 @@ def invalidate_image_policy(item_type, tmdb_id, season_number=None, episode_numb
     return updated
 
 
+def delete_image_policy(item_type, tmdb_id, season_number=None, episode_number=None):
+    """Delete one policy and return its archived image references."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM media_image_policy_cache
+                WHERE item_type=%s AND tmdb_id=%s
+                  AND season_number=%s AND episode_number=%s
+                RETURNING images_json
+                """,
+                _key(item_type, tmdb_id, season_number, episode_number),
+            )
+            row = cursor.fetchone()
+        conn.commit()
+    return list((row or {}).get("images_json") or [])
+
+
 def source_is_referenced(source_url):
     value = json.dumps([{"source_url": str(source_url or "").strip()}])
     with get_db_connection() as conn:

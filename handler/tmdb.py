@@ -15,6 +15,11 @@ import constants
 import threading
 logger = logging.getLogger(__name__)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+
+
+class TmdbNotFoundError(RuntimeError):
+    """A definitive TMDb 404 requested by a status-aware caller."""
+
 # ★★★ 自定义的重试类，用于输出更友好的日志 ★★★
 class LoggedRetry(Retry):
     """
@@ -117,7 +122,14 @@ def _sanitize_text(text: str) -> str:
     return re.sub(r'api_key=[a-zA-Z0-9]+', 'api_key=***', str(text))
 
 # --- 通用的 TMDb 请求函数 ---
-def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None, use_default_language: bool = True) -> Optional[Dict[str, Any]]:
+def _tmdb_request(
+    endpoint: str,
+    api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    use_default_language: bool = True,
+    *,
+    raise_not_found: bool = False,
+) -> Optional[Dict[str, Any]]:
     """【V2.1 - 最终驱魔版】增加了 use_default_language 开关，用于控制是否添加默认语言参数。"""
     if not api_key:
         logger.error("TMDb API Key 未提供，无法发起请求。")
@@ -141,6 +153,8 @@ def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] 
         data = response.json()
         return data
     except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404 and raise_not_found:
+            raise TmdbNotFoundError(endpoint) from e
         error_details = ""
         try:
             error_data = e.response.json()
@@ -706,6 +720,8 @@ def get_collection_details(
     api_key: str,
     skip_fallback: bool = False,
     apply_image_preference: bool = True,
+    *,
+    raise_not_found: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     【V3 - 极致性能版】获取指定 TMDb 合集的详细信息。
@@ -718,7 +734,12 @@ def get_collection_details(
     params = {"language": DEFAULT_LANGUAGE}
     
     logger.debug(f"  ➜ TMDb API: 获取合集详情 (ID: {collection_id})...")
-    data_zh = _tmdb_request(endpoint, api_key, params)
+    data_zh = _tmdb_request(
+        endpoint,
+        api_key,
+        params,
+        raise_not_found=raise_not_found,
+    )
     
     if not data_zh:
         return None

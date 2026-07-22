@@ -143,7 +143,7 @@ def get_verified_emby_item_for_cache(
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
         config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
-        fields="Path,MediaSources,Chapters,SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Type,Name",
+        fields="Path,MediaSources,Chapters,SeriesId,SeasonId,SeriesName,ParentIndexNumber,IndexNumber,Type,Name",
         silent_404=True,
     )
     return item if _emby_item_matches_cache(item, sha1, expected_pick_code) else {}

@@ -25,6 +25,10 @@ class ImagePolicySyncError(RuntimeError):
     pass
 
 
+class ImagePolicyCollectionNotFound(ImagePolicySyncError):
+    pass
+
+
 def _sync_lock(item_type, tmdb_id, season_number=None, episode_number=None):
     identity = (item_type, str(tmdb_id), season_number, episode_number)
     return _SYNC_LOCKS[hash(identity) % len(_SYNC_LOCKS)]
@@ -67,6 +71,20 @@ def get_live_image_candidates(
         raise ImagePolicySyncError("tmdb api key is not configured")
 
     requested_type = str(requested_type or "").strip().title()
+    if requested_type == "Boxset":
+        try:
+            details = tmdb.get_collection_details(
+                int(tmdb_id),
+                api_key,
+                skip_fallback=True,
+                apply_image_preference=False,
+                raise_not_found=True,
+            )
+        except tmdb.TmdbNotFoundError as exc:
+            raise ImagePolicyCollectionNotFound(str(tmdb_id)) from exc
+    else:
+        details = None
+
     raw = tmdb.get_item_images_tmdb(
         requested_type,
         int(tmdb_id),
@@ -78,12 +96,6 @@ def get_live_image_candidates(
         raise ImagePolicySyncError("tmdb image lookup failed")
 
     if requested_type == "Boxset":
-        details = tmdb.get_collection_details(
-            int(tmdb_id),
-            api_key,
-            skip_fallback=True,
-            apply_image_preference=False,
-        )
         original_language = next((
             str(item.get("original_language") or "").strip()
             for item in (details or {}).get("parts") or []
