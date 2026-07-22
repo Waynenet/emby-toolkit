@@ -404,7 +404,8 @@ class _UdfIsoReader:
 
     def _fid_name(self, data, pos):
         name_len = data[pos + 19]
-        raw = data[pos + 38:pos + 38 + name_len]
+        name_start = pos + 38 + _u16(data, pos + 36)
+        raw = data[name_start:name_start + name_len]
         if not raw:
             return ""
         compression_id = raw[0]
