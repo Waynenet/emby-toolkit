@@ -803,7 +803,7 @@ class WatchlistProcessor:
         try:
             helpers.apply_rating_logic(latest_series_data, latest_series_data, 'Series')
         except Exception as e:
-            pass
+            logger.debug(f"  ➜ [分级逻辑] 应用分级计算时跳过或出错 (TMDb: {tmdb_id}): {e}")
         
         # 2. 将 TMDb 最新数据写入本地 JSON
         self._save_local_json(f"override/tmdb-tv/{tmdb_id}/series.json", latest_series_data)
