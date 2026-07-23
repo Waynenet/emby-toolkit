@@ -262,7 +262,7 @@ def task_intro_fingerprint_backfill(processor):
         task_manager.update_status_from_thread(progress, message)
 
     try:
-        progress_updater(10, "正在扫描缺失片头/片尾章节的活跃季...")
+        progress_updater(10, "正在按当前触发策略扫描缺失片头/片尾章节的季...")
         from handler import intro_detection_service
 
         result = intro_detection_service.enqueue_active_backfill(limit=50, force=True)
@@ -278,10 +278,11 @@ def task_intro_fingerprint_backfill(processor):
         else:
             queued = int(result.get("count") or 0)
             candidates = int(result.get("candidates") or 0)
+            scope_label = "所选媒体库" if result.get("scope") == "library" else "收藏范围"
             if queued:
-                message = f"已提交 {queued}/{candidates} 个缺章节活跃季，后台继续提取。"
+                message = f"已从{scope_label}提交 {queued}/{candidates} 个缺章节的季，后台继续提取。"
             else:
-                message = "扫描完成：没有发现需要补扫的活跃季。"
+                message = f"扫描完成：{scope_label}没有发现需要补扫的季。"
         logger.info(f"  ➜ [片头片尾提取] {message}")
         progress_updater(100, message)
     except Exception as e:

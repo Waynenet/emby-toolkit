@@ -289,7 +289,7 @@ def enqueue_playback_halfway(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def enqueue_active_backfill(limit: int = 50, *, force: bool = False) -> Dict[str, Any]:
-    """Queue a fallback batch: one missing Episode from each active season."""
+    """Queue one missing Episode per season for the configured trigger scope."""
     try:
         mode = get_trigger_mode()
         if mode == INTRO_TRIGGER_MODE_PLAYBACK:
@@ -299,10 +299,19 @@ def enqueue_active_backfill(limit: int = 50, *, force: bool = False) -> Dict[str
 
         _start_worker()
         selected_library_ids = _intro_detection_library_ids()
-        refs = _load_active_watchlist_episode_refs(
-            limit=max(1, min(int(limit or 50), 200)),
-            selected_library_ids=selected_library_ids,
-        )
+        batch_limit = max(1, min(int(limit or 50), 200))
+        if mode == INTRO_TRIGGER_MODE_IMPORT:
+            refs = _load_library_episode_refs(
+                limit=batch_limit,
+                selected_library_ids=selected_library_ids,
+            )
+            scope_label = "所选媒体库"
+        else:
+            refs = _load_active_watchlist_episode_refs(
+                limit=batch_limit,
+                selected_library_ids=selected_library_ids,
+            )
+            scope_label = "收藏范围"
         queued = 0
         for ref in refs:
             key = f"backfill:{ref.series_tmdb_id}:s{ref.season_number}"
@@ -319,8 +328,14 @@ def enqueue_active_backfill(limit: int = 50, *, force: bool = False) -> Dict[str
             except queue.Full:
                 break
 
-        logger.info("  ➜ [片头声纹提取] 活跃追剧兜底入队完成：%s/%s", queued, len(refs))
-        return {"ok": True, "queued": queued > 0, "count": queued, "candidates": len(refs)}
+        logger.info("  ➜ [片头声纹提取] %s查漏入队完成：%s/%s", scope_label, queued, len(refs))
+        return {
+            "ok": True,
+            "queued": queued > 0,
+            "count": queued,
+            "candidates": len(refs),
+            "scope": "library" if mode == INTRO_TRIGGER_MODE_IMPORT else "favorite",
+        }
     except Exception as e:
         logger.warning("  ➜ [片头声纹提取] 活跃追剧兜底入队失败: %s", e)
         return {"ok": False, "queued": False, "reason": "service_unavailable", "error": str(e)}
@@ -730,32 +745,11 @@ def _process_job(job: Dict[str, Any]) -> None:
     if not _is_intro_library_allowed(target, selected_library_ids):
         logger.debug("  ➜ [片头声纹提取] 《%s》不在已选择的媒体库范围内，跳过。", target.series_title)
         return
-    if mode == INTRO_TRIGGER_MODE_IMPORT and not _is_active_watchlist_target(target):
-        logger.debug("  ➜ [片头声纹提取] 《%s》不在活跃追剧中，跳过入库扫描。", target.series_title)
-        return
     if mode == INTRO_TRIGGER_MODE_FAVORITE and not _is_favorited_season(target):
         logger.debug("  ➜ [片头声纹提取] 《%s》第 %s 季不在收藏范围，跳过。", target.series_title, target.season_number)
         return
     if not target.sha1 or not target.pick_code:
         logger.debug("  ➜ [片头声纹提取] 跳过《%s》S%sE%s：缺少 SHA1/PC。", target.series_title, target.season_number, target.episode_number)
-        return
-
-    intro_needed = not _cache_has_intro(target.sha1)
-    credits_needed = _credits_detection_enabled() and not _cache_has_credits(target.sha1)
-    if not intro_needed and not credits_needed:
-        logger.debug("  ➜ [片头声纹提取] 《%s》S%sE%s 的章节缓存已齐，跳过。", target.series_title, target.season_number, target.episode_number)
-        return
-
-    target_is_clean = intro_needed and _is_confirmed_clean_version(target)
-    if target_is_clean:
-        intro_needed = False
-        logger.info(
-            "  ➜ [片头声纹提取] 《%s》S%02dE%02d 已按纯净版规则确认片头已切除，跳过片头扫描。",
-            target.series_title,
-            target.season_number,
-            target.episode_number,
-        )
-    if not intro_needed and not credits_needed:
         return
 
     season_refs = [
@@ -769,11 +763,23 @@ def _process_job(job: Dict[str, Any]) -> None:
             target.season_number,
         )
         return
+    chapter_refs = [ref for ref in season_refs if not _is_confirmed_clean_version(ref)]
+    _restore_cached_chapters_to_emby(chapter_refs)
+    intro_needed = any(not _cache_has_intro(ref.sha1) for ref in chapter_refs)
+    credits_needed = _credits_detection_enabled() and any(
+        not _cache_has_credits(ref.sha1) for ref in chapter_refs
+    )
+    if not intro_needed and not credits_needed:
+        logger.debug(
+            "  ➜ [片头声纹提取] 《%s》第 %s 季的片头片尾章节已齐，跳过。",
+            target.series_title,
+            target.season_number,
+        )
+        return
     if intro_needed:
-        intro_refs = [ref for ref in season_refs if not _is_confirmed_clean_version(ref)]
-        _detect_and_write_intro(target, intro_refs)
+        _detect_and_write_intro(target, chapter_refs)
     if credits_needed:
-        _detect_and_write_credits(target, season_refs)
+        _detect_and_write_credits(target, chapter_refs)
 
 
 def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef]) -> None:
@@ -965,6 +971,8 @@ def _season_has_intro_detection_cache(target: EpisodeRef) -> bool:
 def _needs_intro_backfill(ref: EpisodeRef, include_credits: bool) -> bool:
     if not ref.sha1 or not ref.pick_code:
         return False
+    if _is_confirmed_clean_version(ref):
+        return False
     return (not _cache_has_intro(ref.sha1)) or (include_credits and not _cache_has_credits(ref.sha1))
 
 
@@ -1013,6 +1021,62 @@ def _load_active_watchlist_episode_refs(
                 if len(refs) >= limit:
                     break
             return refs
+
+
+def _load_library_episode_refs(
+    limit: int = 50,
+    selected_library_ids: Optional[Sequence[str]] = None,
+) -> List[EpisodeRef]:
+    """Load missing seasons from all in-library episodes in the selected libraries."""
+    page_size = min(max(limit * 20, 500), 4000)
+    include_credits = _credits_detection_enabled()
+    refs: List[EpisodeRef] = []
+    seen_seasons = set()
+    offset = 0
+
+    with get_db_connection() as conn:
+        while len(refs) < limit:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT e.tmdb_id, e.title, e.parent_series_tmdb_id, e.season_number, e.episode_number,
+                           e.emby_item_ids_json, e.file_sha1_json, e.file_pickcode_json, e.asset_details_json,
+                           p.title AS series_title, p.emby_item_ids_json AS series_emby_ids
+                    FROM media_metadata e
+                    JOIN media_metadata p
+                      ON p.tmdb_id = e.parent_series_tmdb_id
+                     AND p.item_type = 'Series'
+                    WHERE e.item_type = 'Episode'
+                      AND e.in_library = TRUE
+                      AND e.season_number > 0
+                      AND jsonb_array_length(COALESCE(e.emby_item_ids_json, '[]'::jsonb)) > 0
+                      AND jsonb_array_length(COALESCE(e.file_sha1_json, '[]'::jsonb)) > 0
+                      AND jsonb_array_length(COALESCE(e.file_pickcode_json, '[]'::jsonb)) > 0
+                    ORDER BY e.last_updated_at DESC NULLS LAST, e.tmdb_id
+                    LIMIT %s OFFSET %s
+                    """,
+                    (page_size, offset),
+                )
+                rows = cur.fetchall() or []
+            if not rows:
+                break
+            offset += len(rows)
+            for row in rows:
+                ref = _row_to_episode_ref(dict(row))
+                season_key = (ref.series_tmdb_id, ref.season_number) if ref else None
+                if not ref or not season_key or season_key in seen_seasons:
+                    continue
+                if not _is_intro_library_allowed(ref, selected_library_ids):
+                    continue
+                if not _needs_intro_backfill(ref, include_credits):
+                    continue
+                seen_seasons.add(season_key)
+                refs.append(ref)
+                if len(refs) >= limit:
+                    break
+            if len(rows) < page_size:
+                break
+    return refs
 
 
 def _row_to_episode_ref(
@@ -1756,8 +1820,10 @@ def _write_intro_for_episode(ref: EpisodeRef, start_ticks: int, end_ticks: int) 
             "ChapterIndex": 1,
         },
     ]
-    changed = _merge_intro_into_mediainfo_cache(ref.sha1, chapters)
     applied = _apply_intro_to_emby(ref, start_ticks, end_ticks)
+    if not applied:
+        return False
+    changed = _merge_intro_into_mediainfo_cache(ref.sha1, chapters)
     if changed:
         try:
             from handler.shared_intro_service import upload_intro_for_cache_sha1
@@ -1773,7 +1839,7 @@ def _write_intro_for_episode(ref: EpisodeRef, start_ticks: int, end_ticks: int) 
                 )
         except Exception as e:
             logger.debug("  ➜ [片头声纹提取] 上传共享片头失败 %s: %s", ref.sha1[:12], e)
-    return bool(changed or applied)
+    return True
 
 
 def _write_credits_for_episode(ref: EpisodeRef, start_ticks: int) -> bool:
@@ -1783,9 +1849,69 @@ def _write_credits_for_episode(ref: EpisodeRef, start_ticks: int) -> bool:
         "MarkerType": "CreditsStart",
         "ChapterIndex": 0,
     }
-    changed = _merge_credits_into_mediainfo_cache(ref.sha1, chapter)
     applied = _apply_credits_to_emby(ref, start_ticks)
-    return bool(changed or applied)
+    if not applied:
+        return False
+    _merge_credits_into_mediainfo_cache(ref.sha1, chapter)
+    return True
+
+
+def _restore_cached_chapters_to_emby(refs: Sequence[EpisodeRef]) -> None:
+    item_ids = [ref.item_id for ref in refs if ref.item_id]
+    if not item_ids:
+        return
+    try:
+        from handler import emby
+
+        statuses = emby.get_etk_chapter_status(
+            item_ids,
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL),
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_API_KEY),
+            config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_USER_ID),
+        )
+    except Exception as e:
+        logger.debug("  ➜ [片头声纹提取] 核对 Emby 章节状态失败: %s", e)
+        return
+    if statuses is None:
+        return
+
+    for ref in refs:
+        status = statuses.get(ref.item_id) or {}
+        intro_range, credits_start = _cached_chapter_ticks(ref.sha1)
+        if intro_range and not status.get("intro"):
+            _apply_intro_to_emby(ref, intro_range[0], intro_range[1])
+        if credits_start is not None and not status.get("credits"):
+            _apply_credits_to_emby(ref, credits_start)
+
+
+def _cached_chapter_ticks(sha1: str) -> Tuple[Optional[Tuple[int, int]], Optional[int]]:
+    data = _cached_mediainfo(sha1)
+    root = _mediainfo_root(data)
+    chapters = root.get("Chapters") if isinstance(root, dict) else []
+    if not isinstance(chapters, list):
+        return None, None
+
+    intro_start = intro_end = credits_start = None
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        try:
+            ticks = int(float(chapter.get("StartPositionTicks")))
+        except (TypeError, ValueError):
+            continue
+        marker = str(chapter.get("MarkerType") or "")
+        if marker == "IntroStart":
+            intro_start = ticks
+        elif marker == "IntroEnd":
+            intro_end = ticks
+        elif marker == "CreditsStart":
+            credits_start = ticks
+    intro_range = (
+        (intro_start, intro_end)
+        if intro_start is not None and intro_end is not None and intro_end > intro_start >= 0
+        else None
+    )
+    return intro_range, credits_start
 
 
 def _merge_intro_into_mediainfo_cache(sha1: str, chapters: List[Dict[str, Any]]) -> bool:

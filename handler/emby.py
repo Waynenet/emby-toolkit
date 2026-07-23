@@ -240,7 +240,14 @@ def apply_etk_intro_chapters(
             headers={"X-Emby-Token": api_key, "Accept": "application/json"},
             json={"IntroStartTicks": start, "IntroEndTicks": end},
         )
-        response.raise_for_status()
+        if not response.ok:
+            logger.error(
+                "  ➜ [片头声纹提取] 写入 Emby Item %s 的片头章节失败: HTTP %s, %s",
+                item_id,
+                response.status_code,
+                (response.text or "-")[:500],
+            )
+            return None
         result = response.json() if response.content else {}
         logger.debug(
             "  ➜ [片头声纹提取] 已写入 Emby Item %s：%s - %s ticks",
@@ -277,7 +284,14 @@ def apply_etk_credits_chapter(
             headers={"X-Emby-Token": api_key, "Accept": "application/json"},
             json={"CreditsStartTicks": start},
         )
-        response.raise_for_status()
+        if not response.ok:
+            logger.error(
+                "  ➜ [片头声纹提取] 写入 Emby Item %s 的片尾章节失败: HTTP %s, %s",
+                item_id,
+                response.status_code,
+                (response.text or "-")[:500],
+            )
+            return None
         result = response.json() if response.content else {}
         logger.debug(
             "  ➜ [片头声纹提取] 已写入 Emby Item %s 片尾起点：%s ticks",
@@ -287,6 +301,47 @@ def apply_etk_credits_chapter(
         return result
     except Exception as e:
         logger.error("  ➜ [片头声纹提取] 写入 Emby Item %s 的片尾章节失败: %s", item_id, e)
+        return None
+
+
+def get_etk_chapter_status(
+    item_ids: List[str],
+    base_url: str,
+    api_key: str,
+    user_id: str,
+) -> Optional[Dict[str, Dict[str, bool]]]:
+    """Read intro/credits marker presence for a batch of Emby items."""
+    ids = list(dict.fromkeys(str(item_id or "").strip() for item_id in item_ids if str(item_id or "").strip()))
+    if not ids or not all([base_url, api_key, user_id]):
+        return None
+    try:
+        response = emby_client.get(
+            f"{base_url.rstrip('/')}/Users/{user_id}/Items",
+            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            params={
+                "Ids": ",".join(ids),
+                "Fields": "Chapters",
+                "Limit": len(ids),
+            },
+        )
+        response.raise_for_status()
+        result: Dict[str, Dict[str, bool]] = {}
+        for item in (response.json() or {}).get("Items") or []:
+            item_id = str(item.get("Id") or "").strip()
+            if not item_id:
+                continue
+            markers = {
+                str(chapter.get("MarkerType") or "").strip()
+                for chapter in (item.get("Chapters") or [])
+                if isinstance(chapter, dict)
+            }
+            result[item_id] = {
+                "intro": {"IntroStart", "IntroEnd"}.issubset(markers),
+                "credits": "CreditsStart" in markers,
+            }
+        return result
+    except Exception as e:
+        logger.debug("  ➜ [片头声纹提取] 批量读取 Emby 章节状态失败: %s", e)
         return None
 
 def get_running_tasks(base_url: str, api_key: str) -> List[Dict[str, Any]]:

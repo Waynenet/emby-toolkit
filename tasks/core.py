@@ -42,7 +42,7 @@ TASK_HELP_TEXTS = {
     'role-translation': '为影视条目中的角色名补充中文显示，让演员角色展示更友好。',
     'actor-translation': '为演员、导演等人物信息补充中文名。',
     'process-watchlist': '刷新智能追剧列表，检查连载剧更新、补充集图片和元数据。',
-    'intro-fingerprint-backfill': '扫描活跃追剧中缺少片头/片尾章节的季，并提交片头片尾提取队列。播放过半模式仅实时提取。',
+    'intro-fingerprint-backfill': '按当前触发策略扫描缺少片头/片尾章节的季；入库即扫覆盖所选媒体库存量，播放过半仅实时提取。',
     'actor-tracking': '刷新演员订阅，根据关注演员检查新作品并触发后续订阅处理。',
     'custom-collections': '刷新全部自建合集，重新拉取榜单并匹配、订阅。',
     'auto-subscribe': '统一处理电影、剧集、追更和求资源等订阅需求，按规则搜索、转存或登记缺口。',
