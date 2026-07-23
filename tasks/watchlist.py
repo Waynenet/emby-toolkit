@@ -243,3 +243,34 @@ def task_subscribe_assistant_maintenance(processor):
     except Exception as e:
         logger.error(f"执行 '{task_name}' 时发生错误: {e}", exc_info=True)
         progress_updater(-1, f"任务失败: {e}")
+
+
+def task_intro_fingerprint_backfill(processor):
+    """提交片头声纹查漏补缺队列，供任务链定时兜底。"""
+    task_name = "片头声纹查漏补缺"
+
+    def progress_updater(progress, message):
+        task_manager.update_status_from_thread(progress, message)
+
+    try:
+        progress_updater(10, "正在扫描缺失片头声纹的活跃季...")
+        from handler import intro_detection_service
+
+        result = intro_detection_service.enqueue_active_backfill(limit=50, force=True)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or result.get("reason") or "提交失败")
+
+        if result.get("skipped"):
+            message = "片头声纹提取未开启，已跳过。"
+        else:
+            queued = int(result.get("count") or 0)
+            candidates = int(result.get("candidates") or 0)
+            if queued:
+                message = f"已提交 {queued}/{candidates} 个缺章节活跃季，后台继续提取。"
+            else:
+                message = "扫描完成：没有发现需要补扫的活跃季。"
+        logger.info(f"  ➜ [片头声纹提取] {message}")
+        progress_updater(100, message)
+    except Exception as e:
+        logger.error(f"执行 '{task_name}' 时发生错误: {e}", exc_info=True)
+        progress_updater(-1, f"任务失败: {e}")

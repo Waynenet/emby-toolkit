@@ -614,6 +614,26 @@ def _shared_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def migrate_legacy_intro_detection_trigger_mode() -> bool:
+    """将旧共享资源片头开关一次性迁移到智能追剧策略。"""
+    legacy_config = get_setting(SHARED_RESOURCE_CONFIG_KEY) or {}
+    if not isinstance(legacy_config, dict) or not _shared_bool(
+        legacy_config.get('p115_etk_intro_detection_enabled'),
+        False,
+    ):
+        return False
+
+    watchlist_config = get_setting('watchlist_config') or {}
+    watchlist_config = watchlist_config if isinstance(watchlist_config, dict) else {}
+    if 'intro_detection_trigger_mode' in watchlist_config:
+        return False
+
+    migrated_config = dict(watchlist_config)
+    migrated_config['intro_detection_trigger_mode'] = 'import'
+    save_setting('watchlist_config', migrated_config)
+    return True
+
+
 def _shared_int(value, default: int = 0, minimum: int = None, maximum: int = None) -> int:
     try:
         if value in (None, ''):
@@ -721,6 +741,8 @@ def get_shared_resource_config() -> Dict[str, Any]:
 
 def save_shared_resource_config(value: Dict[str, Any]) -> Dict[str, Any]:
     """保存共享资源独立配置，并返回规范化后的完整配置。"""
+    # 规范化会移除已废弃的旧开关，先迁移避免用户先保存共享配置而丢失启用状态。
+    migrate_legacy_intro_detection_trigger_mode()
     current = get_shared_resource_config()
     payload = normalize_shared_resource_config(value if isinstance(value, dict) else {}, base=current)
     save_setting(SHARED_RESOURCE_CONFIG_KEY, payload)

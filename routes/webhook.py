@@ -1633,6 +1633,17 @@ def trigger_emby_metadata_backfill():
     return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
 
 
+@webhook_bp.route('/api/emby/intro-detection/backfill', methods=['POST'])
+def trigger_emby_intro_detection_backfill():
+    """Queue the opt-in active-watch intro fallback from the bridge task."""
+    from handler.intro_detection_service import enqueue_active_backfill
+
+    result = enqueue_active_backfill()
+    if result.get('ok'):
+        return jsonify(result), 202 if result.get('queued') else 200
+    return jsonify(result), 503 if result.get('reason') == 'service_unavailable' else 200
+
+
 @webhook_bp.route('/api/emby/metadata/images/refresh', methods=['POST'])
 def refresh_emby_metadata_images():
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2061,7 +2072,7 @@ def emby_webhook():
         "item.markfavorite", "item.unmarkfavorite",
         "item.markplayed", "item.markunplayed",
         "playback.start", "playback.pause", "playback.stop",
-        "item.rate"
+        "playback.halfway", "item.rate"
     ]
 
     if event_type == "user.policyupdated":
@@ -2127,6 +2138,52 @@ def emby_webhook():
         if not user_id or not item_id_from_webhook:
             return jsonify({"status": "event_ignored_missing_data"}), 200
 
+        user_data_from_event = data.get("UserData") or item_from_webhook.get("UserData") or {}
+        exact_favorite_handled = False
+        if event_type in ["item.markfavorite", "item.unmarkfavorite", "item.rate"]:
+            favorite_value = None
+            if event_type == "item.markfavorite":
+                favorite_value = True
+            elif event_type == "item.unmarkfavorite":
+                favorite_value = False
+            elif isinstance(user_data_from_event, dict) and 'IsFavorite' in user_data_from_event:
+                favorite_value = bool(user_data_from_event.get('IsFavorite'))
+            if favorite_value is not None and item_type_from_webhook in ['Series', 'Season', 'Episode']:
+                user_db.set_emby_favorite_item(user_id, item_id_from_webhook, bool(favorite_value))
+                exact_favorite_handled = True
+                if favorite_value:
+                    try:
+                        from handler import intro_detection_service
+                        spawn(intro_detection_service.enqueue_favorite_item, dict(item_from_webhook))
+                    except Exception as e:
+                        logger.debug(f"  ➜ [片头声纹提取] 分派收藏触发失败: {e}")
+
+        if event_type == "playback.halfway":
+            if item_type_from_webhook != 'Episode':
+                return jsonify({"status": "event_ignored_non_episode_halfway"}), 200
+            playback_info = data.get("PlaybackInfo") or {}
+            try:
+                pos = float(
+                    playback_info.get('PositionTicks')
+                    or playback_info.get('PlaybackPositionTicks')
+                    or data.get('PositionTicks')
+                    or 0
+                )
+                runtime = float(
+                    playback_info.get('RunTimeTicks')
+                    or item_from_webhook.get('RunTimeTicks')
+                    or 0
+                )
+            except Exception:
+                pos = runtime = 0
+            if runtime > 0 and pos / runtime < 0.5:
+                return jsonify({"status": "event_ignored_before_halfway"}), 200
+            try:
+                from handler import intro_detection_service
+                spawn(intro_detection_service.enqueue_playback_halfway, dict(item_from_webhook))
+            except Exception as e:
+                logger.debug(f"  ➜ [片头声纹提取] 分派播放过半触发失败: {e}")
+
 
         id_to_update_in_db = None
         if item_type_from_webhook in ['Movie', 'Series']:
@@ -2142,12 +2199,14 @@ def emby_webhook():
                 id_to_update_in_db = series_id
         
         if not id_to_update_in_db:
+            if exact_favorite_handled:
+                return jsonify({"status": "exact_favorite_updated"}), 200
             return jsonify({"status": "event_ignored_unsupported_type_or_not_found"}), 200
 
         update_data = {"user_id": user_id, "item_id": id_to_update_in_db}
         
         if event_type in ["item.markfavorite", "item.unmarkfavorite", "item.markplayed", "item.markunplayed", "item.rate"]:
-            user_data_from_item = item_from_webhook.get("UserData", {})
+            user_data_from_item = user_data_from_event
             if 'IsFavorite' in user_data_from_item:
                 update_data['is_favorite'] = user_data_from_item['IsFavorite']
             if 'Played' in user_data_from_item:
@@ -2156,7 +2215,7 @@ def emby_webhook():
                     update_data['playback_position_ticks'] = 0
                     update_data['last_played_date'] = datetime.now(timezone.utc)
 
-        elif event_type in ["playback.start", "playback.pause", "playback.stop"]:
+        elif event_type in ["playback.start", "playback.pause", "playback.stop", "playback.halfway"]:
             playback_info = data.get("PlaybackInfo", {})
             if playback_info:
                 position_ticks = playback_info.get('PositionTicks')
