@@ -181,6 +181,69 @@ def enqueue_item(
         return {"ok": False, "queued": False, "reason": "enqueue_error", "error": str(e)}
 
 
+def enqueue_imported_episode_ids(
+    episode_ids: Sequence[Any],
+    *,
+    allow_playback_followup: bool = False,
+) -> Dict[str, Any]:
+    """Queue newly imported episodes only after ETK has persisted bindings."""
+    try:
+        mode = get_trigger_mode()
+        if mode == INTRO_TRIGGER_MODE_OFF:
+            return {"ok": True, "queued": 0, "skipped": True, "reason": "disabled"}
+        import_trigger_allowed = _mode_accepts_job(mode, INTRO_JOB_TRIGGER_IMPORT)
+        playback_followup = mode == INTRO_TRIGGER_MODE_PLAYBACK and allow_playback_followup
+        if not import_trigger_allowed and not playback_followup:
+            return {"ok": True, "queued": 0, "skipped": True, "reason": "trigger_not_selected"}
+
+        ids = []
+        for value in episode_ids or []:
+            item_id = str(value or "").strip()
+            if item_id and item_id not in ids:
+                ids.append(item_id)
+        if not ids:
+            return {"ok": True, "queued": 0, "skipped": True, "reason": "empty"}
+
+        _start_worker()
+        queued = 0
+        unresolved = 0
+        for item_id in ids:
+            ref = _load_episode_ref_by_item_id(item_id)
+            if not ref:
+                unresolved += 1
+                continue
+            if playback_followup and not _season_has_intro_detection_cache(ref):
+                continue
+            if not _claim_recent(f"{INTRO_JOB_TRIGGER_IMPORT}:{item_id}"):
+                continue
+            _queue.put_nowait({
+                "kind": "episode",
+                "episode": _episode_to_payload(ref),
+                "trigger": INTRO_JOB_TRIGGER_PLAYBACK if playback_followup else INTRO_JOB_TRIGGER_IMPORT,
+                "queued_at": time.time(),
+            })
+            queued += 1
+        if queued:
+            logger.info(
+                "  ➜ [片头声纹提取] 入库后已确认分集落库，入队 %s/%s 集（队列 %s）。",
+                queued,
+                len(ids),
+                _queue.qsize(),
+            )
+        if unresolved:
+            logger.debug(
+                "  ➜ [片头声纹提取] 入库后仍有 %s/%s 集未能定位分集记录，已跳过。",
+                unresolved,
+                len(ids),
+            )
+        return {"ok": True, "queued": queued, "unresolved": unresolved}
+    except queue.Full:
+        return {"ok": False, "queued": 0, "reason": "queue_full"}
+    except Exception as e:
+        logger.debug("  ➜ [片头声纹提取] 入库后入队失败: %s", e, exc_info=True)
+        return {"ok": False, "queued": 0, "reason": "enqueue_error", "error": str(e)}
+
+
 def enqueue_favorite_item(item: Dict[str, Any]) -> Dict[str, Any]:
     """Start only the season(s) represented by a newly favorited item."""
     if get_trigger_mode() != INTRO_TRIGGER_MODE_FAVORITE:
@@ -890,6 +953,13 @@ def _load_same_season_episode_refs(target: EpisodeRef) -> List[EpisodeRef]:
                 seen_sha1.add(ref.sha1)
                 refs.append(ref)
             return refs
+
+
+def _season_has_intro_detection_cache(target: EpisodeRef) -> bool:
+    for ref in _load_same_season_episode_refs(target):
+        if _cache_has_intro(ref.sha1) or _cache_has_credits(ref.sha1):
+            return True
+    return False
 
 
 def _needs_intro_backfill(ref: EpisodeRef, include_credits: bool) -> bool:

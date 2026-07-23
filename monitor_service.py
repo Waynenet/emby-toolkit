@@ -36,7 +36,6 @@ EMBY_BIND_RETRY_COUNTS = {}
 EMBY_BIND_MAX_RETRIES = 2
 EMBY_BIND_RETRY_DELAY_SECONDS = 10
 EMBY_BIND_PLUGIN_WAIT_SECONDS = 8
-ETK_INTRO_DETECTION_SETTLE_SECONDS = 12
 EMBY_BIND_PENDING_PATHS = set()
 EMBY_BIND_PLUGIN_COMPLETED = set()
 EMBY_BIND_CONDITION = threading.Condition(EMBY_BIND_LOCK)
@@ -378,32 +377,6 @@ def enqueue_emby_binding(file_path: str, mediainfo: Optional[Dict[str, Any]] = N
         EMBY_BIND_TIMER.start()
 
 
-def _enqueue_etk_intro_detection(item: Dict[str, Any], sha1: str = '') -> None:
-    """Queue a just-bound episode for the opt-in ETK intro experiment.
-
-    This runs after media-info injection only.  The service itself checks the
-    feature switch and active smart-watch status, so normal imports remain a
-    no-op when the experiment is disabled.
-    """
-    if not isinstance(item, dict) or str(item.get('Type') or '').title() != 'Episode':
-        return
-    def _enqueue_after_binding_settles():
-        try:
-            from handler.intro_detection_service import enqueue_item
-
-            enqueue_item(item, sha1=sha1)
-        except Exception as e:
-            # Intro extraction must never break a completed media-info binding.
-            logger.debug("  ➜ [片头声纹提取] 新分集入队失败，已忽略: %s", e)
-
-    # The active-watch lookup relies on the SeriesId binding.  Let the normal
-    # 10-second Episode aggregation persist that binding first; this is a
-    # fixed post-import settle delay, not a polling loop.
-    timer = threading.Timer(ETK_INTRO_DETECTION_SETTLE_SECONDS, _enqueue_after_binding_settles)
-    timer.daemon = True
-    timer.start()
-
-
 def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pick_code: str = '') -> Dict[str, Any]:
     """Accept bridge binding callbacks for both ETK imports and Emby rescans."""
     import extensions
@@ -457,7 +430,6 @@ def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pi
                 rebound.get('title') or item.get('Name') or item_id,
                 item_id,
             )
-            _enqueue_etk_intro_detection(item, sha1=sha1)
             return {'ok': True, 'rebound': True, **rebound}
         return {'ok': True, 'skipped': True, **rebound}
 
@@ -471,7 +443,6 @@ def accept_plugin_emby_binding(item: Dict[str, Any], sha1: str = '', expected_pi
     try:
         from routes.webhook import dispatch_active_emby_items
         dispatch_active_emby_items([item])
-        _enqueue_etk_intro_detection(item, sha1=sha1)
     except Exception:
         with EMBY_BIND_CONDITION:
             EMBY_BIND_PLUGIN_COMPLETED.discard(normalized)
@@ -578,10 +549,6 @@ def _process_emby_binding_queue():
     if injected:
         from routes.webhook import dispatch_active_emby_items
         dispatch_active_emby_items(list(injected.values()))
-        for path, item in injected.items():
-            _pick_code, cache_sha1 = processor._extract_115_fingerprints(path)
-            _enqueue_etk_intro_detection(item, sha1=cache_sha1 or '')
-
         with EMBY_BIND_LOCK:
             for path in ready_paths:
                 normalized = emby._normalize_emby_media_path(path)

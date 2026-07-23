@@ -37,6 +37,15 @@ def task_process_watchlist(
             subscription_triggering_episode_ids=subscription_triggering_episode_ids,
             skip_logical_share_dispatch=not bool(tmdb_id),
         )
+        if tmdb_id and new_episode_ids:
+            try:
+                from handler import intro_detection_service
+                intro_detection_service.enqueue_imported_episode_ids(
+                    new_episode_ids,
+                    allow_playback_followup=True,
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [片头声纹提取] 智能追剧完成后分派入库扫描失败: {e}", exc_info=True)
 
     except Exception as e:
         task_name = "追剧列表更新"
