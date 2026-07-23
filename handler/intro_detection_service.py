@@ -50,6 +50,7 @@ FINGERPRINT_HAMMING_DISTANCE = 6
 FINGERPRINT_MAX_CONSECUTIVE_MISSES = 2
 FINGERPRINT_MIN_MATCH_RATIO = 0.85
 FINGERPRINT_ANCHOR_WIDTH = 3
+FINGERPRINT_CACHE_TOLERANCE_SECONDS = 5
 FINGERPRINT_ANCHOR_MASKS = (
     0x0F0F0F0F,
     0xF0F0F0F0,
@@ -776,13 +777,19 @@ def _process_job(job: Dict[str, Any]) -> None:
             target.season_number,
         )
         return
+    direct_url_cache: Dict[str, Tuple[str, str]] = {}
     if intro_needed:
-        _detect_and_write_intro(target, chapter_refs)
+        _detect_and_write_intro(target, chapter_refs, direct_url_cache=direct_url_cache)
     if credits_needed:
-        _detect_and_write_credits(target, chapter_refs)
+        _detect_and_write_credits(target, chapter_refs, direct_url_cache=direct_url_cache)
 
 
-def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef]) -> None:
+def _detect_and_write_intro(
+    target: EpisodeRef,
+    season_refs: Sequence[EpisodeRef],
+    *,
+    direct_url_cache: Optional[Dict[str, Tuple[str, str]]] = None,
+) -> None:
     if len(season_refs) < 2:
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季可用于片头比对的非纯净分集不足 2 集，暂不提取。", target.series_title, target.season_number)
         return
@@ -793,7 +800,11 @@ def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef
     for sample_seconds in INTRO_SAMPLE_STEPS:
         fps = []
         for ref in season_refs[:MAX_WORK_EPISODES_PER_SEASON]:
-            fp = _load_or_extract_fingerprint(ref, requested_sample_seconds=sample_seconds)
+            fp = _load_or_extract_fingerprint(
+                ref,
+                requested_sample_seconds=sample_seconds,
+                direct_url_cache=direct_url_cache,
+            )
             if fp and len(fp.values) >= 40:
                 fps.append(fp)
         if len(fps) < 2:
@@ -821,7 +832,11 @@ def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef
         attempted += 1
         own_range = ranges_by_sha1.get(ref.sha1)
         if not own_range:
-            fp = _load_or_extract_fingerprint(ref, requested_sample_seconds=selected_sample_seconds)
+            fp = _load_or_extract_fingerprint(
+                ref,
+                requested_sample_seconds=selected_sample_seconds,
+                direct_url_cache=direct_url_cache,
+            )
             if not fp or len(fp.values) < 40:
                 continue
             own_range = _match_intro_against_template(
@@ -1172,25 +1187,91 @@ def _load_or_extract_fingerprint(
     *,
     kind: str = FINGERPRINT_KIND_INTRO,
     requested_sample_seconds: int = 0,
+    direct_url_cache: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Optional[FingerprintRef]:
     window_start, sample_seconds = _fingerprint_window(ref, kind, requested_sample_seconds)
     if sample_seconds < MIN_INTRO_SECONDS:
         return None
-    cached = _load_fingerprint_cache(
-        ref.sha1,
-        kind=kind,
-        minimum_sample_seconds=sample_seconds,
-        expected_sample_seconds=sample_seconds if kind == FINGERPRINT_KIND_CREDITS else 0,
-    )
+    cached = _load_fingerprint_cache(ref.sha1, kind=kind)
     if cached:
-        cached_window_start, _ = _fingerprint_window(ref, kind, cached[1])
-        return FingerprintRef(ref, cached[0], cached[1], cached_window_start, kind)
-    values = _extract_fingerprint(ref, window_start=window_start, sample_seconds=sample_seconds, kind=kind)
+        cached_values, cached_sample_seconds = cached
+        cached_coverage = _normalize_fingerprint_coverage(cached_sample_seconds, kind)
+        if cached_coverage + FINGERPRINT_CACHE_TOLERANCE_SECONDS >= sample_seconds:
+            values = _slice_cached_fingerprint(
+                cached_values,
+                cached_coverage,
+                sample_seconds,
+                kind,
+            )
+            if cached_coverage != cached_sample_seconds:
+                _save_fingerprint_cache(ref.sha1, cached_values, cached_coverage, kind=kind)
+            return FingerprintRef(ref, values, sample_seconds, window_start, kind)
+
+        extension_start = float(cached_coverage)
+        extension_seconds = sample_seconds - cached_coverage
+        prepend = False
+        if kind == FINGERPRINT_KIND_CREDITS:
+            cached_window_start, _ = _fingerprint_window(ref, kind, cached_coverage)
+            extension_start = window_start
+            extension_seconds = max(1, int(round(cached_window_start - window_start)))
+            prepend = True
+        logger.info(
+            "  ➜ [片头声纹提取] 增量扩展%s指纹：%s S%02dE%02d（%s 秒 -> %s 秒）",
+            "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头",
+            ref.series_title,
+            ref.season_number,
+            ref.episode_number,
+            cached_coverage,
+            sample_seconds,
+        )
+        extension = _extract_fingerprint(
+            ref,
+            window_start=extension_start,
+            sample_seconds=extension_seconds,
+            kind=kind,
+            direct_url_cache=direct_url_cache,
+        )
+        if not extension:
+            return None
+        values = extension + cached_values if prepend else cached_values + extension
+        _save_fingerprint_cache(ref.sha1, values, sample_seconds, kind=kind)
+        return FingerprintRef(ref, values, sample_seconds, window_start, kind)
+
+    values = _extract_fingerprint(
+        ref,
+        window_start=window_start,
+        sample_seconds=sample_seconds,
+        kind=kind,
+        direct_url_cache=direct_url_cache,
+    )
     if not values:
         return None
-    actual_sample_seconds = min(sample_seconds, max(1, int(round(len(values) * 0.15))))
-    _save_fingerprint_cache(ref.sha1, values, actual_sample_seconds, kind=kind)
-    return FingerprintRef(ref, values, actual_sample_seconds, window_start, kind)
+    _save_fingerprint_cache(ref.sha1, values, sample_seconds, kind=kind)
+    return FingerprintRef(ref, values, sample_seconds, window_start, kind)
+
+
+def _normalize_fingerprint_coverage(sample_seconds: int, kind: str) -> int:
+    value = max(1, int(sample_seconds or 0))
+    steps = CREDITS_SAMPLE_STEPS if kind == FINGERPRINT_KIND_CREDITS else INTRO_SAMPLE_STEPS
+    for step in steps:
+        if abs(value - step) <= FINGERPRINT_CACHE_TOLERANCE_SECONDS:
+            return step
+    return value
+
+
+def _slice_cached_fingerprint(
+    values: List[int],
+    cached_sample_seconds: int,
+    requested_sample_seconds: int,
+    kind: str,
+) -> List[int]:
+    if not values or cached_sample_seconds <= requested_sample_seconds:
+        return values
+    keep_count = max(
+        1,
+        min(len(values), int(round(len(values) * requested_sample_seconds / cached_sample_seconds))),
+    )
+    return values[-keep_count:] if kind == FINGERPRINT_KIND_CREDITS else values[:keep_count]
 
 
 def _fingerprint_cache_key(sha1: str, kind: str) -> str:
@@ -1297,6 +1378,7 @@ def _extract_fingerprint(
     window_start: float = 0.0,
     sample_seconds: int = SAMPLE_SECONDS,
     kind: str = FINGERPRINT_KIND_INTRO,
+    direct_url_cache: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> List[int]:
     from handler.p115_service import P115Service
 
@@ -1304,11 +1386,18 @@ def _extract_fingerprint(
     if not client:
         logger.warning("  ➜ [片头声纹提取] 115 客户端未初始化，无法提取指纹。")
         return []
-    try:
-        direct_url, backend = client.resolve_download_url(ref.pick_code, user_agent=UA, return_backend=True)
-    except Exception as e:
-        logger.warning("  ➜ [片头声纹提取] 获取直链失败《%s》S%sE%s: %s", ref.series_title, ref.season_number, ref.episode_number, e)
-        return []
+    cached_url = direct_url_cache.get(ref.pick_code) if direct_url_cache is not None else None
+    reused_url = bool(cached_url)
+    if cached_url:
+        direct_url, backend = cached_url
+    else:
+        try:
+            direct_url, backend = client.resolve_download_url(ref.pick_code, user_agent=UA, return_backend=True)
+        except Exception as e:
+            logger.warning("  ➜ [片头声纹提取] 获取直链失败《%s》S%sE%s: %s", ref.series_title, ref.season_number, ref.episode_number, e)
+            return []
+        if direct_url_cache is not None and direct_url:
+            direct_url_cache[ref.pick_code] = (direct_url, str(backend or ""))
     if not direct_url:
         logger.warning("  ➜ [片头声纹提取] 获取直链为空《%s》S%sE%s。", ref.series_title, ref.season_number, ref.episode_number)
         return []
@@ -1324,6 +1413,21 @@ def _extract_fingerprint(
     values = _run_ffmpeg_chromaprint(direct_url, window_start=window_start, sample_seconds=sample_seconds)
     if values:
         return values
+    if reused_url and direct_url_cache is not None:
+        direct_url_cache.pop(ref.pick_code, None)
+        try:
+            direct_url, backend = client.resolve_download_url(ref.pick_code, user_agent=UA, return_backend=True)
+        except Exception:
+            direct_url = ""
+        if direct_url:
+            direct_url_cache[ref.pick_code] = (direct_url, str(backend or ""))
+            values = _run_ffmpeg_chromaprint(
+                direct_url,
+                window_start=window_start,
+                sample_seconds=sample_seconds,
+            )
+            if values:
+                return values
     logger.warning("  ➜ [片头声纹提取] %s音频指纹提取失败：%s S%02dE%02d", "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头", ref.series_title, ref.season_number, ref.episode_number)
     return []
 
@@ -1457,7 +1561,12 @@ def _detect_common_intro(
     return (base, base_start_template, base_end_template, normalized, len(consensus)) if normalized else None
 
 
-def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeRef]) -> None:
+def _detect_and_write_credits(
+    target: EpisodeRef,
+    season_refs: Sequence[EpisodeRef],
+    *,
+    direct_url_cache: Optional[Dict[str, Tuple[str, str]]] = None,
+) -> None:
     detected = None
     fps: List[FingerprintRef] = []
     selected_sample_seconds = 0
@@ -1468,6 +1577,7 @@ def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeR
                 ref,
                 kind=FINGERPRINT_KIND_CREDITS,
                 requested_sample_seconds=sample_seconds,
+                direct_url_cache=direct_url_cache,
             )
             if fp and len(fp.values) >= 40:
                 fps.append(fp)
@@ -1498,6 +1608,7 @@ def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeR
                 ref,
                 kind=FINGERPRINT_KIND_CREDITS,
                 requested_sample_seconds=selected_sample_seconds,
+                direct_url_cache=direct_url_cache,
             )
             if not fp or len(fp.values) < 40:
                 continue
