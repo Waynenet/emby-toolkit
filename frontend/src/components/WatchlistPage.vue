@@ -984,7 +984,22 @@ const formatAirDate = (dateString) => {
 };
 
 const getPosterUrl = (embyIds) => {
-  const itemId = embyIds?.[0];
+  let itemId = null;
+  
+  // 1. 如果是标准的数组，取第一项
+  if (Array.isArray(embyIds) && embyIds.length > 0) {
+    itemId = embyIds[0];
+  } 
+  // 2. 如果是未解析的 JSON 字符串，尝试解析
+  else if (typeof embyIds === 'string' && embyIds.trim()) {
+    try {
+      const parsed = JSON.parse(embyIds);
+      if (Array.isArray(parsed) && parsed.length > 0) itemId = parsed[0];
+    } catch (e) {
+      itemId = embyIds; // 兜底当成普通 ID 字符串
+    }
+  }
+
   if (!itemId) return '';
   return `/image_proxy/Items/${itemId}/Images/Primary?maxHeight=480&tag=1`;
 };
