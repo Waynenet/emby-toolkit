@@ -1131,14 +1131,13 @@ def process_subscription_items_and_update_db(
             # === 让子函数内部支持 'NONE' 状态写入 ===
             elif status == 'NONE':
                 request_db.set_media_status_none(ids, itype, media_info_list=requests)
-    # === 主函数最外层，调用子函数时的分流判定 ===
+    # === 在 target_status == 'NONE' 中移除对父剧集的重复写入 ===
     if target_status == 'SUBSCRIBED':
         if parent_series_to_ensure_exist:
             group_and_update(list(parent_series_to_ensure_exist.values()), 'SUBSCRIBED')
         group_and_update(missing_released_items, 'SUBSCRIBED')
     elif target_status == 'NONE':
-        if parent_series_to_ensure_exist:
-            group_and_update(list(parent_series_to_ensure_exist.values()), 'NONE')
+        # 父剧集在上方 Step 4 已经以 'NONE' 写入过了，此处只处理子项 (Season / Movie)，彻底消除重复调用！
         group_and_update(missing_released_items, 'NONE')
         group_and_update(missing_unreleased_items, 'NONE')
     else:
