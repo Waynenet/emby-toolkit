@@ -3,7 +3,8 @@
 This is intentionally small and opt-in:
 - callers enqueue freshly-bound Episode items;
 - the service itself checks the shared-resource switch and active watchlist;
-- one daemon worker extracts at most the first 10 minutes from 115;
+- one daemon worker progressively samples the first 3/5/10 minutes for intros
+  and the last 1/2/3 minutes for credits;
 - chromaprint raw fingerprints are cached by SHA1;
 - once a stable same-season intro is found, chapters are written back to ETK
   media-info cache, Emby, and the shared-intro uploader.
@@ -33,12 +34,14 @@ from database.connection import get_db_connection
 logger = logging.getLogger(__name__)
 
 SAMPLE_SECONDS = 600
+INTRO_SAMPLE_STEPS = (180, 300, SAMPLE_SECONDS)
+CREDITS_SAMPLE_STEPS = (60, 120, 180)
 MAX_WORK_EPISODES_PER_SEASON = 8
 MIN_INTRO_SECONDS = 18
 MAX_INTRO_SECONDS = 240
 MAX_INTRO_START_SECONDS = 360
 MIN_CREDITS_SECONDS = 18
-MAX_CREDITS_SECONDS = 360
+MAX_CREDITS_SECONDS = 180
 INTRO_TICKS = 10_000_000
 QUEUE_MAXSIZE = 512
 RECENT_TTL_SECONDS = 6 * 3600
@@ -226,6 +229,8 @@ def enqueue_active_backfill(limit: int = 50, *, force: bool = False) -> Dict[str
     """Queue a fallback batch: one missing Episode from each active season."""
     try:
         mode = get_trigger_mode()
+        if mode == INTRO_TRIGGER_MODE_PLAYBACK:
+            return {"ok": True, "queued": False, "skipped": True, "reason": "playback_realtime_only"}
         if mode == INTRO_TRIGGER_MODE_OFF or (not force and mode != INTRO_TRIGGER_MODE_IMPORT):
             return {"ok": True, "queued": False, "skipped": True, "reason": "disabled"}
 
@@ -363,7 +368,7 @@ def _normalize_job_trigger(value: Any) -> str:
 
 def _mode_accepts_job(mode: str, trigger: str) -> bool:
     if trigger == INTRO_JOB_TRIGGER_BACKFILL:
-        return mode != INTRO_TRIGGER_MODE_OFF
+        return mode in {INTRO_TRIGGER_MODE_IMPORT, INTRO_TRIGGER_MODE_FAVORITE}
     if mode == INTRO_TRIGGER_MODE_IMPORT:
         return trigger == INTRO_JOB_TRIGGER_IMPORT
     if mode == INTRO_TRIGGER_MODE_FAVORITE:
@@ -713,16 +718,27 @@ def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季可用于片头比对的非纯净分集不足 2 集，暂不提取。", target.series_title, target.season_number)
         return
 
+    detected = None
     fps: List[FingerprintRef] = []
-    for ref in season_refs[:MAX_WORK_EPISODES_PER_SEASON]:
-        fp = _load_or_extract_fingerprint(ref)
-        if fp and len(fp.values) >= 40:
-            fps.append(fp)
+    selected_sample_seconds = 0
+    for sample_seconds in INTRO_SAMPLE_STEPS:
+        fps = []
+        for ref in season_refs[:MAX_WORK_EPISODES_PER_SEASON]:
+            fp = _load_or_extract_fingerprint(ref, requested_sample_seconds=sample_seconds)
+            if fp and len(fp.values) >= 40:
+                fps.append(fp)
+        if len(fps) < 2:
+            continue
+        detected = _detect_common_intro(
+            fps,
+            max_start_seconds=min(MAX_INTRO_START_SECONDS, sample_seconds),
+        )
+        if detected:
+            selected_sample_seconds = sample_seconds
+            break
     if len(fps) < 2:
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季有效片头指纹不足，暂不写入。", target.series_title, target.season_number)
         return
-
-    detected = _detect_common_intro(fps)
     if not detected:
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季未找到稳定公共片头。", target.series_title, target.season_number)
         return
@@ -736,7 +752,7 @@ def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef
         attempted += 1
         own_range = ranges_by_sha1.get(ref.sha1)
         if not own_range:
-            fp = _load_or_extract_fingerprint(ref)
+            fp = _load_or_extract_fingerprint(ref, requested_sample_seconds=selected_sample_seconds)
             if not fp or len(fp.values) < 40:
                 continue
             own_range = _match_intro_against_template(
@@ -744,19 +760,21 @@ def _detect_and_write_intro(target: EpisodeRef, season_refs: Sequence[EpisodeRef
                 fp,
                 base_start,
                 base_end,
+                max_start_seconds=min(MAX_INTRO_START_SECONDS, selected_sample_seconds),
             )
         if not own_range:
             continue
         if _write_intro_for_episode(ref, own_range[0], own_range[1]):
             updated += 1
     logger.info(
-        "  ➜ [片头声纹提取] 《%s》第 %s 季已识别片头 %.1fs-%.1fs，整季回写 %s/%s 集（样本 %s 集，命中比对 %s 组）。",
+        "  ➜ [片头声纹提取] 《%s》第 %s 季已识别片头 %.1fs-%.1fs，整季回写 %s/%s 集（窗口 %s 秒，样本 %s 集，命中比对 %s 组）。",
         target.series_title,
         target.season_number,
         base_start,
         base_end,
         updated,
         attempted,
+        selected_sample_seconds,
         len(fps),
         matched,
     )
@@ -1019,13 +1037,20 @@ def _load_or_extract_fingerprint(
     ref: EpisodeRef,
     *,
     kind: str = FINGERPRINT_KIND_INTRO,
+    requested_sample_seconds: int = 0,
 ) -> Optional[FingerprintRef]:
-    window_start, sample_seconds = _fingerprint_window(ref, kind)
+    window_start, sample_seconds = _fingerprint_window(ref, kind, requested_sample_seconds)
     if sample_seconds < MIN_INTRO_SECONDS:
         return None
-    cached = _load_fingerprint_cache(ref.sha1, kind=kind)
+    cached = _load_fingerprint_cache(
+        ref.sha1,
+        kind=kind,
+        minimum_sample_seconds=sample_seconds,
+        expected_sample_seconds=sample_seconds if kind == FINGERPRINT_KIND_CREDITS else 0,
+    )
     if cached:
-        return FingerprintRef(ref, cached[0], cached[1], window_start, kind)
+        cached_window_start, _ = _fingerprint_window(ref, kind, cached[1])
+        return FingerprintRef(ref, cached[0], cached[1], cached_window_start, kind)
     values = _extract_fingerprint(ref, window_start=window_start, sample_seconds=sample_seconds, kind=kind)
     if not values:
         return None
@@ -1041,7 +1066,13 @@ def _fingerprint_cache_key(sha1: str, kind: str) -> str:
     return sha1 if kind == FINGERPRINT_KIND_INTRO else f"{sha1}:{kind}"
 
 
-def _load_fingerprint_cache(sha1: str, *, kind: str = FINGERPRINT_KIND_INTRO) -> Optional[Tuple[List[int], int]]:
+def _load_fingerprint_cache(
+    sha1: str,
+    *,
+    kind: str = FINGERPRINT_KIND_INTRO,
+    minimum_sample_seconds: int = 0,
+    expected_sample_seconds: int = 0,
+) -> Optional[Tuple[List[int], int]]:
     cache_key = _fingerprint_cache_key(sha1, kind)
     if not cache_key:
         return None
@@ -1059,7 +1090,12 @@ def _load_fingerprint_cache(sha1: str, *, kind: str = FINGERPRINT_KIND_INTRO) ->
                 values = json.loads(zlib.decompress(blob).decode("utf-8"))
                 if not isinstance(values, list) or not values:
                     return None
-                return [int(x) for x in values], int(row.get("sample_seconds") or SAMPLE_SECONDS)
+                cached_sample_seconds = int(row.get("sample_seconds") or SAMPLE_SECONDS)
+                if cached_sample_seconds < max(0, int(minimum_sample_seconds or 0)):
+                    return None
+                if expected_sample_seconds and abs(cached_sample_seconds - int(expected_sample_seconds)) > 2:
+                    return None
+                return [int(x) for x in values], cached_sample_seconds
     except Exception as e:
         logger.debug("  ➜ [片头声纹提取] 读取%s指纹缓存失败 %s: %s", "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头", cache_key[:12], e)
         return None
@@ -1100,13 +1136,24 @@ def _save_fingerprint_cache(
         logger.debug("  ➜ [片头声纹提取] 写入%s指纹缓存失败 %s: %s", "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头", cache_key[:12], e)
 
 
-def _fingerprint_window(ref: EpisodeRef, kind: str) -> Tuple[float, int]:
+def _fingerprint_window(
+    ref: EpisodeRef,
+    kind: str,
+    requested_sample_seconds: int = 0,
+) -> Tuple[float, int]:
+    requested_sample_seconds = max(
+        1,
+        int(
+            requested_sample_seconds
+            or (CREDITS_SAMPLE_STEPS[-1] if kind == FINGERPRINT_KIND_CREDITS else INTRO_SAMPLE_STEPS[-1])
+        ),
+    )
     if kind != FINGERPRINT_KIND_CREDITS:
-        return 0.0, SAMPLE_SECONDS
+        return 0.0, requested_sample_seconds
     runtime_seconds = _cached_runtime_seconds(ref.sha1)
     if runtime_seconds <= 0:
         return 0.0, 0
-    sample_seconds = min(SAMPLE_SECONDS, max(1, int(runtime_seconds)))
+    sample_seconds = min(requested_sample_seconds, max(1, int(runtime_seconds)))
     return max(0.0, runtime_seconds - sample_seconds), sample_seconds
 
 
@@ -1227,13 +1274,15 @@ def _parse_raw_chromaprint(output: bytes) -> List[int]:
 
 def _detect_common_intro(
     fps: List[FingerprintRef],
+    *,
+    max_start_seconds: float = MAX_INTRO_START_SECONDS,
 ) -> Optional[Tuple[FingerprintRef, float, float, Dict[str, Tuple[int, int]], int]]:
     base = max(fps, key=lambda fp: len(fp.values))
     segments: List[Tuple[FingerprintRef, float, float, float, float]] = []
     for fp in fps:
         if fp is base:
             continue
-        seg = _find_best_common_segment(base, fp, max_start_seconds=MAX_INTRO_START_SECONDS)
+        seg = _find_best_common_segment(base, fp, max_start_seconds=max_start_seconds)
         if seg:
             base_start, base_end, own_start, own_end = seg
             segments.append((fp, base_start, base_end, own_start, own_end))
@@ -1275,16 +1324,28 @@ def _detect_common_intro(
 
 
 def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeRef]) -> None:
+    detected = None
     fps: List[FingerprintRef] = []
-    for ref in season_refs[:MAX_WORK_EPISODES_PER_SEASON]:
-        fp = _load_or_extract_fingerprint(ref, kind=FINGERPRINT_KIND_CREDITS)
-        if fp and len(fp.values) >= 40:
-            fps.append(fp)
+    selected_sample_seconds = 0
+    for sample_seconds in CREDITS_SAMPLE_STEPS:
+        fps = []
+        for ref in season_refs[:MAX_WORK_EPISODES_PER_SEASON]:
+            fp = _load_or_extract_fingerprint(
+                ref,
+                kind=FINGERPRINT_KIND_CREDITS,
+                requested_sample_seconds=sample_seconds,
+            )
+            if fp and len(fp.values) >= 40:
+                fps.append(fp)
+        if len(fps) < 2:
+            continue
+        detected = _detect_common_credits(fps, max_start_seconds=sample_seconds)
+        if detected:
+            selected_sample_seconds = sample_seconds
+            break
     if len(fps) < 2:
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季有效片尾指纹不足，暂不写入。", target.series_title, target.season_number)
         return
-
-    detected = _detect_common_credits(fps)
     if not detected:
         logger.info("  ➜ [片头声纹提取] 《%s》第 %s 季未找到稳定公共片尾。", target.series_title, target.season_number)
         return
@@ -1299,7 +1360,11 @@ def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeR
         attempted += 1
         own_start = starts_by_sha1.get(ref.sha1)
         if own_start is None:
-            fp = _load_or_extract_fingerprint(ref, kind=FINGERPRINT_KIND_CREDITS)
+            fp = _load_or_extract_fingerprint(
+                ref,
+                kind=FINGERPRINT_KIND_CREDITS,
+                requested_sample_seconds=selected_sample_seconds,
+            )
             if not fp or len(fp.values) < 40:
                 continue
             own_start = _match_credits_against_template(
@@ -1307,18 +1372,20 @@ def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeR
                 fp,
                 base_start,
                 base_end,
+                max_start_seconds=selected_sample_seconds,
             )
         if own_start is None:
             continue
         if _write_credits_for_episode(ref, own_start):
             updated += 1
     logger.info(
-        "  ➜ [片头声纹提取] 《%s》第 %s 季已识别片尾起点 %.1fs，整季回写 %s/%s 集（样本 %s 集，命中比对 %s 组）。",
+        "  ➜ [片头声纹提取] 《%s》第 %s 季已识别片尾起点 %.1fs，整季回写 %s/%s 集（窗口 %s 秒，样本 %s 集，命中比对 %s 组）。",
         target.series_title,
         target.season_number,
         target_start / INTRO_TICKS,
         updated,
         attempted,
+        selected_sample_seconds,
         len(fps),
         matched,
     )
@@ -1326,13 +1393,15 @@ def _detect_and_write_credits(target: EpisodeRef, season_refs: Sequence[EpisodeR
 
 def _detect_common_credits(
     fps: List[FingerprintRef],
+    *,
+    max_start_seconds: float,
 ) -> Optional[Tuple[FingerprintRef, float, float, Dict[str, int], int]]:
     base = max(fps, key=lambda fp: len(fp.values))
     segments: List[Tuple[FingerprintRef, float, float, float, float]] = []
     for fp in fps:
         if fp is base:
             continue
-        seg = _find_best_common_segment(base, fp, max_start_seconds=SAMPLE_SECONDS)
+        seg = _find_best_common_segment(base, fp, max_start_seconds=max_start_seconds)
         if seg:
             base_start, base_end, own_start, own_end = seg
             duration = min(base_end - base_start, own_end - own_start)
@@ -1386,13 +1455,15 @@ def _match_intro_against_template(
     other: FingerprintRef,
     base_start_template: float,
     base_end_template: float,
+    *,
+    max_start_seconds: float = MAX_INTRO_START_SECONDS,
 ) -> Optional[Tuple[int, int]]:
     matched_range = _find_template_matched_range(
         base,
         other,
         base_start_template,
         base_end_template,
-        max_start_seconds=MAX_INTRO_START_SECONDS,
+        max_start_seconds=max_start_seconds,
         min_seconds=MIN_INTRO_SECONDS,
     )
     if not matched_range:
@@ -1415,13 +1486,15 @@ def _match_credits_against_template(
     other: FingerprintRef,
     base_start_template: float,
     base_end_template: float,
+    *,
+    max_start_seconds: float,
 ) -> Optional[int]:
     matched_range = _find_template_matched_range(
         base,
         other,
         base_start_template,
         base_end_template,
-        max_start_seconds=SAMPLE_SECONDS,
+        max_start_seconds=max_start_seconds,
         min_seconds=MIN_CREDITS_SECONDS,
     )
     if not matched_range:
