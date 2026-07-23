@@ -91,26 +91,12 @@ watchlist_bp = Blueprint('watchlist', __name__, url_prefix='/api/watchlist')
 
 logger = logging.getLogger(__name__)
 
-# --- 自愈式添加字段辅助函数 ---
-def _ensure_enable_mp_subscribe_column():
-    """确保数据库表具有 enable_mp_subscribe 字段，零配置无感迁移"""
-    try:
-        with watchlist_db.get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("ALTER TABLE media_metadata ADD COLUMN IF NOT EXISTS enable_mp_subscribe BOOLEAN DEFAULT TRUE;")
-            conn.commit()
-    except Exception as e:
-        logger.warning(f"自愈数据库字段 'enable_mp_subscribe' 失败: {e}")
-
 # 2. 使用蓝图定义路由
 @watchlist_bp.route('', methods=['GET'])
 @admin_required
 def api_get_watchlist():
     logger.debug("API (Blueprint): 收到获取追剧列表的请求。")
     try:
-        # 💡 每次获取列表时自动检查并补齐新字段
-        _ensure_enable_mp_subscribe_column()
-
         items = watchlist_db.get_all_watchlist_items()
 
         for item in items:
@@ -151,7 +137,6 @@ def api_update_mp_subscribe():
 
     logger.info(f"API (Blueprint): 收到请求，将项目 {tmdb_id} 的 MoviePilot 自动订阅设为 {enabled}。")
     try:
-        _ensure_enable_mp_subscribe_column()
         with watchlist_db.get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
@@ -180,7 +165,6 @@ def api_batch_update_mp_subscribe():
 
     logger.info(f"API (Blueprint): 收到批量请求，将 {len(item_ids)} 个剧集的 MoviePilot 自动订阅设为 {enabled}。")
     try:
-        _ensure_enable_mp_subscribe_column()
         with watchlist_db.get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
