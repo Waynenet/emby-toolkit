@@ -549,7 +549,6 @@ def _process_emby_binding_queue():
     if injected:
         from routes.webhook import dispatch_active_emby_items
         dispatch_active_emby_items(list(injected.values()))
-
         with EMBY_BIND_LOCK:
             for path in ready_paths:
                 normalized = emby._normalize_emby_media_path(path)

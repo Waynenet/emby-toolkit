@@ -341,6 +341,39 @@ def get_watching_tmdb_ids() -> set:
         logger.error(f"  ➜ 从数据库获取正在追看/暂停的TMDB ID时出错: {e}", exc_info=True)
     return watching_ids
 
+
+def get_active_watchlist_series_by_emby_id(series_id: str) -> Optional[Dict[str, Any]]:
+    """Return a still-active smart-watch Series row for an Emby SeriesId.
+
+    The autonomous intro experiment deliberately excludes Completed shows so a
+    scheduled fallback can never turn into an old-library scan.
+    """
+    series_id = str(series_id or '').strip()
+    if not series_id:
+        return None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT tmdb_id, title, watching_status
+                    FROM media_metadata
+                    WHERE item_type = 'Series'
+                      AND emby_item_ids_json @> %s::jsonb
+                      AND watching_status = ANY(%s)
+                    LIMIT 1
+                    """,
+                    (
+                        json.dumps([series_id]),
+                        ['Watching', 'Paused', 'Pending'],
+                    ),
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.debug("读取智能追剧活跃状态失败: series_id=%s -> %s", series_id, e)
+        return None
+
 def remove_seasons_from_gaps_list(tmdb_id: str, seasons_to_remove: List[int]):
     """从指定项目的 watchlist_missing_info_json['seasons_with_gaps'] 列表中移除指定的季号。"""
     if not seasons_to_remove:

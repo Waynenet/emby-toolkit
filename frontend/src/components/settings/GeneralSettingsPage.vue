@@ -1309,15 +1309,15 @@
                         <n-button 
                           type="warning" 
                           ghost 
-                          :loading="isResettingMappings" 
+                          :loading="isResettingEmbyAssociations"
                           class="action-button"
-                          @click="showResetMappingsModal"
+                          @click="showResetEmbyAssociationsModal"
                         >
                           <template #icon><n-icon :component="SyncIcon" /></template>
-                          重置Emby数据
+                          重置 Emby 关联
                         </n-button>
                       </n-space>
-                      <p class="description-text"><b>导出：</b>将数据库中的一个或多个表备份为 JSON.GZ 文件。<br><b>导入：</b>从 JSON.GZ 备份文件中恢复数据。<br><b>清空：</b>删除指定表中的所有数据，此操作不可逆。<br><b>清空向量：</b>更换ai后，必须执行此操作。不同模型生成的向量不兼容，混用会导致推荐结果完全错误。清空后需重新扫描生成。<br><b>清理离线：</b>移除已删除且无订阅状态的残留记录，给数据库瘦身。<br><b>校准：</b>修复导入数据可能引起的自增序号错乱的问题。<br><b>重置：</b>在重建 Emby 媒体库后，使用此功能清空所有旧的 Emby 关联数据（用户、合集、播放状态等），并保留核心元数据，以便后续重新扫描和关联。</p>
+                      <p class="description-text"><b>导出：</b>将数据库中的一个或多个表备份为 JSON.GZ 文件。<br><b>导入：</b>从 JSON.GZ 备份文件中恢复数据。<br><b>清空：</b>删除指定表中的所有数据，此操作不可逆。<br><b>清空向量：</b>更换ai后，必须执行此操作。不同模型生成的向量不兼容，混用会导致推荐结果完全错误。清空后需重新扫描生成。<br><b>清理离线：</b>移除已删除且无订阅状态的残留记录，给数据库瘦身。<br><b>校准：</b>修复导入数据可能引起的自增序号错乱的问题。<br><b>重置 Emby 关联：</b>仅解除旧媒体 ItemID、停用旧合集并清理派生索引；保留 Emby 用户、授权、媒体源指纹、元数据、图片缓存和订阅状态。</p>
                     </n-space>
                   </n-card>
                 </n-gi>
@@ -1876,22 +1876,22 @@
         </n-space>
       </template>
     </n-modal>
-  <!-- 重置演员映射模态框 -->
+  <!-- 重置 Emby 关联模态框 -->
   <n-modal 
-    v-model:show="resetMappingsModalVisible" 
+    v-model:show="resetEmbyAssociationsModalVisible"
     preset="dialog" 
-    title="确认重置Emby数据"
+    title="确认重置 Emby 关联"
     :style="modalStyle(520)"
     class="glass-modal"
   >
     <n-alert title="高危操作警告" type="warning" style="margin-bottom: 15px;">
-      <p style="margin: 0 0 8px 0;">此操作将 <strong>清空所有Emby相关数据</strong>。</p>
-      <p style="margin: 0 0 8px 0;">它会保留宝贵的 元数据以及演员映射，以便在全量扫描后自动重新关联。</p>
-      <p class="warning-text" style="margin: 0;"><strong>请仅在您已经或将要重建 Emby 媒体库时执行此操作。</strong></p>
+      <p style="margin: 0 0 8px 0;">此操作会解除媒体项与旧 Emby ItemID 的关联，并清理播放缓存、洗版和去重索引。</p>
+      <p style="margin: 0 0 8px 0;">Emby 用户、ETK 授权、媒体源指纹、元数据、图片缓存和订阅状态都会保留。</p>
+      <p class="warning-text" style="margin: 0;"><strong>仅在 Emby 媒体库已删除并准备重建时执行。</strong></p>
     </n-alert>
     <template #action>
-      <n-button @click="resetMappingsModalVisible = false">取消</n-button>
-      <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings">确认重置</n-button>
+      <n-button @click="resetEmbyAssociationsModalVisible = false">取消</n-button>
+      <n-button type="warning" @click="handleResetEmbyAssociations" :loading="isResettingEmbyAssociations">确认重置</n-button>
     </template>
   </n-modal>
   <!-- AI 提示词配置模态框 -->
@@ -2256,10 +2256,12 @@ const tableInfo = {
   'media_metadata': { cn: '媒体元数据', isSharable: true },
   'media_image_cache': { cn: '媒体图片缓存', isSharable: false },
   'media_image_policy_cache': { cn: '媒体图片策略缓存', isSharable: false },
+  'p115_intro_fingerprint_cache': { cn: '片头声纹缓存', isSharable: false },
   'resubscribe_rules': { cn: '媒体洗版规则', isSharable: false },
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },
   'emby_users': { cn: 'Emby用户', isSharable: false },
+  'emby_favorite_items': { cn: 'Emby精确收藏索引', isSharable: false },
   'user_media_data': { cn: 'Emby用户数据', isSharable: false },
   'user_templates': { cn: '用户权限模板', isSharable: false },
   'invitations': { cn: '邀请链接', isSharable: false },
@@ -2344,8 +2346,8 @@ const openDefaultStreamConfig = () => {
   defaultStreamModalRef.value?.open();
 };
 
-const isResettingMappings = ref(false);
-const resetMappingsModalVisible = ref(false);
+const isResettingEmbyAssociations = ref(false);
+const resetEmbyAssociationsModalVisible = ref(false);
 const availableLibraries = ref([]);
 const loadingLibraries = ref(false);
 const libraryError = ref(null);
@@ -2591,17 +2593,17 @@ const handleEmbyAuthorizationUpdated = (event) => {
   configModel.value.emby_api_key = '********';
   fetchEmbyLibrariesInternal();
 };
-const showResetMappingsModal = () => { resetMappingsModalVisible.value = true; };
-const handleResetActorMappings = async () => {
-  isResettingMappings.value = true;
+const showResetEmbyAssociationsModal = () => { resetEmbyAssociationsModalVisible.value = true; };
+const handleResetEmbyAssociations = async () => {
+  isResettingEmbyAssociations.value = true;
   try {
     const response = await axios.post('/api/actions/prepare-for-library-rebuild');
     message.success(response.data.message || 'Emby数据已成功重置！');
-    resetMappingsModalVisible.value = false;
+    resetEmbyAssociationsModalVisible.value = false;
   } catch (error) {
     message.error(error.response?.data?.error || '重置失败，请检查后端日志。');
   } finally {
-    isResettingMappings.value = false;
+    isResettingEmbyAssociations.value = false;
   }
 };
 const testProxy = async () => {

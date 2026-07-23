@@ -14,7 +14,7 @@ from .actors import (task_enrich_aliases, task_persons_translation,
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
 from .media import task_role_translation, task_populate_metadata_cache, task_backfill_media_metadata, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_mediainfo, task_repair_p115_fingerprints, task_fill_missing_video_screenshots, task_fill_studio_images
-from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance
+from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance, task_intro_fingerprint_backfill
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
 from .subscriptions import task_auto_subscribe, task_manual_subscribe_batch
@@ -42,6 +42,7 @@ TASK_HELP_TEXTS = {
     'role-translation': '为影视条目中的角色名补充中文显示，让演员角色展示更友好。',
     'actor-translation': '为演员、导演等人物信息补充中文名。',
     'process-watchlist': '刷新智能追剧列表，检查连载剧更新、补充集图片和元数据。',
+    'intro-fingerprint-backfill': '按当前触发策略扫描缺少片头/片尾章节的季；入库即扫覆盖所选媒体库存量，播放过半仅实时提取。',
     'actor-tracking': '刷新演员订阅，根据关注演员检查新作品并触发后续订阅处理。',
     'custom-collections': '刷新全部自建合集，重新拉取榜单并匹配、订阅。',
     'auto-subscribe': '统一处理电影、剧集、追更和求资源等订阅需求，按规则搜索、转存或登记缺口。',
@@ -293,6 +294,7 @@ def get_task_registry(context: str = 'all'):
         'actor-translation': (task_persons_translation, "中文化人物名", 'media', True),
         'process-watchlist': (task_process_watchlist, "刷新智能追剧", 'watchlist', True),
         'subscribe-assistant-maintenance': (task_subscribe_assistant_maintenance, "订阅助手巡检", 'watchlist', True),
+        'intro-fingerprint-backfill': (task_intro_fingerprint_backfill, "片头片尾提取", 'watchlist', True),
         'actor-tracking': (task_process_actor_subscriptions, "刷新演员订阅", 'actor', True),
         'custom-collections': (task_process_all_custom_collections, "刷新自建合集", 'media', True),
         'auto-subscribe': (task_auto_subscribe, "统一订阅处理", 'media', True),

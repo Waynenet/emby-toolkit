@@ -90,6 +90,27 @@ watchlist_bp = Blueprint('watchlist', __name__, url_prefix='/api/watchlist')
 
 logger = logging.getLogger(__name__)
 
+_INTRO_DETECTION_TRIGGER_MODES = {'off', 'import', 'favorite', 'playback'}
+
+
+def _normalize_intro_detection_trigger_mode(value):
+    mode = str(value or '').strip().lower()
+    return mode if mode in _INTRO_DETECTION_TRIGGER_MODES else 'off'
+
+
+def _normalize_intro_detection_library_ids(value):
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for item in value:
+        library_id = str(item or '').strip()
+        if library_id and library_id not in seen:
+            seen.add(library_id)
+            result.append(library_id)
+    return result
+
+
 # 2. 使用蓝图定义路由
 @watchlist_bp.route('', methods=['GET']) # 注意：这里的路径是空的，因为前缀已经定义
 @admin_required
@@ -375,6 +396,9 @@ def api_watchlist_settings():
         "douban_count_correction": False,
         "revival_check_days": 365,
         "tg_channel_tracking": False,
+        "intro_detection_trigger_mode": "off",
+        "intro_detection_credits_enabled": False,
+        "intro_detection_library_ids": [],
     }
 
     if request.method == 'GET':
@@ -387,6 +411,15 @@ def api_watchlist_settings():
                 **default_config,
                 **{k: v for k, v in saved_config.items() if k in default_config},
             }
+            if 'intro_detection_trigger_mode' in saved_config:
+                final_config['intro_detection_trigger_mode'] = _normalize_intro_detection_trigger_mode(
+                    saved_config.get('intro_detection_trigger_mode')
+                )
+            elif settings_db.migrate_legacy_intro_detection_trigger_mode():
+                final_config['intro_detection_trigger_mode'] = 'import'
+            final_config['intro_detection_library_ids'] = _normalize_intro_detection_library_ids(
+                final_config.get('intro_detection_library_ids')
+            )
             return jsonify(final_config), 200
         except Exception as e:
             logger.error(f"获取追剧配置失败: {e}", exc_info=True)
@@ -397,11 +430,33 @@ def api_watchlist_settings():
             new_config = request.json
             if not isinstance(new_config, dict):
                 return jsonify({"error": "配置格式错误"}), 400
-            allowed_keys = set(default_config.keys())
-            new_config = {k: new_config.get(k, v) for k, v in default_config.items() if k in allowed_keys}
+            current_config = settings_db.get_setting(CONFIG_KEY) or {}
+            current_config = current_config if isinstance(current_config, dict) else {}
+            if (
+                'intro_detection_trigger_mode' not in current_config
+                and 'intro_detection_trigger_mode' not in new_config
+                and settings_db.migrate_legacy_intro_detection_trigger_mode()
+            ):
+                current_config = {
+                    **current_config,
+                    'intro_detection_trigger_mode': 'import',
+                }
+
+            updated_config = dict(current_config)
+            for key, default in default_config.items():
+                if key in new_config:
+                    updated_config[key] = new_config[key]
+                elif key not in updated_config:
+                    updated_config[key] = default
+            updated_config['intro_detection_trigger_mode'] = _normalize_intro_detection_trigger_mode(
+                updated_config.get('intro_detection_trigger_mode')
+            )
+            updated_config['intro_detection_library_ids'] = _normalize_intro_detection_library_ids(
+                updated_config.get('intro_detection_library_ids')
+            )
             
             # 保存到数据库
-            settings_db.save_setting(CONFIG_KEY, new_config)
+            settings_db.save_setting(CONFIG_KEY, updated_config)
             return jsonify({"message": "追剧策略配置已保存"}), 200
         except Exception as e:
             logger.error(f"保存追剧配置失败: {e}", exc_info=True)

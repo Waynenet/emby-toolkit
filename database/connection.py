@@ -139,6 +139,19 @@ def init_db():
                     )
                 """)
 
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS emby_favorite_items (
+                        user_id TEXT NOT NULL,
+                        item_id TEXT NOT NULL,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        PRIMARY KEY (user_id, item_id)
+                    )
+                """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_emby_favorite_items_item "
+                    "ON emby_favorite_items(item_id)"
+                )
+
                 logger.trace("  ➜ 正在创建 'collections_info' 表 ...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS collections_info (
@@ -556,6 +569,17 @@ def init_db():
                         raw_ffprobe_json JSONB,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         hit_count INTEGER DEFAULT 0
+                    )
+                """)
+
+                logger.trace("  ➜ 正在创建 'p115_intro_fingerprint_cache' 表 (ETK 自主片头指纹缓存)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS p115_intro_fingerprint_cache (
+                        sha1 TEXT PRIMARY KEY,
+                        fingerprint_zlib BYTEA NOT NULL,
+                        fingerprint_count INTEGER NOT NULL DEFAULT 0,
+                        sample_seconds INTEGER NOT NULL DEFAULT 600,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     )
                 """)
 

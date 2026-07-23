@@ -66,6 +66,60 @@ def upsert_user_media_data(data: Dict[str, Any]):
         logger.error(f"DB: 更新用户媒体数据失败 for user {user_id}, item {item_id}: {e}", exc_info=True)
         raise
 
+
+def set_emby_favorite_item(user_id: str, item_id: str, is_favorite: bool) -> None:
+    """Persist the exact Emby item that a user has favorited.
+
+    Playback history intentionally aggregates Episodes onto Series in
+    ``user_media_data``.  Intro detection instead needs the original Emby
+    item identity so Series, Season, and Episode favorites remain distinct.
+    """
+    user_id = str(user_id or '').strip()
+    item_id = str(item_id or '').strip()
+    if not user_id or not item_id:
+        return
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                if is_favorite:
+                    cursor.execute(
+                        """
+                        INSERT INTO emby_favorite_items (user_id, item_id, updated_at)
+                        VALUES (%s, %s, NOW())
+                        ON CONFLICT (user_id, item_id)
+                        DO UPDATE SET updated_at = NOW()
+                        """,
+                        (user_id, item_id),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM emby_favorite_items WHERE user_id=%s AND item_id=%s",
+                        (user_id, item_id),
+                    )
+            conn.commit()
+    except Exception as e:
+        logger.error("DB: 保存 Emby 收藏状态失败 user=%s item=%s: %s", user_id, item_id, e, exc_info=True)
+        raise
+
+
+def has_any_emby_favorite(item_ids: List[str]) -> bool:
+    """Return whether any user has favorited one of the exact Emby item IDs."""
+    ids = list({str(item_id or '').strip() for item_id in item_ids if str(item_id or '').strip()})
+    if not ids:
+        return False
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT EXISTS(SELECT 1 FROM emby_favorite_items WHERE item_id = ANY(%s)) AS matched",
+                    (ids,),
+                )
+                row = cursor.fetchone()
+                return bool(row and row.get('matched'))
+    except Exception as e:
+        logger.error("DB: 查询 Emby 收藏状态失败: %s", e, exc_info=True)
+        return False
+
 def upsert_user_media_data_batch(user_id: str, items_data: List[Dict[str, Any]]):
     """【V1】为一个指定用户，批量更新或插入其所有媒体的状态。"""
     

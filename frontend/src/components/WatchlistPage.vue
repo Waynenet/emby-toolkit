@@ -419,6 +419,60 @@
                   </div>
                 </div>
               </div>
+              <n-divider style="margin: 0" />
+              <div class="setting-item">
+                <div class="setting-icon"><n-icon :component="ScanIcon" /></div>
+                <div class="setting-content">
+                  <div class="setting-header">
+                    <div>
+                      <div class="setting-label">片头声纹提取</div>
+                      <div class="setting-desc">按触发方式提取片头声纹；详细规则见 Wiki。</div>
+                    </div>
+                    <n-select
+                      v-model:value="watchlistConfig.intro_detection_trigger_mode"
+                      :options="introDetectionTriggerOptions"
+                      size="small"
+                      style="width: 160px"
+                    />
+                  </div>
+                </div>
+              </div>
+              <n-divider style="margin: 0" />
+              <div class="setting-item">
+                <div class="setting-icon"><n-icon :component="CollectionsIcon" /></div>
+                <div class="setting-content">
+                  <div class="setting-header">
+                    <div>
+                      <div class="setting-label">媒体库范围</div>
+                      <div class="setting-desc">不选则不限制；建议排除超大库。</div>
+                    </div>
+                    <n-select
+                      v-model:value="watchlistConfig.intro_detection_library_ids"
+                      :options="introDetectionLibraryOptions"
+                      :loading="introDetectionLibrariesLoading"
+                      multiple
+                      filterable
+                      clearable
+                      max-tag-count="responsive"
+                      size="small"
+                      style="width: 280px"
+                    />
+                  </div>
+                </div>
+              </div>
+              <n-divider style="margin: 0" />
+              <div class="setting-item">
+                <div class="setting-icon"><n-icon :component="TimeIcon" /></div>
+                <div class="setting-content">
+                  <div class="setting-header">
+                    <div>
+                      <div class="setting-label">提取片尾起点</div>
+                      <div class="setting-desc">额外写入片尾起点；客户端是否跳过由 Emby 决定。</div>
+                    </div>
+                    <n-switch v-model:value="watchlistConfig.intro_detection_credits_enabled" size="small" />
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -486,17 +540,55 @@ const showConfigModal = ref(false);
 const configSaving = ref(false);
 
 const buildWatchlistConfig = (data = {}) => {
+  const introDetectionTriggerMode = ['off', 'import', 'favorite', 'playback'].includes(data.intro_detection_trigger_mode)
+    ? data.intro_detection_trigger_mode
+    : 'off';
   return {
     douban_count_correction: data.douban_count_correction ?? false,
     revival_check_days: data.revival_check_days ?? 365,
-    tg_channel_tracking: data.tg_channel_tracking ?? false
+    tg_channel_tracking: data.tg_channel_tracking ?? false,
+    intro_detection_trigger_mode: introDetectionTriggerMode,
+    intro_detection_credits_enabled: data.intro_detection_credits_enabled ?? false,
+    intro_detection_library_ids: Array.isArray(data.intro_detection_library_ids)
+      ? data.intro_detection_library_ids.map(id => String(id)).filter(Boolean)
+      : []
   };
 };
 
+const introDetectionTriggerOptions = [
+  { label: '关闭', value: 'off' },
+  { label: '入库即扫', value: 'import' },
+  { label: '仅扫收藏', value: 'favorite' },
+  { label: '播放过半', value: 'playback' }
+];
+
 const watchlistConfig = ref(buildWatchlistConfig());
+const introDetectionLibraries = ref([]);
+const introDetectionLibrariesLoading = ref(false);
+const introDetectionLibraryOptions = computed(() =>
+  introDetectionLibraries.value.map(lib => ({
+    label: lib.Name,
+    value: String(lib.Id)
+  }))
+);
+
+const fetchIntroDetectionLibraries = async () => {
+  if (introDetectionLibrariesLoading.value || introDetectionLibraries.value.length > 0) return;
+  introDetectionLibrariesLoading.value = true;
+  try {
+    const { data } = await axios.get('/api/emby_libraries');
+    introDetectionLibraries.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.warn('获取 Emby 媒体库失败', e);
+    introDetectionLibraries.value = [];
+  } finally {
+    introDetectionLibrariesLoading.value = false;
+  }
+};
 
 const openConfigModal = async () => {
   showConfigModal.value = true;
+  fetchIntroDetectionLibraries();
   try {
     const { data } = await axios.get('/api/watchlist/settings');
     if (data) {

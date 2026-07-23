@@ -434,16 +434,16 @@ def api_correct_all_sequences():
         logger.error(f"API调用api_correct_all_sequences时发生错误: {e}", exc_info=True)
         return jsonify({"error": "服务器在处理时发生内部错误"}), 500
     
-# --- 重置Emby数据 ---
+# --- 重置 Emby 关联 ---
 @db_admin_bp.route('/actions/prepare-for-library-rebuild', methods=['POST'])
 @admin_required
 def api_prepare_for_library_rebuild():
-    logger.warning("接收到“为 Emby 重建做准备”的请求，这是一个高危操作，将重置所有 Emby 关联数据。")
+    logger.warning("接收到“重置 Emby 关联”的请求，将解除旧 ItemID 并清理派生缓存，保留用户和核心媒体数据。")
     try:
         # ### 核心修改：调用新的数据库函数 ###
         results = maintenance_db.prepare_for_library_rebuild()
         
-        message = "为 Emby 媒体库重建的准备工作已成功完成！"
+        message = "Emby 关联已重置，用户、授权、媒体源和核心元数据均已保留。"
         logger.info(message)
         return jsonify({"message": message, "details": results}), 200
         

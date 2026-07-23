@@ -37,6 +37,15 @@ def task_process_watchlist(
             subscription_triggering_episode_ids=subscription_triggering_episode_ids,
             skip_logical_share_dispatch=not bool(tmdb_id),
         )
+        if tmdb_id and new_episode_ids:
+            try:
+                from handler import intro_detection_service
+                intro_detection_service.enqueue_imported_episode_ids(
+                    new_episode_ids,
+                    allow_playback_followup=True,
+                )
+            except Exception as e:
+                logger.debug(f"  ➜ [片头声纹提取] 智能追剧完成后分派入库扫描失败: {e}", exc_info=True)
 
     except Exception as e:
         task_name = "追剧列表更新"
@@ -239,6 +248,42 @@ def task_subscribe_assistant_maintenance(processor):
             f"清理删除记录 {stats.get('delete_records_cleaned', 0)}"
         )
         logger.info(f"  ➜ [增强订阅助手] {message}")
+        progress_updater(100, message)
+    except Exception as e:
+        logger.error(f"执行 '{task_name}' 时发生错误: {e}", exc_info=True)
+        progress_updater(-1, f"任务失败: {e}")
+
+
+def task_intro_fingerprint_backfill(processor):
+    """提交片头片尾提取队列，供任务链定时兜底。"""
+    task_name = "片头片尾提取"
+
+    def progress_updater(progress, message):
+        task_manager.update_status_from_thread(progress, message)
+
+    try:
+        progress_updater(10, "正在按当前触发策略扫描缺失片头/片尾章节的季...")
+        from handler import intro_detection_service
+
+        result = intro_detection_service.enqueue_active_backfill(limit=50, force=True)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or result.get("reason") or "提交失败")
+
+        if result.get("skipped"):
+            message = (
+                "播放过半模式仅实时提取，已跳过。"
+                if result.get("reason") == "playback_realtime_only"
+                else "片头片尾提取未开启，已跳过。"
+            )
+        else:
+            queued = int(result.get("count") or 0)
+            candidates = int(result.get("candidates") or 0)
+            scope_label = "所选媒体库" if result.get("scope") == "library" else "收藏范围"
+            if queued:
+                message = f"已从{scope_label}提交 {queued}/{candidates} 个缺章节的季，后台继续提取。"
+            else:
+                message = f"扫描完成：{scope_label}没有发现需要补扫的季。"
+        logger.info(f"  ➜ [片头片尾提取] {message}")
         progress_updater(100, message)
     except Exception as e:
         logger.error(f"执行 '{task_name}' 时发生错误: {e}", exc_info=True)
