@@ -102,6 +102,10 @@ class WatchlistProcessor:
         self.douban_api = douban_api
         self._stop_event = threading.Event()
         self.progress_callback = None
+        
+        # ★★★ 新增这行：创建一个专门用于保护本地文件写入的线程锁 ★★★
+        self._file_lock = threading.Lock()
+        
         logger.trace("WatchlistProcessor 初始化完成。")
 
     # --- 线程控制 ---
@@ -640,8 +644,7 @@ class WatchlistProcessor:
 
     def _save_local_json(self, relative_path: str, new_data: Dict[str, Any]):
         """
-        保存数据到本地 JSON 缓存文件 (智能合并模式)。
-        - ★★★ 智能保护：'series.json' 不更新 'name'，但 'season-*.json' 会更新 'name'。
+        保存数据到本地 JSON 缓存文件 (智能合并模式 + 线程安全)。
         """
         if not self.local_data_path:
             return
@@ -649,63 +652,58 @@ class WatchlistProcessor:
         full_path = os.path.join(self.local_data_path, relative_path)
         filename = os.path.basename(full_path)
         
-        # ★★★ 关键检查：如果文件不存在，直接放弃，绝不创建“残缺”文件 ★★★
+        # 如果文件不存在，直接放弃，无需拿锁
         if not os.path.exists(full_path):
             logger.trace(f"  ➜ 本地缓存文件不存在，跳过更新: {filename}")
             return
 
-        try:
-            # 读取现有文件
-            with open(full_path, 'r', encoding='utf-8') as f:
-                final_data = json.load(f)
+        # ★★★ 新增：使用线程锁包裹整个“读-修改-写”过程，保证并发安全 ★★★
+        with self._file_lock:
+            try:
+                # 读取现有文件
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    final_data = json.load(f)
 
-            # 定义要更新的字段 (TMDb 字段 -> JSON 字段)
-            fields_to_update = {
-                # --- 基础视觉与文本 ---
-                "overview": "overview",           # 简介
-                "poster_path": "poster_path",     # 海报
-                "backdrop_path": "backdrop_path", # 背景
-                "still_path": "still_path",       # 剧照
-                "tagline": "tagline",             # 标语
-                
-                # --- 日期 ---
-                "first_air_date": "release_date", # 首播日期 (Series)
-                "air_date": "release_date",       # 播出日期 (Episode/Season)
-                
-                # --- ★★★ 新增：核心元数据 ★★★ ---
-                "genres": "genres",                         # 类型 (对象数组)
-                "keywords": "keywords",                     # 关键词 (对象结构)
-                "content_ratings": "content_ratings",       # 分级信息 (对象结构)
-                "origin_country": "origin_country",         # 产地 (字符串数组)
-                "production_companies": "production_companies", # 制作公司 (对象数组)
-                
-                # --- ★★★ 新增：评分与状态 ★★★ ---
-                "vote_average": "vote_average",   # 评分
-                "vote_count": "vote_count",       # 评分人数
-                "popularity": "popularity"        # 热度
-            }
+                # 定义要更新的字段 (TMDb 字段 -> JSON 字段)
+                fields_to_update = {
+                    "overview": "overview",
+                    "poster_path": "poster_path",
+                    "backdrop_path": "backdrop_path",
+                    "still_path": "still_path",
+                    "tagline": "tagline",
+                    "first_air_date": "release_date",
+                    "air_date": "release_date",
+                    "genres": "genres",
+                    "keywords": "keywords",
+                    "content_ratings": "content_ratings",
+                    "origin_country": "origin_country",
+                    "production_companies": "production_companies",
+                    "vote_average": "vote_average",
+                    "vote_count": "vote_count",
+                    "popularity": "popularity"
+                }
 
-            # 差异化保护：只有非 series.json 才允许更新标题
-            if 'series.json' not in filename:
-                fields_to_update["name"] = "name"
+                # 差异化保护：只有非 series.json 才允许更新标题
+                if 'series.json' not in filename:
+                    fields_to_update["name"] = "name"
 
-            # 执行合并更新
-            updated = False
-            for tmdb_key, json_key in fields_to_update.items():
-                if tmdb_key in new_data and new_data[tmdb_key] is not None:
-                    # 只有值真的变了才更新，减少文件IO
-                    if final_data.get(json_key) != new_data[tmdb_key]:
-                        final_data[json_key] = new_data[tmdb_key]
-                        updated = True
+                # 执行合并更新
+                updated = False
+                for tmdb_key, json_key in fields_to_update.items():
+                    if tmdb_key in new_data and new_data[tmdb_key] is not None:
+                        # 只有值真的变了才更新，减少文件IO
+                        if final_data.get(json_key) != new_data[tmdb_key]:
+                            final_data[json_key] = new_data[tmdb_key]
+                            updated = True
 
-            # 只有发生变更时才写入
-            if updated:
-                with open(full_path, 'w', encoding='utf-8') as f:
-                    json.dump(final_data, f, ensure_ascii=False, indent=4)
-                logger.debug(f"  ➜ 已刷新本地元数据: {filename}")
+                # 只有发生变更时才写入
+                if updated:
+                    with open(full_path, 'w', encoding='utf-8') as f:
+                        json.dump(final_data, f, ensure_ascii=False, indent=4)
+                    logger.debug(f"  ➜ 已刷新本地元数据: {filename}")
             
-        except Exception as e:
-            logger.error(f"更新本地缓存文件失败: {full_path}, 错误: {e}")
+            except Exception as e:
+                logger.error(f"更新本地缓存文件失败: {full_path}, 错误: {e}")
 
     # --- 通用的元数据刷新辅助函数 ---
     def _refresh_series_metadata(self, tmdb_id: str, item_name: str, item_id: Optional[str]) -> Optional[tuple]:
