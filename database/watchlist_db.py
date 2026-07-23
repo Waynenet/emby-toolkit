@@ -646,17 +646,16 @@ def batch_import_series_as_completed(library_ids: Optional[List[str]] = None) ->
         logger.error(f"  ➜ 批量导入剧集时出错: {e}", exc_info=True)
         raise
 
-def _build_library_filter_sql(library_ids: List[str]) -> str:
+def _build_library_filter_sql(library_ids: List[str]) -> tuple[str, list]:
     """
-    (内部辅助) 构建用于筛选媒体库的 SQL 片段。
-    逻辑：剧集本身在库中 OR 剧集的任意一集在库中。
+    (内部辅助) 构建用于筛选媒体库的 SQL 片段及对应的参数列表。
     """
-    # 确保 ID 是字符串
+    if not library_ids:
+        return "", []
+
     lib_ids_str = [str(lid) for lid in library_ids]
-    # 将列表转为 SQL 数组字符串，例如: '{123, 456}'
-    array_literal = "{" + ",".join(lib_ids_str) + "}"
     
-    return f"""
+    sql = """
         AND tmdb_id IN (
             -- 1. 通过单集反查
             SELECT DISTINCT parent_series_tmdb_id
@@ -667,7 +666,7 @@ def _build_library_filter_sql(library_ids: List[str]) -> str:
               AND EXISTS (
                   SELECT 1
                   FROM jsonb_array_elements(asset_details_json) AS elem
-                  WHERE elem->>'source_library_id' = ANY('{array_literal}'::text[])
+                  WHERE elem->>'source_library_id' = ANY(%s)
               )
             
             UNION
@@ -681,20 +680,16 @@ def _build_library_filter_sql(library_ids: List[str]) -> str:
               AND EXISTS (
                   SELECT 1
                   FROM jsonb_array_elements(asset_details_json) AS elem
-                  WHERE elem->>'source_library_id' = ANY('{array_literal}'::text[])
+                  WHERE elem->>'source_library_id' = ANY(%s)
               )
         )
     """
+    # 返回 SQL 字符串 以及 对应 %s 占位符的参数列表
+    return sql, [lib_ids_str, lib_ids_str]
 
 def get_gap_scan_candidates(library_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """
     获取“缺集扫描”任务的候选剧集。
-    
-    筛选条件（全部在 SQL 中完成）：
-    1. item_type = 'Series'
-    2. 状态不是 'Watching' 或 'Paused' (由主任务负责)
-    3. 订阅状态不是 'IGNORED' (尊重用户选择)
-    4. (可选) 属于指定的媒体库
     """
     base_sql = """
         SELECT tmdb_id, title as item_name, watching_status as status, subscription_status
@@ -703,36 +698,31 @@ def get_gap_scan_candidates(library_ids: Optional[List[str]] = None) -> List[Dic
           AND watching_status NOT IN ('Watching', 'Paused')
           AND subscription_status != 'IGNORED'
     """
+    params = []
     
+    # ★ 修改点：接收 tuple，拆分 SQL 与 参数
     if library_ids:
-        base_sql += _build_library_filter_sql(library_ids)
+        filter_sql, filter_params = _build_library_filter_sql(library_ids)
+        base_sql += filter_sql
+        params.extend(filter_params) # 追加参数
         
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(base_sql)
+            # ★ 修改点：传递 tuple(params) 进去
+            cursor.execute(base_sql, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(f"  ➜ 获取缺集扫描候选列表时出错: {e}", exc_info=True)
         return []
 
 def find_missing_old_seasons(library_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """
-    【高效补旧番】直接从数据库查找缺失的旧季。
-    逻辑：
-    1. 找出每部剧的最大季号 (Max Season)。
-    2. 找出所有 season_number < Max Season 且 in_library = FALSE 的季。
-    3. 排除被标记为 IGNORED 的季。
-    4. ★新增：必须是已被智能追剧模块接管的剧集 (watching_status != 'NONE')。
-    """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             
-            # 基础 SQL：关联查询找出比最大季号小的缺失季
             sql = """
                 WITH series_max_season AS (
-                    -- 1. 计算每部剧的最大季号
                     SELECT parent_series_tmdb_id, MAX(season_number) as max_seq
                     FROM media_metadata
                     WHERE item_type = 'Season' AND season_number > 0 AND in_library = TRUE
@@ -748,37 +738,34 @@ def find_missing_old_seasons(library_ids: Optional[List[str]] = None) -> List[Di
                     s.release_date,
                     s.poster_path,
                     s.overview,
-                    p.title as series_title -- 获取父剧集标题用于日志或展示
+                    p.title as series_title
                 FROM media_metadata s
                 JOIN series_max_season ms ON s.parent_series_tmdb_id = ms.parent_series_tmdb_id
                 LEFT JOIN media_metadata p ON s.parent_series_tmdb_id = p.tmdb_id
                 WHERE 
                     s.item_type = 'Season'
                     AND s.season_number > 0
-                    AND s.in_library = FALSE          -- 核心：本地没有
-                    AND s.season_number < ms.max_seq  -- 核心：小于最大季号 (即旧季)
-                    AND s.subscription_status != 'IGNORED' -- 尊重用户忽略
-                    
-                    -- ★★★ 新增条件：父剧集必须已被接管 (有状态) ★★★
+                    AND s.in_library = FALSE
+                    AND s.season_number < ms.max_seq
+                    AND s.subscription_status != 'IGNORED'
                     AND p.watching_status IS NOT NULL 
                     AND p.watching_status != 'NONE'
             """
 
-            # 如果指定了媒体库，需要过滤父剧集是否在指定库中
             params = []
+            # ★ 修改点：摒弃 f-string 字符串硬拼接，改用原生参数 %s
             if library_ids:
                 lib_ids_str = [str(lid) for lid in library_ids]
-                array_literal = "{" + ",".join(lib_ids_str) + "}"
-                
-                sql += f"""
+                sql += """
                     AND p.in_library = TRUE
                     AND p.asset_details_json IS NOT NULL
                     AND EXISTS (
                         SELECT 1
                         FROM jsonb_array_elements(p.asset_details_json) AS elem
-                        WHERE elem->>'source_library_id' = ANY('{array_literal}'::text[])
+                        WHERE elem->>'source_library_id' = ANY(%s)
                     )
                 """
+                params.append(lib_ids_str)
 
             cursor.execute(sql, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
@@ -790,13 +777,7 @@ def find_missing_old_seasons(library_ids: Optional[List[str]] = None) -> List[Di
 def get_series_by_dynamic_condition(condition_sql: str = None, library_ids: Optional[List[str]] = None, tmdb_id: Optional[str] = None, include_all_series: bool = False) -> List[Dict[str, Any]]:
     """
     根据动态条件获取剧集列表（用于 WatchlistProcessor）。
-    
-    :param condition_sql: SQL 条件片段
-    :param library_ids: 可选的媒体库 ID 列表
-    :param tmdb_id: 可选，指定单个 TMDb ID
-    :param include_all_series: 是否包含所有状态的剧集 (默认只查 watching_status != 'NONE')
     """
-    # 基础查询字段
     base_sql = """
         SELECT 
             tmdb_id,
@@ -818,24 +799,21 @@ def get_series_by_dynamic_condition(condition_sql: str = None, library_ids: Opti
     
     params = []
 
-    # 1. 优先处理单项查询
     if tmdb_id:
         base_sql += " AND tmdb_id = %s"
         params.append(tmdb_id)
     else:
-        # 2. 只有在非单项查询时，才应用状态过滤和库过滤
-        
-        # ★★★ 新增：控制是否过滤掉未追踪剧集 ★★★
         if not include_all_series:
              base_sql += " AND watching_status != 'NONE'"
 
-        # 拼接动态条件
         if condition_sql:
             base_sql += f" AND ({condition_sql})"
         
-        # 拼接媒体库过滤
+        # ★ 修改点：接收并拼接库过滤的 SQL 和 参数
         if library_ids:
-            base_sql += _build_library_filter_sql(library_ids)
+            filter_sql, filter_params = _build_library_filter_sql(library_ids)
+            base_sql += filter_sql
+            params.extend(filter_params)
         
     try:
         with get_db_connection() as conn:
