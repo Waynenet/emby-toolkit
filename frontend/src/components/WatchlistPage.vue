@@ -681,7 +681,7 @@ const filteredWatchlist = computed(() => {
   }
 
   if (currentView.value === 'inProgress') {
-    list = list.filter(item => ['Watching', 'Paused', 'Pending'].includes(item.status));
+    list = list.filter(item => ['Watching', 'Paused', 'Pending'].includes(item.status) && (item.collected_count || 0) > 0);
     if (filterStatus.value !== 'all') list = list.filter(item => item.status === filterStatus.value);
     if (filterMissing.value !== 'all') list = list.filter(item => hasMissingSeasons(item) === (filterMissing.value === 'yes'));
     if (filterGaps.value !== 'all') list = list.filter(item => hasGaps(item) === (filterGaps.value === 'yes'));
