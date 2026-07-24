@@ -13,7 +13,10 @@ import task_manager
 from .actors import (task_enrich_aliases, task_persons_translation, 
                      task_process_actor_subscriptions, task_merge_duplicate_actors,
                      task_purge_ghost_actors)
-from .media import task_role_translation, task_populate_metadata_cache, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_local_cache_from_db, task_fill_studio_images
+from .media import (task_role_translation, task_populate_metadata_cache, 
+                    task_execute_auto_tagging_rules, task_scan_monitor_folders, 
+                    task_restore_local_cache_from_db, task_fill_studio_images,
+                    task_elevate_directors) # ★ 新增导入
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_subscribe_assistant_maintenance
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
 from .tmdb_collections import task_refresh_collections
@@ -92,9 +95,6 @@ def _task_run_chain_internal(processor, task_name: str, sequence_config_key: str
             try:
                 target_processor = None
                 if processor_type == 'media':
-                    # ★★★ 核心修复 ★★★
-                    # 优先使用传递给任务链的 processor 实例。
-                    # 这个 processor 就是主 media_processor_instance。
                     target_processor = processor
                 elif processor_type == 'watchlist':
                     target_processor = extensions.watchlist_processor_instance
@@ -105,11 +105,12 @@ def _task_run_chain_internal(processor, task_name: str, sequence_config_key: str
                     logger.error(f"任务链错误：无法为任务 '{task_description}' 找到类型为 '{processor_type}' 的处理器实例，已跳过。")
                     continue
 
-                # ★★★ 核心修复：根据任务键，使用正确的关键字参数调用 ★★★
+                # ★★★ 核心配置：加入 elevate-directors，支持传递 force_full_update 参数 ★★★
                 tasks_requiring_force_flag = [
                     'role-translation', 
                     'enrich-aliases', 
-                    'populate-metadata'
+                    'populate-metadata',
+                    'elevate-directors' # ★ 新增：任务链中调用时默认使用增量模式(force_full_update=False)
                 ]
                 
                 if task_key in tasks_requiring_force_flag:
@@ -168,10 +169,7 @@ def task_run_chain_low_freq(processor):
 def get_task_registry(context: str = 'all'):
     """
     返回一个包含所有可执行任务的字典。
-    - 新增 'task-chain-high-freq' 和 'task-chain-low-freq' 两个独立的任务链入口。
     """
-    # 完整的任务注册表
-    # 格式: 任务Key: (任务函数, 任务描述, 处理器类型, 是否适合在任务链中运行)
     full_registry = {
         # --- 任务链本身，不能嵌套 ---
         'task-chain-high-freq': (task_run_chain_high_freq, "高频刷新任务链", 'media', False),
@@ -182,6 +180,7 @@ def get_task_registry(context: str = 'all'):
         'populate-metadata': (task_populate_metadata_cache, "同步媒体数据", 'media', True),
         'role-translation': (task_role_translation, "中文化角色名", 'media', True),
         'actor-translation': (task_persons_translation, "中文化人物名", 'media', True),
+        'elevate-directors': (task_elevate_directors, "导演API提权", 'media', True), # ★ 新增可加入任务链的提权任务
         'process-watchlist': (task_process_watchlist, "刷新智能追剧", 'watchlist', True),
         'subscribe-assistant-maintenance': (task_subscribe_assistant_maintenance, "订阅助手巡检", 'watchlist', True),
         'actor-tracking': (task_process_actor_subscriptions, "刷新演员订阅", 'actor', True),
@@ -197,7 +196,6 @@ def get_task_registry(context: str = 'all'):
         'refresh_completed_series': (task_refresh_completed_series, "全量刷新剧集", 'watchlist', True),
         'execute-auto-tagging-rules': (task_execute_auto_tagging_rules, "自动打标规则", 'media', True),
         'scan-monitor-folders': (task_scan_monitor_folders, "扫描监控目录", 'media', True),
-        'restore-cache-from-db': (task_restore_local_cache_from_db, "恢复覆盖缓存", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "扫描全库剧集", 'watchlist', False),
@@ -211,6 +209,7 @@ def get_task_registry(context: str = 'all'):
         'scan_old_seasons_backfill': (task_scan_old_seasons_backfill, "扫描缺季的剧", 'watchlist', False),
         'generate_embeddings': (task_generate_embeddings, "生成媒体向量", 'media', False),
         'fill-studio-images': (task_fill_studio_images, "补全工作室图标", 'media', False),
+        'restore-cache-from-db': (task_restore_local_cache_from_db, "恢复覆盖缓存", 'media', False),
     }
 
     if context == 'chain':

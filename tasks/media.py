@@ -173,6 +173,22 @@ def task_role_translation(processor, force_full_update: bool = False):
         force_full_update=force_full_update 
     )
 
+# ★★★ 导演 API 后置提权任务入口 ★★★
+def task_elevate_directors(processor, force_full_update: bool = False):
+    """
+    【任务项】导演 API 后置提权
+    - force_full_update=False (默认): 增量模式，自动跳过导演已位于首位的项目，速度极快。
+    - force_full_update=True: 全量模式，强制重新检查全库所有项目并矫正导演位置。
+    """
+    mode_desc = "全量" if force_full_update else "增量"
+    logger.info(f"  ➜ 准备启动“导演 API 后置提权”任务 ({mode_desc}模式)...")
+
+    # 调用 core_processor.py 中 MediaProcessor 类的全库/增量提权逻辑
+    processor.elevate_directors_in_library(
+        force_full_update=force_full_update,
+        update_status_callback=task_manager.update_status_from_thread
+    )
+
 # --- 使用手动编辑的结果处理媒体项 ---
 def task_manual_update(processor, item_id: str, manual_cast_list: list, item_name: str):
     """任务：使用手动编辑的结果处理媒体项"""

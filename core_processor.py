@@ -7,7 +7,7 @@ import re
 import copy
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from collections import defaultdict
 import threading
 from datetime import datetime, timezone
@@ -91,7 +91,7 @@ def _read_local_json(file_path: str) -> Optional[Dict[str, Any]]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except json.JSONDecodeError as e: # [优化] 精确捕获JSON解析异常
+    except json.JSONDecodeError as e:
         logger.error(f"解析本地JSON文件失败: {file_path}, 错误: {e}")
         return None
     except Exception as e:
@@ -104,11 +104,8 @@ def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episo
     """
     logger.debug(f"  ➜ 【演员聚合】开始为 '{series_data.get('name')}' 从内存中的TMDB数据聚合演员...")
     aggregated_cast_map = {}
-    
-    # [优化] 内存截断保护：超长剧集（如几百集动漫）避免聚合几千个客串演员导致内存爆炸
     MAX_ACTORS_TRACKED = 200 
 
-    # 1. 优先处理主剧集的演员列表
     main_cast = series_data.get("credits", {}).get("cast", [])
     for actor in main_cast:
         actor_id = actor.get("id")
@@ -116,9 +113,7 @@ def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episo
             aggregated_cast_map[actor_id] = actor
     logger.debug(f"  ➜ 从主剧集数据中加载了 {len(aggregated_cast_map)} 位主演员。")
 
-    # 2. 聚合所有分集的演员和客串演员
     for episode_data in all_episodes_data:
-        # [优化] 超过内存保护上限则停止聚合龙套演员
         if len(aggregated_cast_map) >= MAX_ACTORS_TRACKED:
             logger.debug(f"  ➜ 演员数量已达内存保护上限 ({MAX_ACTORS_TRACKED})，停止继续深度聚合。")
             break
@@ -130,9 +125,9 @@ def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episo
             actor_id = actor.get("id")
             if actor_id and actor_id not in aggregated_cast_map:
                 if 'order' not in actor:
-                    actor['order'] = 999  # 为客串演员设置高order值
+                    actor['order'] = 999
                 aggregated_cast_map[actor_id] = actor
-                if len(aggregated_cast_map) >= MAX_ACTORS_TRACKED: # [优化] 再次检查阈值
+                if len(aggregated_cast_map) >= MAX_ACTORS_TRACKED:
                     break
 
     full_aggregated_cast = list(aggregated_cast_map.values())
@@ -143,10 +138,8 @@ def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episo
 
 class MediaProcessor:
     def __init__(self, config: Dict[str, Any], ai_translator=None, douban_api=None):
-        # ★★★ 从 config 字典里解析出所有需要的属性 ★★★
         self.config = config
 
-        # 初始化我们的数据库管理员
         self.actor_db_manager = ActorDBManager()
         self.log_db_manager = LogDBManager()
 
@@ -167,7 +160,7 @@ class MediaProcessor:
             
         logger.trace("核心处理器初始化完成。")
 
-    # --- [优化] 抽离出来的独立方法：洗刷标题及提取中文名 ---
+    # --- 洗刷标题及提取中文名 ---
     def _resolve_clean_title(self, item_type: str, fresh_data: Dict[str, Any], aggregated_tmdb_data: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
         raw_title = fresh_data.get("title") if item_type == "Movie" else fresh_data.get("name")
         current_title = utils.clean_invisible_chars(raw_title)
@@ -213,7 +206,7 @@ class MediaProcessor:
         
         return current_title, original_title
 
-    # --- [优化] 抽离出来的独立方法：评估处理质量并写日志 ---
+    # --- 评估处理质量并写日志 ---
     def _evaluate_and_log_quality(self, cursor: psycopg2.extensions.cursor, item_details: Dict[str, Any], tmdb_id: str, 
                                   final_cast: List, original_cast_count: int, cache_row: Any, specific_episode_ids: Optional[List[str]]):
         item_id = item_details.get("Id")
@@ -315,22 +308,8 @@ class MediaProcessor:
             self._mark_item_as_processed(cursor, target_log_id, target_log_name, score=processing_score)
             self.log_db_manager.remove_from_failed_log(cursor, target_log_id)
 
-    # --- [优化版] 实时监控文件逻辑 (增加缓存跳过 & 支持批量延迟刷新) ---
+    # --- 实时监控文件逻辑---
     def process_file_actively(self, file_path: str, skip_refresh: bool = False) -> Optional[str]:
-        """
-        实时监控（优化版）：
-        1. 识别 TMDb ID。
-        2. 双向检查数据库和本地缓存，互补缺失数据。
-        3. 生成本地覆盖缓存文件 (Override Cache)。
-        4. (可选) 通知 Emby 刷新。
-        
-        Args:
-            file_path: 文件路径
-            skip_refresh: 是否跳过 Emby 刷新步骤 (用于批量处理时最后统一刷新)
-            
-        Returns:
-            str: 该文件所属的父目录路径 (如果处理成功)，否则返回 None
-        """
         folder_path = os.path.dirname(file_path)
         try:
             filename = os.path.basename(file_path)
@@ -338,14 +317,10 @@ class MediaProcessor:
             grandparent_path = os.path.dirname(folder_path)
             grandparent_name = os.path.basename(grandparent_path)
             
-            # =========================================================
-            # 步骤 1: 识别信息
-            # =========================================================
             tmdb_id = None
             search_query = None
             search_year = None
 
-            # 1.1 优先：直接从文件名/目录名解析 [tmdb-xxx] ID (秒级识别，无磁盘IO开销)
             tmdb_regex = r'(?:tmdb|tmdbid)[-_=\s]*(\d+)'
             match = re.search(tmdb_regex, folder_name, re.IGNORECASE)
             if not match:
@@ -359,9 +334,7 @@ class MediaProcessor:
                     tmdb_id = str(temp_id)
                     logger.info(f"  ➜ [实时监控] 本地正则成功提取 TMDb ID: {tmdb_id}")
 
-            # 1.2 备选：若未解析到 ID，提取标题和年份进行后续在线搜索
             if not tmdb_id:
-                # 优化：先尝试从目录名提取搜索信息
                 def is_season_folder(name: str) -> bool:
                     return bool(re.match(r'^(Season|S)\s*\d+|Specials', name, re.IGNORECASE))
                 def extract_title_year(text: str):
@@ -382,21 +355,16 @@ class MediaProcessor:
                     query = raw_title.replace('.', ' ').replace('_', ' ').strip(' -[]()')
                     return query, year
 
-                # 首先尝试 folder_name，如果是季目录（如 Season 1），则向上使用 grandparent_name
                 if is_season_folder(folder_name):
                     search_query, search_year = extract_title_year(grandparent_name)
                 else:
                     search_query, search_year = extract_title_year(folder_name)
 
-                # 如果目录名都没提取到有效标题，再用 filename
                 if not search_query or search_query == '':
                     search_query, search_year = extract_title_year(os.path.splitext(filename)[0])
 
                 logger.info(f"  ➜ [实时监控] 未找到ID，提取搜索信息: 标题='{search_query}', 年份='{search_year}'")
 
-            # =========================================================
-            # 步骤 2: 获取 TMDb 数据 (如果只有标题则搜索)
-            # =========================================================
             if not tmdb_id and search_query:
                 is_series_guess = bool(re.search(r'S\d+E\d+', filename, re.IGNORECASE))
                 search_type = 'tv' if is_series_guess else 'movie'
@@ -411,61 +379,46 @@ class MediaProcessor:
             if not is_valid_tmdb_id(tmdb_id): 
                 return None
 
-            # 确定类型
             is_series = bool(re.search(r'S\d+E\d+', filename, re.IGNORECASE))
             item_type = "Series" if is_series else "Movie"
 
-            # =========================================================
-            # 极速查重 (利用文件名比对)
-            # =========================================================
             try:
-                # 获取该 TMDb ID 下所有已入库的文件名 (含电影和所有分集)
                 known_files = media_db.get_known_filenames_by_tmdb_id(tmdb_id)
                 current_filename = os.path.basename(file_path)
                 
                 if current_filename in known_files:
                     logger.info(f"  ➜ [实时监控] 文件已完美入库 ({current_filename})，直接跳过。")
-                    return file_path # 即使跳过处理，也返回路径以便后续刷新检查
+                    return file_path
             except Exception as e:
                 logger.warning(f"  ➜ [实时监控] 查重失败，将继续常规流程: {e}")
 
-            # =========================================================
-            # ★★★ 核心升级：数据库与缓存双向互补检查 ★★★
-            # =========================================================
             should_skip_full_processing = False
             
-            # 1. 路径准备
             cache_folder_name = "tmdb-movies2" if item_type == "Movie" else "tmdb-tv"
             base_override_dir = os.path.join(self.local_data_path, "override", cache_folder_name, str(tmdb_id))
             main_json_filename = "all.json" if item_type == "Movie" else "series.json"
             main_json_path = os.path.join(base_override_dir, main_json_filename)
             file_exists = os.path.exists(main_json_path)
 
-            # 2. 数据库查询 (获取完整元数据 + 演员表)
             db_record = None
             db_actors = []
             
             with get_central_db_connection() as conn:
                 cursor = conn.cursor()
-                # A. 查主表
                 cursor.execute(f"SELECT * FROM media_metadata WHERE tmdb_id = %s AND item_type = %s", (str(tmdb_id), item_type))
                 row = cursor.fetchone()
                 if row:
                     db_record = dict(row)
-                    # B. 查演员 (如果主表存在)
                     if db_record.get('actors_json'):
                         try:
                             raw_actors = db_record['actors_json']
-                            # ★★★ 修复：兼容 list 和 str 两种类型 ★★★
                             if isinstance(raw_actors, str):
                                 actors_link = json.loads(raw_actors)
                             else:
                                 actors_link = raw_actors
 
-                            # 提取 tmdb_id 列表
                             actor_tmdb_ids = [a['tmdb_id'] for a in actors_link if 'tmdb_id' in a]
                             if actor_tmdb_ids:
-                                # 批量查询演员详情
                                 placeholders = ','.join(['%s'] * len(actor_tmdb_ids))
                                 sql = f"""
                                     SELECT *, primary_name AS name, tmdb_person_id AS tmdb_id
@@ -477,36 +430,28 @@ class MediaProcessor:
                                 actor_rows = cursor.fetchall()
                                 actor_map = {r['tmdb_id']: dict(r) for r in actor_rows}
                                 
-                                # 组装回有序列表
                                 for link in actors_link:
                                     tid = link.get('tmdb_id')
                                     if tid in actor_map:
                                         full_actor = actor_map[tid].copy()
-                                        full_actor['character'] = link.get('character') # 使用关系表里的角色名
+                                        full_actor['character'] = link.get('character')
                                         full_actor['order'] = link.get('order')
                                         db_actors.append(full_actor)
                                         
-                                # 按 order 排序
                                 db_actors.sort(key=lambda x: x.get('order', 999))
                         except Exception as e:
                             logger.warning(f"  ➜ [实时监控] 从数据库解析演员失败: {e}")
 
-            # 3. 决策逻辑分支
-            
-            # --- 分支 A: 数据库有，文件没有 -> 生成文件 (纸质存档缺失) ---
             if db_record and not file_exists and db_actors:
                 logger.info(f"  ➜ [实时监控] 命中数据库缓存 (ID:{tmdb_id})，但覆盖缓存缺失。正在从数据库生成覆盖缓存文件...")
                 try:
-                    # 1. 生成主 payload
                     from tasks.helpers import reconstruct_metadata_from_db
                     payload = reconstruct_metadata_from_db(db_record, db_actors)
 
-                    # ★★★ 新增：如果是剧集，需要查询并注入分季/分集数据 ★★★
                     if item_type == "Series":
                         with get_central_db_connection() as conn:
                             cursor = conn.cursor()
                             
-                            # A. 查分季
                             cursor.execute("SELECT * FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Season'", (str(tmdb_id),))
                             seasons_rows = cursor.fetchall()
                             seasons_data = []
@@ -521,10 +466,9 @@ class MediaProcessor:
                                 }
                                 seasons_data.append(s_data)
                             
-                            # B. 查分集
                             cursor.execute("SELECT * FROM media_metadata WHERE parent_series_tmdb_id = %s AND item_type = 'Episode'", (str(tmdb_id),))
                             episodes_rows = cursor.fetchall()
-                            episodes_data = {} # 字典格式 S1E1: data
+                            episodes_data = {}
                             
                             for e_row in episodes_rows:
                                 s_num = e_row['season_number']
@@ -542,7 +486,6 @@ class MediaProcessor:
                                 }
                                 episodes_data[key] = e_data
 
-                            # C. 注入 payload
                             if seasons_data:
                                 payload['seasons_details'] = seasons_data
                             if episodes_data:
@@ -550,7 +493,6 @@ class MediaProcessor:
                                 
                             logger.info(f"  ➜ [实时监控] 已从数据库恢复 {len(seasons_data)} 个季和 {len(episodes_data)} 个分集的数据。")
                     
-                    # 2. 构造上下文对象
                     fake_item_details = {
                         "Id": "pending", 
                         "Name": db_record.get('title'), 
@@ -558,7 +500,6 @@ class MediaProcessor:
                         "ProviderIds": {"Tmdb": tmdb_id}
                     }
                     
-                    # 3. 写入文件
                     self.sync_item_metadata(
                         item_details=fake_item_details,
                         tmdb_id=str(tmdb_id),
@@ -569,16 +510,13 @@ class MediaProcessor:
                 except Exception as e:
                     logger.error(f"  ➜ [实时监控] 从数据库恢复文件失败: {e}，将回退到在线刮削。")
 
-            # --- 分支 B: 文件有，数据库没有 -> 反哺数据库 (数字存档缺失) ---
             elif not db_record and file_exists:
                 logger.info(f"  ➜ [实时监控] 命中本地覆盖文件 (ID:{tmdb_id})，但数据库记录缺失。正在反哺数据库...")
                 try:
                     override_data = _read_local_json(main_json_path)
                     if override_data:
-                        # 提取演员
                         cast_data = (override_data.get('casts', {}) or override_data.get('credits', {})).get('cast', [])
                         
-                        # 构造伪造的 Emby 对象用于 upsert
                         fake_item_details = {
                             "Id": "pending", 
                             "Name": override_data.get('title') or override_data.get('name'), 
@@ -587,13 +525,12 @@ class MediaProcessor:
                             "DateCreated": datetime.now(timezone.utc)
                         }
                         
-                        # 写入数据库
                         with get_central_db_connection() as conn:
                             cursor = conn.cursor()
                             self._upsert_media_metadata(
                                 cursor=cursor,
                                 item_type=item_type,
-                                final_processed_cast=cast_data, # 直接使用文件里的演员
+                                final_processed_cast=cast_data,
                                 source_data_package=override_data,
                                 item_details_from_emby=fake_item_details
                             )
@@ -604,9 +541,7 @@ class MediaProcessor:
                 except Exception as e:
                     logger.error(f"  ➜ [实时监控] 反哺数据库失败: {e}，将回退到在线刮削。")
 
-            # --- 分支 C: 都有 -> 完美状态 ---
             elif db_record and file_exists:
-                # 检查是否需要更新 in_library 状态 (如果是新文件入库)
                 if db_record.get('in_library') is False:
                      logger.info(f"  ➜ [实时监控] 数据双全 (ID:{tmdb_id})，但数据库标记为离线。无需处理元数据，仅通知 Emby 刷新。")
                 else:
@@ -614,13 +549,9 @@ class MediaProcessor:
                 
                 should_skip_full_processing = True
 
-            # --- 分支 D: 都没有 -> 继续后续的 TMDb 在线流程 ---
             else:
                 logger.info(f"  ➜ [实时监控] 本地无缓存 (ID:{tmdb_id})，准备执行 TMDb 在线刮削...")
 
-            # =========================================================
-            # 步骤 3: 获取完整详情 & 准备核心处理
-            # =========================================================
             details = None
             aggregated_tmdb_data = None
             final_processed_cast = None
@@ -640,12 +571,8 @@ class MediaProcessor:
                     logger.error("  ➜ [实时监控] 无法获取 TMDb 详情，中止处理。")
                     return None
                 
-                # [优化] 调用新抽离的辅助函数，代码更清爽
                 current_title, original_title = self._resolve_clean_title(item_type, details, aggregated_tmdb_data)
 
-                # =================================================================
-                # ★★★ 提前获取豆瓣数据，充当免费权威翻译字典 ★★★
-                # =================================================================
                 douban_cast_raw = []
                 try:
                     dummy_emby_item = {
@@ -659,115 +586,26 @@ class MediaProcessor:
                 except Exception as e:
                     logger.warning(f"  ➜ [提前拦截] 获取豆瓣数据失败: {e}")
 
-                # =================================================================
-                # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
-                # =================================================================
-                # 准备演员源数据
-                authoritative_cast_source = []
-                directors_source = []
-                other_crew_source = []
+                # ★★★ 全员中文化 (豆瓣优先 + AI 音译/翻译兜底) ★★★
+                target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
+                self._update_crew_and_creators_with_douban_and_ai(
+                    details=target_tmdb_data,
+                    douban_cast_raw=douban_cast_raw,
+                    item_name=current_title or original_title
+                )
 
+                # ★★★ 标准官方规范：纯净抽取演员表 ★★★
                 if item_type == "Movie":
                     credits_source = details.get('credits') or details.get('casts') or {}
-                    raw_actors = credits_source.get('cast', [])
-                    raw_crew = credits_source.get('crew', [])
-                    
-                    seen_crew_ids = set()
-                    # 1. 提取主要导演 (最多2个，Order设为负数确保排在最前面)
-                    for c in raw_crew:
-                        c_id = c.get('id')
-                        if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
-                            c_copy = c.copy()
-                            c_copy['character'] = '导演'
-                            c_copy['order'] = -100 + len(directors_source) 
-                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
-                            directors_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
-                            
-                    # 2. 提取其他所有工作人员 (制片、编剧、原著等，排在最后面)
-                    for c in raw_crew:
-                        c_id = c.get('id')
-                        # 限制最多提取前8个核心幕后，防止 TMDb 上百个打杂人员导致 Emby 卡顿
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 8: 
-                            c_copy = c.copy()
-                            c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
-                            c_copy['order'] = 1000 + len(other_crew_source) 
-                            c_copy['_is_crew'] = True # ★★★ 核心标记：打上幕后人员的永久烙印
-                            other_crew_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
-                            
-                    actors_source = raw_actors
-
-                    # ★★★ 彻底清空原始 Crew 数据，防止出现两次及无头像杂鱼乱入 ★★★
-                    if 'credits' in details: details['credits']['crew'] = []
-                    if 'casts' in details: details['casts']['crew'] = []
-
+                    authoritative_cast_source = credits_source.get('cast', [])
                 elif item_type == "Series":
                     if aggregated_tmdb_data:
                         all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                        actors_source = _aggregate_series_cast_from_tmdb_data(details, all_episodes)
+                        authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(details, all_episodes)
                     else:
                         credits_source = details.get('aggregate_credits') or details.get('credits') or {}
-                        actors_source = credits_source.get('cast', [])
-                        
-                    seen_crew_ids = set()
-                    raw_crew = (details.get('aggregate_credits') or details.get('credits') or {}).get('crew', [])
-                    
-                    # 1. ★★★ 最优先：捞出真正的导演，赋予特权放在第一位！★★★
-                    for c in raw_crew:
-                        c_id = c.get('id')
-                        # 兼容电视剧特有的 jobs 列表解析
-                        is_director = False
-                        if c.get('job') == 'Director':
-                            is_director = True
-                        elif 'jobs' in c and isinstance(c['jobs'], list):
-                            if any(j.get('job') == 'Director' for j in c['jobs']):
-                                is_director = True
-                                
-                        if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
-                            c_copy = c.copy()
-                            c_copy['character'] = '导演'
-                            c_copy['order'] = -100 + len(directors_source)
-                            c_copy['_is_crew'] = True 
-                            directors_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
+                        authoritative_cast_source = credits_source.get('cast', [])
 
-                    # 2. 其次处理原著/编剧等主创人员 (如果他是导演，上面已经入库，这里会自动跳过他)
-                    creators = details.get('created_by', [])
-                    for c in creators:
-                        c_id = c.get('id')
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 3:
-                            c_copy = c.copy()
-                            c_copy['character'] = '主创' 
-                            c_copy['order'] = 1000 + len(other_crew_source)
-                            c_copy['_is_crew'] = True 
-                            other_crew_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
-
-                    # 3. 最后提取其他幕后打杂工作人员
-                    for c in raw_crew:
-                        c_id = c.get('id')
-                        if c_id not in seen_crew_ids and len(other_crew_source) < 8:
-                            c_copy = c.copy()
-                            # 兼容电视剧提取职务名称
-                            job_name = c.get('job')
-                            if not job_name and 'jobs' in c and isinstance(c['jobs'], list) and len(c['jobs']) > 0:
-                                job_name = c['jobs'][0].get('job')
-                            c_copy['character'] = job_name or c.get('department') or '工作人员'
-                            c_copy['order'] = 1000 + len(other_crew_source)
-                            c_copy['_is_crew'] = True 
-                            other_crew_source.append(c_copy)
-                            seen_crew_ids.add(c_id)
-
-                    # ★★★ 彻底清空原始 Crew 和 Created_by 数据 ★★★
-                    if 'aggregate_credits' in details: details['aggregate_credits']['crew'] = []
-                    if 'credits' in details: details['credits']['crew'] = []
-                    if 'created_by' in details: details['created_by'] = []
-
-                # 3. 合并队列：导演在前 -> 演员在中 -> 其他幕后在后
-                authoritative_cast_source = directors_source + actors_source + other_crew_source
-
-                # ★★★ 全局应用隐藏无头像规则（给 API 减负，没头像的幕后统统在这里被杀掉） ★★★
                 if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
                     authoritative_cast_source = [a for a in authoritative_cast_source if a.get("profile_path")]
 
@@ -793,7 +631,7 @@ class MediaProcessor:
                 # ★★★ 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译 ★★★
                 # =================================================================
                 target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else details
-                
+
                 cast_payload = []
                 for actor in final_processed_cast:
                     cast_payload.append({
@@ -809,9 +647,6 @@ class MediaProcessor:
                         if 'credits' not in target_tmdb_data['series_details']: target_tmdb_data['series_details']['credits'] = {}
                         target_tmdb_data['series_details']['credits']['cast'] = cast_payload
 
-                # =================================================================
-                # ★★★ 大一统 AI 翻译引擎 (此时演员已经是中文，AI 会直接跳过演员翻译) ★★★
-                # =================================================================
                 if self.ai_translator:
                     from tasks.helpers import translate_tmdb_metadata_recursively
                     translate_tmdb_metadata_recursively(
@@ -824,14 +659,12 @@ class MediaProcessor:
                         douban_cast_data=douban_cast_raw
                     )
 
-                # [新增修复] 实时监控也需要将 AI 翻译结果同步回 final_processed_cast，并处理前缀
                 translated_cast_map = {str(a.get('id')): a.get('character') for a in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])) if a.get('id')}
                 
                 for actor in final_processed_cast:
                     aid = str(actor.get('id'))
                     final_char = translated_cast_map.get(aid) or actor.get('character') or ""
                     final_char = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', final_char).strip()
-                    # 【核心优化】不再提前兜底 "演员"，改为空白以便最终由格式化函数在最后统一进行配音/演员兜底
                     if not utils.contains_chinese(final_char): final_char = ""
                     actor['character'] = final_char
                 
@@ -842,22 +675,12 @@ class MediaProcessor:
                 final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
 
                 for actor in final_processed_cast:
-                    char_str = actor.get('character', '')
-                    is_crew_flag = actor.get('_is_crew', False)
-                    if is_crew_flag:
-                        actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
-
-                for actor in final_processed_cast:
                     aid = str(actor.get('id'))
                     final_char_with_prefix = actor.get('character')
                     for t_actor in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])):
                         if str(t_actor.get('id')) == aid: t_actor['character'] = final_char_with_prefix
             
-            # =========================================================
-            # 步骤 4 & 5: 生成本地 override 元数据文件 & 写入数据库
-            # =========================================================
             if not should_skip_full_processing:
-                # 1. 准备伪造的 Emby 对象
                 fake_item_details = {
                     "Id": "pending",
                     "Name": details.get('title') or details.get('name'),
@@ -871,29 +694,6 @@ class MediaProcessor:
                     tmdb_data=details,
                     aggregated_tmdb_data=aggregated_tmdb_data
                 )
-
-                # =============================================================
-                # ★★★ 核弹级清理：强制抹除所有层级的独立 Crew/Created_by 节点 ★★★
-                # 因为我们已经把有价值的幕后人员全部融合进了 Cast(演员表)，
-                # 此时必须把所有原生的 Crew 节点物理销毁，防止任何没头像的杂兵乱入！
-                # =============================================================
-                if 'casts' in formatted_metadata: formatted_metadata['casts']['crew'] = []
-                if 'credits' in formatted_metadata: formatted_metadata['credits']['crew'] = []
-                if 'created_by' in formatted_metadata: formatted_metadata['created_by'] = []
-                
-                if item_type == "Series":
-                    # 1. 物理清洗所有分季的 Crew
-                    for s in formatted_metadata.get('seasons_details', []):
-                        if 'credits' in s: s['credits']['crew'] = []
-                    # 2. 物理清洗所有分集的 Crew
-                    ep_data = formatted_metadata.get('episodes_details')
-                    if isinstance(ep_data, dict):
-                        for ep in ep_data.values():
-                            if 'credits' in ep: ep['credits']['crew'] = []
-                    elif isinstance(ep_data, list):
-                        for ep in ep_data:
-                            if 'credits' in ep: ep['credits']['crew'] = []
-                # =============================================================
 
                 logger.info(f"  ➜ [实时监控] 正在写入本地元数据文件...")
                 self.sync_item_metadata(
@@ -924,9 +724,6 @@ class MediaProcessor:
             else:
                 logger.info(f"  ➜ [实时监控] 已跳过在线刮削和元数据写入 (数据已通过缓存恢复)。")
 
-            # =========================================================
-            # 步骤 6: 通知 Emby 刷新 (可选)
-            # =========================================================
             if not skip_refresh:
                 logger.info(f"  ➜ [实时监控] 极速通知 Emby 单文件入库: {os.path.basename(file_path)}")
                 emby.notify_emby_file_changes([file_path], self.emby_url, self.emby_api_key)
@@ -1947,7 +1744,99 @@ class MediaProcessor:
             specific_episode_ids=specific_episode_ids
         )
 
-    # [优化] 将原本冗长且复杂的 _process_item_core_logic 进行了大范围精简和合并
+    # =========================================================================
+    # ✨✨✨ 幕后人员全员中文化引擎 (豆瓣优先 + AI 智能音译兜底) ✨✨✨
+    # =========================================================================
+    def _update_crew_and_creators_with_douban_and_ai(self, details: Dict[str, Any], douban_cast_raw: List[Dict[str, Any]], item_name: str):
+        """
+        【幕后全员中文化引擎】
+        1. 豆瓣优先：将 TMDb 幕后人员 (credits.crew / created_by) 与豆瓣演职员列表交叉对比，优先替换为豆瓣中文姓名。
+        2. AI 翻译兜底：若对比后仍为外文/拼音，自动调用 AI 引擎（音译/翻译模式）将其翻译为简体中文！
+        """
+        if not details:
+            return
+
+        # --- 步骤 1: 建立豆瓣演职员查找表 ---
+        douban_map = {}
+        if douban_cast_raw:
+            for d in douban_cast_raw:
+                zh_name = str(d.get("name") or "").strip()
+                en_name = str(d.get("latin_name") or d.get("original_name") or "").strip().lower()
+                if zh_name and utils.contains_chinese(zh_name):
+                    if en_name:
+                        douban_map[en_name] = zh_name
+                    douban_map[zh_name.lower()] = zh_name
+
+        def _get_douban_zh(person_dict):
+            orig = str(person_dict.get("original_name") or "").strip().lower()
+            curr = str(person_dict.get("name") or "").strip().lower()
+            if orig in douban_map: return douban_map[orig]
+            if curr in douban_map: return douban_map[curr]
+            # 支持 名 姓 倒装对比
+            parts = orig.split()
+            if len(parts) == 2:
+                rev = f"{parts[1]} {parts[0]}"
+                if rev in douban_map: return douban_map[rev]
+            return None
+
+        # 收集需要检查的幕后人员对象
+        crew_members = []
+        target_node = details.get('series_details', details) if isinstance(details, dict) else details
+        
+        # A. 提取 crew 节点
+        credits_obj = target_node.get("credits") or target_node.get("casts") or target_node.get("aggregate_credits")
+        if isinstance(credits_obj, dict) and "crew" in credits_obj and isinstance(credits_obj["crew"], list):
+            crew_members.extend(credits_obj["crew"])
+
+        # B. 提取 created_by 节点 (剧集主创/导演)
+        if "created_by" in target_node and isinstance(target_node["created_by"], list):
+            crew_members.extend(target_node["created_by"])
+
+        if not crew_members:
+            return
+
+        # --- 步骤 2: 阶段一 - 豆瓣中文名覆盖 ---
+        douban_updated_count = 0
+        for member in crew_members:
+            matched_zh = _get_douban_zh(member)
+            if matched_zh:
+                member["name"] = matched_zh
+                douban_updated_count += 1
+
+        if douban_updated_count > 0:
+            logger.info(f"  ➜ [幕后中文化] 成功通过豆瓣匹配并更新了 {douban_updated_count} 位幕后人员(含导演)的中文名。")
+
+        # --- 步骤 3: 阶段二 - AI 智能音译/翻译兜底 ---
+        if self.ai_translator and self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE, False):
+            untranslated_names = set()
+            refs_to_update = []
+
+            for member in crew_members:
+                curr_name = str(member.get("name") or "").strip()
+                if curr_name and not utils.contains_chinese(curr_name):
+                    untranslated_names.add(curr_name)
+                    refs_to_update.append((member, curr_name))
+
+            if untranslated_names:
+                logger.info(f"  ➜ [幕后中文化] 发现 {len(untranslated_names)} 位幕后人员(含导演)仍为外文，启动 AI 音译/翻译...")
+                try:
+                    translated_dict = self.ai_translator.batch_translate(
+                        list(untranslated_names),
+                        mode="transliterate",
+                        title=item_name
+                    )
+                    if translated_dict and isinstance(translated_dict, dict):
+                        ai_count = 0
+                        for member_dict, raw_name in refs_to_update:
+                            if raw_name in translated_dict:
+                                zh_result = translated_dict[raw_name]
+                                if zh_result and utils.contains_chinese(zh_result):
+                                    member_dict["name"] = zh_result
+                                    ai_count += 1
+                        logger.info(f"  ➜ [幕后中文化] AI 成功补全翻译了 {ai_count} 位幕后人员(含导演)的中文名。")
+                except Exception as e_ai:
+                    logger.warning(f"  ➜ [幕后中文化] AI 翻译幕后人员时发生错误: {e_ai}")
+
     def _process_item_core_logic(self, item_details_from_emby: Dict[str, Any], force_full_update: bool = False, specific_episode_ids: Optional[List[str]] = None):
         """【God Object 解耦优化版】主流程管控"""
         item_id = item_details_from_emby.get("Id")
@@ -1957,9 +1846,6 @@ class MediaProcessor:
 
         logger.trace(f"--- 开始处理 '{item_name_for_log}' (TMDb ID: {tmdb_id}) ---")
 
-        # =====================================================================
-        # ★★★ 神医联动兜底：顺手牵羊获取 Emby 端的剧集组 ID ★★★
-        # =====================================================================
         if item_type == "Series" and tmdb_id:
             emby_tmdb_eg = item_details_from_emby.get("ProviderIds", {}).get("TmdbEg")
             if emby_tmdb_eg:
@@ -1969,7 +1855,7 @@ class MediaProcessor:
                     if emby_tmdb_eg != current_db_eg:
                         logger.info(f"  ➜ 💡 [神医联动] 在处理媒体时，发现 Emby 存在不同的剧集组 ID ({emby_tmdb_eg})，正在同步到本地并触发全量重构...")
                         watchlist_db.set_episode_group_id(str(tmdb_id), emby_tmdb_eg)
-                        force_full_update = True  # 强制全量重拉，重构底层数据！
+                        force_full_update = True
                 except Exception as e:
                     logger.warning(f"  ➜ 同步 Emby 剧集组信息失败: {e}")
 
@@ -1985,17 +1871,11 @@ class MediaProcessor:
             tmdb_details_for_extra = json.loads(json.dumps(utils.MOVIE_SKELETON_TEMPLATE if item_type == "Movie" else utils.SERIES_SKELETON_TEMPLATE))
             fresh_data, aggregated_tmdb_data, final_processed_cast, cache_row = None, None, None, None
             
-            # =================================================================
-            # ★★★ 提前读取本地缓存 (用于快速跳过 或 重新处理时的智能比对) ★★★
-            # =================================================================
             cache_folder_name = "tmdb-movies2" if item_type == "Movie" else "tmdb-tv"
             target_override_dir = os.path.join(self.local_data_path, "override", cache_folder_name, str(tmdb_id))
             override_json_path = os.path.join(target_override_dir, "all.json" if item_type == "Movie" else "series.json")
             existing_override_data = _read_local_json(override_json_path) if os.path.exists(override_json_path) else None
 
-            # =================================================================
-            # ★★★ 性能二次飞跃：提前检查本地缓存，跳过所有在线请求 (仅限非强制更新) ★★★
-            # =================================================================
             if not force_full_update and existing_override_data:
                 logger.info(f"  ➜ [快速模式] 命中本地缓存，直接加载并跳过 TMDB/豆瓣/AI 请求...")
                 try:
@@ -2026,9 +1906,6 @@ class MediaProcessor:
                     logger.warning(f"  ➜ 读取覆盖文件失败: {e}，将回退到在线刮削。")
                     final_processed_cast = None
 
-            # =================================================================
-            # ★★★ 如果无缓存或强制更新，执行完整的 API 流水线 ★★★
-            # =================================================================
             if final_processed_cast is None:
                 if self.tmdb_api_key:
                     try:
@@ -2052,117 +1929,39 @@ class MediaProcessor:
                         logger.warning(f"  ➜ [提前拦截] 获取豆瓣数据失败: {e}")
 
                     target_tmdb_data = aggregated_tmdb_data if item_type == "Series" else fresh_data
-                    
-                    # =================================================================
-                    # ★★★ 核心优化：先把演员表用 IMDb ID 完美处理出来 ★★★
-                    # =================================================================
-                    authoritative_cast_source = []
-                    directors_source = []
-                    other_crew_source = []
 
+                    # ★★★ 幕后全员中文化 (豆瓣中文优先 + AI 智能音译兜底) ★★★
+                    self._update_crew_and_creators_with_douban_and_ai(
+                        details=target_tmdb_data,
+                        douban_cast_raw=douban_cast_raw,
+                        item_name=current_title or original_title
+                    )
+
+                    # ★★★ 官方标准规范：纯净抽取演员表 ★★★
                     if item_type == "Movie":
                         credits_source = fresh_data.get('credits') or fresh_data.get('casts') or {}
-                        raw_actors = credits_source.get('cast', [])
-                        raw_crew = credits_source.get('crew', [])
-                        
-                        seen_crew_ids = set()
-                        # 1. 提取主要导演
-                        for c in raw_crew:
-                            c_id = c.get('id')
-                            if c.get('job') == 'Director' and len(directors_source) < 2 and c_id not in seen_crew_ids:
-                                c_copy = c.copy()
-                                c_copy['character'] = '导演'
-                                c_copy['order'] = -100 + len(directors_source) 
-                                c_copy['_is_crew'] = True 
-                                directors_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-                                
-                        # 2. 提取其他所有工作人员
-                        for c in raw_crew:
-                            c_id = c.get('id')
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 8: 
-                                c_copy = c.copy()
-                                c_copy['character'] = c.get('job') or c.get('department') or '工作人员'
-                                c_copy['order'] = 1000 + len(other_crew_source) 
-                                c_copy['_is_crew'] = True 
-                                other_crew_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-                                
-                        actors_source = raw_actors
-
+                        authoritative_cast_source = credits_source.get('cast', [])
                     elif item_type == "Series":
                         if aggregated_tmdb_data:
                             all_episodes = list(aggregated_tmdb_data.get("episodes_details", {}).values())
-                            actors_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
+                            authoritative_cast_source = _aggregate_series_cast_from_tmdb_data(fresh_data, all_episodes)
                         else:
                             credits_source = fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}
-                            actors_source = credits_source.get('cast', [])
-
-                        seen_crew_ids = set()
-                        raw_crew = (fresh_data.get('aggregate_credits') or fresh_data.get('credits') or {}).get('crew', [])
-
-                        # 1. ★★★ 最优先：捞出真正的导演，赋予特权放在第一位！★★★
-                        for c in raw_crew:
-                            c_id = c.get('id')
-                            # 兼容电视剧特有的 jobs 列表解析
-                            is_director = False
-                            if c.get('job') == 'Director':
-                                is_director = True
-                            elif 'jobs' in c and isinstance(c['jobs'], list):
-                                if any(j.get('job') == 'Director' for j in c['jobs']):
-                                    is_director = True
-
-                            if is_director and len(directors_source) < 3 and c_id not in seen_crew_ids:
-                                c_copy = c.copy()
-                                c_copy['character'] = '导演'
-                                c_copy['order'] = -100 + len(directors_source)
-                                c_copy['_is_crew'] = True 
-                                directors_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-
-                        # 2. 其次处理原著/编剧等主创人员 (如果他是导演，上面已经入库，这里会自动跳过他)
-                        creators = fresh_data.get('created_by', [])
-                        for c in creators:
-                            c_id = c.get('id')
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 3:
-                                c_copy = c.copy()
-                                c_copy['character'] = '主创' 
-                                c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True 
-                                other_crew_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-
-                        # 3. 最后提取其他幕后打杂工作人员
-                        for c in raw_crew:
-                            c_id = c.get('id')
-                            if c_id not in seen_crew_ids and len(other_crew_source) < 8:
-                                c_copy = c.copy()
-                                # 兼容电视剧提取职务名称
-                                job_name = c.get('job')
-                                if not job_name and 'jobs' in c and isinstance(c['jobs'], list) and len(c['jobs']) > 0:
-                                    job_name = c['jobs'][0].get('job')
-                                c_copy['character'] = job_name or c.get('department') or '工作人员'
-                                c_copy['order'] = 1000 + len(other_crew_source)
-                                c_copy['_is_crew'] = True 
-                                other_crew_source.append(c_copy)
-                                seen_crew_ids.add(c_id)
-
-                    authoritative_cast_source = directors_source + actors_source + other_crew_source
+                            authoritative_cast_source = credits_source.get('cast', [])
 
                     if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True) and authoritative_cast_source:
                         authoritative_cast_source = [a for a in authoritative_cast_source if a.get("profile_path")]
 
-                    # 【修正版】正确使用全库重刷连接，保留已有 Emby 演员
-                    with get_central_db_connection() as conn:
+                    with get_db_connection() as conn:
                         cursor = conn.cursor()
+                        logger.info(f"  ➜ 启动演员表核心处理 (ID精准匹配/映射)...")
                         current_emby_cast_raw = [p for p in all_emby_people if p.get("Type") == "Actor"]
                         emby_config = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
                         enriched_emby_cast = self.actor_db_manager.enrich_actors_with_provider_ids(cursor, current_emby_cast_raw, emby_config)
 
-                        logger.info(f"  ➜ 启动演员表核心处理 (ID精准匹配/映射)...")
                         final_processed_cast = self._process_cast_list(
                             tmdb_cast_people=authoritative_cast_source,
-                            emby_cast_people=enriched_emby_cast, # 恢复读取原版演员
+                            emby_cast_people=enriched_emby_cast,
                             douban_cast_list=douban_cast_raw,
                             item_details_from_emby=item_details_from_emby,
                             cursor=cursor,
@@ -2170,7 +1969,6 @@ class MediaProcessor:
                             stop_event=self.get_stop_event()
                         )
 
-                        # ★★★ 智能比对与继承 (满足用户需求：保留已有翻译/手动修改) ★★★
                         if force_full_update and existing_override_data:
                             old_cast_map = {str(a['id']): a for a in (existing_override_data.get('casts', {}) or existing_override_data.get('credits', {})).get('cast', []) if a.get('id')}
                             for actor in final_processed_cast:
@@ -2179,44 +1977,28 @@ class MediaProcessor:
                                     if not utils.contains_chinese(actor.get('character')) and utils.contains_chinese(old_actor.get('character')): actor['character'] = old_actor['character']
                                     if not utils.contains_chinese(actor.get('name')) and utils.contains_chinese(old_actor.get('name')): actor['name'] = old_actor['name']
 
-                        # 将完美的中文演员表塞回原数据中，防止 AI 瞎翻译
                         cast_payload = [{"id": a.get("id"), "name": a.get("name"), "character": a.get("character"), "order": a.get("order")} for a in final_processed_cast]
                         if item_type == "Movie": target_tmdb_data.setdefault('credits', {})['cast'] = cast_payload
                         elif item_type == "Series" and 'series_details' in target_tmdb_data: target_tmdb_data['series_details'].setdefault('credits', {})['cast'] = cast_payload
 
-                        # 大一统 AI 翻译引擎
                         if self.ai_translator:
                             translate_tmdb_metadata_recursively(item_type, target_tmdb_data, self.ai_translator, item_name_for_log, self.tmdb_api_key, self.config, douban_cast_raw)
 
-                        # 将翻译结果同步回 final_processed_cast 并执行强制英文兜底
                         translated_cast_map = {str(a.get('id')): a.get('character') for a in (target_tmdb_data.get('credits', {}).get('cast', []) if item_type == "Movie" else target_tmdb_data.get('series_details', {}).get('credits', {}).get('cast', [])) if a.get('id')}
                         
                         for actor in final_processed_cast:
                             aid = str(actor.get('id'))
                             final_char = translated_cast_map.get(aid) or actor.get('character') or ""
-                            
-                            # 剔除 AI 翻译时可能自作主张加的词汇，剥离出纯净角色名，防止套娃重叠
                             final_char = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', final_char).strip()
-                            
-                            # 【核心优化】不再提前兜底 "演员"，改为空白以便最终由格式化函数统一进行兜底
                             if not utils.contains_chinese(final_char): final_char = ""
                             actor['character'] = final_char
                         
-                        # [完美修复] 重新使用格式化函数过一遍，根据用户的“角色前缀开关”和媒体类型(动画/真人)重新挂载 "饰/配" 前缀
                         raw_genres = item_details_from_emby.get("Genres", [])
                         genres = [g.get('name') for g in raw_genres if g.get('name')] if raw_genres and isinstance(raw_genres[0], dict) else raw_genres
                         is_animation = "Animation" in genres or "动画" in genres or "Documentary" in genres or "纪录" in genres or "记录" in genres
                         
                         final_processed_cast = actor_utils.format_and_complete_cast_list(final_processed_cast, is_animation, self.config, mode='auto')
 
-                        # [新增] 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀
-                        for actor in final_processed_cast:
-                            char_str = actor.get('character', '')
-                            is_crew_flag = actor.get('_is_crew', False)
-                            if is_crew_flag:
-                                actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
-
-                        # 最后将挂载好前缀的最终角色名回写到目标数据池中，确保生成写入文件的元数据是带前缀的完美版
                         for actor in final_processed_cast:
                             aid = str(actor.get('id'))
                             final_char_with_prefix = actor.get('character')
@@ -2224,25 +2006,10 @@ class MediaProcessor:
                                 if str(t_actor.get('id')) == aid: t_actor['character'] = final_char_with_prefix
 
                         tmdb_details_for_extra = construct_metadata_payload(item_type, fresh_data, aggregated_tmdb_data, item_details_from_emby)
-                        
-                        # [加入核弹清洗]
-                        if 'casts' in tmdb_details_for_extra: tmdb_details_for_extra['casts']['crew'] = []
-                        if 'credits' in tmdb_details_for_extra: tmdb_details_for_extra['credits']['crew'] = []
-                        if 'created_by' in tmdb_details_for_extra: tmdb_details_for_extra['created_by'] = []
-                        if item_type == "Series":
-                            for s in tmdb_details_for_extra.get('seasons_details', []):
-                                if 'credits' in s: s['credits']['crew'] = []
-                            ep_data = tmdb_details_for_extra.get('episodes_details')
-                            if isinstance(ep_data, dict):
-                                for ep in ep_data.values():
-                                    if 'credits' in ep: ep['credits']['crew'] = []
-                            elif isinstance(ep_data, list):
-                                for ep in ep_data:
-                                    if 'credits' in ep: ep['credits']['crew'] = []
 
                         if not item_details_from_emby.get("Genres") and fresh_data.get("genres"): item_details_from_emby["Genres"] = fresh_data.get("genres")
                         
-                        conn.commit() # [优化] 提前提交演员处理的结果，尽早释放部分锁
+                        conn.commit()
 
             # =================================================================
             # ★★★ 老六笑话兜底 (基于 tmdb_details_for_extra) ★★★
@@ -2287,13 +2054,15 @@ class MediaProcessor:
                         if force_full_update: self.download_images_from_tmdb(str(tmdb_id), item_type, aggregated_tmdb_data)
                     emby.refresh_emby_item_metadata(item_id, self.emby_url, self.emby_api_key, self.emby_user_id, True, item_name_for_log)
 
-                # 将复杂庞大的 Upsert 和打分质检包裹在同一个事务内
                 self._upsert_media_metadata(cursor, item_type, final_processed_cast, tmdb_details_for_extra, item_details_from_emby, specific_episode_ids)
                 self._evaluate_and_log_quality(cursor, item_details_from_emby, tmdb_id, final_processed_cast, original_emby_actor_count, cache_row, specific_episode_ids)
                 
-                conn.commit() # [优化] 统一 Commit，减少事务开销
+                conn.commit()
 
-            # 智能推荐缓存刷新
+            # ▼▼▼ 刮削/刷新完成后，立即触发 API 将导演提升至演职员首位 ▼▼▼
+            if not is_feedback_mode:
+                self.elevate_directors_for_item(item_id)
+
             is_pure_episode_update = (item_type == 'Series' and specific_episode_ids)
             if item_type in ['Movie', 'Series'] and not is_pure_episode_update and self.config.get(constants.CONFIG_OPTION_PROXY_ENABLED) and self.config.get(constants.CONFIG_OPTION_AI_VECTOR):
                 threading.Thread(target=RecommendationEngine.refresh_cache).start()
@@ -2327,34 +2096,21 @@ class MediaProcessor:
             if isinstance(raw, list):
                 raw = " / ".join([str(x) for x in raw])
             val = str(raw or "").strip()
-            
-            # [强化] 如果常规字段没抓到职位，看看豆瓣有没有在 jobs 里塞“导演”等特殊身份
-            if not val or val in ["演员", "自己", "配音", "本色出演"]:
-                jobs = d_actor_dict.get("jobs", [])
-                if isinstance(jobs, list) and "导演" in jobs:
-                    val = "导演"
-                    
-            # 如果包含中文，且不是泛指词汇，则认为是有效具体角色
             if val and utils.contains_chinese(val) and val not in ["演员", "自己", "配音", "本色出演"]:
                 return val
             return None
 
-        # --- 专门用于判断该人是否真的是幕后导演，而非角色名叫导演 ---
         def _is_actual_director(d_actor_dict):
             jobs = d_actor_dict.get("jobs", [])
             if isinstance(jobs, list) and "导演" in jobs:
                 return True
             return False
 
-        # ======================================================================
-        # 预处理: 清洗同名演员
-        # ======================================================================
         logger.debug("  ➜ 预处理：清洗源数据中的同名演员，合并身兼数职人员。")
         cleaned_tmdb_cast = []
         seen_names = {} 
         
-        # 排序时移除大于0的限制，允许负数
-        tmdb_cast_people.sort(key=lambda x: x.get('order') if isinstance(x.get('order'), (int, float)) else 999)
+        tmdb_cast_people.sort(key=lambda x: x.get('order', 999))
 
         for actor in tmdb_cast_people:
             name = actor.get("name")
@@ -2365,19 +2121,16 @@ class MediaProcessor:
             
             if cleaned_name not in seen_names:
                 cleaned_tmdb_cast.append(actor)
-                seen_names[cleaned_name] = actor # 存整个字典对象
+                seen_names[cleaned_name] = actor
             else:
                 existing_actor = seen_names[cleaned_name]
-                # 使用 or 确保即使字段值为 None，也能安全地退回到默认字符串
                 role = actor.get("character") or "未知角色"
                 existing_role = existing_actor.get("character") or "未知角色"
                 
-                # 【优化】如果这个人既是导演又是演员，智能合并角色名
                 if role != "未知角色" and existing_role != "未知角色" and role not in existing_role:
                     existing_actor["character"] = f"{existing_role} / {role}"
                     logger.info(f"  ➜ 发现身兼多职人员 '{cleaned_name}'，已合并身份: {existing_actor['character']}")
                 elif role != "未知角色" and existing_role == "未知角色":
-                    # 如果老数据是未知角色，新数据有具体角色，直接用具体的覆盖它
                     existing_actor["character"] = role
                 else:
                     logger.info(f"  ➜ 为避免张冠李戴，删除同名异人演员: '{cleaned_name}' (角色: {role})")
@@ -2385,11 +2138,7 @@ class MediaProcessor:
         tmdb_cast_people = cleaned_tmdb_cast
         original_tmdb_ids = {str(actor.get("id")) for actor in tmdb_cast_people if actor.get("id")}
         
-        # ======================================================================
         # 步骤 1: 数据适配与关联
-        # ======================================================================
-        logger.debug("  ➜ 开始演员数据适配 (反查缓存模式)...")
-        
         tmdb_actor_map_by_id = {str(actor.get("id")): actor for actor in tmdb_cast_people}
         tmdb_actor_map_by_en_name = {str(actor.get("name") or "").lower().strip(): actor for actor in tmdb_cast_people}
 
@@ -2425,17 +2174,7 @@ class MediaProcessor:
                 emby_role = emby_actor.get("Role") or ""
                 tmdb_role = tmdb_match.get("character") or ""
                 
-                # 智能角色名合并/选择：
-                # 如果 TMDb 中包含“导演”或“主创”等核心幕后标记，而 Emby 的现有角色中没有，则进行合并，防止导演身份被演员身份抹除
-                if any(x in tmdb_role for x in ["导演", "主创"]) and not any(x in emby_role for x in ["导演", "主创"]):
-                    if emby_role and emby_role != tmdb_role:
-                        clean_emby = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', emby_role).strip()
-                        prefix = "导演" if "导演" in tmdb_role else "主创"
-                        merged_actor["character"] = f"{prefix} / {clean_emby}"
-                    else:
-                        merged_actor["character"] = tmdb_role
-                else:
-                    merged_actor["character"] = emby_role if emby_role else tmdb_role
+                merged_actor["character"] = emby_role if emby_role else tmdb_role
                 final_cast_list.append(merged_actor)
                 used_tmdb_ids.add(tmdb_id_str)
 
@@ -2445,11 +2184,7 @@ class MediaProcessor:
                 new_actor["emby_person_id"] = None
                 final_cast_list.append(new_actor)
 
-        logger.debug(f"  ➜ 数据适配完成，生成了 {len(final_cast_list)} 条基准演员数据。")
-        
-        # ======================================================================
         # 步骤 2: 挂载豆瓣 ID 与 角色覆盖
-        # ======================================================================
         douban_candidates = actor_utils.format_douban_cast(douban_cast_list)
         unmatched_local_actors = list(final_cast_list)
         merged_actors = []
@@ -2457,7 +2192,6 @@ class MediaProcessor:
         logger.info(f"  ➜ 匹配阶段 1: 提取豆瓣ID及具体角色名")
         
         for idx, d_actor in enumerate(douban_candidates):
-            # 绕过 format 造成的字段丢失，直接从原始列表里提取原滋原味的英文名
             raw_actor = douban_cast_list[idx] if idx < len(douban_cast_list) else {}
             
             raw_zh = d_actor.get("Name") or raw_actor.get("name") or ""
@@ -2471,7 +2205,6 @@ class MediaProcessor:
                 local_name = str(l_actor.get("name") or "").lower().strip()
                 local_original_name = str(l_actor.get("original_name") or "").lower().strip()
                 
-                # 【终极版匹配逻辑】支持倒装、无视空格、以及纯中文与拼音的跨物种匹配
                 def _is_name_match(n1: str, n2: str) -> bool:
                     if not n1 or not n2: return False
                     
@@ -2483,28 +2216,23 @@ class MediaProcessor:
                     if len(p1) == 2 and len(p2) == 2:
                         if p1[0] == p2[1] and p1[1] == p2[0]: return True
 
-                    # ★★★ 终极拼音兜底匹配 (解决豆瓣缺失英文名，只有中文名的情况) ★★★
                     try:
                         import pypinyin
                         def _check_pinyin(zh_name, en_name_clean):
-                            # 如果不包含中文，则跳过拼音转换
                             if not any('\u4e00' <= char <= '\u9fff' for char in zh_name): return False
                             
-                            # 1. 正常顺序拼音 (例如：郑华 -> zhenghua)
                             py_normal = "".join(pypinyin.lazy_pinyin(zh_name)).lower()
                             if py_normal == en_name_clean: return True
                             
-                            # 2. 倒装顺序拼音 (例如：华郑 -> huazheng，适配西方 名+姓 规则)
                             if len(zh_name) >= 2:
                                 py_rev = "".join(pypinyin.lazy_pinyin(zh_name[1:] + zh_name[0])).lower()
                                 if py_rev == en_name_clean: return True
                             return False
 
-                        # 无论哪个变量是中文，哪个是拼音，互相交叉检查一次
                         if _check_pinyin(n1, n2_clean) or _check_pinyin(n2, n1_clean):
                             return True
                     except ImportError:
-                        pass # 若环境无 pypinyin 库则静默跳过
+                        pass
                         
                     return False
 
@@ -2519,31 +2247,11 @@ class MediaProcessor:
                     if douban_id_to_add:
                         l_actor["douban_id"] = douban_id_to_add
                     
-                    # 提取有效的豆瓣具体角色
                     valid_d_role = _extract_douban_role(d_actor) or _extract_douban_role(raw_actor)
-                    is_douban_director = _is_actual_director(d_actor) or _is_actual_director(raw_actor)
-                    
                     current_char = l_actor.get("character") or ""
-                    # 【核心集成点】使用 actor_utils.select_best_role 智能对比角色名优先级
                     best_role = actor_utils.select_best_role(current_char, valid_d_role or "")
+                    l_actor["character"] = best_role
                     
-                    # 保护导演/主创标记
-                    is_tmdb_director = l_actor.get('_is_crew', False) and any(x in current_char for x in ['导演', '主创'])
-                    if is_tmdb_director:
-                        prefix = '导演' if '导演' in current_char else '主创'
-                        if prefix not in best_role:
-                            l_actor["character"] = f"{prefix} / {best_role}"
-                        else:
-                            l_actor["character"] = best_role
-                    else:
-                        l_actor["character"] = best_role
-                            
-                    # [新增保险] 如果豆瓣职业判定是导演，且在 TMDb 排序靠后，强制提权置顶！
-                    if is_douban_director and l_actor.get('order', 999) > 0:
-                        l_actor['order'] = -50
-                        l_actor['_is_crew'] = True
-                        
-                    # 匹配成功后，将 TMDb 名字替换为豆瓣中文名
                     if raw_zh and utils.contains_chinese(raw_zh):
                         l_actor["name"] = raw_zh
                     
@@ -2552,18 +2260,18 @@ class MediaProcessor:
                     break
                     
             if not match_found_for_this_douban_actor:
-                # 兜底：把原滋原味的英文名塞回去，防止后续阶段继续丢失
                 d_actor["original_name"] = raw_en
                 unmatched_douban_actors.append(d_actor)
 
         current_cast_list = merged_actors + unmatched_local_actors
         final_cast_map = {str(actor['id']): actor for actor in current_cast_list if actor.get('id') and str(actor.get('id')) != 'None'}
 
-        # ======================================================================
-        # 步骤 3: 补充缺失的豆瓣演员 (查库补全) - [优化版: 限制新增，不限制更新]
-        # ======================================================================
+        # 步骤 3: 补充缺失的豆瓣演员 (查库补全)
+        # ★★★过滤掉豆瓣列表中的导演/幕后人员，防止未匹配的豆瓣导演被误当成演员插入 cast 数组！★★★
+        unmatched_douban_actors = [d for d in unmatched_douban_actors if not _is_actual_director(d)]
+
         if not unmatched_douban_actors:
-            logger.info("  ➜ 豆瓣API未返回演员或所有演员已匹配，跳过补充演员流程。")
+            logger.info("  ➜ 豆瓣API未返回未匹配演员，跳过补充演员流程。")
         else:
             limit = self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30)
             try:
@@ -2575,7 +2283,6 @@ class MediaProcessor:
             logger.info(f"  ➜ 匹配阶段 2: 用豆瓣ID查'演员映射表' ({len(unmatched_douban_actors)} 位演员)")
             still_unmatched = []
             
-            # 无论是否超限，都执行查库匹配，用于“更新/洗白”现有的英文名演员
             for d_actor in unmatched_douban_actors:
                 if self.is_stop_requested(): raise InterruptedError("任务中止")
                 d_douban_id = d_actor.get("DoubanCelebrityId")
@@ -2590,29 +2297,17 @@ class MediaProcessor:
                         if tmdb_id_from_map in final_cast_map:
                             existing_actor = final_cast_map[tmdb_id_from_map]
                             if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
-                            if valid_d_role: 
-                                current_char = existing_actor.get("character") or ""
-                                is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
-                                # 防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                if is_tmdb_director and '导演' not in valid_d_role:
-                                    existing_actor["character"] = f"导演 / {valid_d_role}"
-                                else:
-                                    existing_actor["character"] = valid_d_role
+                            if valid_d_role: existing_actor["character"] = valid_d_role
                             match_found = True
                         else:
-                            # 根据真实的 jobs 列表判断，而不是角色名包含"导演"
-                            is_important_crew = _is_actual_director(d_actor)
-                            
-                            # 【优化点】避免提前兜底“演员”，改为空字符串 "", 留待翻译后由 formatter 统合处理
-                            if len(final_cast_map) < limit or is_important_crew:
+                            if len(final_cast_map) < limit:
                                 cached_metadata_map = self.actor_db_manager.get_full_actor_details_by_tmdb_ids(cursor, [int(tmdb_id_from_map)])
                                 cached_metadata = cached_metadata_map.get(int(tmdb_id_from_map), {})
                                 final_cast_map[tmdb_id_from_map] = {
                                     "id": tmdb_id_from_map, "name": d_actor.get("Name"),
                                     "original_name": cached_metadata.get("original_name") or d_actor.get("OriginalName"),
                                     "character": valid_d_role if valid_d_role else "", 
-                                    "order": -50 if is_important_crew else 999, # 导演强制给负数排前面
-                                    "_is_crew": True if is_important_crew else False, # 打上免死烙印
+                                    "order": 999,
                                     "imdb_id": entry.get("imdb_id"), "douban_id": d_douban_id, "emby_person_id": None
                                 }
                                 match_found = True
@@ -2624,7 +2319,6 @@ class MediaProcessor:
             unmatched_douban_actors = still_unmatched
             still_unmatched_final = list(unmatched_douban_actors)
 
-            # 阶段 3: 尝试通过外部 ID 进一步在线搜索与关联
             if unmatched_douban_actors and self.config.get(constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API, False):
                 logger.info(f"  ➜ 匹配阶段 3: 用IMDb ID进行最终在线匹配 ({len(unmatched_douban_actors)} 位演员)")
                 still_unmatched_final = []
@@ -2662,26 +2356,14 @@ class MediaProcessor:
                                 if tmdb_id_from_find in final_cast_map:
                                     existing_actor = final_cast_map[tmdb_id_from_find]
                                     if utils.contains_chinese(d_actor.get("Name", "")): existing_actor["name"] = d_actor.get("Name")
-                                    if valid_d_role: 
-                                        current_char = existing_actor.get("character") or ""
-                                        is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
-                                        # 防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                        if is_tmdb_director and '导演' not in valid_d_role:
-                                            existing_actor["character"] = f"导演 / {valid_d_role}"
-                                        else:
-                                            existing_actor["character"] = valid_d_role
+                                    if valid_d_role: existing_actor["character"] = valid_d_role
                                     match_found = True
                                 else:
-                                    # 根据真实的 jobs 列表判断，而不是角色名包含"导演"
-                                    is_important_crew = _is_actual_director(d_actor)
-                                    
-                                    # 避免提前兜底“演员”，改为空字符串 "", 留待翻译后由 formatter 统合处理
-                                    if len(final_cast_map) < limit or is_important_crew:
+                                    if len(final_cast_map) < limit:
                                         final_cast_map[tmdb_id_from_find] = {
                                             "id": tmdb_id_from_find, "name": d_actor.get("Name"),
                                             "character": valid_d_role if valid_d_role else "", 
-                                            "order": -50 if is_important_crew else 999, 
-                                            "_is_crew": True if is_important_crew else False,
+                                            "order": 999,
                                             "imdb_id": d_imdb_id, "douban_id": d_douban_id, "emby_person_id": None
                                         }
                                         match_found = True
@@ -2701,16 +2383,8 @@ class MediaProcessor:
                                     new_name = d_actor.get("Name")
                                     if new_name and utils.contains_chinese(new_name):
                                         existing_actor["name"] = new_name
-                                    if valid_d_role:
-                                        current_char = existing_actor.get("character") or ""
-                                        is_tmdb_director = existing_actor.get('_is_crew', False) and '导演' in current_char
-                                        # 防止 TMDb 提取的 "导演" 被豆瓣覆盖
-                                        if is_tmdb_director and '导演' not in valid_d_role:
-                                            existing_actor["character"] = f"导演 / {valid_d_role}"
-                                        else:
-                                            existing_actor["character"] = valid_d_role
+                                    if valid_d_role: existing_actor["character"] = valid_d_role
                                 else:
-                                    # 角色名同样改为 "" 进行延迟兜底
                                     new_actor_entry = {
                                         "id": tmdb_id_to_process,
                                         "name": d_actor.get("Name"),
@@ -2724,9 +2398,7 @@ class MediaProcessor:
         
         current_cast_list = list(final_cast_map.values())
         
-        # ======================================================================
         # 步骤 4: 从 TMDb 补全头像
-        # ======================================================================
         actors_to_supplement = [actor for actor in current_cast_list if str(actor.get("id")) not in original_tmdb_ids and actor.get("id")]
         if actors_to_supplement:
             logger.info(f"  ➜ 开始为 {len(actors_to_supplement)} 位新增演员检查并补全头像信息...")
@@ -2748,21 +2420,15 @@ class MediaProcessor:
                 if profile_path:
                     actor["profile_path"] = profile_path
 
-        # ======================================================================
         # 步骤 5: 移除无头像演员
-        # ======================================================================
         if self.config.get(constants.CONFIG_OPTION_REMOVE_ACTORS_WITHOUT_AVATARS, True):
             actors_with_avatars = [actor for actor in current_cast_list if actor.get("profile_path")]
             if len(actors_with_avatars) < len(current_cast_list):
                 current_cast_list = actors_with_avatars
 
-        # ======================================================================
         # 步骤 6：智能截断与排序
-        # ======================================================================
         limit = int(self.config.get(constants.CONFIG_OPTION_MAX_ACTORS_TO_PROCESS, 30) or 30)
-        
-        # 解除大于0的限制，允许负数order (保证导演排在首位)
-        sort_key = lambda x: x.get('order') if isinstance(x.get('order'), (int, float)) else 999
+        sort_key = lambda x: x.get('order', 999)
         
         if len(current_cast_list) > limit:
             with_profile = [actor for actor in current_cast_list if actor.get("profile_path")]
@@ -2773,9 +2439,7 @@ class MediaProcessor:
         else:
             current_cast_list.sort(key=sort_key)
 
-        # ======================================================================
         # 步骤 7: 最终格式化与补全
-        # ======================================================================
         tmdb_to_emby_id_map = {str(a.get('id')): a.get('emby_person_id') for a in current_cast_list if a.get('id') and a.get('emby_person_id')}
         
         raw_genres = item_details_from_emby.get("Genres", [])
@@ -2784,22 +2448,13 @@ class MediaProcessor:
         
         final_cast_perfect = actor_utils.format_and_complete_cast_list(current_cast_list, is_animation, self.config, mode='auto')
         
-        # 剔除导演和所有幕后工作人员被底层误加的 "饰" 前缀
-        for actor in final_cast_perfect:
-            is_crew_flag = actor.get('_is_crew', False)
-            if is_crew_flag:
-                char_str = actor.get('character', '')
-                actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
-        
         for actor in final_cast_perfect:
             tmdb_id_str = str(actor.get("id"))
             if tmdb_id_str in tmdb_to_emby_id_map:
                 actor["emby_person_id"] = tmdb_to_emby_id_map[tmdb_id_str]
             actor["provider_ids"] = {"Tmdb": str(actor.get("id")), "Imdb": actor.get("imdb_id"), "Douban": actor.get("douban_id")}
 
-        # ======================================================================
         # 步骤 8: 最终数据回写
-        # ======================================================================
         logger.info(f"  ➜ 开始将 {len(final_cast_perfect)} 位最终演员的完整信息同步回数据库...")
         emby_config_for_upsert = {"url": self.emby_url, "api_key": self.emby_api_key, "user_id": self.emby_user_id}
 
@@ -2810,7 +2465,7 @@ class MediaProcessor:
                 cursor.execute("BEGIN")
 
         return final_cast_perfect
-    
+
     def translate_cast_list_for_editing(self, 
                                     cast_list: List[Dict[str, Any]], 
                                     title: Optional[str] = None, 
@@ -3112,21 +2767,9 @@ class MediaProcessor:
                 new_cast_built, is_animation, self.config, mode='manual'
             )
             
-            # 手动编辑保存后，同样需要剔除幕后人员的 "饰" 前缀
-            for actor in final_formatted_cast:
-                if actor.get('_is_crew', False):
-                    char_str = actor.get('character', '')
-                    actor['character'] = re.sub(r'^(饰\s*|配\s*|饰演\s*|配音\s*)', '', char_str).strip()
-                    
             final_cast_for_json = self._build_cast_from_final_data(final_formatted_cast)
 
-            # ★★★ 核弹级清理：在写入本地 JSON 前，彻底抹除所有 Crew 节点 ★★★
-            if 'casts' in data: data['casts']['crew'] = []
-            if 'credits' in data: data['credits']['crew'] = []
-            if 'created_by' in data: data['created_by'] = []
-            # =============================================================
-
-            # 重新赋值修正后的演员表
+            # 重新赋值修正后的演员表 (完全保留 crew / created_by 节点)
             if 'casts' in data:
                 data['casts']['cast'] = final_cast_for_json
             elif 'credits' in data:
@@ -3164,22 +2807,6 @@ class MediaProcessor:
                         aggregated_tmdb_data=aggregated_tmdb_data_manual,
                         emby_data_fallback=item_details
                     )
-                    
-                    # 核弹级清理
-                    if 'casts' in formatted_manual_metadata: formatted_manual_metadata['casts']['crew'] = []
-                    if 'credits' in formatted_manual_metadata: formatted_manual_metadata['credits']['crew'] = []
-                    if 'created_by' in formatted_manual_metadata: formatted_manual_metadata['created_by'] = []
-                    
-                    if item_type == "Series":
-                        for s in formatted_manual_metadata.get('seasons_details', []):
-                            if 'credits' in s: s['credits']['crew'] = []
-                        ep_data = formatted_manual_metadata.get('episodes_details')
-                        if isinstance(ep_data, dict):
-                            for ep in ep_data.values():
-                                if 'credits' in ep: ep['credits']['crew'] = []
-                        elif isinstance(ep_data, list):
-                            for ep in ep_data:
-                                if 'credits' in ep: ep['credits']['crew'] = []
 
                 self._upsert_media_metadata(
                     cursor=cursor,
@@ -3193,6 +2820,9 @@ class MediaProcessor:
                 self.log_db_manager.save_to_processed_log(cursor, item_id, item_name, score=10.0)
                 self.log_db_manager.remove_from_failed_log(cursor, item_id)
                 conn.commit()
+
+            # ▼▼▼ 手动处理完成后，触发 API 导演置顶 ▼▼▼
+            self.elevate_directors_for_item(item_id)
 
             logger.info(f"  ➜ 手动处理 '{item_name}' 流程完成。")
             return True
@@ -3242,7 +2872,6 @@ class MediaProcessor:
                 if not db_record:
                     return False, f"数据库中未找到 '{item_name}' 的主元数据，请执行'重新处理'。"
 
-                # === 处理电影和单集 ===
                 if item_type in ["Movie", "Episode"]:
                     sources_to_parse = []
                     emby_ids_to_heal = []
@@ -3260,7 +2889,6 @@ class MediaProcessor:
                             
                             sources_to_parse.append((source_id, emby_path, mediainfo_path, source))
                             
-                            # 收集缺失的文件
                             if mediainfo_path and not os.path.exists(mediainfo_path):
                                 emby_ids_to_heal.append(source_id)
                                 files_to_watch.append(mediainfo_path)
@@ -3274,7 +2902,6 @@ class MediaProcessor:
                             emby_ids_to_heal.append(item_id)
                             files_to_watch.append(mediainfo_path)
 
-                    # 触发神医 API 并进行智能短轮询等待
                     if emby_ids_to_heal:
                         logger.info(f"  ➜ [轻量补全] 发现缺失 JSON，触发 API 唤醒神医处理 {len(emby_ids_to_heal)} 个文件...")
                         for eid in emby_ids_to_heal:
@@ -3289,7 +2916,6 @@ class MediaProcessor:
                         if not all(os.path.exists(f) for f in files_to_watch):
                             return False, "已触发神医提取，但因网盘读取原因耗时较长。请去泡杯茶，几分钟后再点击补全。"
 
-                    # 开始安全解析并写入数据库
                     all_assets = []
                     all_ids = []
                     for source_id, emby_path, mediainfo_path, source in sources_to_parse:
@@ -3317,9 +2943,7 @@ class MediaProcessor:
                         WHERE tmdb_id = %s AND item_type = %s
                     """, (assets_json_str, ids_json_str, str(tmdb_id), item_type))
 
-                # === 处理剧集 (校验旗下所有分集) ===
                 elif item_type == "Series":
-                    # ★★★ 核心修复：把 emby_item_ids_json 也查出来，用于提取每集的真实 Emby ID ★★★
                     cursor.execute("""
                         SELECT season_number, episode_number, asset_details_json, emby_item_ids_json 
                         FROM media_metadata 
@@ -3341,7 +2965,6 @@ class MediaProcessor:
                                 bad_eps_names.append(f"S{db_ep['season_number']}E{db_ep['episode_number']}")
                                 files_to_watch.append(minfo_path)
                                 
-                                # 提取这个缺失分集的真实 Emby ID
                                 try:
                                     emby_ids = json.loads(db_ep['emby_item_ids_json']) if isinstance(db_ep['emby_item_ids_json'], str) else db_ep['emby_item_ids_json']
                                     if emby_ids and len(emby_ids) > 0:
@@ -3349,15 +2972,12 @@ class MediaProcessor:
                                 except Exception:
                                     pass
                     
-                    # ★ 触发神医 API 并进行智能短轮询等待 ★
                     if bad_eps_names:
                         logger.info(f"  ➜ [轻量补全] 剧集发现 {len(bad_eps_names)} 集缺失 JSON，触发 API 逐集唤醒神医...")
                         
-                        # 遍历发送具体视频文件的播放请求，Emby 就能正确处理了！
                         for eid in emby_ids_to_heal:
                             emby.trigger_media_info_refresh(eid, self.emby_url, self.emby_api_key, self.emby_user_id)
                         
-                        # 剧集分集多，最多等 10 秒
                         for i in range(5):
                             time.sleep(2)
                             if all(os.path.exists(f) for f in files_to_watch):
@@ -3370,12 +2990,10 @@ class MediaProcessor:
                 else:
                     return False, f"不支持的补全类型: {item_type}"
 
-                # === 流信息补全完毕，重新算分并洗白 ===
                 raw_actors = db_record.get('actors_json', '[]')
                 actors_link = json.loads(raw_actors) if isinstance(raw_actors, str) else raw_actors
                 
                 final_cast = []
-                # 从 person_metadata 表中查询真实姓名并重组列表
                 if actors_link:
                     actor_tmdb_ids = [a.get('tmdb_id') for a in actors_link if a.get('tmdb_id')]
                     if actor_tmdb_ids:
@@ -3870,8 +3488,6 @@ class MediaProcessor:
                 data_to_write['networks'] = unique_networks
                 if 'production_companies' in data_to_write:
                     del data_to_write['production_companies']
-                
-                logger.debug(f"  ➜ {log_prefix} [剧集优化] 已将制作公司合并入电视网并去重，最终数量: {len(unique_networks)}")
 
             if self.config.get(constants.CONFIG_OPTION_KEYWORD_TO_TAGS, False):
                 try:
@@ -3964,7 +3580,6 @@ class MediaProcessor:
             })
         return cast_list
 
-    # --- 使用 ThreadPoolExecutor 并发写入季/集文件，大幅提升几百集长剧的处理速度 ---
     def _inject_cast_to_series_files(self, target_dir: str, cast_list: List[Dict[str, Any]], series_details: Dict[str, Any], episode_ids_to_sync: Optional[List[str]] = None, tmdb_episodes_data: Optional[Dict[str, Any]] = None, tmdb_seasons_data: Optional[List[Dict[str, Any]]] = None):
         log_prefix = "[覆盖缓存-分集文件注入]"
         if cast_list is not None:
@@ -3996,12 +3611,9 @@ class MediaProcessor:
                         if master_info.get('original_name'): person['original_name'] = master_info.get('original_name')
                         if master_info.get('profile_path'): person['profile_path'] = master_info.get('profile_path')
                         if master_info.get('character'): person['character'] = master_info.get('character')
-                        
-                        # 强制同步主剧集的排序，防止 Emby 聚合时发生乱序插队
                         if 'order' in master_info: 
                             person['order'] = master_info.get('order')
                     else:
-                        # 对于不在主名单里的客串演员，将其顺位后移，坚决避开 0, 1, 2... 的前排冲突
                         original_order = person.get('order', 99)
                         person['order'] = original_order + 1000
                 except ValueError: continue
@@ -4110,7 +3722,6 @@ class MediaProcessor:
         sorted_files_to_process = sorted(list(files_to_process))
         os.makedirs(target_dir, exist_ok=True)
 
-        # 将单文件处理逻辑封装为一个子函数，供线程池并发调用
         def _process_single_child_file(filename: str) -> int:
             try:
                 child_json_path = os.path.join(target_dir, filename)
@@ -4255,7 +3866,6 @@ class MediaProcessor:
                 logger.warning(f"  ➜ 并发写入子文件 '{filename}' 时失败: {e_child}")
                 return 0
 
-        # 引入线程池处理文件 I/O，并发处理数百集 JSON 写入
         updated_children_count = 0
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4)) as executor:
@@ -4443,6 +4053,106 @@ class MediaProcessor:
 
         except Exception as e:
             logger.error(f"  ➜ {log_prefix} 为 '{item_name_for_log}' 更新覆盖缓存文件时发生错误: {e}", exc_info=True)
+
+    # =========================================================================
+    # ✨✨✨ API 导演后置提权方法 ✨✨✨
+    # =========================================================================
+    def elevate_directors_for_item(self, item_id: str, item_details: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        通过 Emby API 将项目的 Type='Director' 导演对象提权排至 People 数组首位。
+        """
+        try:
+            if not item_details:
+                item_details = emby.get_emby_item_details(
+                    item_id, self.emby_url, self.emby_api_key, self.emby_user_id, fields="People,Name"
+                )
+            if not item_details or "People" not in item_details:
+                return False
+
+            current_people = item_details.get("People", [])
+            if not current_people:
+                return False
+
+            # 1. 分离导演与非导演
+            directors = [p for p in current_people if p.get("Type") == "Director"]
+            if not directors:
+                return False # 没有导演，无需调整
+
+            non_directors = [p for p in current_people if p.get("Type") != "Director"]
+
+            # 2. 增量判断：检查前 N 个项目是否已经全都是导演
+            first_n_types = [p.get("Type") for p in current_people[:len(directors)]]
+            if all(t == "Director" for t in first_n_types):
+                logger.debug(f"  ➜ [导演提权] 《{item_details.get('Name')}》导演已位于首位，跳过 API 更新。")
+                return False
+
+            # 3. 重新拼接数组：导演在最前，演员/其他人在后
+            reordered_people = directors + non_directors
+
+            # 4. 调用 API 写入 Emby 数据库
+            success = emby.update_emby_item_details(
+                item_id=item_id,
+                new_data={"People": reordered_people},
+                emby_server_url=self.emby_url,
+                emby_api_key=self.emby_api_key,
+                user_id=self.emby_user_id
+            )
+            if success:
+                logger.info(f"  ➜ [导演提权] 成功将 {len(directors)} 位导演提升至《{item_details.get('Name')}》演职员首位。")
+            return success
+
+        except Exception as e:
+            logger.error(f"  ➜ [导演提权] 处理项目 {item_id} 时发生错误: {e}")
+            return False
+
+    def elevate_directors_in_library(self, force_full_update: bool = False, update_status_callback: Optional[Callable] = None):
+        """
+        全库/增量执行“导演 API 后置提权”任务。
+        - 增量模式（默认）：仅对导演未置顶的项目调用 API POST 更新，已置顶的项目秒级跳过。
+        - 全量模式：无视现有顺序，强制对全库重新拉取并重排。
+        """
+        mode_str = "全量" if force_full_update else "增量"
+        logger.info(f"--- 开始执行“导演 API 后置提权”任务 [{mode_str}] ---")
+
+        libs_to_process = self.config.get("libraries_to_process", [])
+        if not libs_to_process:
+            logger.warning("  ➜ 未配置要处理的媒体库，提权任务结束。")
+            return
+
+        all_items = emby.get_emby_library_items(
+            self.emby_url, self.emby_api_key, "Movie,Series", self.emby_user_id, 
+            libs_to_process, fields="People,Name"
+        ) or []
+
+        total = len(all_items)
+        if total == 0:
+            logger.info("  ➜ 选定库中未找到任何媒体项目，任务结束。")
+            return
+
+        updated_count = 0
+        skipped_count = 0
+
+        for i, item in enumerate(all_items):
+            if self.is_stop_requested():
+                logger.warning("  ➜ 导演提权任务收到中止信号，提前退出。")
+                break
+
+            item_id = item.get("Id")
+            item_name = item.get("Name", item_id)
+
+            if update_status_callback:
+                progress = int(((i + 1) / total) * 100)
+                update_status_callback(progress, f"({i+1}/{total}) 检查导演排序: {item_name}")
+
+            was_updated = self.elevate_directors_for_item(item_id, item_details=item)
+            if was_updated:
+                updated_count += 1
+            else:
+                skipped_count += 1
+
+            time.sleep(0.05)
+
+        logger.info(f"--- “导演 API 后置提权”任务完成 [{mode_str}]：扫描 {total} 个，提权更新 {updated_count} 个，跳过 {skipped_count} 个 ---")
 
     def close(self):
         if self.douban_api: self.douban_api.close()
