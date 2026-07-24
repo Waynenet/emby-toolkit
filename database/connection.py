@@ -495,17 +495,6 @@ def init_db():
                     )
                 """)
 
-                logger.trace("  ➜ 正在创建 'douban_api_cache' 表...")
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS douban_api_cache (
-                        id SERIAL PRIMARY KEY,
-                        imdb_id TEXT,
-                        douban_id TEXT,
-                        actors_json JSONB NOT NULL,
-                        last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                    )
-                """)
-
                 logger.trace("  ➜ 正在创建 'title_parse_whitelist' 表...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS title_parse_whitelist (
@@ -663,10 +652,6 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, parent_series_tmdb_id);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watching_status ON media_metadata (watching_status) WHERE watching_status != 'NONE';")
 
-                    # 13. 【外部API缓存优化】加速豆瓣数据缓存的精准命中
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_douban_cache_imdb ON douban_api_cache(imdb_id);")
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_douban_cache_douban ON douban_api_cache(douban_id);")
-
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)
                 logger.trace("  ➜ 数据库升级检查完成。")
@@ -684,7 +669,8 @@ def init_db():
                         'p115_filesystem_cache',     # 新增废弃表 1
                         'p115_mediainfo_cache',      # 新增废弃表 2
                         'p115_organize_records',     # 新增废弃表 3
-                        'user_recommendation_cache'  # 新增废弃表 4
+                        'user_recommendation_cache', # 新增废弃表 4
+                        'douban_api_cache'           # 新增废弃表 5
                     ]
                     for table in deprecated_tables:
                         logger.trace(f"    ➜ [数据库清理] 正在尝试移除废弃的表: '{table}'...")

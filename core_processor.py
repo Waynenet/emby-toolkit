@@ -1683,45 +1683,16 @@ class MediaProcessor:
                     except (ValueError, TypeError): pass
                 return cast, rating_float
             else:
-                logger.warning(f"  ➜ 本地豆瓣文件 '{local_json_path}' 无效，将降级尝试数据库缓存。")
+                logger.warning(f"  ➜ 本地豆瓣文件 '{local_json_path}' 无效，将尝试在线 API 获取。")
 
         # =================================================================
-        # 优先级 2: 尝试从 PostgreSQL 数据库读取之前程序的 API 缓存
-        # =================================================================
-        if imdb_id or douban_id_from_provider:
-            try:
-                with get_central_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        query = "SELECT actors_json FROM douban_api_cache WHERE "
-                        conditions = []
-                        params = []
-                        if imdb_id:
-                            conditions.append("imdb_id = %s")
-                            params.append(imdb_id)
-                        if douban_id_from_provider:
-                            conditions.append("douban_id = %s")
-                            params.append(douban_id_from_provider)
-                        
-                        sql = query + " OR ".join(conditions) + " LIMIT 1"
-                        cursor.execute(sql, tuple(params))
-                        row = cursor.fetchone()
-                        
-                        if row and row['actors_json']:
-                            logger.info(f"  ➜ [豆瓣获取] ⚡ 命中 PostgreSQL 数据库缓存！免发网络请求，秒级返回。")
-                            # 从数据库取出的 jsonb 数据
-                            db_cast = row['actors_json'] if isinstance(row['actors_json'], list) else []
-                            return db_cast, None
-            except Exception as e:
-                logger.warning(f"  ➜ 从 PostgreSQL 读取豆瓣缓存失败: {e}")
-
-        # =================================================================
-        # 优先级 3: 走在线 API 请求豆瓣数据
+        # 优先级 2: 走在线 API 请求豆瓣数据
         # =================================================================
         if not self.config.get(constants.CONFIG_OPTION_DOUBAN_ENABLE_ONLINE_API, True):
-            logger.info("  ➜ 未找到本地与数据库缓存，且在线豆瓣API已禁用，跳过豆瓣数据获取。")
+            logger.info("  ➜ 未找到本地缓存，且在线豆瓣API已禁用，跳过豆瓣数据获取。")
             return [], None
         
-        logger.info(f"  ➜ 缓存未命中，准备通过豆瓣在线 API 获取演员信息 (IMDb: {imdb_id or '无'}, 年份: {item_year})...")
+        logger.info(f"  ➜ 准备通过豆瓣在线 API 获取演员信息 (IMDb: {imdb_id or '无'}, 年份: {item_year})...")
 
         # ★ 尝试从 TMDb 数据中提取季名称，用于智能拼接搜索
         target_season_name = None
@@ -1730,7 +1701,6 @@ class MediaProcessor:
                                    key=lambda x: x['season_number'], reverse=True)
             if valid_seasons:
                 target_season_name = valid_seasons[0].get('name')
-                # ★★★ 物理斩断年份：入库的如果最新是第2季以上，直接清空主剧年份 ★★★
                 if valid_seasons[0].get('season_number', 0) > 1:
                     item_year = None
 
@@ -1738,7 +1708,7 @@ class MediaProcessor:
             name=item_name, 
             imdbid=imdb_id, 
             mtype=item_type, 
-            year=item_year,        # 已经被物理清空
+            year=item_year,
             season_name=target_season_name 
         )
 
@@ -1760,22 +1730,6 @@ class MediaProcessor:
             mtype=douban_type
         )
         douban_cast_raw = cast_data.get("cast", [])
-
-        # =================================================================
-        # 优先级 4: 将 API 成功获取的数据写入 PostgreSQL 缓存 (不污染本地神医目录)
-        # =================================================================
-        if douban_cast_raw:
-            try:
-                with get_central_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        cursor.execute("""
-                            INSERT INTO douban_api_cache (imdb_id, douban_id, actors_json) 
-                            VALUES (%s, %s, %s)
-                        """, (imdb_id, douban_id, json.dumps(douban_cast_raw, ensure_ascii=False)))
-                    conn.commit()
-                logger.debug(f"  ➜ [豆瓣获取] 💾 在线豆瓣数据已成功持久化至 PostgreSQL 数据库。")
-            except Exception as e:
-                logger.warning(f"  ➜ 将豆瓣数据写入 PostgreSQL 时发生错误: {e}")
 
         return douban_cast_raw, None
     
