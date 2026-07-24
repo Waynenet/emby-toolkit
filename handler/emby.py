@@ -304,6 +304,51 @@ def apply_etk_credits_chapter(
         return None
 
 
+def update_etk_chapters(
+    item_id: str,
+    base_url: str,
+    api_key: str,
+    *,
+    intro_start_ticks: Optional[int] = None,
+    intro_end_ticks: Optional[int] = None,
+    credits_start_ticks: Optional[int] = None,
+    clear_intro: bool = False,
+    clear_credits: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Update or clear ETK intro/credits markers through the bridge plugin."""
+    if not all([item_id, base_url, api_key]):
+        return None
+    payload: Dict[str, Any] = {
+        "ClearIntro": bool(clear_intro),
+        "ClearCredits": bool(clear_credits),
+    }
+    if intro_start_ticks is not None:
+        payload["IntroStartTicks"] = int(intro_start_ticks)
+    if intro_end_ticks is not None:
+        payload["IntroEndTicks"] = int(intro_end_ticks)
+    if credits_start_ticks is not None:
+        payload["CreditsStartTicks"] = int(credits_start_ticks)
+
+    try:
+        response = emby_client.post(
+            f"{base_url.rstrip('/')}/Items/{item_id}/ETKMediaInfo/Chapters",
+            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            json=payload,
+        )
+        if not response.ok:
+            logger.error(
+                "  ➜ [片头片尾编辑] 更新 Emby Item %s 章节失败: HTTP %s, %s",
+                item_id,
+                response.status_code,
+                (response.text or "-")[:500],
+            )
+            return None
+        return response.json() if response.content else {}
+    except Exception as e:
+        logger.error("  ➜ [片头片尾编辑] 更新 Emby Item %s 章节失败: %s", item_id, e)
+        return None
+
+
 def get_etk_chapter_status(
     item_ids: List[str],
     base_url: str,
@@ -1698,8 +1743,11 @@ def get_emby_item_image_bytes(
 
     response = None
     try:
+        image_path = f"Images/{image_type}"
+        if str(image_type or "").strip().lower() == "backdrop":
+            image_path = "Images/Backdrop/0"
         response = emby_client.get(
-            f"{emby_server_url.rstrip('/')}/Items/{item_id}/Images/{image_type}",
+            f"{emby_server_url.rstrip('/')}/Items/{item_id}/{image_path}",
             params={"api_key": emby_api_key},
             stream=True,
             timeout=30,
