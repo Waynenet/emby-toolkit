@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 SAMPLE_SECONDS = 600
 INTRO_SAMPLE_STEPS = (180, 300, SAMPLE_SECONDS)
 CREDITS_SAMPLE_STEPS = (180, 300)
-INTRO_DETECTION_ALGORITHM_VERSION = 3
+INTRO_DETECTION_ALGORITHM_VERSION = 4
 MAX_WORK_EPISODES_PER_SEASON = 3
 MAX_WRITE_EPISODES_PER_JOB = MAX_WORK_EPISODES_PER_SEASON
 BATCH_CONTINUATION_DELAY_SECONDS = 3
@@ -57,6 +57,7 @@ FINGERPRINT_MAX_CONSECUTIVE_MISSES = 5
 FINGERPRINT_MIN_MATCH_RATIO = 0.85
 FINGERPRINT_ANCHOR_WIDTH = 3
 FINGERPRINT_CACHE_TOLERANCE_SECONDS = 5
+FINGERPRINT_EXTRACT_MAX_FAILURES = 3
 FINGERPRINT_ANCHOR_MASKS = (
     0x0F0F0F0F,
     0xF0F0F0F0,
@@ -1270,6 +1271,125 @@ def _mark_detection_failure(
         logger.debug("  ➜ [片头片尾提取] 写入失败标记失败 %s/%s: %s", kind, failure_key, e)
 
 
+def _should_count_fingerprint_extract_failure(kind: str, sample_seconds: int) -> bool:
+    kind = str(kind or FINGERPRINT_KIND_INTRO).strip().lower()
+    steps = CREDITS_SAMPLE_STEPS if kind == FINGERPRINT_KIND_CREDITS else INTRO_SAMPLE_STEPS
+    first_step = int(steps[0])
+    return abs(int(sample_seconds or 0) - first_step) <= FINGERPRINT_CACHE_TOLERANCE_SECONDS
+
+
+def _record_fingerprint_extract_failure(
+    ref: EpisodeRef,
+    kind: str,
+    *,
+    sample_seconds: int,
+    reason: str,
+) -> int:
+    if not ref or not _should_count_fingerprint_extract_failure(kind, sample_seconds):
+        return 0
+    kind = str(kind or FINGERPRINT_KIND_INTRO).strip().lower()
+    failure_key = _failure_key_for_episode(ref)
+    if not failure_key:
+        return 0
+    attempts = 0
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO p115_intro_fingerprint_failures(
+                        failure_key, kind, algorithm_version, attempts,
+                        last_sample_seconds, last_reason,
+                        series_tmdb_id, season_number, sha1, updated_at
+                    ) VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (failure_key, kind, algorithm_version)
+                    DO UPDATE SET
+                        attempts = p115_intro_fingerprint_failures.attempts + 1,
+                        last_sample_seconds = EXCLUDED.last_sample_seconds,
+                        last_reason = EXCLUDED.last_reason,
+                        series_tmdb_id = EXCLUDED.series_tmdb_id,
+                        season_number = EXCLUDED.season_number,
+                        sha1 = EXCLUDED.sha1,
+                        updated_at = NOW()
+                    RETURNING attempts
+                    """,
+                    (
+                        failure_key,
+                        kind,
+                        INTRO_DETECTION_ALGORITHM_VERSION,
+                        int(sample_seconds or 0),
+                        str(reason or '')[:200],
+                        ref.series_tmdb_id,
+                        int(ref.season_number or 0),
+                        ref.sha1,
+                    ),
+                )
+                row = cur.fetchone()
+                attempts = int(row.get('attempts') if isinstance(row, dict) else row[0])
+            conn.commit()
+    except Exception as e:
+        logger.debug("  ➜ [片头片尾提取] 记录指纹提取失败次数失败 %s/%s: %s", kind, failure_key, e)
+        return 0
+
+    if attempts >= FINGERPRINT_EXTRACT_MAX_FAILURES:
+        terminal_reason = (
+            'credits_fingerprint_extract_failed'
+            if kind == FINGERPRINT_KIND_CREDITS
+            else 'intro_fingerprint_extract_failed'
+        )
+        _mark_detection_failure(
+            ref,
+            kind,
+            scope='episode',
+            reason=terminal_reason,
+            sample_count=attempts,
+            episode_count=0,
+        )
+        logger.warning(
+            "  ➜ [片头片尾提取] 《%s》S%02dE%02d %s音频指纹连续提取失败 %s 次，当前算法版本不再自动重试。",
+            ref.series_title,
+            ref.season_number,
+            ref.episode_number,
+            "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头",
+            attempts,
+        )
+    else:
+        logger.debug(
+            "  ➜ [片头片尾提取] 《%s》S%02dE%02d %s音频指纹提取失败计数：%s/%s。",
+            ref.series_title,
+            ref.season_number,
+            ref.episode_number,
+            "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头",
+            attempts,
+            FINGERPRINT_EXTRACT_MAX_FAILURES,
+        )
+    return attempts
+
+
+def _clear_fingerprint_extract_failure(ref: EpisodeRef, kind: str) -> None:
+    if not ref:
+        return
+    kind = str(kind or FINGERPRINT_KIND_INTRO).strip().lower()
+    failure_key = _failure_key_for_episode(ref)
+    if not failure_key:
+        return
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM p115_intro_fingerprint_failures
+                    WHERE failure_key=%s
+                      AND kind=%s
+                      AND algorithm_version=%s
+                    """,
+                    (failure_key, kind, INTRO_DETECTION_ALGORITHM_VERSION),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.debug("  ➜ [片头片尾提取] 清理指纹提取失败次数失败 %s/%s: %s", kind, failure_key, e)
+
+
 def _load_active_watchlist_episode_refs(
     limit: int = 50,
     selected_library_ids: Optional[Sequence[str]] = None,
@@ -1471,6 +1591,8 @@ def _load_or_extract_fingerprint(
     window_start, sample_seconds = _fingerprint_window(ref, kind, requested_sample_seconds)
     if sample_seconds < MIN_INTRO_SECONDS:
         return None
+    if _is_detection_failed(ref, kind):
+        return None
     cached = _load_fingerprint_cache(ref.sha1, kind=kind)
     if cached:
         cached_values, cached_sample_seconds = cached
@@ -1495,6 +1617,7 @@ def _load_or_extract_fingerprint(
     )
     if not values:
         return None
+    _clear_fingerprint_extract_failure(ref, kind)
     _save_fingerprint_cache(ref.sha1, values, sample_seconds, kind=kind)
     return FingerprintRef(ref, values, sample_seconds, window_start, kind)
 
@@ -1659,7 +1782,14 @@ def _extract_fingerprint(
         ref.episode_number,
         backend or "115",
     )
-    values = _run_ffmpeg_chromaprint(direct_url, window_start=window_start, sample_seconds=sample_seconds)
+    audio_stream_index = _fingerprint_audio_stream_index(ref.sha1)
+    values = _run_ffmpeg_chromaprint(
+        direct_url,
+        window_start=window_start,
+        sample_seconds=sample_seconds,
+        audio_stream_index=audio_stream_index,
+    )
+    countable_extract_failure = not reused_url
     if values:
         time.sleep(3)
         return values
@@ -1675,9 +1805,18 @@ def _extract_fingerprint(
                 direct_url,
                 window_start=window_start,
                 sample_seconds=sample_seconds,
+                audio_stream_index=audio_stream_index,
             )
             if values:
                 return values
+            countable_extract_failure = True
+    if countable_extract_failure:
+        _record_fingerprint_extract_failure(
+            ref,
+            kind,
+            sample_seconds=sample_seconds,
+            reason='ffmpeg_chromaprint_empty',
+        )
     logger.warning("  ➜ [片头片尾提取] %s音频指纹提取失败：%s S%02dE%02d", "片尾" if kind == FINGERPRINT_KIND_CREDITS else "片头", ref.series_title, ref.season_number, ref.episode_number)
     return []
 
@@ -1687,6 +1826,7 @@ def _run_ffmpeg_chromaprint(
     *,
     window_start: float = 0.0,
     sample_seconds: int = SAMPLE_SECONDS,
+    audio_stream_index: Optional[int] = None,
 ) -> List[int]:
     if not shutil.which("ffmpeg"):
         return []
@@ -1710,6 +1850,8 @@ def _run_ffmpeg_chromaprint(
     cmd.extend([
         "-i",
         direct_url,
+        "-map",
+        f"0:{audio_stream_index}" if audio_stream_index is not None else "0:a:0",
         "-t",
         str(max(1, int(sample_seconds or SAMPLE_SECONDS))),
         "-ac",
@@ -1727,6 +1869,39 @@ def _run_ffmpeg_chromaprint(
         "-",
     ])
     return _parse_raw_chromaprint(_run_command(cmd))
+
+
+def _fingerprint_audio_stream_index(sha1: str) -> Optional[int]:
+    root = _mediainfo_root(_cached_mediainfo(sha1))
+    if not isinstance(root, dict):
+        return None
+    source = root.get("MediaSourceInfo") if isinstance(root.get("MediaSourceInfo"), dict) else root
+    streams = source.get("MediaStreams") if isinstance(source, dict) else None
+    if not isinstance(streams, list):
+        return None
+
+    valid_streams = [stream for stream in streams if _is_valid_fingerprint_audio_stream(stream)]
+    if not valid_streams:
+        return None
+    selected = next((stream for stream in valid_streams if stream.get("IsDefault") is True), valid_streams[0])
+    try:
+        return int(selected.get("Index"))
+    except Exception:
+        return None
+
+
+def _is_valid_fingerprint_audio_stream(stream: Any) -> bool:
+    if not isinstance(stream, dict):
+        return False
+    if str(stream.get("Type") or "").strip().lower() != "audio":
+        return False
+    codec = str(stream.get("Codec") or "").strip().lower()
+    if not codec or codec in {"unknown", "none", "null", "data"} or codec.isdigit():
+        return False
+    try:
+        return int(stream.get("Index")) >= 0
+    except Exception:
+        return False
 
 
 def _run_command(cmd: List[str]) -> bytes:
