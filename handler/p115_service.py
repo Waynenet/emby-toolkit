@@ -5932,16 +5932,145 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     logger.error(f"  ➜ 解析 115 分类规则失败: {e}")
                     self.rules = []
 
+    def _load_database_raw_metadata(self):
+        """Load organizer metadata from the persisted media snapshot."""
+        item_type = 'Movie' if self.media_type == 'movie' else 'Series'
+        try:
+            from database.connection import get_db_connection
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM media_metadata WHERE tmdb_id = %s AND item_type = %s",
+                        (str(self.tmdb_id), item_type),
+                    )
+                    row = cursor.fetchone()
+            if not row:
+                return {}
+
+            def _json_value(value, default):
+                if value in (None, ''):
+                    return default
+                if isinstance(value, (dict, list)):
+                    return value
+                try:
+                    return json.loads(value)
+                except (TypeError, ValueError):
+                    return default
+
+            def _names(value):
+                value = _json_value(value, [])
+                if isinstance(value, dict):
+                    value = value.get('results') or value.get('keywords') or []
+                result = []
+                for item in value:
+                    if isinstance(item, dict):
+                        result.append(item)
+                    elif item:
+                        result.append({'name': str(item)})
+                return result
+
+            title = row.get('title') or row.get('original_title') or self.original_title
+            original_title = row.get('original_title') or title
+            details = {
+                'id': int(self.tmdb_id) if str(self.tmdb_id).isdigit() else self.tmdb_id,
+                'name' if self.media_type == 'tv' else 'title': title,
+                'original_name' if self.media_type == 'tv' else 'original_title': original_title,
+                'original_language': row.get('original_language'),
+                'overview': row.get('overview'),
+                'tagline': row.get('tagline'),
+                'first_air_date' if self.media_type == 'tv' else 'release_date': row.get('release_date'),
+                'last_air_date': row.get('last_air_date'),
+                'vote_average': row.get('rating') or 0,
+                'genres': _names(row.get('genres_json')),
+                'production_companies': _names(row.get('production_companies_json')),
+                'networks': _names(row.get('networks_json')),
+                'keywords': {'results': _names(row.get('keywords_json'))},
+                'production_countries': _names(row.get('countries_json')),
+                'origin_country': [
+                    item.get('iso_3166_1') for item in _json_value(row.get('countries_json'), [])
+                    if isinstance(item, dict) and item.get('iso_3166_1')
+                ],
+                'original_title': original_title,
+                'original_name': original_title,
+                'runtime': row.get('runtime_minutes') if self.media_type == 'movie' else None,
+                'episode_run_time': ([row.get('runtime_minutes')] if row.get('runtime_minutes') else []),
+                'adult': False,
+            }
+
+            official = _json_value(row.get('official_rating_json'), {})
+            if official:
+                if self.media_type == 'tv':
+                    details['content_ratings'] = {
+                        'results': [
+                            {'iso_3166_1': country, 'rating': rating}
+                            for country, rating in official.items()
+                            if rating
+                        ]
+                    }
+                else:
+                    details['release_dates'] = {
+                        'results': [
+                            {
+                                'iso_3166_1': country,
+                                'release_dates': [{'certification': rating}],
+                            }
+                            for country, rating in official.items()
+                            if rating
+                        ]
+                    }
+
+            actors = _json_value(row.get('actors_json'), [])
+            directors = _json_value(row.get('directors_json'), [])
+            cast = [item for item in actors if isinstance(item, dict)]
+            crew = [
+                dict(item, job='Director')
+                for item in directors
+                if isinstance(item, dict)
+            ]
+            if cast or crew:
+                details['credits'] = {'cast': cast, 'crew': crew}
+
+            if row.get('release_year') and not details.get('first_air_date' if self.media_type == 'tv' else 'release_date'):
+                date_key = 'first_air_date' if self.media_type == 'tv' else 'release_date'
+                details[date_key] = f"{int(row['release_year']):04d}-01-01"
+            if self.media_type == 'tv' and not details.get('first_air_date'):
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT release_date, release_year
+                            FROM media_metadata
+                            WHERE parent_series_tmdb_id = %s
+                              AND item_type = 'Season'
+                              AND (release_date IS NOT NULL OR release_year IS NOT NULL)
+                            ORDER BY season_number NULLS LAST
+                            LIMIT 1
+                            """,
+                            (str(self.tmdb_id),),
+                        )
+                        season_row = cursor.fetchone()
+                if season_row:
+                    details['first_air_date'] = season_row.get('release_date')
+                    if not details['first_air_date'] and season_row.get('release_year'):
+                        details['first_air_date'] = f"{int(season_row['release_year']):04d}-01-01"
+            return details
+        except Exception as exc:
+            logger.warning("  ➜ [115整理] 读取本地媒体元数据失败: TMDb %s -> %s", self.tmdb_id, exc)
+            return {}
+
     def _fetch_raw_metadata(self):
         """
         获取 TMDb 原始元数据 (ID/Code)，不进行任何中文转换。
         """
-        if not self.api_key: return {}
-        
         # 读取内存缓存
         cache_key = f"{self.media_type}_{self.tmdb_id}"
         if cache_key in _TMDB_METADATA_CACHE:
             return _TMDB_METADATA_CACHE[cache_key]
+
+        database_details = self._load_database_raw_metadata()
+        if not self.api_key and not database_details:
+            return {}
 
         data = {
             'genre_ids': [],
@@ -5955,18 +6084,38 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
 
         try:
             raw_details = {}
-            if self.media_type == 'tv':
-                raw_details = tmdb.get_tv_details(
-                    self.tmdb_id, self.api_key,
-                    append_to_response="keywords,content_ratings,networks,credits,alternative_titles,external_ids,images"
-                )
-            else:
-                raw_details = tmdb.get_movie_details(
-                    self.tmdb_id, self.api_key,
-                    append_to_response="keywords,release_dates,credits,alternative_titles,external_ids,images"
-                )
+            if self.api_key:
+                try:
+                    if self.media_type == 'tv':
+                        raw_details = tmdb.get_tv_details(
+                            self.tmdb_id, self.api_key,
+                            append_to_response="keywords,content_ratings,networks,credits,alternative_titles,external_ids,images"
+                        ) or {}
+                    else:
+                        raw_details = tmdb.get_movie_details(
+                            self.tmdb_id, self.api_key,
+                            append_to_response="keywords,release_dates,credits,alternative_titles,external_ids,images"
+                        ) or {}
+                except Exception as exc:
+                    logger.warning("  ➜ [115整理] TMDb 请求失败，继续使用本地元数据: TMDb %s -> %s", self.tmdb_id, exc)
 
-            if not raw_details: return {}
+            # The persisted snapshot is authoritative for organizer decisions;
+            # network data only fills fields that are absent locally.
+            if database_details:
+                merged_details = dict(raw_details or {})
+                for key, value in database_details.items():
+                    if value not in (None, '', [], {}):
+                        merged_details[key] = value
+                raw_details = merged_details
+            if not raw_details:
+                return {}
+
+            # PostgreSQL DATE values are returned as datetime.date; organizer paths
+            # consume ISO text and must not slice/date-format database objects.
+            for date_key in ('release_date', 'first_air_date', 'last_air_date', 'air_date'):
+                value = raw_details.get(date_key)
+                if value is not None and hasattr(value, 'isoformat'):
+                    raw_details[date_key] = value.isoformat()
 
             if self.ai_translator:
                 translation_config = dict(config_manager.APP_CONFIG)
@@ -7182,6 +7331,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         title = self.details.get('title') or self.original_title
         original_title = self.details.get('original_title') or title
         date_str = self.details.get('date') or ''
+        date_str = date_str.isoformat() if hasattr(date_str, 'isoformat') else str(date_str)
         year = date_str[:4] if date_str else ''
         cfg = self.rename_config
         keep_original = cfg.get('keep_original_name', False)
@@ -7362,7 +7512,9 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                     for movie in collection_movies:
                         m_title = movie.get('title', '')
                         m_orig = movie.get('original_title', '')
-                        m_year = movie.get('release_date', '')[:4] if movie.get('release_date') else ''
+                        movie_date = movie.get('release_date')
+                        movie_date = movie_date.isoformat() if hasattr(movie_date, 'isoformat') else str(movie_date or '')
+                        m_year = movie_date[:4] if movie_date else ''
                         
                         clean_m_title = re.sub(r'[^\w\u4e00-\u9fa5]', '', m_title).lower()
                         clean_m_orig = re.sub(r'[^\w\u4e00-\u9fa5]', '', m_orig).lower()
@@ -7751,6 +7903,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         title = self.details.get('title') or self.original_title
         original_title = self.details.get('original_title') or title
         date_str = self.details.get('date') or ''
+        date_str = date_str.isoformat() if hasattr(date_str, 'isoformat') else str(date_str)
         year = date_str[:4] if date_str else ''
 
         cfg = self.rename_config
@@ -7763,6 +7916,19 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
         # ★ 保留原名只影响文件名，不影响主目录
         # batch 模式 root_name 可能是“批量文件”，绝不能拿它当目标主目录
         main_format = self._get_rename_format('main_dir', ['title_zh', 'sep_space', 'year', 'sep_space', 'tmdb_bracket'])
+        year_required = (
+            (isinstance(main_format, str) and re.search(r'\b(?:year|year_pure)\b', main_format))
+            or (isinstance(main_format, (list, tuple)) and any(
+                str(part).rsplit('_', 1)[0] in {'year', 'year_pure'}
+                for part in main_format
+            ))
+        )
+        if year_required and not re.fullmatch(r'(?:19|20)\d{2}', year):
+            logger.error(
+                f"  ➜ [115整理] 缺少主目录命名所需的有效发行年份，已中断整理: "
+                f"TMDb={self.tmdb_id}, title={original_title}"
+            )
+            return False
         std_root_name = self._build_name_from_format(
             main_format,
             is_tv=(self.media_type == 'tv'),
@@ -8668,6 +8834,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                 """给 p115_filesystem_cache 写入洗版优先级快照。失败只返回空快照，不影响整理。"""
                 try:
                     file_sha1 = _item.get('sha1') or _item.get('sha')
+                    notification_pending = bool(_item.get('_washing_replaces_existing'))
                     level = _batch_washing_level_from_reason(_reason)
                     level_reason = str(_reason or '').strip()
 
@@ -8696,7 +8863,7 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                                 norm_new = WashingService._normalize_info(new_info)
                                 level, level_reason = WashingService.get_level(norm_new, priorities)
 
-                    if level >= 9999:
+                    if level >= 9999 and not notification_pending:
                         return {}
 
                     identity = {
@@ -8709,16 +8876,19 @@ class SmartOrganizer(P115MediaAnalyzerMixin):
                             'episode_number': _item.get('_episode_num'),
                         })
                     from datetime import datetime, timezone
+                    snapshot = {
+                        'reason': level_reason or (f'优先级 {level}' if level < 9999 else ''),
+                        'target_cid': str(target_cid or ''),
+                        'media_type': 'movie' if self.media_type == 'movie' else 'series',
+                        'version_slot': _item.get('_washing_slot') if isinstance(_item, dict) else None,
+                        'identity': identity,
+                        'evaluated_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                    if notification_pending:
+                        snapshot['notification_pending'] = True
                     return {
-                        'washing_level': int(level),
-                        'washing_snapshot_json': {
-                            'reason': level_reason or f'优先级 {level}',
-                            'target_cid': str(target_cid or ''),
-                            'media_type': 'movie' if self.media_type == 'movie' else 'series',
-                            'version_slot': _item.get('_washing_slot') if isinstance(_item, dict) else None,
-                            'identity': identity,
-                            'evaluated_at': datetime.now(timezone.utc).isoformat()
-                        }
+                        'washing_level': int(level) if level < 9999 else None,
+                        'washing_snapshot_json': snapshot,
                     }
                 except Exception as e:
                     logger.debug(f"  ➜ [洗版快照] 计算失败: {_new_name} -> {e}")

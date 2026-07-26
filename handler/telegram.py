@@ -361,18 +361,7 @@ def _notice_asset_size(asset: dict) -> int:
 
 
 def _notice_asset_resolution(asset: dict) -> str:
-    resolution = _notice_asset_value(asset, 'resolution_display')
-    width = (asset or {}).get('width')
-    height = (asset or {}).get('height')
-    try:
-        width = int(width or 0)
-        height = int(height or 0)
-    except Exception:
-        width, height = 0, 0
-    dimension = f"{width}x{height}" if width and height else ''
-    if resolution and dimension and dimension not in resolution:
-        return f"{resolution} / {dimension}"
-    return resolution or dimension
+    return _notice_asset_value(asset, 'resolution_display')
 
 
 def _notice_join_unique(values, limit: int = 4) -> str:
@@ -604,7 +593,7 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
     【全能媒体通知函数】
     根据传入的媒体详情，自动获取图片、组装消息并发送给频道和订阅者。
     """
-    notification_name = {'new': '新入库', 'update': '追更入库'}.get(notification_type, notification_type or '媒体')
+    notification_name = {'new': '新入库', 'update': '追更入库', 'wash': '洗版入库'}.get(notification_type, notification_type or '媒体')
     logger.info(f"  ➜ 准备发送 Telegram {notification_name}通知：《{item_details.get('Name') or '未知媒体'}》。")
     
     try:
@@ -690,7 +679,8 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         # --- 4. 组装最终的通知文本 (Caption) ---
         notification_title_map = {
             'new': '✨ 入库成功',
-            'update': '🔄 已更新'
+            'update': '🔄 已更新',
+            'wash': '♻️ 洗版成功',
         }
         notification_title = notification_title_map.get(notification_type, '🔔 状态更新')
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -782,7 +772,8 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
         if subscriber_chat_ids:
             personal_caption_map = {
                 'new': f"✅ *您的订阅已入库*\n\n{caption}",
-                'update': f"🔄 *您的订阅已更新*\n\n{caption}"
+                'update': f"🔄 *您的订阅已更新*\n\n{caption}",
+                'wash': f"♻️ *您的订阅已洗版*\n\n{caption}",
             }
             personal_caption = personal_caption_map.get(notification_type, caption)
             

@@ -8,9 +8,21 @@ from typing import Optional, Dict, Tuple, List, Set, Any
 import logging
 from datetime import datetime, timedelta, timezone
 
-from handler.tmdb import get_movie_details, get_tv_details, get_tv_season_details, search_tv_shows, get_tv_season_details
+from handler.tmdb import (
+    get_movie_details,
+    get_tv_details,
+    get_tv_season_details,
+    get_season_details_tmdb,
+    search_tv_shows,
+)
 from database import settings_db, connection, request_db, media_db
+from database.metadata_provider_db import (
+    build_image_language_parameter,
+    build_image_language_priority,
+    select_image_path,
+)
 from ai_translator import AITranslator
+import config_manager
 import utils
 import constants
 
@@ -1717,6 +1729,93 @@ def calculate_ancestor_ids(item_id: str, id_to_parent_map: dict, library_guid: s
         
     return [str(fid) for fid in ancestors if fid and str(fid).lower() != "none"]
 
+def _apply_subscription_image_preference(
+    details: Optional[Dict[str, Any]],
+    item_type: str,
+    tmdb_id: str,
+    tmdb_api_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Refresh and select subscription artwork using the configured language priority."""
+    if not isinstance(details, dict):
+        return details
+
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE,
+        "zh",
+    )
+    priorities = build_image_language_priority(details.get("original_language"), preference)
+    image_languages = build_image_language_parameter(priorities)
+
+    try:
+        if item_type == "Movie":
+            image_details = get_movie_details(
+                int(tmdb_id),
+                tmdb_api_key,
+                append_to_response="images",
+                include_image_language=image_languages,
+            )
+        elif item_type == "Series":
+            image_details = get_tv_details(
+                int(tmdb_id),
+                tmdb_api_key,
+                append_to_response="images",
+                include_image_language=image_languages,
+            )
+        else:
+            image_details = None
+    except (TypeError, ValueError):
+        image_details = None
+
+    if image_details:
+        details = dict(details)
+        details["images"] = image_details.get("images") or details.get("images") or {}
+
+    images = details.get("images") or {}
+    details["poster_path"] = (
+        select_image_path(images.get("posters"), priorities)
+        or details.get("poster_path")
+    )
+    details["backdrop_path"] = (
+        select_image_path(images.get("backdrops"), priorities)
+        or details.get("backdrop_path")
+    )
+    return details
+
+
+def _get_subscription_season_details(
+    parent_details: Dict[str, Any],
+    parent_id: str,
+    season_number: int,
+    tmdb_api_key: str,
+) -> Optional[Dict[str, Any]]:
+    preference = config_manager.APP_CONFIG.get(
+        constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE,
+        "zh",
+    )
+    priorities = build_image_language_priority(
+        parent_details.get("original_language"), preference
+    )
+    try:
+        details = get_season_details_tmdb(
+            int(parent_id),
+            int(season_number),
+            tmdb_api_key,
+            append_to_response="images",
+            include_image_language=build_image_language_parameter(priorities),
+        )
+    except (TypeError, ValueError):
+        details = None
+    if not details:
+        return get_tv_season_details(parent_id, season_number, tmdb_api_key)
+
+    images = details.get("images") or {}
+    details["poster_path"] = (
+        select_image_path(images.get("posters"), priorities)
+        or details.get("poster_path")
+    )
+    return details
+
+
 # --- 通用订阅处理函数 ---
 def process_subscription_items_and_update_db(
     tmdb_items: List[Dict[str, Any]], 
@@ -1785,6 +1884,43 @@ def process_subscription_items_and_update_db(
     today_str = datetime.now().strftime('%Y-%m-%d')
     parent_series_cache = {} 
 
+    def _metadata_for_placeholder(item_type: str, details: Dict[str, Any], parent_details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """复用正式入库的扁平化字段；Season 继承父剧集非人物元数据。"""
+        source_details = parent_details if item_type == 'Season' and parent_details else details
+        payload = construct_metadata_payload('Series' if item_type == 'Season' else item_type, source_details or {})
+        preference = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh')
+        priorities = build_image_language_priority(source_details.get('original_language'), preference)
+        images = source_details.get('images') or {}
+        if item_type == 'Season':
+            payload.update({
+                'name': details.get('name'),
+                'overview': details.get('overview') or payload.get('overview'),
+                'first_air_date': details.get('air_date') or payload.get('first_air_date'),
+                'poster_path': details.get('poster_path') or payload.get('poster_path'),
+                'number_of_episodes': details.get('episode_count') or 0,
+            })
+        credits = payload.get('casts') or {}
+        directors = [d for d in credits.get('crew', []) if d.get('job') in ('Director', 'Series Director')]
+        countries = payload.get('production_countries') or payload.get('origin_country') or []
+        release_date = details.get('air_date') or details.get('release_date') or details.get('first_air_date')
+        release_year = int(str(release_date)[:4]) if release_date and str(release_date)[:4].isdigit() else None
+        return {
+            'release_year': release_year,
+            'original_language': source_details.get('original_language'),
+            'tagline': payload.get('tagline'), 'homepage': payload.get('homepage'),
+            'runtime_minutes': payload.get('runtime'), 'rating': payload.get('vote_average'),
+            'imdb_id': payload.get('imdb_id'), 'official_rating_json': payload.get('_official_rating_map') or {},
+            'genres_json': payload.get('genres') or [], 'directors_json': directors or payload.get('created_by') or [],
+            'production_companies_json': payload.get('production_companies') or [],
+            'networks_json': payload.get('networks') or [],
+            'countries_json': [c.get('iso_3166_1') if isinstance(c, dict) else c for c in countries],
+            'keywords_json': payload.get('keywords') or [], 'last_air_date': source_details.get('last_air_date'),
+            'total_episodes': payload.get('number_of_episodes') or 0,
+            'logo_path': select_image_path(images.get('logos'), priorities),
+            'thumb_path': select_image_path(images.get('backdrops'), priorities) or source_details.get('backdrop_path'),
+            'watchlist_tmdb_status': source_details.get('status'),
+        }
+
     # 用于记录本次真正处理过的 ID (返回给调用方用于清理)
     processed_active_ids = set()
 
@@ -1835,6 +1971,9 @@ def process_subscription_items_and_update_db(
                 if parent_id not in parent_series_cache:
                     p_details = get_tv_details(parent_id, tmdb_api_key)
                     if p_details:
+                        p_details = _apply_subscription_image_preference(
+                            p_details, "Series", parent_id, tmdb_api_key
+                        )
                         parent_series_cache[parent_id] = p_details
                 
                 parent_details = parent_series_cache.get(parent_id)
@@ -1851,9 +1990,12 @@ def process_subscription_items_and_update_db(
                     'backdrop_path': parent_details.get('backdrop_path'),
                     'overview': parent_details.get('overview')
                 }
+                parent_series_to_ensure_exist[parent_id].update(_metadata_for_placeholder('Series', parent_details))
 
                 # 3. 获取季详情
-                details = get_tv_season_details(parent_id, season_num, tmdb_api_key)
+                details = _get_subscription_season_details(
+                    parent_details, parent_id, season_num, tmdb_api_key
+                )
                 if details:
                     details['parent_series_tmdb_id'] = str(parent_id)
                     details['parent_title'] = parent_details.get('name')
@@ -1877,6 +2019,9 @@ def process_subscription_items_and_update_db(
                     continue
                 details = get_tv_details(tmdb_id, tmdb_api_key)
                 if details:
+                    details = _apply_subscription_image_preference(
+                        details, "Series", tmdb_id, tmdb_api_key
+                    )
                     target_db_id = str(details.get('id') or tmdb_id)
                     processed_active_ids.add(target_db_id)
 
@@ -1885,6 +2030,9 @@ def process_subscription_items_and_update_db(
                 if f"{tmdb_id}_Movie" in existing_status_keys: continue
                 details = get_movie_details(tmdb_id, tmdb_api_key)
                 if details:
+                    details = _apply_subscription_image_preference(
+                        details, "Movie", tmdb_id, tmdb_api_key
+                    )
                     target_db_id = str(details.get('id'))
                     processed_active_ids.add(target_db_id)
 
@@ -1898,6 +2046,7 @@ def process_subscription_items_and_update_db(
                 'tmdb_id': target_db_id, # 这里存入的是 季ID 或 电影ID
                 'item_type': item_type_for_db, # 这里是 'Season' 或 'Movie'
                 'title': details.get('name') or details.get('title'),
+                'original_title': details.get('original_name') or details.get('original_title'),
                 'release_date': release_date,
                 'release_year': release_year, 
                 'overview': details.get('overview'),
@@ -1907,6 +2056,9 @@ def process_subscription_items_and_update_db(
                 'season_number': details.get('season_number'),
                 'source': subscription_source # 直接使用传入的 source
             }
+            item_details_for_db.update(_metadata_for_placeholder(
+                item_type_for_db, details, parent_details if item_type_for_db == 'Season' else None
+            ))
             
             if item_type_for_db == 'Season':
                 item_details_for_db['title'] = details.get('name') or f"第 {season_num} 季"
@@ -1930,6 +2082,7 @@ def process_subscription_items_and_update_db(
             item_type='Series',
             media_info_list=list(parent_series_to_ensure_exist.values())
         )
+        request_db.update_media_metadata_details(list(parent_series_to_ensure_exist.values()))
 
     def group_and_update(items_list, status):
         if not items_list: return
@@ -1948,6 +2101,7 @@ def process_subscription_items_and_update_db(
                 request_db.set_media_status_subscribed(ids, itype, media_info_list=requests, source=subscription_source)
             elif status == 'PENDING_RELEASE':
                 request_db.set_media_status_pending_release(ids, itype, media_info_list=requests, source=subscription_source)
+            request_db.update_media_metadata_details(requests)
 
     if target_status == 'SUBSCRIBED':
         if parent_series_to_ensure_exist:
@@ -2287,13 +2441,14 @@ def reconstruct_metadata_from_db(db_row: Dict[str, Any], actors_list: List[Dict[
         try:
             raw_rating = db_row['official_rating_json']
             ratings_map = json.loads(raw_rating) if isinstance(raw_rating, str) else raw_rating
-            
-            # ★★★ 核心修复：严格只取映射后的 US 分级。绝不拿其他国家的原始分级兜底 ★★★
-            rating_val = ratings_map.get('US')
-            
-            if rating_val:
-                payload['mpaa'] = rating_val
-                payload['certification'] = rating_val
+            if isinstance(ratings_map, dict):
+                payload['_official_rating_map'] = dict(ratings_map)
+
+                # 严格只取映射后的 US 分级，不拿其他国家的原始分级兜底。
+                rating_val = ratings_map.get('US') or ratings_map.get('us')
+                if rating_val:
+                    payload['mpaa'] = rating_val
+                    payload['certification'] = rating_val
         except Exception: pass
 
     return payload

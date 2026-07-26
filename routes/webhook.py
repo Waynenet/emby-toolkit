@@ -51,6 +51,9 @@ WEBHOOK_REQUEUE_DELAY = 5
 WEBHOOK_PENDING_TASKS = collections.deque()
 WEBHOOK_PENDING_TASKS_LOCK = threading.Lock()
 WEBHOOK_PENDING_TASKS_DRAINER = None
+EMBY_METADATA_BACKFILL_DEBOUNCE_SECONDS = 120
+EMBY_METADATA_BACKFILL_RECENT = {}
+EMBY_METADATA_BACKFILL_RECENT_LOCK = threading.Lock()
 
 UPDATE_DEBOUNCE_TIMERS = {}
 UPDATE_DEBOUNCE_LOCK = threading.Lock()
@@ -104,7 +107,9 @@ def _enqueue_active_series_notification(item_details: dict, notification_type: s
             "new_episode_ids": [],
         })
         pending["item_details"] = dict(item_details)
-        if notification_type == "new":
+        if notification_type == "wash":
+            pending["notification_type"] = "wash"
+        elif notification_type == "new" and pending["notification_type"] != "wash":
             pending["notification_type"] = "new"
         for episode_id in new_episode_ids or []:
             episode_id = str(episode_id or "").strip()
@@ -126,6 +131,59 @@ def _enqueue_active_series_notification(item_details: dict, notification_type: s
         len(pending["new_episode_ids"]),
         ACTIVE_SERIES_NOTIFICATION_DEBOUNCE_TIME,
     )
+
+
+def _consume_washing_notification_marker(emby_item_ids: List[str]) -> bool:
+    """消费当前入库文件的洗版通知标记，避免后续刷新重复显示洗版成功。"""
+    item_ids = [str(item_id).strip() for item_id in emby_item_ids or [] if str(item_id).strip()]
+    if not item_ids:
+        return False
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT file_pickcode_json, file_sha1_json
+                    FROM media_metadata
+                    WHERE emby_item_ids_json ?| %s
+                    """,
+                    (item_ids,),
+                )
+                pick_codes = set()
+                sha1s = set()
+                for row in cursor.fetchall() or []:
+                    pick_codes.update(str(value).strip() for value in (row.get('file_pickcode_json') or []) if str(value).strip())
+                    sha1s.update(str(value).strip().upper() for value in (row.get('file_sha1_json') or []) if str(value).strip())
+
+                if not pick_codes and not sha1s:
+                    return False
+
+                clauses = []
+                params = []
+                if pick_codes:
+                    clauses.append("pick_code = ANY(%s)")
+                    params.append(list(pick_codes))
+                if sha1s:
+                    clauses.append("UPPER(sha1) = ANY(%s)")
+                    params.append(list(sha1s))
+
+                cursor.execute(
+                    f"""
+                    UPDATE p115_filesystem_cache
+                    SET washing_snapshot_json = washing_snapshot_json - 'notification_pending'
+                    WHERE ({' OR '.join(clauses)})
+                      AND washing_snapshot_json @> '{{"notification_pending": true}}'::jsonb
+                    RETURNING id
+                    """,
+                    tuple(params),
+                )
+                consumed = bool(cursor.fetchall())
+                conn.commit()
+                return consumed
+    except Exception as e:
+        logger.warning(f"  ➜ [洗版通知] 消费洗版标记失败，沿用普通入库通知: {e}")
+        return False
 
 
 def _should_skip_non_etk_strm_webhook(item_type: str, item_name: str, item_path: str) -> bool:
@@ -1179,7 +1237,9 @@ def _handle_full_processing_flow(processor: 'MediaProcessor', item_id: str, forc
     try:
         # 如果提供了 new_episode_ids，说明是追更通知
         # 如果 is_new_item 为 True，说明是新入库通知
-        notif_type = 'update' if (precise_new_episode_ids and not is_new_item) else 'new'
+        notice_item_ids = precise_new_episode_ids if item_type == "Series" else [item_id]
+        is_washing = _consume_washing_notification_marker(notice_item_ids)
+        notif_type = 'wash' if is_washing else ('update' if (precise_new_episode_ids and not is_new_item) else 'new')
         
         if aggregate_notification and item_type == "Series" and precise_new_episode_ids:
             _enqueue_active_series_notification(item_details, notif_type, precise_new_episode_ids)
@@ -1631,6 +1691,176 @@ def trigger_emby_metadata_backfill():
     status = task_manager.get_task_status()
     if status.get('is_running') and status.get('current_action') == '补齐媒体元数据':
         return jsonify({'ok': True, 'submitted': False, 'reason': 'task_already_running'}), 200
+    return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
+
+
+def _resolve_missing_metadata_backfill_targets(emby_item_ids):
+    """Resolve Emby selections to unique root identities without contacting TMDb."""
+    identities = {}
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT tmdb_id, item_type, parent_series_tmdb_id
+            FROM media_metadata
+            WHERE in_library IS TRUE AND emby_item_ids_json ?| %s
+            """,
+            (emby_item_ids,),
+        )
+        for row in cursor.fetchall():
+            if row['item_type'] == 'Movie':
+                tmdb_id, media_type = row['tmdb_id'], 'movie'
+            else:
+                tmdb_id, media_type = row.get('parent_series_tmdb_id') or row['tmdb_id'], 'tv'
+            if tmdb_id:
+                identities[(str(tmdb_id), media_type)] = {
+                    'tmdb_id': str(tmdb_id),
+                    'media_type': media_type,
+                }
+    from database.metadata_provider_db import needs_metadata_backfill
+    return [
+        target for target in identities.values()
+        if needs_metadata_backfill(target['tmdb_id'], target['media_type'])
+    ]
+
+
+def _resolve_library_missing_metadata_backfill_targets(emby_library_id):
+    """Resolve missing root metadata within one Emby library from local assets."""
+    from database.metadata_provider_db import MEDIA_METADATA_SCHEMA_VERSION
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT root.tmdb_id, root.item_type
+            FROM media_metadata root
+            WHERE root.in_library IS TRUE
+              AND root.item_type IN ('Movie', 'Series')
+              AND (
+                  root.metadata_schema_version < %s
+                  OR NULLIF(BTRIM(root.title), '') IS NULL
+                  OR NULLIF(BTRIM(root.overview), '') IS NULL
+                  OR root.release_year IS NULL
+                  OR NULLIF(BTRIM(COALESCE(
+                      root.official_rating_json->>'US',
+                      root.official_rating_json->>'us',
+                      '')), '') IS NULL
+                  OR root.genres_json IS NULL
+                  OR root.genres_json = '[]'::jsonb
+                  OR (
+                      root.item_type = 'Series'
+                      AND EXISTS (
+                          SELECT 1 FROM media_metadata special
+                          WHERE special.parent_series_tmdb_id = root.tmdb_id
+                            AND special.item_type = 'Episode'
+                            AND special.in_library IS TRUE
+                            AND special.season_number = 0
+                            AND special.tmdb_id LIKE root.tmdb_id || '-S0E%%'
+                      )
+                  )
+              )
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(COALESCE(
+                          root.asset_details_json, '[]'::jsonb)) asset
+                      WHERE asset->>'source_library_id' = %s
+                  )
+                  OR (
+                      root.item_type = 'Series'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM media_metadata episode
+                          WHERE episode.parent_series_tmdb_id = root.tmdb_id
+                            AND episode.item_type = 'Episode'
+                            AND episode.in_library IS TRUE
+                            AND EXISTS (
+                                SELECT 1
+                                FROM jsonb_array_elements(COALESCE(
+                                    episode.asset_details_json, '[]'::jsonb)) asset
+                                WHERE asset->>'source_library_id' = %s
+                            )
+                      )
+                  )
+              )
+            """,
+            (
+                MEDIA_METADATA_SCHEMA_VERSION,
+                str(emby_library_id),
+                str(emby_library_id),
+            ),
+        )
+        return [
+            {
+                'tmdb_id': str(row['tmdb_id']),
+                'media_type': 'tv' if row['item_type'] == 'Series' else 'movie',
+            }
+            for row in cursor.fetchall()
+            if row.get('tmdb_id')
+        ]
+
+
+def _trigger_emby_metadata_backfill(emby_item_ids):
+    targets = _resolve_missing_metadata_backfill_targets(emby_item_ids)
+    if not targets:
+        return jsonify({'ok': True, 'submitted': False, 'reason': 'metadata_complete'}), 200
+
+    from tasks.media import task_backfill_media_metadata_batch
+    submitted = task_manager.submit_task(
+        task_function=task_backfill_media_metadata_batch,
+        task_name=f"补齐缺失元数据 ({len(targets)} 项)",
+        processor_type='media',
+        silent=True,
+        targets=targets,
+    )
+    if submitted:
+        return jsonify({'ok': True, 'submitted': True, 'count': len(targets)}), 202
+    return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
+
+
+@webhook_bp.route('/api/emby/metadata/backfill/item', methods=['POST'])
+def trigger_emby_item_metadata_backfill():
+    emby_item_id = str((request.get_json(silent=True) or {}).get('emby_item_id') or '').strip()
+    if not emby_item_id:
+        return jsonify({'ok': False, 'error': 'emby_item_id is required'}), 400
+    return _trigger_emby_metadata_backfill([emby_item_id])
+
+
+@webhook_bp.route('/api/emby/metadata/backfill/items', methods=['POST'])
+def trigger_emby_items_metadata_backfill():
+    values = (request.get_json(silent=True) or {}).get('emby_item_ids') or []
+    item_ids = list(dict.fromkeys(
+        str(value).strip() for value in values if str(value or '').strip()
+    ))
+    if not item_ids:
+        return jsonify({'ok': False, 'error': 'emby_item_ids is required'}), 400
+    return _trigger_emby_metadata_backfill(item_ids)
+
+
+@webhook_bp.route('/api/emby/metadata/backfill/library', methods=['POST'])
+def trigger_emby_library_metadata_backfill():
+    data = request.get_json(silent=True) or {}
+    library_id = str(data.get('emby_library_id') or '').strip()
+    refresh_mode = str(data.get('refresh_mode') or '').strip().lower()
+    if not library_id.isdigit():
+        return jsonify({'ok': False, 'error': 'emby_library_id is required'}), 400
+    if refresh_mode != 'missing_metadata':
+        return jsonify({'ok': False, 'error': 'unsupported refresh_mode'}), 400
+
+    targets = _resolve_library_missing_metadata_backfill_targets(library_id)
+    if not targets:
+        return jsonify({'ok': True, 'submitted': False, 'reason': 'metadata_complete'}), 200
+
+    from tasks.media import task_backfill_media_metadata_batch
+    submitted = task_manager.submit_task(
+        task_function=task_backfill_media_metadata_batch,
+        task_name=f"补齐缺失元数据 (媒体库 {library_id}，{len(targets)} 项)",
+        processor_type='media',
+        silent=True,
+        targets=targets,
+    )
+    if submitted:
+        return jsonify({'ok': True, 'submitted': True, 'count': len(targets)}), 202
     return jsonify({'ok': False, 'submitted': False, 'reason': 'etk_busy'}), 409
 
 
