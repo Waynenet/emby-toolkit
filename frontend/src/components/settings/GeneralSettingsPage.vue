@@ -191,6 +191,18 @@
                         <n-input-number v-model:value="configModel.proxy_port" :min="1025" :max="65535" :disabled="!configModel.proxy_enabled" style="width: 100%;" placeholder="8096"/>
                       </n-form-item-grid-item>
 
+                      <n-form-item-grid-item label="锁定反代地址" path="proxy_lock_discovery_address" label-width="100">
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-switch
+                              v-model:value="configModel.proxy_lock_discovery_address"
+                              :disabled="!configModel.proxy_enabled"
+                            />
+                          </template>
+                          让 Emby 客户端通过局域网发现时始终使用当前反代地址
+                        </n-tooltip>
+                      </n-form-item-grid-item>
+
                       <!-- 3. 缺失占位符 -->
                       <n-form-item-grid-item label="缺失占位符" path="proxy_show_missing_placeholders" label-width="100">
                          <n-space align="center">
@@ -937,19 +949,19 @@
                       </n-alert>
                     </n-card>
 
-                    <!-- 卡片 3：映射管理 -->
+                    <!-- 卡片 3：映射与词表 -->
                     <n-card :bordered="false" class="dashboard-card">
                       <template #header>
                         <div style="display: flex; align-items: center; justify-content: space-between;">
-                          <span class="card-title">映射管理</span>
+                          <span class="card-title">映射与词表</span>
                           <n-button secondary type="info" @click="mappingManagerModalVisible = true">
                             <template #icon><n-icon :component="SparklesIcon" /></template>
-                            管理映射
+                            管理词表
                           </n-button>
                         </div>
                       </template>
                       <n-alert type="info" :show-icon="true">
-                        统一管理关键词、工作室、国家地区、原语言、发布组与分级映射，识别和筛选逻辑会读取这里的配置。
+                        统一管理关键词、工作室、国家地区、原语言、发布组、文件屏蔽词与分级映射，识别和筛选逻辑会读取这里的配置。
                       </n-alert>
                     </n-card>
 
@@ -1706,11 +1718,11 @@
     />
     <!-- ★ 引入阶梯洗版优先级模态框 -->
     <WashingPriorityModal ref="washingPriorityModalRef" />
-    <!-- 映射管理模态框 -->
+    <!-- 映射与词表模态框 -->
     <n-modal
       v-model:show="mappingManagerModalVisible"
       preset="card"
-      title="映射规则管理"
+      title="映射与词表"
       :style="modalStyle(900)"
       :bordered="false"
       class="custom-modal glass-modal"
@@ -2258,6 +2270,9 @@ const tableInfo = {
   'media_image_policy_cache': { cn: '媒体图片策略缓存', isSharable: false },
   'p115_intro_fingerprint_cache': { cn: '片头声纹缓存', isSharable: false },
   'p115_intro_detection_failures': { cn: '片头识别失败记录', isSharable: false },
+  'p115_intro_fingerprint_failures': { cn: '片头指纹提取失败记录', isSharable: false },
+  'emby_search_index': { cn: 'Emby搜索索引', isSharable: false },
+  'emby_search_rebuild_state': { cn: 'Emby搜索索引重建状态', isSharable: false },
   'resubscribe_rules': { cn: '媒体洗版规则', isSharable: false },
   'resubscribe_index': { cn: '媒体洗版缓存', isSharable: false },
   'cleanup_index': { cn: '媒体去重缓存', isSharable: false },
@@ -2765,6 +2780,11 @@ const fetchNativeViewsSimple = async () => {
 watch(() => configModel.value?.refresh_emby_after_update, (isRefreshEnabled) => {
   if (configModel.value && !isRefreshEnabled) {
     configModel.value.auto_lock_cast_after_update = false;
+  }
+});
+watch(() => configModel.value?.proxy_enabled, (enabled) => {
+  if (configModel.value && !enabled) {
+    configModel.value.proxy_lock_discovery_address = false;
   }
 });
 watch(
