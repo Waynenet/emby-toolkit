@@ -467,7 +467,14 @@ def _get_notification_template(template_key: str) -> str:
         return ''
     if not isinstance(templates, dict):
         return ''
-    return str(templates.get(template_key) or '').strip()
+    template = str(templates.get(template_key) or '').strip()
+    if template_key == 'intercept_notify':
+        template = re.sub(
+            r'(\*原因\*:)\s*\{\{\s*reason\s*\}\}',
+            r'\1\n{{ reason }}',
+            template,
+        )
+    return template
 
 
 def _render_notification_template(template_key: str, context: dict, default_text: str) -> str:
@@ -1098,7 +1105,7 @@ def send_intercept_notification(file_names, reason: str):
         default_caption = (
             f"⛔ *洗版拦截通知*\n\n"
             f"📁 *拦截文件*: {name_str}\n"
-            f"🚫 *原因*: {escaped_reason}\n"
+            f"🚫 *原因*:\n{escaped_reason}\n"
             f"🕒 *时间*: `{current_time}`\n\n"
             f"💡 _文件未达到优先级标准，已被标记「质检不合格」。_"
         )

@@ -652,7 +652,7 @@ class WashingService:
                     return True, f"命中排除条件: 来源 ({norm_info.get('source')})"
             else:
                 if not match:
-                    return False, f"来源未命中 ({norm_info.get('source') or 'unknown'})"
+                    return False, f"来源未命中 ({'/'.join(str(source) for source in req_source)})"
 
         req_release_group = priority_rule.get("release_group") or priority_rule.get("release_groups") or []
         if req_release_group:
@@ -879,14 +879,14 @@ class WashingService:
                     return -1, f"规则组[{group_name}] {reason}" 
                 # ★ 格式化输出：规则组->电影->优先级 3
                 return normal_priority_index, f"规则组[{group_name}] -> 优先级 {normal_priority_index}"
-            
+
             if not is_exclude:
                 fail_reasons.append(f"规则组[{group_name}]-优先级{normal_priority_index}[{reason}]")
-                
+
         if not fail_reasons:
             return 0, "未配置任何有效的普通优先级规则"
-            
-        return 0, " | ".join(fail_reasons)
+
+        return 0, "\n".join(fail_reasons)
 
     @classmethod
     def _load_priorities(cls, db_media_type: str, target_cid: str) -> list:
@@ -1333,7 +1333,7 @@ class WashingService:
         if new_level == -1:
             return _decision("REJECT", new_reason_detail)
         if new_level == 0:
-            return _decision("REJECT", f"槽位[{slot_name}] 未达标 ({new_reason_detail})")
+            return _decision("REJECT", f"槽位[{slot_name}] 未达标\n{new_reason_detail}")
 
         # 3. 取库内旧版原始流
         existing_raw_infos = cls._load_existing_raw_infos(
