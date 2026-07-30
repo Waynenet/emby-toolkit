@@ -203,6 +203,7 @@ class SubscribeAssistantManager:
                 real_next_episode=real_next_episode,
             )
             sub = existing_by_season.get(season_num)
+            created_subscription = False
             if not sub and season_num == latest_season_num and final_status in ("Watching", "Paused", "Pending") and not local_season_completed:
                 if self._triggering_episodes_are_virtual(triggering_episode_ids) or self._season_has_virtual_import(tmdb_id, season_num):
                     logger.info(
@@ -227,6 +228,7 @@ class SubscribeAssistantManager:
                 sub = self._create_subscription(tmdb_id, series_name, season_num, decision, consume_quota=True)
                 if sub:
                     existing_by_season[season_num] = sub
+                    created_subscription = True
             if not sub:
                 continue
 
@@ -250,27 +252,34 @@ class SubscribeAssistantManager:
 
             self._update_source_state(subscribe_id, decision)
             total = self._target_total(decision, season_info, signal)
-            self._remember_expected_mp_update(
-                subscribe_id,
-                fields=["state", "total_episode"] if total else ["state"],
-                expected_state=decision["mp_state"],
-                expected_total=total,
-            )
-            if moviepilot.update_subscription_status(
-                int(tmdb_id),
-                season_num,
-                decision["mp_state"],
-                self.app_config,
-                total_episodes=total,
-            ):
+            if created_subscription and decision["mp_state"] == "R":
                 logger.info(
-                    "  ➜ [订阅助手] 《%s》第 %s 季 已同步 MP 状态=%s，总集数=%s，原因=%s",
+                    "  ➜ [订阅助手] 《%s》第 %s 季新订阅已保留 N 状态，等待 MP 新增订阅任务搜索。",
                     series_name,
                     season_num,
-                    decision["mp_state"],
-                    total or "不改",
-                    decision.get("reason") or "状态同步",
                 )
+            else:
+                self._remember_expected_mp_update(
+                    subscribe_id,
+                    fields=["state", "total_episode"] if total else ["state"],
+                    expected_state=decision["mp_state"],
+                    expected_total=total,
+                )
+                if moviepilot.update_subscription_status(
+                    int(tmdb_id),
+                    season_num,
+                    decision["mp_state"],
+                    self.app_config,
+                    total_episodes=total,
+                ):
+                    logger.info(
+                        "  ➜ [订阅助手] 《%s》第 %s 季 已同步 MP 状态=%s，总集数=%s，原因=%s",
+                        series_name,
+                        season_num,
+                        decision["mp_state"],
+                        total or "不改",
+                        decision.get("reason") or "状态同步",
+                    )
 
             if decision.get("snapshot"):
                 self._sync_completed_full_washing(
@@ -965,6 +974,12 @@ class SubscribeAssistantManager:
         if self._consume_expected_mp_update(subscribe_id, info, fields):
             self._remember_subscription(subscribe_id, info, reason="subscribe.modified.expected")
             logger.debug("  ➜ [订阅助手] 已确认 ETK 预期内的 MP 订阅修改：%s。", self._format_subscribe_info(info))
+            return True
+
+        if str(old_info.get("state") or "").upper() == "N" and str(info.get("state") or "").upper() == "R":
+            self._remember_subscription(subscribe_id, info, reason="subscribe.modified.initial_search")
+            self._sync_mp_subscription_to_etk(info, reason="subscribe.modified.initial_search")
+            logger.debug("  ➜ [订阅助手] 已确认 MP 新增订阅首次搜索完成：%s。", self._format_subscribe_info(info))
             return True
 
         self._remember_subscription(
@@ -2097,6 +2112,28 @@ class SubscribeAssistantManager:
             logger.debug("  ➜ [订阅助手] 查询本地在库集数失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
             return 0
 
+    def _local_in_library_episode_max(self, tmdb_id: str, season: int) -> int:
+        try:
+            with connection.get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT MAX(episode_number) AS episode_number
+                        FROM media_metadata
+                        WHERE parent_series_tmdb_id = %s
+                          AND season_number = %s
+                          AND item_type = 'Episode'
+                          AND in_library = TRUE
+                          AND episode_number IS NOT NULL
+                        """,
+                        (str(tmdb_id), int(season)),
+                    )
+                    row = cursor.fetchone() or {}
+            return _safe_int(row.get("episode_number"))
+        except Exception as e:
+            logger.debug("  ➜ [订阅助手] 查询本地已入库最大集号失败：tmdb=%s, season=%s, err=%s", tmdb_id, season, e)
+            return 0
+
     def _create_subscription(
         self,
         tmdb_id: str,
@@ -2106,6 +2143,10 @@ class SubscribeAssistantManager:
         consume_quota: bool = False,
     ) -> Optional[dict]:
         payload_kwargs = self._subscription_wash_kwargs(decision)
+        if _safe_int(payload_kwargs.get("best_version_full")) != 1:
+            local_episode_max = self._local_in_library_episode_max(tmdb_id, season)
+            if local_episode_max > 0:
+                payload_kwargs["start_episode"] = local_episode_max + 1
         if not moviepilot.subscribe_series_to_moviepilot(
             {"title": series_name, "tmdb_id": tmdb_id},
             season,
